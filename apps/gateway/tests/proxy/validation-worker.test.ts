@@ -24,16 +24,20 @@ import {
   LocalSessionDiscoveryUnavailableError,
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,
+  DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS,
+  DEFAULT_WORKFLOW_VALIDATION_QUIET_POLL_INTERVAL_MS,
   WorkflowValidationClient,
   WorkflowValidationClientError,
   type WorkflowValidationPassSummary,
   type WorkflowValidationTransport,
   WorkflowValidationWorker,
+  type WorkflowValidationWorkerOptions,
 } from "../../src/proxy/validation-worker.js";
+import { ToolRegistry } from "../../src/registry/registry.js";
 import { localCallsFor, recordSession } from "./recorded-sessions.js";
 
 const WORKSPACE_ID = "ws_recorder_a1";
@@ -186,7 +190,11 @@ describe("WorkflowValidationClient", () => {
     expect(headerOf(call, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(call, "x-installation-id")).toBe(INSTALLATION_ID);
     expect(headerOf(call, "x-protocol-version")).toBe(PROTOCOL_VERSION);
-    expect(headerOf(call, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
+    expect(headerOf(call, "x-resin-workflow-validation-capabilities")?.split(",")).toEqual([
+      "workspace-inputs-v1",
+      "unknown-typed-proposals-v1",
+      "cross-session-held-out-v1",
+    ]);
     // An entry that is not a well-formed ask cannot be replayed; it is left out, not guessed at.
     expect(requests).toHaveLength(1);
     expect(requests[0]?.requestId).toBe("req-01");
@@ -262,7 +270,11 @@ describe("WorkflowValidationWorker", () => {
     expect(headerOf(post, "x-workspace-id")).toBe(WORKSPACE_ID);
     expect(headerOf(post, "x-device-id")).toBe(DEVICE_ID);
     expect(headerOf(post, "x-protocol-version")).toBe(PROTOCOL_VERSION);
-    expect(headerOf(post, "x-resin-workflow-validation-capabilities")).toBe("workspace-inputs-v1");
+    expect(headerOf(post, "x-resin-workflow-validation-capabilities")?.split(",")).toEqual([
+      "workspace-inputs-v1",
+      "unknown-typed-proposals-v1",
+      "cross-session-held-out-v1",
+    ]);
     expect(headerOf(post, "content-type")).toBe("application/json");
 
     const decision = postedDecision(calls);
@@ -534,29 +546,189 @@ describe("WorkflowValidationWorker", () => {
   });
 });
 
+describe("the validation worker's poll cadence", () => {
+  const FAST = DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS;
+  const QUIET = DEFAULT_WORKFLOW_VALIDATION_QUIET_POLL_INTERVAL_MS;
+  /** The gaps a fresh worker takes while every poll comes back empty: fast three times, then doubling to quiet. */
+  const BACKING_OFF = [FAST, FAST, FAST, 2 * FAST, 4 * FAST, QUIET, QUIET];
+  let plan: RecordedWorkflow;
+
+  beforeEach(() => {
+    plan = recordedPlan();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function ask(requestId: string, overrides: Partial<WorkflowValidationRequest> = {}) {
+    return requestFor(plan, { requestId, ...overrides });
+  }
+
+  /**
+   * A started worker over a transport whose listing for poll `n` (from 1) is `script(n)`, thrown when
+   * it is an error. `gaps()` is the time before each poll, from the start for the first.
+   */
+  function polling(
+    script: (poll: number) => WorkflowValidationRequest[] | Error,
+    options: Partial<WorkflowValidationWorkerOptions> = {},
+  ) {
+    const startedAt = Date.now();
+    const polledAt: number[] = [];
+    const worker = new WorkflowValidationWorker({
+      client: {
+        listPending: async () => {
+          polledAt.push(Date.now());
+          const listed = script(polledAt.length);
+          if (listed instanceof Error) throw listed;
+          return listed;
+        },
+        submitDecision: async () => ({ status: "recorded" }),
+      },
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      createValidator: () => async () => ({ verdicts: [], unavailable: "stubbed check" }),
+      random: () => 0,
+      ...options,
+    });
+    worker.start();
+    const gaps = () => polledAt.map((at, index) => at - (polledAt[index - 1] ?? startedAt));
+    return { worker, polledAt, gaps };
+  }
+
+  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+
+  it("stays on the fast cadence while asks keep arriving", async () => {
+    const { worker, gaps } = polling((poll) => [ask(`req-${poll}`)]);
+
+    await vi.advanceTimersByTimeAsync(10 * FAST);
+
+    expect(gaps()).toEqual(Array(10).fill(FAST));
+    worker.stop();
+  });
+
+  it("backs off stepwise to the quiet cadence after three consecutive empty polls", async () => {
+    const { worker, gaps } = polling(() => []);
+
+    await vi.advanceTimersByTimeAsync(sum(BACKING_OFF) + 2 * QUIET);
+
+    expect(gaps()).toEqual([...BACKING_OFF, QUIET, QUIET]);
+    worker.stop();
+  });
+
+  it("returns to the fast cadence at once when a quiet poll lists an ask", async () => {
+    const { worker, gaps } = polling((poll) => (poll === 7 ? [ask("req-late")] : []));
+
+    await vi.advanceTimersByTimeAsync(sum(BACKING_OFF) + 3 * FAST + 2 * FAST);
+
+    expect(gaps()).toEqual([...BACKING_OFF, FAST, FAST, FAST, 2 * FAST]);
+    worker.stop();
+  });
+
+  it("keeps the fast retry after a failed poll", async () => {
+    const { worker, gaps } = polling((poll) =>
+      poll === 7 ? new WorkflowValidationClientError("cloud unavailable") : [],
+    );
+
+    await vi.advanceTimersByTimeAsync(sum(BACKING_OFF) + 3 * FAST + 2 * FAST);
+
+    expect(gaps()).toEqual([...BACKING_OFF, FAST, FAST, FAST, 2 * FAST]);
+    worker.stop();
+  });
+
+  it("counts a re-listed ask it already refused as an empty poll", async () => {
+    const { worker, gaps } = polling(() => [
+      ask("req-foreign", { workspaceId: OTHER_WORKSPACE_ID }),
+    ]);
+
+    // The first listing is new, so the fourth poll is still fast; from then on it backs off.
+    await vi.advanceTimersByTimeAsync(FAST + sum(BACKING_OFF));
+
+    expect(gaps()).toEqual([FAST, ...BACKING_OFF]);
+    worker.stop();
+  });
+
+  it("pulls a quiet timer in to one fast interval on a wake, however many wakes arrive", async () => {
+    const { worker, polledAt, gaps } = polling(() => []);
+    await vi.advanceTimersByTimeAsync(sum(BACKING_OFF.slice(0, 6)));
+    expect(gaps()).toEqual(BACKING_OFF.slice(0, 6));
+    const lastQuietPoll = polledAt.at(-1) ?? 0;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const wokenAt = Date.now();
+    worker.wake();
+    await vi.advanceTimersByTimeAsync(5_000);
+    // A second wake would put the poll later than the one already pulled in; it changes nothing.
+    worker.wake();
+    await vi.advanceTimersByTimeAsync(FAST - 5_000 - 1);
+    expect(polledAt.at(-1)).toBe(lastQuietPoll);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(polledAt.at(-1)).toBe(wokenAt + FAST);
+
+    // Woken, the cadence starts over: the woken poll and two more at fast, then the backoff.
+    await vi.advanceTimersByTimeAsync(4 * FAST);
+    expect(gaps().slice(6)).toEqual([10_000 + FAST, FAST, FAST, 2 * FAST]);
+    worker.stop();
+  });
+
+  it("leaves a timer already due within a fast interval alone on a wake", async () => {
+    const { worker, polledAt } = polling(() => []);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    worker.wake();
+    await vi.advanceTimersByTimeAsync(FAST - 5_000);
+
+    expect(polledAt).toHaveLength(1);
+    worker.stop();
+  });
+
+  it.each([
+    ["the least", 0, 1],
+    ["the most", 1, 1.2],
+    ["the most, for a source out of range above", 7, 1.2],
+    ["the least, for a source out of range below", -3, 1],
+  ])("jitter lengthens both cadences by %s", async (_label, random, factor) => {
+    const fast = polling((poll) => [ask(`req-${poll}`)], { random: () => random });
+    const quiet = polling(() => [], { random: () => random });
+
+    await vi.advanceTimersByTimeAsync(1.2 * (sum(BACKING_OFF) + QUIET));
+
+    expect(fast.gaps()[0]).toBe(FAST * factor);
+    expect(quiet.gaps().slice(5, 7)).toEqual([QUIET * factor, QUIET * factor]);
+    fast.worker.stop();
+    quiet.worker.stop();
+  });
+});
+
 describe("the validation worker's place in the runtime", () => {
+  async function validCredentials(tempDir: string): Promise<CloudCredentialStore> {
+    const store = new CloudCredentialStore({
+      tokenFilePath: path.join(tempDir, "device-token.json"),
+    });
+    await store.persist({
+      cloudUrl: "https://cloud.custom-origin.io",
+      accessToken: makeJwt({
+        schemaVersion: 1,
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        deviceId: DEVICE_ID,
+        installationId: INSTALLATION_ID,
+        userId: "user_validation_01",
+        issuedAt: new Date(Date.now() - 60_000).toISOString(),
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        scopes: ["device:connect"],
+      }),
+      refreshToken: "refresh-token-1",
+      deviceId: DEVICE_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    return store;
+  }
+
   it("is constructed with valid credentials and follows the runtime's start and stop", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-validation-worker-"));
     try {
-      const tokenFile = path.join(tempDir, "device-token.json");
-      const store = new CloudCredentialStore({ tokenFilePath: tokenFile });
-      await store.persist({
-        cloudUrl: "https://cloud.custom-origin.io",
-        accessToken: makeJwt({
-          schemaVersion: 1,
-          accountId: ACCOUNT_ID,
-          workspaceId: WORKSPACE_ID,
-          deviceId: DEVICE_ID,
-          installationId: INSTALLATION_ID,
-          userId: "user_validation_01",
-          issuedAt: new Date(Date.now() - 60_000).toISOString(),
-          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-          scopes: ["device:connect"],
-        }),
-        refreshToken: "refresh-token-1",
-        deviceId: DEVICE_ID,
-        workspaceId: WORKSPACE_ID,
-      });
+      const store = await validCredentials(tempDir);
       const runtime = await createProductionProxyRuntime({
         credentialStore: store,
         fetchFn: async () => {
@@ -572,6 +744,45 @@ describe("the validation worker's place in the runtime", () => {
 
       await runtime.stop();
       expect(runtime.validationWorker?.isRunning()).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("wakes the worker when the catalog revision changes, not when a sync repeats it", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-validation-worker-wake-"));
+    try {
+      const registry = new ToolRegistry();
+      const runtime = await createProductionProxyRuntime({
+        credentialStore: await validCredentials(tempDir),
+        registry,
+        fetchFn: async () => {
+          throw new Error("this test must not reach the network");
+        },
+      });
+      const worker = runtime.validationWorker;
+      if (worker === undefined) throw new Error("the runtime built no validation worker");
+      const wake = vi.spyOn(worker, "wake");
+      const snapshot = await registry.resolveCatalog(WORKSPACE_ID);
+      const announce = (revision: number) =>
+        registry.events.emitImmediate({
+          workspaceId: WORKSPACE_ID,
+          revision,
+          snapshot,
+          changedToolIds: [],
+          timestamp: DECIDED_AT,
+        });
+
+      await runtime.start();
+      announce(4);
+      announce(4);
+      expect(wake).toHaveBeenCalledTimes(1);
+      announce(5);
+      expect(wake).toHaveBeenCalledTimes(2);
+
+      await runtime.stop();
+      announce(6);
+      expect(wake).toHaveBeenCalledTimes(2);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

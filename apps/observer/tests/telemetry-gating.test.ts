@@ -70,6 +70,8 @@ function createCaptureDoubles() {
     getDiagnostics: vi.fn(() => ({})),
     getTailer: vi.fn(() => ({
       getCursorManager: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
     })),
   });
   const capture = mockCaptureCoordinator({

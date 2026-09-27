@@ -8,6 +8,7 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import { recordCarriedCallsFromEvents } from "../../src/recording.js";
 
 function recording(
   sessionId = "session-result-evidence",
@@ -164,5 +165,68 @@ describe("demonstration slice selection", () => {
       observed: [{ position: 0, reference: "private:result" }],
       calls: [{ position: 0, callId: "load-repeat" }],
     });
+  });
+});
+
+describe("a held-out demonstration covers the whole plan", () => {
+  /** Loads then saves a file, then repeats the work for another file: whole, or only the load. */
+  function repeat(sessionId: string, repeatSaves: boolean) {
+    const store = new InMemoryPrivateValueStore();
+    const recorder = new WorkflowCallRecorder({ privateValues: store });
+    let sequence = 0;
+    const events = [] as ReturnType<typeof projectEventToMetadataOnly>[];
+    const emit = (fields: Record<string, unknown>) =>
+      events.push(
+        projectEventToMetadataOnly(
+          recorder.observe(
+            NormalizedSessionEventSchema.parse({
+              schemaVersion: "1.0.0",
+              sessionId,
+              timestamp: "2026-09-18T10:00:00.000Z",
+              eventId: `${sessionId}-${++sequence}`,
+              causalRef: { causalSequence: sequence, parentId: null },
+              redaction: { isRedacted: false, redactedFields: [], redactionStrategy: "mask" },
+              ...fields,
+            }),
+            { workspaceId: "ws_results" },
+          ),
+        ),
+      );
+    const call = (callId: string, toolName: string, path: string, result: string) => {
+      emit({ type: "tool_call", callId, toolName, connection: "files", parameters: { path } });
+      emit({
+        type: "tool_result",
+        callId,
+        toolName,
+        result,
+        isError: false,
+        executionDurationMs: 1,
+      });
+    };
+    emit({ type: "message", role: "user", content: "Load first.csv and save it" });
+    call("load-1", "load", "first.csv", "first contents");
+    call("save-1", "save", "first.csv", "saved first");
+    const planEnd = events.length;
+    emit({ type: "message", role: "user", content: "Repeat for second.csv" });
+    call("load-2", "load", "second.csv", "second contents");
+    if (repeatSaves) call("save-2", "save", "second.csv", "saved second");
+    return recordCarriedCallsFromEvents(`wf-${sessionId}`, events.slice(0, planEnd), {
+      supportingEvents: events.slice(planEnd),
+    })!;
+  }
+
+  it("offers no held-out demonstration when the repeat ran only part of the plan", () => {
+    const recipe = repeat("session-partial-repeat", false);
+    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["load-1", "save-1"]);
+    expect(recipe.workflow.heldOut).toBeUndefined();
+  });
+
+  it("offers the repeat as held-out when it ran every step in order", () => {
+    const recipe = repeat("session-whole-repeat", true);
+    expect(recipe.workflow.steps.map((step) => step.callId)).toEqual(["load-1", "save-1"]);
+    expect(recipe.workflow.heldOut?.calls).toEqual([
+      { stepId: recipe.workflow.steps[0]!.id, callIds: ["load-2"] },
+      { stepId: recipe.workflow.steps[1]!.id, callIds: ["save-2"] },
+    ]);
   });
 });

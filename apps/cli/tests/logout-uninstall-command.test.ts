@@ -1,5 +1,9 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import path from "node:path";
 import process from "node:process";
+import { applyOmpCatalogInstructions } from "@resin/adapter-omp";
 import { describe, expect, it, vi } from "vitest";
 import { logoutCommand, parseLogoutFlags } from "../src/commands/logout.js";
 import {
@@ -357,6 +361,27 @@ url = "http://localhost:9400"
       expect(parsed.removedPaths).not.toContain(path.join(resinHome, "state", "token.json"));
     } finally {
       process.stdout.write = originalStdout;
+    }
+  });
+
+  it("removes the learned-tool block from OMP's appended system prompt, keeping the user's text", async () => {
+    const home = await mkdtemp(join(tmpdir(), "uninstall-omp-guidance-"));
+    try {
+      const appendPath = join(home, ".omp", "agent", "APPEND_SYSTEM.md");
+      await applyOmpCatalogInstructions({
+        markdown: "### `release_notes`",
+        toolNames: ["release_notes"],
+        ompHome: join(home, ".omp"),
+      });
+      await writeFile(appendPath, `User notes\n\n${await readFile(appendPath, "utf8")}`);
+      const cleaned = await removeHarnessMcpConfigurations({
+        customHome: home,
+        fsBridge: createMockFsBridge(),
+      });
+      expect(cleaned).toContain("Oh My Pi (OMP)");
+      expect(await readFile(appendPath, "utf8")).toBe("User notes\n");
+    } finally {
+      await rm(home, { recursive: true, force: true });
     }
   });
 });

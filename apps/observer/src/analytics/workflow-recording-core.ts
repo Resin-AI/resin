@@ -688,6 +688,7 @@ export function reconstructWorkflowFromEvents(
   const heldOut = demonstratedWorkflow(
     demonstrationOf(allEvents, selectedExecutionIndex),
     stepIdByPosition,
+    recipe.workflow.steps.map((step) => step.id),
   );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
@@ -802,10 +803,17 @@ function demonstrationOf(
   return demonstration;
 }
 
-/** The demonstration, addressed by the steps this recording gave the work it demonstrates. */
+/**
+ * The demonstration, addressed by the steps this recording gave the work it demonstrates.
+ *
+ * Only a whole repeat is a demonstration: its calls must cover every plan step, in plan order. An
+ * earlier execution that ran only part of the work cannot reproduce the plan, so offering it would
+ * only make a validator report every step it lacks as missed.
+ */
 function demonstratedWorkflow(
   demonstration: WorkflowCallHeldOut | undefined,
   stepIdByPosition: ReadonlyMap<number, string>,
+  planStepIds: readonly string[],
 ): RecordedWorkflow["heldOut"] | undefined {
   if (demonstration === undefined) return undefined;
   const inputs: NonNullable<RecordedWorkflow["heldOut"]>["inputs"] = [];
@@ -833,6 +841,22 @@ function demonstratedWorkflow(
     const existing = calls.find((call) => call.stepId === stepId);
     if (existing === undefined) calls.push({ stepId, callIds: [entry.callId] });
     else existing.callIds.push(entry.callId);
+  }
+  // Coverage is judged by step identity. A carrier that names no calls (a native or older
+  // demonstration) covers the steps its values address.
+  const covered =
+    calls.length > 0
+      ? calls.map((call) => call.stepId)
+      : planStepIds.filter(
+          (stepId) =>
+            inputs.some((entry) => entry.stepId === stepId) ||
+            observed.some((entry) => entry.stepId === stepId),
+        );
+  if (
+    covered.length !== planStepIds.length ||
+    covered.some((stepId, index) => stepId !== planStepIds[index])
+  ) {
+    return undefined;
   }
   return calls.length === 0 ? { inputs, observed } : { inputs, observed, calls };
 }

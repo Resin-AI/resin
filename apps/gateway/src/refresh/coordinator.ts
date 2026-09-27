@@ -30,6 +30,30 @@ export interface McpGatewayLike {
   getAllConnections(): McpConnection[];
   getConnection(connectionId: string): McpConnection | undefined;
   sendNotificationToConnection(connectionId: string, notification: JsonRpcNotification): void;
+  /** The learned tools this workspace's connection lists: names and descriptions only. */
+  listLearnedTools?(
+    context: McpConnection["workspaceContext"],
+  ): Promise<Array<{ name: string; description?: string }>>;
+}
+
+/**
+ * The catalog instructions a harness can put in front of its model: one `### \`name\`` heading per
+ * learned tool, with its description's first line. Empty when the workspace has no learned tools.
+ */
+export function renderCatalogInstructions(
+  tools: ReadonlyArray<{ name: string; description?: string }>,
+): string {
+  if (tools.length === 0) return "";
+  const sections = tools.map((tool) => {
+    const summary = tool.description
+      ?.split("\n")
+      .find((line) => line.trim().length > 0)
+      ?.trim();
+    return summary === undefined ? `### \`${tool.name}\`` : `### \`${tool.name}\`\n\n${summary}`;
+  });
+  return ["## Resin learned tools", "", ...sections.flatMap((section) => [section, ""])]
+    .join("\n")
+    .trim();
 }
 
 /**
@@ -411,6 +435,13 @@ export class CatalogRefreshCoordinator {
             catalogVersion: "1.0.0",
             timestamp,
           };
+          const learned = await this.gateway
+            ?.listLearnedTools?.(conn.workspaceContext)
+            .catch(() => undefined);
+          if (learned !== undefined) {
+            changeSummary.instructionsMarkdown = renderCatalogInstructions(learned);
+            changeSummary.evolvedToolNames = learned.map((tool) => tool.name);
+          }
 
           try {
             const result = await adapter.notifyCatalogRefresh(workspace, changeSummary);

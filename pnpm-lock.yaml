@@ -209,6 +209,9 @@ importers:
 
   apps/gateway:
     dependencies:
+      '@resin/adapter-omp':
+        specifier: workspace:*
+        version: link:../../adapters/omp
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

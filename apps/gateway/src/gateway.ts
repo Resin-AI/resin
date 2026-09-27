@@ -349,6 +349,20 @@ export class LocalMcpGateway {
     return this.connections.get(connectionId);
   }
 
+  /** The learned tools a workspace lists, as the model sees them: names and descriptions only. */
+  async listLearnedTools(
+    context: McpConnection["workspaceContext"],
+  ): Promise<Array<{ name: string; description?: string }>> {
+    const tools = await this.router.listTools(context);
+    return tools
+      .filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true)
+      .map((tool) =>
+        tool.description === undefined
+          ? { name: tool.name }
+          : { name: tool.name, description: tool.description },
+      );
+  }
+
   /**
    * Handles a parsed JSON-RPC message for a given connection and returns a response (or null for notifications).
    */

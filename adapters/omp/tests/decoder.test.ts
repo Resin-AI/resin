@@ -1726,6 +1726,31 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(otherToolCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
     });
 
+    it("marks native bash commands and never a forged or command-less bash call", () => {
+      const bashRecord = makeRecord("session-bash-interface", 1, {
+        type: "tool_call",
+        toolCall: { id: "call-bash", toolName: "bash", arguments: { command: "ls", cwd: "/w" } },
+      });
+      bashRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      const bashCall = decoder.decode(bashRecord) as IntermediateToolCallEvent;
+      expect(bashCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("omp-bash");
+
+      const forgedRecord = makeRecord("session-bash-interface", 2, {
+        type: "tool_call",
+        toolCall: { id: "call-not-bash", toolName: "shell", arguments: { command: "ls" } },
+      });
+      forgedRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash" };
+      const forged = decoder.decode(forgedRecord) as IntermediateToolCallEvent;
+      expect(forged.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+
+      const argvRecord = makeRecord("session-bash-interface", 3, {
+        type: "tool_call",
+        toolCall: { id: "call-bash-argv", toolName: "bash", arguments: { command: ["ls"] } },
+      });
+      const argv = decoder.decode(argvRecord) as IntermediateToolCallEvent;
+      expect(argv.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    });
+
     it("announces every embedded request with matched results and single provider accounting", () => {
       const sessionId = "session-embedded-multi-1";
 

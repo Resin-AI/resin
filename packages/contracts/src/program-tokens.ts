@@ -112,6 +112,31 @@ function matchFileDescriptorOperator(source: string, index: number): string | un
   return source.slice(index, end);
 }
 
+/**
+ * Programs whose `-c`/`-e` argument is source code they run: shells, script interpreters, stream
+ * editors and database clients. Elsewhere the flag takes data — `sha256sum -c sums`, `grep -e
+ * pattern`, `head -c 10` — and the word after it is a value like any other.
+ */
+const CODE_RUNNER =
+  /^(?:(?:ba|z|da|k|mk|a|c|tc|fi)?sh|busybox|python(?:[0-9.]*)?|pypy[0-9.]*|node(?:js)?|deno|bun|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|lua[0-9.]*|luajit|rscript|tclsh[0-9.]*|pwsh|powershell|osascript|g?sed|[gmn]?awk|psql|mysql|mariadb|sqlite3|duckdb|clickhouse(?:-client)?|mongo(?:sh)?|redis-cli|jshell|groovy|scala|julia|elixir|erl|swift)$/i;
+
+/**
+ * Whether the simple command the latest token belongs to runs a code-running program: any word of
+ * it, since wrappers (`sudo`, `env`, `timeout 5`, `xargs`) put the interpreter past command position.
+ */
+function commandRunsCode(tokens: readonly ProgramToken[]): boolean {
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    const token = tokens[index]!;
+    if (token.kind === "operator") {
+      if (["&&", "||", ";", "|", "|&", "(", "&", "\n"].includes(token.raw)) return false;
+      continue;
+    }
+    const base = token.raw.slice(token.raw.lastIndexOf("/") + 1);
+    if (CODE_RUNNER.test(base)) return true;
+  }
+  return false;
+}
+
 function shellTokens(source: string): ProgramToken[] {
   const tokens: ProgramToken[] = [];
   let index = 0;
@@ -221,8 +246,7 @@ function shellTokens(source: string): ProgramToken[] {
       bindable:
         bindable &&
         start !== 0 &&
-        tokens.at(-1)?.raw !== "-c" &&
-        tokens.at(-1)?.raw !== "-e" &&
+        !(["-c", "-e"].includes(tokens.at(-1)?.raw ?? "") && commandRunsCode(tokens)) &&
         !["&&", "||", ";", "|", "(", "&"].includes(tokens.at(-1)?.raw ?? "") &&
         !(
           tokens.at(-1)?.kind === "operator" &&

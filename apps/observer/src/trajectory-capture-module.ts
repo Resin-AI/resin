@@ -425,10 +425,40 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
 
     // 6. Wire onRecords only while local telemetry is explicitly enabled.
     if (this.telemetryEnabled) {
-      this.unsubscribeRecords = this.observerCoordinator.onRecords(
-        this.captureCoordinator.handleRecords,
-      );
+      this.unsubscribeRecords = this.subscribeCapture();
     }
+  }
+
+  /**
+   * Wires tailer deliveries into the capture coordinator. A terminal drain waits for every
+   * delivered batch to be acknowledged, so it also asks the coordinator to send the ending
+   * session's coalesced batch now rather than at the end of its upload window.
+   */
+  private subscribeCapture(): () => void {
+    const unsubscribeRecords = this.observerCoordinator.onRecords(
+      this.captureCoordinator.handleRecords,
+    );
+    const tailer =
+      "getTailer" in this.observerCoordinator &&
+      this.observerCoordinator.getTailer instanceof Function
+        ? this.observerCoordinator.getTailer()
+        : undefined;
+    const captureCoordinator = this.captureCoordinator;
+    if (
+      !tailer ||
+      !("expediteFlush" in captureCoordinator) ||
+      !(captureCoordinator.expediteFlush instanceof Function)
+    ) {
+      return unsubscribeRecords;
+    }
+    const onDraining = (event: { sessionId: string }) => {
+      captureCoordinator.expediteFlush(event.sessionId);
+    };
+    tailer.on("session:draining", onDraining);
+    return () => {
+      unsubscribeRecords();
+      tailer.off("session:draining", onDraining);
+    };
   }
 
   private readPersistedPrivacyCheckpoint(): TelemetryPrivacyCheckpoint | undefined {
@@ -789,9 +819,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
 
     // Ensure record subscription is wired
     if (!this.unsubscribeRecords) {
-      this.unsubscribeRecords = this.observerCoordinator.onRecords(
-        this.captureCoordinator.handleRecords,
-      );
+      this.unsubscribeRecords = this.subscribeCapture();
     }
 
     try {

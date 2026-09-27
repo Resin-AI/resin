@@ -403,6 +403,13 @@ function bindEveryCandidate(
       );
       continue;
     }
+    if (proposal.kind === "input" && proposal.type === "unknown") {
+      unaddressable.set(
+        candidate,
+        `${evidence} proposes an input without a type, so the candidate cannot be replayed until its type is known`,
+      );
+      continue;
+    }
     if (!bindCandidateLeaf(step, argument, candidate)) {
       unaddressable.set(
         candidate,
@@ -410,7 +417,7 @@ function bindEveryCandidate(
       );
       continue;
     }
-    if (proposal.kind === "input") {
+    if (proposal.kind === "input" && proposal.type !== "unknown") {
       const declared = bound.inputs.some((input) => input.name === proposal.name);
       if (!declared) bound.inputs.push({ name: proposal.name, type: proposal.type });
     }
@@ -810,6 +817,7 @@ export async function demonstrationEnvironment(params: {
     const name = candidate.proposed.name;
     if (
       value === undefined ||
+      candidate.proposed.type === "unknown" ||
       !matchesDemonstratedType(value, candidate.proposed.type) ||
       conflictingInputs.has(name)
     ) {

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { OmpHarnessAdapter, getOmpRefreshCapability } from "@resin/adapter-omp";
 import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection, type LocalStateStore, createLocalStateStore } from "@resin/db";
@@ -429,6 +430,22 @@ export class McpStdioShim {
         name: "resin-mcp-standalone",
         version: "0.1.0",
       },
+      // OMP reads learned tools only through `xd://` devices its prompt names, so a catalog change
+      // rewrites the managed block in OMP's appended system prompt.
+      ...(this.harnessId === "omp"
+        ? {
+            refreshCoordinatorOptions: {
+              adapters: {
+                omp: {
+                  harnessId: "omp",
+                  getCapabilities: getOmpRefreshCapability,
+                  notifyCatalogRefresh: (workspace, changeSummary) =>
+                    new OmpHarnessAdapter().notifyCatalogRefresh(workspace, changeSummary),
+                },
+              },
+            },
+          }
+        : {}),
     });
 
     this.activeGateway = gateway;

@@ -5,6 +5,7 @@ import { OMP_TESTED_VERSIONS, probeOmpInstallation } from "./discovery.js";
 import {
   OMP_GUIDANCE_MARKERS,
   OMP_RESIN_GUIDANCE,
+  applyOmpCatalogInstructions,
   resolveOmpConfigHome,
   resolveOmpGuidancePath,
 } from "./instructions.js";
@@ -44,4 +45,17 @@ export const ompInstallHarness: HarnessInstallDefinition = {
     markers: OMP_GUIDANCE_MARKERS,
     body: OMP_RESIN_GUIDANCE,
   },
+  installExtensions: [
+    {
+      // The gateway writes the learned-tool catalog into OMP's appended system prompt as the
+      // catalog changes; install has nothing to write, and uninstall removes the block.
+      name: "learned-tool catalog",
+      install: async () => [],
+      uninstall: async ({ home, env, dryRun }) =>
+        dryRun
+          ? []
+          : [await applyOmpCatalogInstructions({ ompHome: resolveOmpConfigHome(home, env) })],
+      verify: async () => true,
+    },
+  ],
 };
