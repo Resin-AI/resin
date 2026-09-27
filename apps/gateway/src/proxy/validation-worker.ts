@@ -46,9 +46,20 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 const WORKFLOW_VALIDATION_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 const WORKSPACE_INPUTS_CAPABILITY = "workspace-inputs-v1";
 
-/** The time between passes when the caller does not name one. */
+/**
+ * The poll cadence, which adapts the way the control plane's does (`@resin/protocol`
+ * `CONTROL_PLANE_*`). Asks arrive in bursts, after the cloud finds a workflow in freshly uploaded
+ * observations, and then none arrive for hours, so a fixed 15 s poll cost an idle device about 5,200
+ * cloud calls a day. The worker polls every 15 s while asks keep arriving. After three consecutive
+ * empty polls it doubles the interval on each further empty poll (30 s, then 60 s) until it reaches
+ * the quiet 120 s. A non-empty poll or a local wake puts it straight back on 15 s. Jitter only ever
+ * lengthens an interval, by up to 20%, so a fleet does not wake in lockstep. An ask lives for days,
+ * so at the quiet cadence an answer is delayed by at most about 2.4 minutes.
+ */
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS = 15_000;
-/** Passes are spread over this fraction of the interval so a fleet does not wake in lockstep. */
+export const DEFAULT_WORKFLOW_VALIDATION_QUIET_POLL_INTERVAL_MS = 120_000;
+export const WORKFLOW_VALIDATION_QUIET_POLL_THRESHOLD = 3;
+export const WORKFLOW_VALIDATION_POLL_BACKOFF_FACTOR = 2;
 export const DEFAULT_WORKFLOW_VALIDATION_POLL_JITTER_RATIO = 0.2;
 /**
  * A check that outlives this bound is refused rather than allowed to run on forever. Recorded steps
@@ -330,9 +341,14 @@ export interface WorkflowValidationWorkerOptions {
   environmentIdentity?: string;
   /** Wall-clock bound for one check; a caller's value is clamped, never unbounded. */
   timeoutMs?: number;
-  /** Time between passes; defaults to 15s. */
+  /** Time between passes while asks are arriving; defaults to 15s. */
   pollIntervalMs?: number;
-  /** Fraction of the interval the passes are spread over; defaults to 0.2. */
+  /**
+   * Time between passes once the cadence has backed off after empty polls; defaults to 120s and is
+   * never shorter than `pollIntervalMs`.
+   */
+  quietPollIntervalMs?: number;
+  /** Fraction of the interval each delay is lengthened by, at most; defaults to 0.2. */
   pollJitterRatio?: number;
   now?: () => Date;
   /** Injectable for deterministic jitter in tests. */
@@ -351,11 +367,14 @@ function boundedTimeout(value: number | undefined): number {
   return Math.min(value, MAX_WORKFLOW_VALIDATION_TIMEOUT_MS);
 }
 
-function boundedInterval(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) {
-    return DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS;
-  }
+function boundedInterval(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
   return value;
+}
+
+/** Identifies one delivery of an ask, so a re-listed ask can be told apart from a new one. */
+function askKey(request: WorkflowValidationRequest): string {
+  return `${request.requestId}\u0000${request.attempt}`;
 }
 
 function boundedJitter(value: number | undefined): number {
@@ -371,6 +390,10 @@ function boundedJitter(value: number | undefined): number {
  * A pass is the unit of work: list the pending asks, decide each one, deliver each decision. One
  * pass runs at a time, so two timers firing close together cannot check the same plan twice, and
  * a pass that takes longer than the interval delays the next one instead of overlapping it.
+ *
+ * The timer's cadence adapts (see `DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS`). A pass counts
+ * as empty when it lists no ask, or only asks the previous pass already refused or saw declined:
+ * those stay pending until they expire, and re-listing them is not a sign that more are coming.
  */
 export class WorkflowValidationWorker {
   private readonly client: WorkflowValidationTransport;
@@ -382,13 +405,20 @@ export class WorkflowValidationWorker {
   private readonly environmentIdentity: string;
   private readonly timeoutMs: number;
   private readonly pollIntervalMs: number;
+  private readonly quietPollIntervalMs: number;
   private readonly pollJitterRatio: number;
   private readonly now: () => Date;
   private readonly random: () => number;
   private readonly log: (message: string) => void;
   private timer?: NodeJS.Timeout;
+  /** When the armed timer fires, in `Date.now()` time; lets a wake pull it earlier. */
+  private timerDueAt?: number;
   private abortController?: AbortController;
   private inFlight?: Promise<WorkflowValidationPassSummary>;
+  /** Consecutive empty passes; the cadence backs off once this reaches the quiet threshold. */
+  private emptyPolls = 0;
+  /** Asks the last pass listed but left undecided or saw declined, keyed by `askKey`. */
+  private settledAsks = new Set<string>();
 
   constructor(options: WorkflowValidationWorkerOptions) {
     this.client = options.client;
@@ -400,28 +430,54 @@ export class WorkflowValidationWorker {
     this.environmentIdentity =
       options.environmentIdentity ?? DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT;
     this.timeoutMs = boundedTimeout(options.timeoutMs);
-    this.pollIntervalMs = boundedInterval(options.pollIntervalMs);
+    this.pollIntervalMs = boundedInterval(
+      options.pollIntervalMs,
+      DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS,
+    );
+    this.quietPollIntervalMs = Math.max(
+      this.pollIntervalMs,
+      boundedInterval(
+        options.quietPollIntervalMs,
+        DEFAULT_WORKFLOW_VALIDATION_QUIET_POLL_INTERVAL_MS,
+      ),
+    );
     this.pollJitterRatio = boundedJitter(options.pollJitterRatio);
     this.now = options.now ?? (() => new Date());
     this.random = options.random ?? Math.random;
     this.log = options.log ?? (() => undefined);
   }
 
-  /** Arms the poll. Passes never hold the process open: the timer is unref'd. */
+  /** Arms the poll, on the fast cadence. Passes never hold the process open: the timer is unref'd. */
   start(): void {
     if (this.abortController) return;
     this.abortController = new AbortController();
+    this.emptyPolls = 0;
     this.armTimer();
   }
 
   /** Stops polling and cancels a transport call in flight; a check already running finishes. */
   stop(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.timerDueAt = undefined;
     this.abortController?.abort();
     this.abortController = undefined;
+  }
+
+  /**
+   * A local sign that an ask may be on its way, such as a catalog revision change: the cadence goes
+   * back to fast, and a timer armed for a quiet interval is pulled in to one fast interval from
+   * now. It never polls on the spot, so a burst of wakes costs no more calls than one.
+   */
+  wake(): void {
+    this.emptyPolls = 0;
+    // With no timer armed, a pass is running or the worker is stopped; the next arm reads the reset.
+    if (this.timer === undefined || this.timerDueAt === undefined) return;
+    const delay = this.nextDelay();
+    if (Date.now() + delay >= this.timerDueAt) return;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.armTimer(delay);
   }
 
   isRunning(): boolean {
@@ -445,21 +501,46 @@ export class WorkflowValidationWorker {
     }
   }
 
-  private armTimer(): void {
+  private armTimer(delay: number = this.nextDelay()): void {
     if (!this.abortController || this.abortController.signal.aborted) return;
+    this.timerDueAt = Date.now() + delay;
     this.timer = setTimeout(() => {
       this.timer = undefined;
+      this.timerDueAt = undefined;
       void this.runOnce()
         // A pass reports its own failures; the poll must survive every one of them.
         .catch(() => undefined)
         .finally(() => this.armTimer());
-    }, this.nextDelay());
+    }, delay);
     this.timer.unref?.();
   }
 
+  /** The interval the cadence is at: fast, then doubling per empty poll past the threshold, capped. */
+  private currentInterval(): number {
+    const steps = this.emptyPolls - WORKFLOW_VALIDATION_QUIET_POLL_THRESHOLD + 1;
+    if (steps <= 0) return this.pollIntervalMs;
+    return Math.min(
+      this.quietPollIntervalMs,
+      this.pollIntervalMs * WORKFLOW_VALIDATION_POLL_BACKOFF_FACTOR ** steps,
+    );
+  }
+
+  /** The interval, lengthened by a jitter of up to `pollJitterRatio` of it; never shortened. */
   private nextDelay(): number {
-    const spread = this.pollIntervalMs * this.pollJitterRatio;
-    return Math.round(this.pollIntervalMs + this.random() * spread);
+    const interval = this.currentInterval();
+    const jitter = Math.max(0, Math.min(1, this.random())) * interval * this.pollJitterRatio;
+    return Math.round(interval + jitter);
+  }
+
+  /**
+   * Moves the cadence after a pass that listed `requests`. It stays fast when any of them is new
+   * since the last pass; otherwise the pass counts as empty. `settled` are the asks this pass left
+   * undecided or saw declined, which the next pass will not count as new.
+   */
+  private recordPass(requests: WorkflowValidationRequest[], settled: Set<string>): void {
+    const arriving = requests.some((request) => !this.settledAsks.has(askKey(request)));
+    this.settledAsks = settled;
+    this.emptyPolls = arriving ? 0 : this.emptyPolls + 1;
   }
 
   private async runPass(signal?: AbortSignal): Promise<WorkflowValidationPassSummary> {
@@ -476,14 +557,18 @@ export class WorkflowValidationWorker {
     } catch (error) {
       this.log(`workflow validation: could not list pending asks (${describe(error)})`);
       summary.deferred += 1;
+      // A failed poll is retried on the fast cadence, as it always was.
+      this.emptyPolls = 0;
       return summary;
     }
+    const settled = new Set<string>();
     summary.pending = requests.length;
     for (const request of requests) {
       if (signal?.aborted) break;
       const decision = await this.decide(request);
       if (decision === undefined) {
         summary.refused += 1;
+        settled.add(askKey(request));
         continue;
       }
       let answer: WorkflowValidationSubmitResult;
@@ -501,12 +586,14 @@ export class WorkflowValidationWorker {
         continue;
       }
       summary.rejected += 1;
+      settled.add(askKey(request));
       this.log(
         `workflow validation: the cloud did not record the decision for '${request.requestId}' (${answer.status}${
           answer.reason === undefined ? "" : `: ${answer.reason}`
         })`,
       );
     }
+    this.recordPass(requests, settled);
     return summary;
   }
 

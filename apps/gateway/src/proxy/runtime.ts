@@ -400,6 +400,12 @@ export async function createProductionProxyRuntime(
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });
 
+    // A catalog revision change means the cloud's evolution pipeline just acted on this workspace,
+    // which is when validation asks arrive: it wakes the worker onto its fast cadence. Only a new
+    // revision counts; a sync that re-announces the revision already seen does not.
+    const seenCatalogRevisions = new Map<string, number>();
+    let unsubscribeCatalogWake: (() => void) | undefined;
+
     const transferClient: ArtifactBytesDownloader = options.transferClient ?? {
       async downloadArtifact(digest: string) {
         const downloaded = await client.downloadArtifact(digest);
@@ -569,10 +575,18 @@ export async function createProductionProxyRuntime(
       async start(): Promise<void> {
         coordinator.startPeriodicSync();
         validationWorker.start();
+        unsubscribeCatalogWake ??= options.registry?.events.onCatalogChanged((event) => {
+          const scope = `${event.workspaceId}:${event.sessionId ?? "*"}`;
+          if (seenCatalogRevisions.get(scope) === event.revision) return;
+          seenCatalogRevisions.set(scope, event.revision);
+          validationWorker.wake();
+        });
       },
 
       async stop(): Promise<void> {
         lifecycleAbort.abort();
+        unsubscribeCatalogWake?.();
+        unsubscribeCatalogWake = undefined;
         validationWorker.stop();
         coordinator.stopPeriodicSync();
         if (backgroundTasks.size > 0) {
