@@ -534,6 +534,7 @@ jobs:
             import path from "node:path";
 
             const execFileAsync = promisify(execFile);
+            const { installWithStaleChannelRetry } = await import(path.resolve("tools/publish-public-release.mjs"));
             const releaseTag = process.env.RELEASE_TAG || "v1.0.3";
             const releaseVersion = releaseTag.replace(/^v/, "");
             const smokeDir = process.argv[1];
@@ -591,24 +592,24 @@ jobs:
 
               if (!error && downloaded["install.sh"]) {
                 try {
-                  await execFileAsync("sh", [downloaded["install.sh"]], {
-                    env: { ...process.env, HOME: cleanHome },
-                    timeout: 120000,
-                  });
-                  const binaryPath = path.join(cleanHome, ".resin", "bin", "resin");
-                  if (!fs.existsSync(binaryPath)) {
-                    throw new Error(`Resin binary not found at ${binaryPath}`);
-                  }
-                  const { stdout } = await execFileAsync(binaryPath, ["version"], {
-                    env: { ...process.env, HOME: cleanHome },
-                    timeout: 15000,
-                  });
-                  const rawVersion = stdout.trim();
-                  const versionMatch = rawVersion.replace(/^(resin\s+)?v?/, "");
-                  installedVersion = versionMatch;
-                  if (versionMatch !== releaseVersion) {
-                    throw new Error(`Installed version ${versionMatch} does not match expected release version ${releaseVersion}`);
-                  }
+                  // Each attempt installs into a fresh home; retries only on a stale channel.
+                  await installWithStaleChannelRetry(async () => {
+                    const home = fs.mkdtempSync(path.join(cleanHome, "attempt-"));
+                    await execFileAsync("sh", [downloaded["install.sh"]], {
+                      env: { ...process.env, HOME: home },
+                      timeout: 120000,
+                    });
+                    const binaryPath = path.join(home, ".resin", "bin", "resin");
+                    if (!fs.existsSync(binaryPath)) {
+                      throw new Error(`Resin binary not found at ${binaryPath}`);
+                    }
+                    const { stdout } = await execFileAsync(binaryPath, ["version"], {
+                      env: { ...process.env, HOME: home },
+                      timeout: 15000,
+                    });
+                    installedVersion = stdout.trim().replace(/^(resin\s+)?v?/, "");
+                    return installedVersion;
+                  }, { expectedVersion: releaseVersion, label: installer });
                   status = "PASSED";
                   error = null;
                 } catch (err) {
@@ -642,25 +643,25 @@ jobs:
 
               if (!error && downloaded["install.ps1"]) {
                 try {
-                  const resinHome = path.join(cleanHome, ".resin");
-                  await execFileAsync("pwsh", [downloaded["install.ps1"], "-ResinHome", resinHome, "-Force"], {
-                    env: { ...process.env, HOME: cleanHome },
-                    timeout: 120000,
-                  });
-                  const binaryPath = path.join(resinHome, "bin", "resin");
-                  if (!fs.existsSync(binaryPath)) {
-                    throw new Error(`Resin binary not found at ${binaryPath}`);
-                  }
-                  const { stdout } = await execFileAsync(binaryPath, ["version"], {
-                    env: { ...process.env, HOME: cleanHome },
-                    timeout: 15000,
-                  });
-                  const rawVersion = stdout.trim();
-                  const versionMatch = rawVersion.replace(/^(resin\s+)?v?/, "");
-                  installedVersion = versionMatch;
-                  if (versionMatch !== releaseVersion) {
-                    throw new Error(`Installed version ${versionMatch} does not match expected release version ${releaseVersion}`);
-                  }
+                  // Each attempt installs into a fresh home; retries only on a stale channel.
+                  await installWithStaleChannelRetry(async () => {
+                    const home = fs.mkdtempSync(path.join(cleanHome, "attempt-"));
+                    const resinHome = path.join(home, ".resin");
+                    await execFileAsync("pwsh", [downloaded["install.ps1"], "-ResinHome", resinHome, "-Force"], {
+                      env: { ...process.env, HOME: home },
+                      timeout: 120000,
+                    });
+                    const binaryPath = path.join(resinHome, "bin", "resin");
+                    if (!fs.existsSync(binaryPath)) {
+                      throw new Error(`Resin binary not found at ${binaryPath}`);
+                    }
+                    const { stdout } = await execFileAsync(binaryPath, ["version"], {
+                      env: { ...process.env, HOME: home },
+                      timeout: 15000,
+                    });
+                    installedVersion = stdout.trim().replace(/^(resin\s+)?v?/, "");
+                    return installedVersion;
+                  }, { expectedVersion: releaseVersion, label: installer });
                   status = "PASSED";
                   error = null;
                 } catch (err) {
