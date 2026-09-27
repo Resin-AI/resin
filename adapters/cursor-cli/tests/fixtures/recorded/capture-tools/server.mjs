@@ -5,7 +5,7 @@ const tools = () => [
   { name: "echo", description: "Echo text back", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
   ...(added ? [{ name: "shout", description: "Return text uppercased", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] : []),
 ];
-const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+const send = (m) => process.stdout.write(`${JSON.stringify(m)}\n`);
 createInterface({ input: process.stdin }).on("line", (line) => {
   let m; try { m = JSON.parse(line); } catch { return; }
   if (m.method === "initialize") send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params?.protocolVersion ?? "2024-11-05", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "demo", version: "1.0.0" } } });

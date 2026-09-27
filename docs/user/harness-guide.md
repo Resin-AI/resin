@@ -14,7 +14,7 @@ Every harness below is registered by `resin init` and removed by `resin uninstal
 | **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | `$CODEX_HOME/AGENTS.md` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` | JSONL rollout tailing | Stable meta-tools + response catalog notices | Learns; learned tool called (7→3 calls, −48% input tokens; tool step failed on a generated literal) |
 | **Oh My Pi (OMP)** | `18.3.2` | `$OMP_HOME/agent/mcp.json` (`~/.omp/agent/mcp.json`; legacy `~/.omp/config.json` cleaned on uninstall) | `$OMP_HOME/agent/AGENTS.md` (`~/.omp/agent/AGENTS.md`) | `~/.omp/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl` + subagent dirs | JSONL transcript tailing | Native `tools/list_changed` | Learns; learned tool called once, no savings yet |
 | **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `<agent-dir>/extensions/resin.ts` (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) | `<agent-dir>/AGENTS.md` (or the first existing context file) | `<agent-dir>/sessions/--<cwd>--/*.jsonl`, `$PI_CODING_AGENT_SESSION_DIR`, `sessionDir` setting | JSONL transcript tailing | Native `tools/list_changed` via the extension | Learns; learned tools called once (10→6 calls) |
-| **Cursor CLI** (`cursor-agent`) | none yet: no fixtures until `cursor-agent login` (reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | `~/.cursor/rules/resin.mdc` | `~/.resin/capture/cursor-cli/<conversation_id>.jsonl` | Hook spool (`~/.resin/hooks/cursor-capture.mjs`) | Next session (list_changed unverified) | Blocked: needs `cursor-agent login` |
+| **Cursor CLI** (`cursor-agent`) | `2026.9.26-dd393fe` | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | `~/.cursor/rules/resin.mdc` | `~/.resin/capture/cursor-cli/<conversation_id>.jsonl` | Hook spool (`~/.resin/hooks/cursor-capture.mjs`) | Next session (ignores list_changed mid-session) | Learns (2026-09-27); learned tools called, but every call failed artifact verification (local signing key missing from the device key store), so no savings measured (7→15 calls) |
 | **Grok Build** (`grok`) | `1.0.13` | `$GROK_HOME/config.toml` (`~/.grok/config.toml`) | `$GROK_HOME/AGENTS.md` | `~/.grok/sessions/<encoded cwd>/<id>/updates.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | Learns; invoke blocked by Grok's free usage limit |
 | **Muse Code** (`muse`) | `1.4.0` | `$XDG_CONFIG_HOME/muse/settings.json` (`~/.config/muse/settings.json`) | `$XDG_CONFIG_HOME/muse/AGENTS.md` | `$XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` + `subagent/<child>/session.jsonl` | JSONL session-log tailing | Next session | Blocked: needs `muse login` |
 | **OpenCode** (`opencode`) | `1.18.32`, `1.1.65` | `$XDG_CONFIG_HOME/opencode/opencode.json` (`mcp.resin`) | `$XDG_CONFIG_HOME/opencode/AGENTS.md` | `$XDG_DATA_HOME/opencode/opencode.db` (`OPENCODE_DB`); legacy `storage/` JSON tree | SQLite store / legacy JSON reads | Next session | Learns; learned tools not yet called by the model |
@@ -227,7 +227,7 @@ Runs with `--no-session` write nothing and cannot be captured; runs with `--no-e
 
 ### Tested versions
 
-No version is tested yet. **Blocker:** real fixtures need an authenticated `cursor-agent login`; until they are recorded the tested list stays empty and `resin status` reports every installed cursor-agent (built against `2026.09.26`) as untested. Registration and hook capture still work.
+Tested: cursor-agent `2026.09.26-dd393fe` (normalized `2026.9.26-dd393fe`), qualified with real hook captures from headless (`-p`) and interactive sessions: shell, read, edit, write, MCP, Task subagents, abort, `/compact` (`adapters/cursor-cli/tests/fixtures/recorded/`). Other versions are reported as untested.
 
 ### Automated Registration
 
@@ -241,15 +241,15 @@ cursor-agent reads these paths from `os.homedir()/.cursor`. `CURSOR_CONFIG_DIR` 
 
 ### Session Observation
 
-Resin captures sessions through hooks, not transcript files. cursor-agent writes `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`, with subagents under `<id>/subagents/`. Those files keep only message text and tool-call arguments: they have no tool results, call ids, token usage, timestamps or cwd, and the writer rewrites them after summarization. Hook payloads carry all of these fields. The capture script appends each payload to `~/.resin/capture/cursor-cli/<conversation_id>.jsonl`, adding `resin_received_at` and dropping `user_email`. Each session is bound to the `workspace_roots` its hooks recorded. Subagents are linked to their parent through `subagentStart`.
+Resin captures sessions through hooks, not transcript files. cursor-agent writes `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`. Those files keep only message text and tool-call arguments: they have no tool results, call ids, token usage, timestamps or cwd, and the writer rewrites them after summarization. Hook payloads carry these fields. The capture script appends each payload to `~/.resin/capture/cursor-cli/<conversation_id>.jsonl`, adding `resin_received_at` and dropping `user_email`. Each session is bound to the `workspace_roots` its hooks recorded.
 
 Resin decodes:
 
-- prompts and responses;
-- per-generation usage (input, output and cache-read tokens);
-- tool calls and their results, with `tool_use_id`;
+- prompts and responses (interactive sessions only; see below);
+- per-turn usage (input, output and cache-read tokens) from `stop`;
+- tool calls and their results, identified as `<tool_name>:<tool_use_id>`;
 - shell commands and file edits (old/new strings);
-- compaction and subagents;
+- compaction;
 - aborted or failed turns.
 
 Each payload is checked against the field contract pinned in `adapters/cursor-cli/src/hook-records.ts`. An unknown hook event or a changed field is recorded as drift and never decoded by guesswork.
@@ -258,9 +258,11 @@ Each payload is checked against the field contract pinned in `adapters/cursor-cl
 
 - Sessions from before `resin init`, or from while the hooks were missing, are listed as uncaptured (`listUncapturedSessions`, reason `no-hook-capture`) and are not decoded.
 - Cloud Agents that run on Cursor's machines leave nothing on this device and cannot be captured. cursor-agent 2026.09.26 removed the CLI's `--cloud`/`--background` flags. Self-hosted `cursor-agent worker` sessions are captured and flagged `isBackgroundAgent`.
-- Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete; calls still running when a session is killed are not recorded.
-- Usage is per generation (input, output, cache-read tokens) from `afterAgentResponse`; cursor-agent reports no totals and Resin does not synthesize them.
-- Two things are unverified: whether cursor-agent reacts to MCP `list_changed`, and whether it applies user rules from `~/.cursor/rules`. For now, new tools are assumed to reach the next session.
+- Event times are the moments the hook ran, because payloads carry no timestamps. Tool calls are recorded when they complete; a call still running when a session is aborted is not recorded, and the session ends with reason `error`.
+- Headless `cursor-agent -p` runs fire no `beforeSubmitPrompt`, `afterAgentResponse` or `stop` hook, so their prompt, final answer and token usage are not captured. Their tool calls, edits and session end are.
+- One model edit is reported as a Read and a Write sharing one `tool_use_id`; call ids therefore include the tool name. `afterFileEdit` carries no `tool_use_id` and fires before its Write's `postToolUse`, so file edits are not linked to their call.
+- Task subagents run as separate conversations. No `subagentStart`/`subagentStop` hook fires and the Task call itself reaches no `postToolUse`, so subagent sessions are captured on their own, unlinked to their parent.
+- cursor-agent ignores an MCP server's `tools/list_changed` for the rest of the session (a tool added mid-session was never offered), so new Resin tools reach the next session. Whether it applies user rules from `~/.cursor/rules` is unverified.
 
 ---
 
@@ -363,7 +365,7 @@ Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot 
 
 Codex instead uses the stable gateway described above. Its four advertised tools do not change when the underlying catalog changes, so newly available tools do not depend on native tool-list refresh.
 
-Cursor CLI, Muse Code and OpenCode pick up catalog changes at the next session start; mid-session `list_changed` handling is unverified for them.
+Cursor CLI, Muse Code and OpenCode pick up catalog changes at the next session start. cursor-agent 2026.09.26 was observed to ignore `list_changed` mid-session; for Muse Code and OpenCode it is unverified.
 
 ### Catalog Notices in Tool Responses
 
@@ -387,7 +389,7 @@ Every decoder is tested against transcripts recorded from a real install of the 
 | Codex CLI | `adapters/codex-cli/tests/fixtures/recorded/{0.156.1,0.157.1}/` | `adapters/codex-cli/tests/fixtures/recorded/CAPTURE.md` (+ `capture.sh`) |
 | OMP | `adapters/omp/tests/fixtures/recorded/18.3.2/` | `adapters/omp/tests/fixtures/recorded/CAPTURE.md` |
 | Pi | `adapters/pi/tests/fixtures/recorded/0.87.1/` | `adapters/pi/tests/fixtures/recorded/CAPTURE.md` |
-| Cursor CLI | none yet (blocked on `cursor-agent login`) | `adapters/cursor-cli/tests/fixtures/recorded/CAPTURE.md` |
+| Cursor CLI | `adapters/cursor-cli/tests/fixtures/recorded/2026.9.26-dd393fe/` | `adapters/cursor-cli/tests/fixtures/recorded/CAPTURE.md` (+ `capture-tools/`) |
 | Grok Build | `adapters/grok-build/tests/fixtures/recorded/1.0.13/` | `adapters/grok-build/tests/fixtures/recorded/CAPTURE.md` |
 | Muse Code | `adapters/muse-code/tests/fixtures/recorded/1.4.0/` | `adapters/muse-code/tests/fixtures/recorded/CAPTURE.md` (+ `capture/`) |
 | OpenCode | `adapters/opencode/tests/fixtures/recorded/{1.18.32,1.1.65}/` | `adapters/opencode/tests/fixtures/recorded/CAPTURE.md` |
