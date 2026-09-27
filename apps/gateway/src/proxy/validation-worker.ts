@@ -664,6 +664,7 @@ export class WorkflowValidationWorker {
         proposed: verdict.candidate.proposed,
       },
       confirmed: verdict.confirmed,
+      ...(verdict.confirmedType === undefined ? {} : { confirmedType: verdict.confirmedType }),
       ...(verdict.reason === undefined ? {} : { reason: verdict.reason }),
     }));
     return {

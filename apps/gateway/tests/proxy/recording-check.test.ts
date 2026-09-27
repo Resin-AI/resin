@@ -13,6 +13,8 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  tokenizeProgram,
 } from "@resin/contracts";
 import {
   InMemoryPrivateValueStore,
@@ -489,5 +491,123 @@ describe("local call identity", () => {
     const answer = await validator(store)(plan);
     expect(answer.unavailable).toBeDefined();
     expect(answer.verification?.status).not.toBe("verified");
+  });
+});
+
+describe("a held-out demonstration recorded in another session", () => {
+  const OTHER = "recording-check-other-session";
+  /** One read → edit → bash job, as a harness records it: every argument private. */
+  const job = (prefix: string, file: string, replace = "DONE", limit: unknown = 40): Turn[] => [
+    { user: `Finish the TODO in ${file} and run its tests` },
+    {
+      callId: `${prefix}-read`,
+      toolName: "read",
+      parameters: { path: file, limit },
+      result: `TODO in ${file}`,
+    },
+    {
+      callId: `${prefix}-edit`,
+      toolName: "edit",
+      parameters: { path: file, find: "TODO", replace },
+      result: "edited",
+    },
+    {
+      callId: `${prefix}-bash`,
+      toolName: "bash",
+      parameters: { command: `pnpm vitest run ${file}` },
+      result: "1 passed",
+    },
+  ];
+  const input = (
+    plan: RecordedWorkflow,
+    toolName: string,
+    argument: string,
+    type: "string" | "number" | "unknown",
+  ): WorkflowBindingCandidate => ({
+    stepId: plan.steps.find((step) => step.callable.name === toolName)!.id,
+    argument,
+    path: [],
+    proposed: { kind: "input", name: argument === "limit" ? "limit" : "file", type },
+    reason: "varies-across-executions",
+    missing: "a demonstration with a different value",
+  });
+  function crossSession(store: InMemoryPrivateValueStore, heldOutTurns: Turn[]) {
+    const recorded = record(store, job("a", "src/alpha.ts"));
+    record(store, heldOutTurns, owner, OTHER);
+    const plan: RecordedWorkflow = { ...recorded, candidates: [] };
+    delete (plan as { heldOut?: unknown }).heldOut;
+    const heldOutCalls = ["read", "edit", "bash"].map((toolName) => ({
+      stepId: plan.steps.find((step) => step.callable.name === toolName)!.id,
+      callIds: [`b-${toolName}`],
+    }));
+    const commandStep = plan.steps.find((step) => step.callable.name === "bash")!;
+    const fileToken = tokenizeProgram("shell", "pnpm vitest run src/alpha.ts").findIndex(
+      (token) => token.raw === "src/alpha.ts",
+    );
+    const token: WorkflowBindingCandidate = {
+      stepId: commandStep.id,
+      argument: "command",
+      path: ["tokens", fileToken],
+      proposed: { kind: "input", name: "file", type: "string" },
+      reason: "varies-across-executions",
+      missing: "a demonstration with a different value",
+    };
+    return {
+      plan: { ...plan, heldOut: { inputs: [], observed: [], calls: heldOutCalls } },
+      token,
+      check: validator(store, { sessions: [SESSION, OTHER] }),
+    };
+  }
+
+  it("confirms the job's bindings, reporting each untyped input's JSON type", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan, token, check } = crossSession(store, job("b", "src/beta.ts"));
+    const candidates = [
+      input(plan, "read", "path", "unknown"),
+      input(plan, "edit", "path", "unknown"),
+      token,
+    ];
+    const answer = await check({ ...plan, candidates });
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true, true, true]);
+    expect(answer.verdicts.map((verdict) => verdict.confirmedType)).toEqual([
+      "string",
+      "string",
+      undefined,
+    ]);
+    expect(answer.verdicts[0]!.candidate.proposed).toMatchObject({ type: "unknown" });
+    expect(answer.verification?.status).toBe("verified");
+    expect(JSON.stringify(answer)).not.toContain("beta");
+  });
+
+  it("drops the bindings when the other session ran a different job", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan, token, check } = crossSession(store, job("b", "src/beta.ts", "REMOVED", 99));
+    const candidates = [
+      input(plan, "read", "path", "unknown"),
+      input(plan, "edit", "path", "unknown"),
+      token,
+    ];
+    const answer = await check({ ...plan, candidates });
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false, false, false]);
+    expect(answer.verdicts.every((verdict) => verdict.confirmedType === undefined)).toBe(true);
+    expect(answer.verification?.status).not.toBe("verified");
+  });
+
+  it("drops an untyped proposal whose values disagree on JSON type", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan, check } = crossSession(store, job("b", "src/alpha.ts", "DONE", "40"));
+    const answer = await check({ ...plan, candidates: [input(plan, "read", "limit", "unknown")] });
+    expect(answer.verdicts).toHaveLength(1);
+    expect(answer.verdicts[0]!.confirmed).toBe(false);
+    expect(answer.verdicts[0]!.confirmedType).toBeUndefined();
+    expect(answer.verdicts[0]!.reason).toBeDefined();
+  });
+
+  it("confirms an untyped number proposal as a number", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const { plan, check } = crossSession(store, job("b", "src/alpha.ts", "DONE", 80));
+    const answer = await check({ ...plan, candidates: [input(plan, "read", "limit", "unknown")] });
+    expect(answer.verdicts[0]).toMatchObject({ confirmed: true, confirmedType: "number" });
   });
 });

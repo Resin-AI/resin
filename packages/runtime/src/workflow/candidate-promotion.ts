@@ -112,6 +112,8 @@ export function applyConfirmedWorkflowBinding(
       return undefined;
     }
   } else {
+    // The confirming device names the type; an input is never declared without one.
+    if (proposed.type === "unknown") return undefined;
     const existing = plan.inputs.find((input) => input.name === proposed.name);
     if (
       existing !== undefined &&

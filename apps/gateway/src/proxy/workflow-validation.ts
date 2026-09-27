@@ -57,8 +57,12 @@ export interface LocalCandidateVerdict {
     proposed: WorkflowBindingCandidate["proposed"];
   };
   confirmed: boolean;
+  /** The JSON type of the values a confirmed input proposal binds; never the values. */
+  confirmedType?: DemonstratedType;
   reason?: string;
 }
+
+type DemonstratedType = "string" | "number" | "boolean" | "object" | "array";
 
 export interface LocalWorkflowValidationResult {
   verdicts: LocalCandidateVerdict[];
@@ -91,6 +95,8 @@ export interface RecordingCheckValidatorOptions {
 /** Fixed, value-free reasons: a decision never carries recorded values, commands or outputs. */
 const MISSED_DETAIL = "the recording check did not reproduce this recorded step";
 const NOT_CONFIRMED = "the binding was not confirmed by the recording check";
+const TYPE_DISAGREES =
+  "the demonstrations' values for this input do not share one JSON type; the binding was not confirmed";
 const UNAVAILABLE =
   "this device could not identify the demonstration's recorded calls; no parameter decision was performed";
 
@@ -262,6 +268,26 @@ function iterationDemonstration(
     });
   }
   return { recording, demonstration };
+}
+
+/** The JSON type of the value at `path`; undefined when absent, null, or not a declarable type. */
+function demonstratedType(
+  value: WorkflowJsonValue,
+  path: WorkflowValuePath,
+): DemonstratedType | undefined {
+  let at: WorkflowJsonValue | undefined = value;
+  for (const key of path) {
+    if (Array.isArray(at) && typeof key === "number") at = at[key];
+    else if (at !== null && typeof at === "object" && !Array.isArray(at) && typeof key === "string")
+      at = Object.hasOwn(at, key) ? at[key] : undefined;
+    else return undefined;
+  }
+  if (at === undefined || at === null) return undefined;
+  if (Array.isArray(at)) return "array";
+  const type = typeof at;
+  return type === "string" || type === "number" || type === "boolean" || type === "object"
+    ? type
+    : undefined;
 }
 
 /** What one run of the check decided. */
@@ -467,6 +493,53 @@ export function createRecordingCheckValidator(
     };
 
     const baselineOnly = label === "baseline";
+    // Each input proposal's type, from the values this device recorded for it: the plan's own call
+    // and every held-out iteration. A proposal whose type the cloud could not see (`unknown`) is
+    // checked as the type those values share, and dropped when they share none.
+    const typeOf = new Map<WorkflowBindingCandidate, DemonstratedType | undefined>();
+    if (!baselineOnly) {
+      const typeAt = (reference: string | undefined, path: WorkflowValuePath) => {
+        if (reference === undefined) return undefined;
+        try {
+          return demonstratedType(resolveOwned(reference), path);
+        } catch {
+          return undefined;
+        }
+      };
+      for (const candidate of candidates) {
+        if (candidate.proposed.kind !== "input" || candidate.path[0] === "tokens") continue;
+        const step = plan.steps.find((entry) => entry.id === candidate.stepId);
+        const recorded = step === undefined ? undefined : await options.localCalls.lookup(step.callId);
+        const types = [
+          typeAt(recorded?.argumentReferences[candidate.argument], candidate.path),
+          ...selected.iterations.map((iteration) =>
+            typeAt(
+              iteration.demonstration.inputs.find(
+                (entry) => entry.stepId === candidate.stepId && entry.argument === candidate.argument,
+              )?.reference,
+              candidate.path,
+            ),
+          ),
+        ];
+        typeOf.set(candidate, types.every((type) => type === types[0]) ? types[0] : undefined);
+      }
+    }
+    // What the engine decides: `unknown` proposals carry the type their values share; one whose
+    // values share none (or whose position has no JSON type) is never offered to the engine.
+    const asChecked = new Map<WorkflowBindingCandidate, WorkflowBindingCandidate>();
+    const untyped = new Set<WorkflowBindingCandidate>();
+    for (const candidate of candidates) {
+      const proposed = candidate.proposed;
+      if (proposed.kind !== "input" || proposed.type !== "unknown") {
+        asChecked.set(candidate, candidate);
+        continue;
+      }
+      const type = typeOf.get(candidate);
+      if (type === undefined) untyped.add(candidate);
+      else asChecked.set(candidate, { ...candidate, proposed: { ...proposed, type } });
+    }
+    const originalOf = new Map([...asChecked].map(([original, checked]) => [checked, original]));
+    const checkedCandidates = [...asChecked.values()];
     // One recording cannot show that a value varies, but it can offer the value as an optional
     // input that keeps exactly what the recording ran when omitted. Those offers are applied first,
     // in plan order as the cloud applies confirmed ones, and checking that plan verifies the tool as
@@ -504,7 +577,7 @@ export function createRecordingCheckValidator(
       : [];
     const decided = baselineOnly
       ? await checkIteration(checked, undefined, baselineExtracts, [])
-      : await acrossIterations(selected.iterations, candidates, (iteration, kept) =>
+      : await acrossIterations(selected.iterations, checkedCandidates, (iteration, kept) =>
           checkIteration(withIteration(plan, iteration), iteration, kept, kept),
         );
     if (decided === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
@@ -527,7 +600,7 @@ export function createRecordingCheckValidator(
         detail: MISSED_DETAIL,
       }));
       verification.dropped = verification.dropped.map(({ candidate }) => ({
-        candidate,
+        candidate: originalOf.get(candidate) ?? candidate,
         reason: NOT_CONFIRMED,
       }));
     }
@@ -545,18 +618,27 @@ export function createRecordingCheckValidator(
               : "the original baseline cannot establish a binding on different inputs",
           };
         })
-      : decided.outcomes.map((outcome) => ({ ...outcome, reason: NOT_CONFIRMED }));
+      : candidates.map((candidate) => {
+          if (untyped.has(candidate)) return { candidate, accepted: false, reason: TYPE_DISAGREES };
+          const checkedAs = asChecked.get(candidate);
+          const outcome = decided.outcomes.find((entry) => entry.candidate === checkedAs);
+          return { candidate, accepted: outcome?.accepted === true, reason: NOT_CONFIRMED };
+        });
     return {
-      verdicts: outcomes.map((outcome) => ({
-        candidate: {
-          stepId: outcome.candidate.stepId,
-          argument: outcome.candidate.argument,
-          path: outcome.candidate.path,
-          proposed: outcome.candidate.proposed,
-        },
-        confirmed: outcome.accepted,
-        ...(outcome.accepted ? {} : { reason: outcome.reason }),
-      })),
+      verdicts: outcomes.map((outcome) => {
+        const confirmedType = outcome.accepted ? typeOf.get(outcome.candidate) : undefined;
+        return {
+          candidate: {
+            stepId: outcome.candidate.stepId,
+            argument: outcome.candidate.argument,
+            path: outcome.candidate.path,
+            proposed: outcome.candidate.proposed,
+          },
+          confirmed: outcome.accepted,
+          ...(confirmedType === undefined ? {} : { confirmedType }),
+          ...(outcome.accepted ? {} : { reason: outcome.reason }),
+        };
+      }),
       ...(verification === undefined ? {} : { verification }),
     };
   };
