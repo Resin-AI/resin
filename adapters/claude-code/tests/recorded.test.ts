@@ -57,9 +57,10 @@ describe("recorded Claude Code 2.1.283 sessions", () => {
       "mcp__echo__echo_upper",
       "Agent",
     ]);
-    const shell = events.find((event) => event.type === "command_exec");
-    expect(shell?.type === "command_exec" && shell.command).toBe("python3 calc.py");
-    expect(shell?.type === "command_exec" && shell.workingDirectory).toBe("/workspace/project");
+    const shell = events.find((event) => event.type === "tool_call" && event.toolName === "Bash");
+    expect(shell?.type === "tool_call" && shell.parameters).toMatchObject({
+      command: "python3 calc.py",
+    });
     const mcp = events.find(
       (event) => event.type === "tool_result" && String(event.result).includes("RESIN"),
     );
@@ -214,14 +215,9 @@ describe("recorded Claude Code 2.1.283 one-block-per-record session", () => {
       expect(result.executionDurationMs).toBeGreaterThanOrEqual(0);
       expect(result.metadata?.executionDurationUnknown).toBeUndefined();
     }
-    const commands = events.flatMap((event) => (event.type === "command_exec" ? [event] : []));
-    expect(commands.map((command) => [command.command, command.exitCode])).toContainEqual([
-      "./deployctl promote dep-1cba2e --to production",
-      0,
-    ]);
-    expect(commands).toHaveLength(9);
-    expect(commands[0]?.stdout).toMatch(/^usage: deployctl/);
-    // Each tool result and the command it completed come from one record; they stay distinct.
+    // Each Bash call is one step: a second, call-less command event would make the recorded
+    // workflow's steps ambiguous, and the cloud defers the whole workflow.
+    expect(events.some((event) => event.type === "command_exec")).toBe(false);
     const keys = events.map(
       (event) => `${event.causalRef?.causalSequence}:${event.causalRef?.stepIndex ?? 0}`,
     );

@@ -323,8 +323,6 @@ function withBaseFields<T extends IntermediateSessionEvent>(
 export interface PendingClaudeToolCall {
   toolName: string;
   timestamp: string;
-  command?: string;
-  workingDirectory?: string;
 }
 
 /** Tool calls awaiting their results, keyed by Claude's `tool_use` id. */
@@ -335,13 +333,6 @@ export function claudeCallId(toolCallId: string): string {
   const sanitized = toolCallId.replace(/[^a-zA-Z0-9_.:-]/g, "_");
   const safe = /^[a-zA-Z0-9_-]/.test(sanitized) ? sanitized : `_${sanitized}`;
   return safe.length > 0 ? safe.slice(0, 128) : "_";
-}
-
-/** Exit status of a Claude `Bash` result: Claude prefixes failed output with `Exit code N`. */
-function claudeBashExitCode(output: string, isError: boolean): number {
-  if (!isError) return 0;
-  const match = /^Exit code (\d+)/u.exec(output);
-  return match ? Number(match[1]) : 1;
 }
 
 /**
@@ -749,29 +740,6 @@ function decodeLineEvents(
               ),
             );
             toolResultIds.push(toolCallId);
-
-            if (pending?.command !== undefined) {
-              const shell = asObject(payload.toolUseResult);
-              events.push(
-                withBaseFields<IntermediateCommandExecEvent>(
-                  {
-                    type: "command_exec",
-                    sessionId,
-                    timestamp: recordTime,
-                    command: pending.command,
-                    workingDirectory: pending.workingDirectory,
-                    exitCode: claudeBashExitCode(output, isError),
-                    stdout: asString(shell?.stdout) ?? output,
-                    ...(asString(shell?.stderr) ? { stderr: asString(shell?.stderr) } : {}),
-                    durationMs,
-                    metadata: { toolCallId },
-                  },
-                  sessionId,
-                  recordTime,
-                  sequenceNumber,
-                ),
-              );
-            }
           } else if (blockType === "text" || asString(block.text) !== undefined) {
             const text = asString(block.text) || asString(block.content) || "";
             events.push(
@@ -924,19 +892,7 @@ function decodeLineEvents(
               ),
             );
 
-            // The Bash command becomes a command_exec once its result reports how it exited.
-            const command =
-              toolName.toLowerCase() === "bash" ? asString(inputRecord.command) : undefined;
-            pendingCalls.set(toolCallId, {
-              toolName,
-              timestamp: recordTime,
-              ...(command
-                ? {
-                    command,
-                    workingDirectory: asString(inputRecord.cwd) ?? asString(payload.cwd),
-                  }
-                : {}),
-            });
+            pendingCalls.set(toolCallId, { toolName, timestamp: recordTime });
           }
         }
       }
@@ -1004,24 +960,6 @@ function decodeLineEvents(
         sequenceNumber,
       ),
     );
-
-    if (toolName.toLowerCase() === "bash" && asString(inputRecord.command)) {
-      events.push(
-        withBaseFields<IntermediateCommandExecEvent>(
-          {
-            type: "command_exec",
-            sessionId,
-            timestamp: recordTime,
-            command: asString(inputRecord.command)!,
-            workingDirectory: asString(inputRecord.cwd),
-            metadata: { toolCallId },
-          },
-          sessionId,
-          recordTime,
-          sequenceNumber,
-        ),
-      );
-    }
     return events;
   }
 

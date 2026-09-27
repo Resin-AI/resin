@@ -65,8 +65,18 @@ describe("OpenCode 1.18.32 conformance session", () => {
     const count = (type: string) => events.filter((event) => event.type === type).length;
     expect(count("tool_call")).toBe(16);
     expect(count("tool_result")).toBe(16);
-    expect(count("command_exec")).toBe(13);
+    expect(count("command_exec")).toBe(0);
     expect(count("model_reasoning")).toBe(17);
+  });
+
+  it("records a bash call that exited non-zero as a failed step", () => {
+    // The bash tool result is the only record of the command, so it carries the exit status.
+    const bash = events.flatMap((e) =>
+      e.type === "tool_result" && e.toolName === "bash" ? [[e.isError, e.error ?? null]] : [],
+    );
+    expect(bash).toContainEqual([true, "exit code 2"]);
+    expect(bash).toContainEqual([true, "exit code 1"]);
+    expect(bash).toContainEqual([false, null]);
   });
 
   it("pairs every tool result with its call", () => {

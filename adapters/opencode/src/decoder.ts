@@ -367,8 +367,12 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
     const timestamp = iso(end ?? start, fallbackTime);
     const durationMs =
       start !== undefined && end !== undefined && end >= start ? end - start : undefined;
-    const isError = state.status === "error";
-    const output = isError ? undefined : str(state.output);
+    const toolFailed = state.status === "error";
+    // A bash call that ran but exited non-zero failed; its tool result is the one record of that.
+    const exitCode = tool === "bash" ? int(metadata.exit) : undefined;
+    const commandFailed = !toolFailed && exitCode !== undefined && exitCode !== 0;
+    const isError = toolFailed || commandFailed;
+    const output = toolFailed ? undefined : str(state.output);
     const events: IntermediateSessionEvent[] = [
       {
         type: "tool_result",
@@ -381,27 +385,17 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         result: output ?? null,
         output: output ?? null,
         isError,
-        error: isError ? (str(state.error) ?? "tool error") : undefined,
+        error: toolFailed
+          ? (str(state.error) ?? "tool error")
+          : commandFailed
+            ? `exit code ${exitCode}`
+            : undefined,
         durationMs,
         executionDurationMs: durationMs ?? 0,
         outputSizeBytes: output === undefined ? undefined : Buffer.byteLength(output, "utf8"),
         metadata: { messageId: message.id, partId: part.id, title: str(state.title) },
       },
     ];
-
-    if (tool === "bash" && str(input.command)) {
-      events.push({
-        type: "command_exec",
-        sessionId,
-        timestamp,
-        command: str(input.command)!,
-        workingDirectory: str(input.workdir),
-        exitCode: int(metadata.exit),
-        stdout: str(metadata.output) ?? output,
-        durationMs,
-        metadata: { toolCallId: callId },
-      });
-    }
 
     if (!isError && (tool === "edit" || tool === "write")) {
       const filePath = str(input.filePath) ?? str(metadata.filepath);

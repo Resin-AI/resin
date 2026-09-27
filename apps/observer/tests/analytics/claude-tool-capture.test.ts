@@ -76,7 +76,7 @@ describe("Claude Code tool capture", () => {
     for (const result of results) {
       expect(result.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]).toBeDefined();
     }
-    expect(projected.filter((event) => event.type === "command_exec")).toHaveLength(9);
+    expect(projected.filter((event) => event.type === "command_exec")).toHaveLength(0);
   });
 
   it("ends on a completed assistant turn followed by the session's end", async () => {

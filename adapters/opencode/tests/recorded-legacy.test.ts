@@ -59,10 +59,7 @@ describe("OpenCode 1.1.65 recorded legacy JSON storage", () => {
     expect(events.filter((e) => e.type === "tool_result").every((r) => r.isError === false)).toBe(
       true,
     );
-    expect(events.find((e) => e.type === "command_exec")).toMatchObject({
-      command: "node greet.js",
-      exitCode: 0,
-    });
+    expect(events.some((e) => e.type === "command_exec")).toBe(false);
     expect(events.filter((e) => e.type === "file_edit").map((e) => e.operation)).toEqual([
       "update",
       "create",

@@ -188,12 +188,8 @@ describe("Claude Code Transcript Decoder", () => {
       undefined,
       pending,
     );
-    const commandExec = resultEvents.find((e) => e.type === "command_exec");
-    expect(commandExec).toMatchObject({
-      command: "pnpm build",
-      workingDirectory: "/root",
-      exitCode: 2,
-    });
+    // The Bash call and its result are the one recorded step; no separate command event.
+    expect(resultEvents.some((e) => e.type === "command_exec")).toBe(false);
     expect(resultEvents.find((e) => e.type === "tool_result")).toMatchObject({
       toolName: "Bash",
       isError: true,
@@ -572,16 +568,10 @@ describe("Claude Code Transcript Decoder", () => {
       expect(events.length).toBeGreaterThanOrEqual(4);
 
       const messageEvents = events.filter((e) => e.type === "message");
-      const commandExecEvents = events.filter((e) => e.type === "command_exec");
 
       // message event receives providerUsage
       expect(messageEvents).toHaveLength(1);
       expect(messageEvents[0].type === "message" && messageEvents[0].providerUsage).toBeDefined();
-
-      // synthetic command_exec MUST NOT have providerUsage
-      for (const cmd of commandExecEvents) {
-        expect("providerUsage" in cmd && cmd.providerUsage).toBeFalsy();
-      }
     });
 
     it("decodes explicit unavailable state cleanly", () => {

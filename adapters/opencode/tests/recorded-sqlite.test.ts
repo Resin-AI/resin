@@ -91,11 +91,10 @@ describe("OpenCode 1.18.32 recorded SQLite store", () => {
       isError: false,
     });
 
-    expect(events.find((e) => e.type === "command_exec")).toMatchObject({
-      command: "node greet.js",
-      exitCode: 0,
-      stdout: "hello from greet\n",
-      workingDirectory: "/workspace/project",
+    expect(events.some((e) => e.type === "command_exec")).toBe(false);
+    expect(results.find((r) => r.toolName === "bash")).toMatchObject({
+      output: "hello from greet\n",
+      isError: false,
     });
     const edits = events.filter((e) => e.type === "file_edit");
     expect(edits.map((e) => [e.filePath, e.operation])).toEqual([
