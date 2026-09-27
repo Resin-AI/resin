@@ -1,4 +1,4 @@
-import type { ProviderReportedUsage } from "@resin/contracts";
+import { type ProviderReportedUsage, parseAssistantStopReason } from "@resin/contracts";
 import type {
   DecoderMetadataRecord,
   HarnessRecordDecoder,
@@ -18,7 +18,9 @@ import { GROK_HARNESS_ID } from "./paths.js";
  * - `rewind_marker` is appended when `/rewind` (or ACP `_x.ai/rewind/execute`) drops prompts
  *   `target_prompt_index..`: it becomes a `branch_fork`, so the replacement turns are ordered after
  *   the abandoned ones instead of silently replacing them.
- * - `turn_completed` carries the turn's provider usage.
+ * - `turn_completed` carries the turn's provider usage. A successful stop (`end_turn`) ends the
+ *   prompt's execution (`session_lifecycle` end, as Codex `task_complete`), so the turn settles;
+ *   any other stop only pauses it. A later prompt in the same session starts a new execution.
  */
 export const GROK_DECODER_VERSION = "grok-build-updates-v1";
 const GROK_ACCOUNTING_VERSION = "grok-build-turn-usage-v1";
@@ -63,6 +65,7 @@ interface OpenCall {
   readonly toolName: string;
   readonly builtinName: string;
   readonly input?: DecoderMetadataRecord;
+  readonly startedAtMs?: number;
 }
 
 interface SessionState {
@@ -160,6 +163,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     const sessionId = record.sessionId;
     const base = { sessionId, timestamp: record.timestamp };
     const params = asRecord(payload.params);
+    const agentTimestampMs = asCount(asRecord(params?._meta)?.agentTimestampMs);
 
     if (payload.method === "resin/grok-fork") {
       const parentSessionId = asString(params?.parentSessionId);
@@ -229,7 +233,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
           {
             ...base,
             type: "model_reasoning",
-            reasoningText: contentText(update.content),
+            reasoningContent: contentText(update.content),
             visibility: "visible",
             ...(state.modelId ? { model: state.modelId } : {}),
           },
@@ -237,29 +241,33 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
       case "tool_call": {
         const toolCallId = asString(update.toolCallId);
         if (!toolCallId) return null;
-        const call = resolveCall(update);
+        const call = {
+          ...resolveCall(update),
+          ...(agentTimestampMs !== undefined ? { startedAtMs: agentTimestampMs } : {}),
+        };
         state.calls.set(toolCallId, call);
         return [
           {
             ...base,
             type: "tool_call",
-            toolCallId,
+            callId: toolCallId,
             toolName: call.toolName,
             ...(call.connection ? { connection: call.connection } : {}),
-            ...(call.input ? { input: call.input } : {}),
+            parameters: call.input ?? {},
           },
         ];
       }
       case "tool_call_update":
-        return this.decodeToolUpdate(update, state, base);
+        return this.decodeToolUpdate(update, state, base, agentTimestampMs);
       case "turn_completed": {
         const providerUsage = turnUsage(update);
+        const stopReason = asString(update.stop_reason);
         return [
           {
             ...base,
             type: "session_lifecycle",
-            lifecycleType: "pause",
-            exitReason: asString(update.stop_reason) ?? "turn_completed",
+            lifecycleType: parseAssistantStopReason(stopReason) ? "end" : "pause",
+            exitReason: stopReason ?? "turn_completed",
             harnessName: GROK_HARNESS_ID,
             ...(providerUsage ? { providerUsage } : {}),
             metadata: { promptId: asString(update.prompt_id) ?? null },
@@ -319,6 +327,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     update: Json,
     state: SessionState,
     base: { sessionId: string; timestamp: string },
+    completedAtMs: number | undefined,
   ): IntermediateSessionEvent[] | null {
     const status = update.status;
     const toolCallId = asString(update.toolCallId);
@@ -327,27 +336,40 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     state.calls.delete(toolCallId);
     const isError = status === "failed";
     const output = resultText(update);
+    const durationMs =
+      call?.startedAtMs !== undefined && completedAtMs !== undefined
+        ? Math.max(0, completedAtMs - call.startedAtMs)
+        : 0;
     const events: IntermediateSessionEvent[] = [
       {
         ...base,
         type: "tool_result",
-        toolCallId,
+        callId: toolCallId,
         ...(call ? { toolName: call.toolName } : {}),
-        ...(output !== undefined ? { output } : {}),
+        result: output ?? null,
         isError,
+        executionDurationMs: durationMs,
       },
     ];
     const raw = asRecord(update.rawOutput);
     if (call && SHELL_TOOLS[call.builtinName] && raw?.type === "Bash") {
       const command = asString(raw.command) ?? asString(call.input?.command);
       if (command) {
+        // `output` holds the raw process bytes; `output_for_prompt` prefixes the model-facing
+        // `exit: <code>` line and is only a fallback for versions without the byte array.
+        const stdout = Array.isArray(raw.output)
+          ? Buffer.from(
+              raw.output.filter((byte): byte is number => typeof byte === "number"),
+            ).toString("utf8")
+          : asString(raw.output_for_prompt);
         events.push({
           ...base,
           type: "command_exec",
           command,
           ...(asString(raw.current_dir) ? { cwd: asString(raw.current_dir) } : {}),
           ...(asCount(raw.exit_code) !== undefined ? { exitCode: asCount(raw.exit_code) } : {}),
-          ...(asString(raw.output_for_prompt) ? { stdout: asString(raw.output_for_prompt) } : {}),
+          ...(stdout ? { stdout } : {}),
+          durationMs,
         });
       }
     }

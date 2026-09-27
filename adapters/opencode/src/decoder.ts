@@ -1,4 +1,7 @@
-import type { ProviderReportedUsage } from "@resin/contracts";
+import {
+  type ProviderReportedUsage,
+  RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
+} from "@resin/contracts";
 import type {
   DecoderMetadataRecord,
   HarnessRecordDecoder,
@@ -185,6 +188,7 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
             eventId: payload.part.id,
             timestamp: iso(obj(payload.part.time)?.end, fallbackTime),
             reasoningText: str(payload.part.text) ?? "",
+            reasoningContent: str(payload.part.text) ?? "",
             visibility: "visible",
             model: str(payload.message.modelID),
             metadata: { messageId: payload.message.id },
@@ -281,6 +285,8 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         messageId: message.id,
         agent: str(message.agent),
         finish: str(message.finish),
+        // OpenCode's finish reason ("stop", "tool-calls", ...) is the assistant stop reason.
+        [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: str(message.finish),
         compactionSummary: message.summary === true ? true : undefined,
       },
     });
@@ -319,9 +325,11 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         eventId: `${part.id}:call`,
         timestamp,
         toolCallId: callId,
+        callId,
         toolName: tool,
         connection: this.resolveConnection(tool),
         input,
+        parameters: input,
         metadata: { messageId: message.id, partId: part.id },
       },
     ];
@@ -368,11 +376,14 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         eventId: `${part.id}:result`,
         timestamp,
         toolCallId: callId,
+        callId,
         toolName: tool,
-        result: output,
+        result: output ?? null,
+        output: output ?? null,
         isError,
         error: isError ? (str(state.error) ?? "tool error") : undefined,
         durationMs,
+        executionDurationMs: durationMs ?? 0,
         outputSizeBytes: output === undefined ? undefined : Buffer.byteLength(output, "utf8"),
         metadata: { messageId: message.id, partId: part.id, title: str(state.title) },
       },

@@ -116,6 +116,29 @@ describe.each(CODEX_TESTED_VERSIONS)("recorded Codex %s rollouts", (version) => 
   });
 });
 
+describe("recorded Codex 0.157.1 cell that lists tools before its command", () => {
+  it("still associates later single-command cells with their native commands", async () => {
+    // The first cell filters `ALL_TOOLS` with a callback before awaiting its one command.
+    const events = await decode("0.157.1", "tool-listing-cell");
+    const results = ofType(events, "tool_result").filter((event) => event.toolName === "exec");
+    expect(results).toHaveLength(2);
+    const commands = ofType(events, "command_exec");
+    expect(commands[1]?.metadata?.resinCodexCommandV1).toMatchObject({
+      kind: "command",
+      nativeId: "exec-d54a3df8-68ba-4ab7-9fd3-77c09ce30c71",
+    });
+    expect(results[1]?.metadata?.resinCodexCommandV1).toMatchObject({
+      kind: "result",
+      form: "single-command-output",
+      status: "completed",
+      association: {
+        callId: results[1]?.callId,
+        nativeCommandId: "exec-d54a3df8-68ba-4ab7-9fd3-77c09ce30c71",
+      },
+    });
+  });
+});
+
 describe("recorded headless rollouts under discovery", () => {
   const roots: string[] = [];
   afterEach(async () => {

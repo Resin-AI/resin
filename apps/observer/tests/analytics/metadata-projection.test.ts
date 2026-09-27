@@ -675,7 +675,7 @@ describe("projectEventToMetadataOnly", () => {
     expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
   });
 
-  it("projects session_lifecycle event: preserves lifecycleType, harnessName, workspaceId", () => {
+  it("projects session_lifecycle event: preserves lifecycleType, harnessName; drops the local workspaceId", () => {
     const original: NormalizedSessionLifecycleEvent = {
       ...createBaseHeaders(12),
       type: "session_lifecycle",
@@ -691,7 +691,7 @@ describe("projectEventToMetadataOnly", () => {
     if (projected.type !== "session_lifecycle") throw new Error("Expected session_lifecycle event");
     expect(projected.lifecycleType).toBe("start");
     expect(projected.harnessName).toBe("claude-code");
-    expect(projected.workspaceId).toBe("ws_my_workspace");
+    expect(projected.workspaceId).toBeUndefined();
     expect(projected.redaction.isRedacted).toBe(true);
     expect(projected.redaction.redactionStrategy).toBe("drop");
 

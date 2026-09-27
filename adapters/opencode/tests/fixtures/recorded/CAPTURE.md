@@ -7,6 +7,7 @@ config are never touched).
 | Directory | OpenCode | Store | Provider / model |
 | --- | --- | --- | --- |
 | `1.18.32/opencode-db.jsonl` | 1.18.32 (npm `opencode-ai`, global install) | SQLite `opencode.db` (WAL), exported to JSON Lines | `opencode/nemotron-3.5-lightning-free` (OpenCode free tier, no credentials) |
+| `1.18.32/conformance-db.jsonl` | 1.18.32 | SQLite, exported with `scripts/export-db.mjs` from a resin-bench conformance run, scrubbed with `scripts/harness-fixtures/scrub.mjs` | `opencode/nemotron-3.5-lightning-free` |
 | `1.1.65/storage/` | 1.1.65 (npm `opencode-ai@1.1.65`, local install) | legacy JSON tree (`storage/{session,message,part,project}`) | `github-copilot/gpt-4.1` |
 
 The 1.1.65 free tier rejects old clients, so that capture used the GitHub Copilot provider

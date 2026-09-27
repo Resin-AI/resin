@@ -39,6 +39,7 @@ import {
   type GrokSessionEntry,
   computeGrokForkPrefixOffset,
   listGrokProjects,
+  isGrokTurnOpen,
   listGrokSessions,
   readGrokSubagentParents,
 } from "./store.js";
@@ -71,7 +72,7 @@ export interface GrokHarnessAdapterOptions {
   home?: string;
   env?: NodeJS.ProcessEnv;
   fsBridge?: ConfigFsBridge;
-  /** Only report sessions Grok lists in `active_sessions.json` with a live pid. */
+  /** Only report running sessions (see `listSessions`). */
   activeOnly?: boolean;
   pollIntervalMs?: number;
 }
@@ -79,6 +80,12 @@ export interface GrokHarnessAdapterOptions {
 function workspaceIdFor(cwd: string): string {
   return `ws_grok_${createHash("sha256").update(cwd).digest("hex").slice(0, 16)}`;
 }
+
+/**
+ * How long an unfinished prompt with no new `updates.jsonl` writes still counts as running. A
+ * killed headless run never writes `turn_completed`; past this it is reported completed.
+ */
+const GROK_OPEN_TURN_FRESH_MS = 30 * 60 * 1000;
 
 function isPidAlive(pid: number): boolean {
   try {
@@ -158,7 +165,12 @@ export class GrokHarnessAdapter implements HarnessAdapter {
     ]);
     const sessions: HarnessSession[] = [];
     for (const entry of entries) {
-      const isActive = active.has(entry.sessionId);
+      // A headless `grok -p` run need not appear in `active_sessions.json`; it is still running
+      // while its last prompt has no `turn_completed` yet.
+      const isActive =
+        active.has(entry.sessionId) ||
+        (Date.now() - entry.updatesMtime.getTime() < GROK_OPEN_TURN_FRESH_MS &&
+          (await isGrokTurnOpen(entry.updatesPath)));
       if (this.activeOnly && !isActive) continue;
       this.entries.set(entry.sessionId, entry);
       const summary = entry.summary;
