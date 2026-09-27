@@ -13,6 +13,7 @@ export * from "./config.js";
 
 // Module Lifecycle, DAG Dependency Ordering & Timeouts
 export * from "./lifecycle.js";
+export * from "./daemon-extensions.js";
 
 // Supervisor & Signal Handling
 export * from "./supervisor.js";

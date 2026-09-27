@@ -609,7 +609,7 @@ describe("init onboarding & pairing workflow", () => {
       JSON.stringify({ version: "1.0.32" }),
     );
     await bridge.writeFile(
-      path.join(publicSourceRoot, "apps", "observer", "dist", "bin", "daemon.js"),
+      path.join(publicSourceRoot, "apps", "gateway", "dist", "bin", "daemon.js"),
       "export const daemon = true;",
     );
     await bridge.writeFile(

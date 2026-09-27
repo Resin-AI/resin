@@ -551,7 +551,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
         .mcpServers.resin,
     ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"] });
     expect(sourcePaths).toEqual({
-      daemonPath: "/work/resin/apps/observer/dist/bin/daemon.js",
+      daemonPath: "/work/resin/apps/gateway/dist/bin/daemon.js",
       mcpShimPath: "/work/resin/apps/gateway/dist/bin/mcp-shim.js",
       resinCommand: "/work/resin/apps/cli/bin/resin.mjs",
       runtimePath: "/work/resin/packages/runtime/dist/index.js",

@@ -47,10 +47,10 @@ export const BINARY_SPECS = [
     expectedOutputPattern: /Resin MCP/i,
   },
   {
-    packageName: "@resin/observer",
-    packageDir: "apps/observer",
+    packageName: "@resin/gateway",
+    packageDir: "apps/gateway",
     binKey: "resin-daemon",
-    binPath: "apps/observer/bin/daemon.mjs",
+    binPath: "apps/gateway/bin/daemon.mjs",
     testArgs: ["--help"],
     expectedOutputPattern: /Resin Daemon/i,
   },

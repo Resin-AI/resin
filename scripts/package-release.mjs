@@ -220,7 +220,6 @@ export const INTERNAL_WORKSPACE_REGISTRY = Object.freeze([
     name: "@resin/observer",
     path: "apps/observer",
     entry: "dist/index.js",
-    bin: "dist/bin/daemon.js",
     type: "app",
     private: false,
   },
@@ -946,7 +945,7 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
     },
     {
       path: "resin/bin/resin-daemon",
-      content: "#!/usr/bin/env node\nimport '../apps/observer/dist/bin/daemon.js';\n",
+      content: "#!/usr/bin/env node\nimport '../apps/gateway/dist/bin/daemon.js';\n",
       mode: 0o755,
     },
     {

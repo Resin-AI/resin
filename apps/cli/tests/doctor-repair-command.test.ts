@@ -110,8 +110,9 @@ describe("doctor & repair commands", () => {
     const definition = manager.getUnitDefinition();
     expect(definition).toContain(path.join(sourceRoot, "apps", "cli", "dist", "index.js"));
     expect(definition).toContain(
-      path.join(sourceRoot, "apps", "observer", "dist", "bin", "daemon.js"),
+      path.join(sourceRoot, "apps", "gateway", "dist", "bin", "daemon.js"),
     );
+    expect(definition).not.toContain(path.join("apps", "observer", "dist", "bin", "daemon.js"));
     expect(definition).toContain("RESIN_LOCAL_SOURCE_ROOT");
     expect(definition).toContain(sourceRoot);
     expect(definition).not.toContain(path.join(resinHome, "current"));

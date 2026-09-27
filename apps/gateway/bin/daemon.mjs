@@ -10,12 +10,10 @@ const target = path.resolve(__dirname, "../dist/bin/daemon.js");
 
 if (!fs.existsSync(target)) {
   process.stderr.write(
-    "Error: @resin/observer has not been built yet.\n" +
+    "Error: @resin/gateway has not been built yet.\n" +
       "Please run 'pnpm build' in the workspace root before executing this binary.\n",
   );
   process.exit(1);
 }
-// The executable must run even when invoked by a Vitest-owned process.
-delete process.env.VITEST;
 
 await import(pathToFileURL(target).href);
