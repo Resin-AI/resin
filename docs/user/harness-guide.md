@@ -16,7 +16,7 @@ Every harness below is registered by `resin init` and removed by `resin uninstal
 | **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `<agent-dir>/extensions/resin.ts` (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) | `<agent-dir>/AGENTS.md` (or the first existing context file) | `<agent-dir>/sessions/--<cwd>--/*.jsonl`, `$PI_CODING_AGENT_SESSION_DIR`, `sessionDir` setting | JSONL transcript tailing | Native `tools/list_changed` via the extension | Learns; learned tools called once (10→6 calls) |
 | **Cursor CLI** (`cursor-agent`) | none yet: no fixtures until `cursor-agent login` (reported `untested`) | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | `~/.cursor/rules/resin.mdc` | `~/.resin/capture/cursor-cli/<conversation_id>.jsonl` | Hook spool (`~/.resin/hooks/cursor-capture.mjs`) | Next session (list_changed unverified) | Blocked: needs `cursor-agent login` |
 | **Grok Build** (`grok`) | `1.0.13` | `$GROK_HOME/config.toml` (`~/.grok/config.toml`) | `$GROK_HOME/AGENTS.md` | `~/.grok/sessions/<encoded cwd>/<id>/updates.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | Learns; invoke blocked by Grok's free usage limit |
-| **Muse Code** (`muse`) | `1.4.0` | `$XDG_CONFIG_HOME/muse/settings.json` (`~/.config/muse/settings.json`) | `$XDG_CONFIG_HOME/muse/AGENTS.md` | `$XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` + `subagent/<child>/session.jsonl` | JSONL session-log tailing | Next session | Blocked: needs `muse login` |
+| **Muse Code** (`muse`) | `1.4.0` | `$XDG_CONFIG_HOME/muse/settings.json` (`~/.config/muse/settings.json`) | `$XDG_CONFIG_HOME/muse/AGENTS.md` | `$XDG_DATA_HOME/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` + `subagent/<child>/session.jsonl` | JSONL session-log tailing | Next session | Learns; learned tool called successfully (8→5 calls, −25% input tokens) |
 | **OpenCode** (`opencode`) | `1.18.32`, `1.1.65` | `$XDG_CONFIG_HOME/opencode/opencode.json` (`mcp.resin`) | `$XDG_CONFIG_HOME/opencode/AGENTS.md` | `$XDG_DATA_HOME/opencode/opencode.db` (`OPENCODE_DB`); legacy `storage/` JSON tree | SQLite store / legacy JSON reads | Next session | Learns; learned tools not yet called by the model |
 | **GitHub Copilot CLI** (`copilot`) | `1.0.88` | `$COPILOT_HOME/mcp-config.json` (`~/.copilot/mcp-config.json`) | `$COPILOT_HOME/copilot-instructions.md` | `~/.copilot/session-state/<id>/events.jsonl` | JSONL event-log tailing | Native `tools/list_changed` | Learns and invokes (12→11 calls, −14% input tokens) |
 
@@ -293,7 +293,9 @@ Grok writes each session to `~/.grok/sessions/<encoded cwd>/<id>/`. Resin tails 
 
 Muse Code `1.4.0` is tested (`adapters/muse-code/tests/fixtures/recorded/1.4.0/`). The muse launcher updates itself hourly; set `MUSE_NO_AUTO_UPDATE=1` to stay on a tested version. Other versions are reported as untested and still register.
 
-**Blocker:** the fixtures were recorded with the real `muse` 1.4.0 binary pointed (`--base-url`) at a scripted local stand-in for the model endpoint, because `muse login` is an interactive browser login that was not available. Tool execution, MCP calls, subagents, observers, cancellation and resume are written by muse itself; only model choices and token counts are scripted. Fixtures will be re-recorded against the real endpoint once `muse login` is done.
+The fixtures were recorded with the real `muse` 1.4.0 binary and the real Meta model (`muse-spark-1.3-contributor`): shell, file edits, an MCP call, a subagent, background observers, a SIGINT-cancelled call, and a SIGKILLed call reconciled on resume.
+
+Conformance (resin-bench, 2026-09-27, muse 1.4.0, default model): install, capture, learn and invoke passed; the learned tool was invoked successfully and the treated run took 5 calls and 152,872 input tokens against 8 calls and 204,068 for vanilla (both runs completed the job). The model does not call a learned tool on every run (two of four runs did not).
 
 ### Automated Registration
 
