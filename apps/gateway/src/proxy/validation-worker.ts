@@ -38,6 +38,7 @@ import type {
   WorkflowValidationPassLease,
   WorkflowValidationPassLeaseHandle,
 } from "./validation-lease.js";
+import { WORKFLOW_CAPABILITIES, WORKFLOW_CAPABILITIES_HEADER } from "./workflow-capabilities.js";
 import {
   type LocalWorkflowValidationResult,
   createRecordingCheckValidator,
@@ -47,19 +48,6 @@ import {
 const PENDING_ROUTE = "/v1/evolution/workflow-validation/pending";
 const DECISIONS_ROUTE = "/v1/evolution/workflow-validation/decisions";
 const MAX_RESPONSE_BYTES = 512 * 1024;
-const WORKFLOW_VALIDATION_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
-/**
- * What this device's recording check supports, sent on every validation request so the cloud can
- * gate asks an older device would refuse: `unknown-typed-proposals-v1` (input proposals typed
- * `unknown`, answered with `confirmedType`) and `cross-session-held-out-v1` (held-out calls from
- * another session of this workspace).
- */
-const WORKFLOW_VALIDATION_CAPABILITIES = [
-  "workspace-inputs-v1",
-  "unknown-typed-proposals-v1",
-  "cross-session-held-out-v1",
-].join(",");
-
 /**
  * The poll cadence, which adapts the way the control plane's does (`@resin/protocol`
  * `CONTROL_PLANE_*`). Asks arrive in bursts, after the cloud finds a workflow in freshly uploaded
@@ -230,7 +218,7 @@ export class WorkflowValidationClient implements WorkflowValidationTransport {
         "x-device-id": identity.deviceId,
         "x-installation-id": identity.installationId,
         "x-protocol-version": PROTOCOL_VERSION,
-        [WORKFLOW_VALIDATION_CAPABILITIES_HEADER]: WORKFLOW_VALIDATION_CAPABILITIES,
+        [WORKFLOW_CAPABILITIES_HEADER]: WORKFLOW_CAPABILITIES,
         ...init.headers,
       },
     });
