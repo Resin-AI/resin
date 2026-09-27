@@ -4,6 +4,7 @@ import path from "node:path";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import type { ConfigFsBridge, HarnessInstallation } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
+import { SUPPORTED_HARNESS_IDS } from "../../src/harness-registry.js";
 import {
   HarnessConfigOrchestrator,
   type OrchestrationResult,
@@ -186,14 +187,12 @@ describe("HarnessReconciler", () => {
     };
 
     const first = await reconciler.reconcile(options);
-    expect(probedHarnesses).toEqual(["claude-code", "codex-cli", "omp"]);
+    expect(probedHarnesses).toEqual(SUPPORTED_HARNESS_IDS);
     expect(first.success).toBe(true);
     expect(first.autoRepair).toBe(true);
-    expect(first.results.map((result) => result.status)).toEqual([
-      "reconciled",
-      "reconciled",
-      "reconciled",
-    ]);
+    expect(first.results.map((result) => result.status)).toEqual(
+      SUPPORTED_HARNESS_IDS.map(() => "reconciled"),
+    );
     expect(JSON.parse((await bridge.readFile(`${HOME}/.claude.json`)) ?? "")).toMatchObject({
       mcpServers: {
         resin: {
@@ -219,12 +218,10 @@ describe("HarnessReconciler", () => {
     ).length;
     probedHarnesses.length = 0;
     const second = await reconciler.reconcile(options);
-    expect(probedHarnesses).toEqual(["claude-code", "codex-cli", "omp"]);
-    expect(second.results.map((result) => result.status)).toEqual([
-      "registered",
-      "registered",
-      "registered",
-    ]);
+    expect(probedHarnesses).toEqual(SUPPORTED_HARNESS_IDS);
+    expect(second.results.map((result) => result.status)).toEqual(
+      SUPPORTED_HARNESS_IDS.map(() => "registered"),
+    );
     expect(
       Object.keys(bridge.dump()).filter(
         (filePath) => filePath.includes(".resin-backup.") && filePath.endsWith(".bak"),
@@ -315,6 +312,7 @@ describe("HarnessReconciler", () => {
       workspacePath: WORKSPACE,
       gatewayUrl: GATEWAY_URL,
       fsBridge: bridge,
+      harnesses: ["claude-code", "codex-cli", "omp"],
       installedHarnesses: ["claude-code", "codex-cli", "omp"],
       probeHarness: NO_INSTALLATION_PROBE,
     });

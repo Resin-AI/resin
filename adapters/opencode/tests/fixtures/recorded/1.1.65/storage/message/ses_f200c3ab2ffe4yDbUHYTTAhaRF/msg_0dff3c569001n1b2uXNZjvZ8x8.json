@@ -1,0 +1,33 @@
+{
+  "id": "msg_0dff3c569001n1b2uXNZjvZ8x8",
+  "sessionID": "ses_f200c3ab2ffe4yDbUHYTTAhaRF",
+  "role": "user",
+  "time": {
+    "created": 1790463690089
+  },
+  "summary": {
+    "diffs": [
+      {
+        "file": "README.md",
+        "before": "# Tiny demo\n\nA tiny demo project.\n",
+        "after": "# Tiny demo\n\nA tiny demo project for fixtures.\n",
+        "additions": 1,
+        "deletions": 1,
+        "status": "modified"
+      },
+      {
+        "file": "notes.txt",
+        "before": "",
+        "after": "fixture notes",
+        "additions": 1,
+        "deletions": 0,
+        "status": "added"
+      }
+    ]
+  },
+  "agent": "build",
+  "model": {
+    "providerID": "github-copilot",
+    "modelID": "gpt-4.1"
+  }
+}

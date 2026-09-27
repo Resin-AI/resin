@@ -1,5 +1,6 @@
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
+import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
 import { HarnessConfigOrchestrator } from "../src/installer/harness-config.js";
 
 describe("HarnessConfigOrchestrator", () => {
@@ -19,8 +20,8 @@ describe("HarnessConfigOrchestrator", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.results).toHaveLength(3);
-    expect(result.backups).toHaveLength(3);
+    expect(result.results).toHaveLength(SUPPORTED_HARNESS_IDS.length);
+    expect(result.backups).toHaveLength(SUPPORTED_HARNESS_IDS.length);
 
     // Verify Claude config was written
     const claudeContent = await bridge.readFile(`${home}/.claude.json`);
@@ -39,6 +40,13 @@ describe("HarnessConfigOrchestrator", () => {
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
     expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+
+    // Verify Muse Code settings were written with the schema version muse requires
+    const museContent = await bridge.readFile(`${home}/.config/muse/settings.json`);
+    expect(JSON.parse(museContent ?? "{}")).toEqual({
+      schema_version: 1,
+      mcp_servers: { resin: { command: resinCommand, args: ["mcp"] } },
+    });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {
@@ -55,7 +63,7 @@ describe("HarnessConfigOrchestrator", () => {
       fsBridge: bridge,
     });
     expect(firstRun.success).toBe(true);
-    expect(firstRun.backups).toHaveLength(3);
+    expect(firstRun.backups).toHaveLength(SUPPORTED_HARNESS_IDS.length);
 
     // Second run: should detect already configured state without applying new mutations
     const secondRun = await orchestrator.configureHarnesses({

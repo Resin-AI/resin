@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
-  CODEX_MIN_SUPPORTED_VERSION,
+  CODEX_TESTED_VERSIONS,
   compareSemver,
   extractSemver,
   findCodexExecutable,
@@ -168,28 +168,32 @@ describe("Codex CLI Discovery & Version Probing", () => {
       expect(diagnostics[0]?.code).toBe("VERSION_PROBE_FAILED");
     });
 
-    it("returns unsupported_version when version is below minimum", async () => {
+    it("reports an untested version instead of silently accepting it", async () => {
       const result = await probeCodexInstallation({
         pathLookup: async () => "/usr/bin/codex",
-        executor: async () => ({ stdout: "codex 0.0.5", stderr: "", exitCode: 0 }),
-        minSupportedVersion: CODEX_MIN_SUPPORTED_VERSION,
-      });
-
-      expect(result.status).toBe("unsupported_version");
-      expect(result.version).toBe("0.0.5");
-      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
-      const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;
-      expect(diagnostics[0]?.code).toBe("UNSUPPORTED_VERSION");
-    });
-
-    it("returns ready when binary is found and version is supported", async () => {
-      const result = await probeCodexInstallation({
-        pathLookup: async () => "/usr/bin/codex",
-        executor: async () => ({ stdout: "codex 0.50.0", stderr: "", exitCode: 0 }),
+        executor: async () => ({ stdout: "codex-cli 0.158.0", stderr: "", exitCode: 0 }),
+        testedVersions: CODEX_TESTED_VERSIONS,
       });
 
       expect(result.status).toBe("ready");
-      expect(result.version).toBe("0.50.0");
+      expect(result.version).toBe("0.158.0");
+      expect(result.metadata.versionClassification).toBe("untested");
+      // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
+      const diagnostics = result.metadata.diagnostics as Array<{ code: string; severity: string }>;
+      expect(diagnostics).toEqual([
+        expect.objectContaining({ code: "UNTESTED_VERSION", severity: "warning" }),
+      ]);
+    });
+
+    it("returns ready without diagnostics for a tested version", async () => {
+      const result = await probeCodexInstallation({
+        pathLookup: async () => "/usr/bin/codex",
+        executor: async () => ({ stdout: "codex-cli 0.157.1", stderr: "", exitCode: 0 }),
+      });
+
+      expect(result.status).toBe("ready");
+      expect(result.version).toBe("0.157.1");
+      expect(result.metadata.versionClassification).toBe("tested");
       expect(result.executablePath).toBe(path.resolve("/usr/bin/codex"));
       // SAFETY: HarnessInstallation metadata.diagnostics contains AdapterDiagnostic items.
       const diagnostics = result.metadata.diagnostics as Array<{ code: string }>;

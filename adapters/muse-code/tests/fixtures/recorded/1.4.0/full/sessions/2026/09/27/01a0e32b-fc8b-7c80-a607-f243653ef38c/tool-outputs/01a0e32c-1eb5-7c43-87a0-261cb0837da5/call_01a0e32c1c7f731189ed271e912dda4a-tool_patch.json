@@ -1,0 +1,19 @@
+{
+  "files": [
+    {
+      "hunks": [
+        {
+          "lines": [
+            "-# demo",
+            "+# demo project"
+          ],
+          "newLines": 1,
+          "newStart": 1,
+          "oldLines": 1,
+          "oldStart": 1
+        }
+      ],
+      "path": "/workspace/project/README.md"
+    }
+  ]
+}

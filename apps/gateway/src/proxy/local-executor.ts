@@ -1044,7 +1044,7 @@ export class LocalArtifactExecutor {
           content: [
             {
               type: "text",
-              text: `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}`,
+              text: `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}${rehashResult.error ? `; artifact verification failed: ${rehashResult.error}` : ""}`,
             },
           ],
         };

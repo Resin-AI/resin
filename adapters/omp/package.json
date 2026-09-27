@@ -26,6 +26,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./install": {
+      "types": "./dist/install.d.ts",
+      "import": "./dist/install.js",
+      "default": "./dist/install.js"
     }
   },
   "scripts": {
@@ -35,7 +40,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@oh-my-pi/pi-coding-agent": "18.2.6",
+    "@oh-my-pi/pi-coding-agent": "18.3.2",
     "@resin/contracts": "workspace:*",
     "@resin/harness-contracts": "workspace:*",
     "zod": "^3.25.76"

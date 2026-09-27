@@ -1,0 +1,71 @@
+import path from "node:path";
+import {
+  CANONICAL_RESIN_MCP_SERVER_KEY,
+  type HarnessGuidanceSurface,
+  type HarnessInstallDefinition,
+} from "@resin/harness-contracts";
+import { planCursorMcpConfig } from "./config-planner.js";
+import { probeCursorInstallation } from "./discovery.js";
+import { cursorCaptureHooksExtension } from "./hooks.js";
+import {
+  CURSOR_HARNESS_ID,
+  CURSOR_TESTED_VERSIONS,
+  resolveCursorHome,
+  resolveCursorMcpConfigPath,
+} from "./paths.js";
+
+/**
+ * Guidance lives in a Resin-owned user rule, `~/.cursor/rules/resin.mdc`. A `.mdc` rule needs
+ * its frontmatter on the first line, so the start marker carries it and the whole file is the
+ * managed block (removal deletes the file).
+ */
+export const cursorGuidance: HarnessGuidanceSurface = {
+  resolvePath: (home) => path.join(resolveCursorHome(home), "rules", "resin.mdc"),
+  markers: {
+    start:
+      "---\ndescription: Resin learned tools\nalwaysApply: true\n---\n<!-- resin:cursor-guidance:start -->",
+    end: "<!-- resin:cursor-guidance:end -->",
+  },
+  body: `# Resin learned tools
+
+Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, list the \`resin\` server's tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`,
+};
+
+export const cursorInstallHarness: HarnessInstallDefinition = {
+  id: CURSOR_HARNESS_ID,
+  displayName: "Cursor CLI",
+  shortName: "Cursor",
+  adapterPackage: "@resin/adapter-cursor-cli",
+  testedVersions: CURSOR_TESTED_VERSIONS,
+  knownLimits: [
+    "Capture requires Resin's hooks in ~/.cursor/hooks.json (installed by `resin init`); sessions from before installation, or run while hooks were removed, are reported as uncaptured, not decoded.",
+    "Cursor Cloud Agents that run on Cursor's machines leave no local record and cannot be captured; cursor-agent 2026.09.26 removed the CLI's --cloud/--background flags. Self-hosted `cursor-agent worker` sessions are captured and flagged isBackgroundAgent.",
+    "Hook payloads carry no timestamps; event times are when Resin's hook received them.",
+    "Token usage is per turn, from the `stop` hook (input, output, cache-read tokens). Headless `cursor-agent -p` runs fire no beforeSubmitPrompt, afterAgentResponse or stop hooks (verified with 2026.09.26), so their prompt, final answer and usage are not captured; their tool calls, edits and session end are.",
+    "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
+    "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
+    "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
+    "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session. Whether user rules in ~/.cursor/rules are applied is unverified.",
+  ],
+  probeInstallation: (context) =>
+    probeCursorInstallation({
+      home: context.home,
+      env: context.env,
+      configPath: context.targetPath,
+    }),
+  mcpConfig: {
+    resolvePath: (home) => resolveCursorMcpConfigPath(home),
+    uninstallPaths: (home) => [resolveCursorMcpConfigPath(home)],
+    format: "json",
+    serverKey: CANONICAL_RESIN_MCP_SERVER_KEY,
+    jsonContainerKeys: ["mcpServers"],
+    transports: ["stdio", "http", "sse"],
+    planRegistration: (context) => planCursorMcpConfig(context),
+  },
+  guidance: cursorGuidance,
+  installExtensions: [cursorCaptureHooksExtension],
+};

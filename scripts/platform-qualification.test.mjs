@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { HARNESS_DEFINITIONS } from "../apps/cli/dist/harness-registry.js";
 import { packageRelease } from "./package-release.mjs";
 import {
   PINNED_DENO_VERSION,
@@ -107,13 +108,18 @@ describe("real host platform qualification", () => {
       expect(platform.tarball).toContain(`resin-v1.0.0-${platform.id}`);
     }
 
-    // Qualified Coding Harnesses
-    expect(V1_SUPPORT_MATRIX.harnesses["claude-code"].qualifiedVersions).toEqual([
-      "0.2.14",
-      "1.0.0",
-    ]);
-    expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"].qualifiedVersions).toEqual(["0.45.0"]);
-    expect(V1_SUPPORT_MATRIX.harnesses.omp.qualifiedVersions).toEqual(["0.12.5", "1.0.0"]);
+    // Coding harnesses: one entry per registered harness, carrying its tested versions.
+    expect(Object.keys(V1_SUPPORT_MATRIX.harnesses).sort()).toEqual(
+      HARNESS_DEFINITIONS.map((definition) => definition.id).sort(),
+    );
+    for (const definition of HARNESS_DEFINITIONS) {
+      expect(V1_SUPPORT_MATRIX.harnesses[definition.id]).toMatchObject({
+        adapterPackage: definition.adapterPackage,
+        testedVersions: [...definition.testedVersions],
+        protocol: "mcp",
+      });
+    }
+    expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"].testedVersions).toContain("0.157.1");
 
     // Environment Assumptions
     expect(V1_SUPPORT_MATRIX.environmentAssumptions.shells.supported).toContain("bash");
@@ -252,7 +258,9 @@ describe("real host platform qualification", () => {
     expect(lane.checks.cleanHome.ompBatchAcknowledged).toBe(true);
     expect(lane.checks.cleanHome.sqliteStored).toBe(true);
     expect(lane.checks.cloud).toBeUndefined();
-    expect(lane.harnesses).toHaveLength(3);
+    expect(lane.harnesses.map((harness) => harness.harnessId).sort()).toEqual(
+      HARNESS_DEFINITIONS.map((definition) => definition.id).sort(),
+    );
     for (const harness of lane.harnesses) {
       expect(["ready", "unavailable"]).toContain(harness.status);
       expect(harness.status === "ready").toBe(harness.qualified);

@@ -1,4 +1,5 @@
 import { ISOTimestampSchema, IdentifierSchema, SchemaVersionSchema } from "@resin/contracts/common";
+import { HarnessIdSchema } from "@resin/contracts/harness-ids";
 import { z } from "zod";
 
 /**
@@ -13,6 +14,13 @@ import { z } from "zod";
 export const CONTROL_PLANE_CADENCE_HEADER = "Resin-Control-Plane-Cadence";
 export const CONTROL_PLANE_ADAPTIVE_CADENCE = "adaptive-v1";
 export const CONTROL_PLANE_FAST_POLL_INTERVAL_MS = 30_000;
+/**
+ * Devices send this request header (value {@link CONTROL_PLANE_OPEN_HARNESS_KEYS}) to receive
+ * desired state naming harnesses they may not know. Without it the cloud returns only the harness
+ * keys every device revision can parse, since workspace desired state is shared across devices.
+ */
+export const CONTROL_PLANE_HARNESS_KEYS_HEADER = "Resin-Control-Plane-Harness-Keys";
+export const CONTROL_PLANE_OPEN_HARNESS_KEYS = "open-v1";
 export const CONTROL_PLANE_QUIET_POLL_INTERVAL_MS = 120_000;
 export const CONTROL_PLANE_QUIET_POLL_THRESHOLD = 3;
 export const CONTROL_PLANE_HEARTBEAT_INTERVAL_MS = 300_000;
@@ -49,7 +57,8 @@ export const ControlPlaneConfigurationStateSchema = z
   .strict();
 export type ControlPlaneConfigurationState = z.infer<typeof ControlPlaneConfigurationStateSchema>;
 
-export const ControlPlaneHarnessIdSchema = z.enum(["claude-code", "codex-cli", "omp"]);
+/** Harness ids this protocol revision knows (the shared `HARNESS_IDS` list). */
+export const ControlPlaneHarnessIdSchema = HarnessIdSchema;
 export type ControlPlaneHarnessId = z.infer<typeof ControlPlaneHarnessIdSchema>;
 
 export const ControlPlaneHarnessStateSchema = z
@@ -114,7 +123,10 @@ export const ControlPlaneDesiredStateSchema = z
   .object({
     privacy: ControlPlanePrivacyStateSchema.optional(),
     configuration: ControlPlaneConfigurationStateSchema.optional(),
-    harnesses: z.record(ControlPlaneHarnessIdSchema, ControlPlaneHarnessStateSchema).optional(),
+    // Keyed by any identifier, not only `ControlPlaneHarnessIdSchema`: a peer on a newer revision
+    // may know harnesses this one does not, and one unknown key must not reject the whole state.
+    // Devices apply only the harnesses they support.
+    harnesses: z.record(IdentifierSchema, ControlPlaneHarnessStateSchema).optional(),
     tools: z.record(IdentifierSchema, ControlPlaneToolStateSchema).optional(),
     updates: ControlPlaneUpdateStateSchema.optional(),
     recovery: ControlPlaneRecoveryStateSchema.optional(),

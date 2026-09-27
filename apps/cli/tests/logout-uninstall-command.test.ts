@@ -149,7 +149,7 @@ url = "http://localhost:9400"
       fsBridge,
     });
 
-    expect(cleaned).toContain("Claude Code");
+    expect(cleaned).toContain("Claude Code CLI");
     expect(cleaned).toContain("Codex CLI");
     expect(cleaned).toContain("Oh My Pi (OMP)");
 
@@ -193,7 +193,7 @@ url = "http://localhost:9400"
       fsBridge,
     });
 
-    expect(cleaned).toEqual(["Claude Code", "Codex CLI", "Oh My Pi (OMP)"]);
+    expect(cleaned).toEqual(["Claude Code CLI", "Codex CLI", "Oh My Pi (OMP)"]);
     for (const configPath of [activeClaudePath, priorClaudePath, activeOmpPath]) {
       expect(await fsBridge.readFile(configPath)).not.toContain('"resin"');
     }
@@ -255,7 +255,7 @@ url = "http://localhost:9400"
       fsBridge,
     });
 
-    expect(cleaned).toContain("Claude Code");
+    expect(cleaned).toContain("Claude Code CLI");
     expect(cleaned).toContain("Codex CLI");
     expect(cleaned).toContain("Oh My Pi (OMP)");
 
@@ -325,7 +325,7 @@ url = "http://localhost:9400"
       expect(exitCode).toBe(0);
       const parsed = JSON.parse(stdoutChunks.join(""));
       expect(parsed.success).toBe(true);
-      expect(parsed.harnessesCleaned).toContain("Claude Code");
+      expect(parsed.harnessesCleaned).toContain("Claude Code CLI");
     } finally {
       process.stdout.write = originalStdout;
     }

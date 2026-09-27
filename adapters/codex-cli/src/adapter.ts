@@ -30,6 +30,7 @@ import {
 import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
+  CODEX_TESTED_VERSIONS,
   type CodexTranscriptInspection,
   type CommandExecutor,
   type PathLookupFn,
@@ -72,6 +73,7 @@ function sessionForCodexTranscript(
   if (inspection.nativeSessionId) metadata.nativeSessionId = inspection.nativeSessionId;
   if (inspection.threadId) metadata.threadId = inspection.threadId;
   if (inspection.rootId) metadata.rootId = inspection.rootId;
+  if (inspection.parentThreadId) metadata.parentThreadId = inspection.parentThreadId;
 
   return {
     sessionId: baseName.startsWith("sess_") ? baseName : `sess_${baseName}`,
@@ -160,6 +162,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   readonly id: string = CODEX_HARNESS_ID;
   readonly name: string = CODEX_DISPLAY_NAME;
   readonly version = "0.1.0";
+  readonly supportedHarnessVersions = CODEX_TESTED_VERSIONS;
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly customExecutablePath?: string;

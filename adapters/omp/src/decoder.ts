@@ -33,6 +33,9 @@ import {
   type OmpDeviceSurfaceCall,
   resolveOmpDeviceSurfaceCall,
 } from "./device-surface.js";
+import { getOmpSessionExitReason } from "./session-exit.js";
+
+export { getOmpSessionExitReason };
 
 export const OMP_PROVIDER = "omp";
 export const OMP_ACCOUNTING_VERSION = "omp-v1";
@@ -150,35 +153,6 @@ export function asArray(
   value: OmpTranscriptValue | undefined | null,
 ): OmpTranscriptValue[] | undefined {
   return Array.isArray(value) ? value : undefined;
-}
-
-/** Recognizes the normal custom exit emitted by OMP v18.2.6; unknown kinds stay unclaimed. */
-export function getOmpSessionExitReason(value: unknown): string | undefined {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    !("type" in value) ||
-    value.type !== "custom" ||
-    !("customType" in value) ||
-    value.customType !== "session_exit" ||
-    !("data" in value)
-  ) {
-    return undefined;
-  }
-  const data = value.data;
-  if (
-    !data ||
-    typeof data !== "object" ||
-    Array.isArray(data) ||
-    !("kind" in data) ||
-    data.kind !== "normal" ||
-    !("reason" in data) ||
-    typeof data.reason !== "string" ||
-    data.reason.trim().length === 0
-  ) {
-    return undefined;
-  }
-  return data.reason;
 }
 
 const TOOL_CALL_BLOCK_TYPES: Record<string, true> = {
@@ -2324,15 +2298,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
               ? "pause"
               : rawLType === "resume" || rawLType === "subagent_resume"
                 ? "resume"
-                : rawLType === "crash" || rawLType === "subagent_crash"
-                  ? "crash"
-                  : rawLType === "terminate" ||
-                      rawLType === "subagent_terminate" ||
-                      rawLType === "subagent_end" ||
-                      rawLType === "agent_end" ||
-                      rawLType === "end"
-                    ? "terminate"
-                    : "spawn";
+                : rawLType === "crash" ||
+                    rawLType === "subagent_crash" ||
+                    rawLType === "terminate" ||
+                    rawLType === "subagent_terminate" ||
+                    rawLType === "subagent_end" ||
+                    rawLType === "agent_end" ||
+                    rawLType === "end"
+                  ? "terminate"
+                  : "spawn";
 
     const parentId =
       asString(obj.parentId) ??

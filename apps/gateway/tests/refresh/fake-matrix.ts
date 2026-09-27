@@ -225,8 +225,8 @@ export function createMockConnection(options: FakeConnectionOptions = {}) {
  */
 export function createRefreshMatrix() {
   return {
-    claudeCode: new FakeRefreshAdapter({
-      harnessId: "claude-code",
+    nudgeOnly: new FakeRefreshAdapter({
+      harnessId: "nudge-only",
       scenario: "nudge_only",
     }),
     codexCli: new FakeRefreshAdapter({

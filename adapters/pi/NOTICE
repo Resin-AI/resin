@@ -1,0 +1,74 @@
+Resin
+Copyright 2026 Resin Authors
+
+This product includes software developed at
+Resin (https://resin.sh/ or https://github.com/Resin-AI/resin).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+========================================================================
+Third-Party Software Notices and Attributions
+========================================================================
+
+This project incorporates, bundles, or depends on third-party open-source
+software components. Each component is governed by its own license terms.
+All bundled and runtime dependencies have been reviewed and verified under
+approved permissive open-source licenses (including Apache-2.0, MIT, ISC,
+and BSD-2-Clause / BSD-3-Clause).
+
+Key third-party dependencies and their respective copyright notices:
+
+1. TypeScript
+   License: Apache-2.0
+   Copyright (c) Microsoft Corporation. All rights reserved.
+   https://github.com/microsoft/TypeScript
+
+2. Zod
+   License: MIT
+   Copyright (c) 2020 Colin McDonnell
+   https://github.com/colinhacks/zod
+
+3. Fastify
+   License: MIT
+   Copyright (c) 2016-2026 Fastify contributors
+   https://github.com/fastify/fastify
+
+4. better-sqlite3
+   License: MIT
+   Copyright (c) 2017 Joshua Wise
+   https://github.com/WiseLibs/better-sqlite3
+
+5. ws
+   License: MIT
+   Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
+   https://github.com/websockets/ws
+
+6. AWS SDK for JavaScript v3 (@aws-sdk/*)
+   License: Apache-2.0
+   Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+   https://github.com/aws/aws-sdk-js-v3
+
+7. Vitest
+   License: MIT
+   Copyright (c) 2021-Present Anthony Fu, Matias Capeletto and Vitest contributors
+   https://github.com/vitest-dev/vitest
+
+8. Biome
+   License: MIT or Apache-2.0
+   Copyright (c) Biome Authors and individual contributors
+   https://github.com/biomejs/biome
+
+9. Turbo
+   License: MIT or Apache-2.0
+   Copyright (c) Vercel, Inc.
+   https://github.com/vercel/turborepo

@@ -1163,6 +1163,45 @@ describe("TrajectoryCaptureCoordinator", () => {
       expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
     });
 
+    it("uploads lifecycle events without the daemon-local workspace id but keeps it for local consumers", async () => {
+      const submittedObservations: NormalizedSessionEvent[] = [];
+      const localEvents: NormalizedSessionEvent[] = [];
+      const mockObservationClient = {
+        sendTrajectoryObservationBatch: vi.fn(),
+        sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
+          submittedObservations.push(...input.observations);
+          return {
+            batchId: "batch_local_workspace_1",
+            acceptedCount: input.observations.length,
+            rejectedCount: 0,
+          };
+        }),
+      } as unknown as CloudObservationClient;
+      const coordinator = new TrajectoryCaptureCoordinator({
+        pipeline: new NormalizationPipeline(),
+        observationClient: mockObservationClient,
+        attributionResolver: async () => null,
+      });
+      coordinator.setSessionEventSink((_session, events) => {
+        localEvents.push(...events);
+      });
+
+      const session = createMockHarnessSession("sess_local_workspace_1", "completed");
+      const endRec = createLifecycleRecord(session.sessionId, 2, "end", "completed");
+      endRec.rawPayload = { ...(endRec.rawPayload as object), workspaceId: "ws_codex_local_1" };
+      await coordinator.handleRecords(
+        session,
+        [createPromptRecord(session.sessionId, 1), endRec],
+        async () => {},
+      );
+
+      const local = localEvents.find((event) => event.type === "session_lifecycle");
+      const uploaded = submittedObservations.find((event) => event.type === "session_lifecycle");
+      expect(local).toMatchObject({ workspaceId: "ws_codex_local_1" });
+      expect(uploaded).toBeDefined();
+      expect(uploaded).not.toHaveProperty("workspaceId");
+    });
+
     it("generic failed session without terminal record: synthesizes crash terminal event", async () => {
       const pipeline = new NormalizationPipeline();
       const submittedObservations: NormalizedSessionEvent[] = [];

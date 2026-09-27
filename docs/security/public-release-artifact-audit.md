@@ -159,7 +159,7 @@ The 839 disclosed cloud files inside `resin/apps/cloud/dist/` include:
 
 #### Release Manifest (`manifest-1.0.3.json`)
 The manifest declared the following **15 packages**:
-- Allowlisted Public Packages: `@resin/contracts`, `@resin/crypto`, `@resin/db`, `@resin/harness-contracts`, `@resin/protocol`, `@resin/runtime`, `resin`, `@resin/gateway`, `@resin/observer`, `@resin/adapter-claude-code`, `@resin/adapter-codex`, `@resin/adapter-omp` (12 packages).
+- Allowlisted Public Packages: `@resin/contracts`, `@resin/crypto`, `@resin/db`, `@resin/harness-contracts`, `@resin/protocol`, `@resin/runtime`, `resin`, `@resin/gateway`, `@resin/observer`, `@resin/adapter-claude-code`, `@resin/adapter-codex`, `@resin/adapter-omp`, `@resin/adapter-pi`, `@resin/adapter-cursor-cli`, `@resin/adapter-grok-build`, `@resin/adapter-muse-code`, `@resin/adapter-opencode`, `@resin/adapter-copilot-cli` (18 packages).
 - **Disclosed Private Packages (3 packages)**:
   - ⚠️ `@resin/cloud` (Path: `apps/cloud`, Type: `app`)
   - ⚠️ `@resin/test-fixtures` (Path: `fixtures/test-fixtures`, Type: `package`)

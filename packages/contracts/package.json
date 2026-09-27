@@ -33,6 +33,11 @@
       "import": "./dist/common.js",
       "default": "./dist/common.js"
     },
+    "./harness-ids": {
+      "types": "./dist/harness-ids.d.ts",
+      "import": "./dist/harness-ids.js",
+      "default": "./dist/harness-ids.js"
+    },
     "./canonical": {
       "types": "./dist/canonical.d.ts",
       "import": "./dist/canonical.js",

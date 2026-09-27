@@ -1,0 +1,24 @@
+{
+  "id": "prt_0dff3f9c9002VzUCTgDz41TAUe",
+  "sessionID": "ses_f200c0ab8ffezEyenGnxw5g0Yn",
+  "messageID": "msg_0dff3f54f0015o1z0KCZFcPnLn",
+  "type": "tool",
+  "callID": "call_4yWZwJYdOzIuDQh3ydJ7Hyqn",
+  "tool": "glob",
+  "state": {
+    "status": "completed",
+    "input": {
+      "pattern": "greet.js"
+    },
+    "output": "/workspace/project/greet.js",
+    "title": "",
+    "metadata": {
+      "count": 1,
+      "truncated": false
+    },
+    "time": {
+      "start": 1790463703656,
+      "end": 1790463703661
+    }
+  }
+}

@@ -19,8 +19,21 @@ This document specifies the supported scope, platform matrix, resource boundarie
 
 ## 2. Supported AI Coding Harnesses
 
-| Harness | Version Compatibility | Tested Versions | Supported Protocols |
-|---------|-----------------------|-----------------|---------------------|
+Resin registers any installed version of these harnesses; only the listed versions have recorded-session coverage, and `resin status` marks others as untested. See the [Harness Integration Guide](harness-guide.md) for paths, capture methods and per-harness limits.
+
+| Harness | Tested Versions | Capture |
+|---------|-----------------|---------|
+| **Claude Code CLI** | `2.1.283` | MCP stdio / JSONL transcripts |
+| **Codex CLI** | `0.156.1`, `0.157.1` | MCP stdio / JSONL rollouts |
+| **Oh My Pi (OMP)** | `18.3.2` | MCP stdio / JSONL transcripts |
+| **Pi** | `0.87.1` | Resin extension / JSONL transcripts |
+| **Cursor CLI** | none yet (needs `cursor-agent login` for fixtures) | MCP stdio / hook spool |
+| **Grok Build** | `1.0.13` | MCP stdio / JSONL transcripts |
+| **Muse Code** | `1.4.0` | MCP stdio / JSONL session logs |
+| **OpenCode** | `1.18.32`, `1.1.65` | MCP stdio / SQLite or legacy JSON store |
+| **GitHub Copilot CLI** | `1.0.88` | MCP stdio / JSONL event logs |
+
+---------|-----------------------|-----------------|---------------------|
 | **Claude Code CLI** | `>= 0.1.0` | `0.2.29`, `1.0.0` | MCP SSE / JSONL observation |
 | **Codex CLI** | `>= 0.1.0` | `0.1.0`, `0.2.0` | MCP SSE / TOML session observation |
 | **Oh My Pi (OMP)** | `>= 0.1.0` | `0.1.0`, `0.2.0` | MCP SSE / Hub IPC observation |

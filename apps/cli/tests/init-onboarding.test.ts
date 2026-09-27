@@ -117,9 +117,35 @@ describe("init onboarding & pairing workflow", () => {
   beforeEach(async () => {
     home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-init-home-"));
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), "resin-init-ws-"));
+    // Harness probes read process.env when a test passes no env: hide the workstation's installed
+    // harnesses and state so results do not depend on what this machine has.
+    vi.stubEnv("PATH", "");
+    vi.stubEnv("HOME", home);
+    for (const name of [
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+      "XDG_STATE_HOME",
+      "CODEX_HOME",
+      "CLAUDE_CONFIG_DIR",
+      "COPILOT_HOME",
+      "GROK_HOME",
+      "OPENCODE_CONFIG",
+      "PI_CODING_AGENT_DIR",
+      "CODEX_CONFIG_PATH",
+      "CODEX_SESSIONS_DIR",
+      "OMP_BIN",
+      "OMP_HOME",
+      "RESIN_OMP_HOME",
+      "OPENCODE_DB",
+      "PI_CODING_AGENT_SESSION_DIR",
+    ]) {
+      vi.stubEnv(name, undefined);
+    }
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     await fs.rm(home, { recursive: true, force: true });
     await fs.rm(workspace, { recursive: true, force: true });

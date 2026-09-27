@@ -429,8 +429,8 @@ var init_parseUtil = __esm({
     init_errors();
     init_en();
     makeIssue = (params) => {
-      const { data, path: path10, errorMaps, issueData } = params;
-      const fullPath = [...path10, ...issueData.path || []];
+      const { data, path: path33, errorMaps, issueData } = params;
+      const fullPath = [...path33, ...issueData.path || []];
       const fullIssue = {
         ...issueData,
         path: fullPath
@@ -738,11 +738,11 @@ var init_types = __esm({
     init_parseUtil();
     init_util();
     ParseInputLazyPath = class {
-      constructor(parent, value, path10, key) {
+      constructor(parent, value, path33, key) {
         this._cachedPath = [];
         this.parent = parent;
         this.data = value;
-        this._path = path10;
+        this._path = path33;
         this._key = key;
       }
       get path() {
@@ -4124,6 +4124,9 @@ var init_zod = __esm({
 });
 
 // packages/contracts/dist/common.js
+function nowIso() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
 function normalizeSha256(digest, prefix = false) {
   const cleanHex = digest.toLowerCase().replace(/^sha256:/, "");
   if (cleanHex.length !== 64 || !/^[a-f0-9]{64}$/.test(cleanHex)) {
@@ -4391,9 +4394,156 @@ var init_errors2 = __esm({
 });
 
 // packages/harness-contracts/dist/config.js
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-var NodeConfigFsBridge, defaultFsBridge;
+function computeConfigHash(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+function planConfigMutation(options) {
+  const planId = randomUUID();
+  const preconditionHash = options.currentContent === null ? "" : computeConfigHash(options.currentContent);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const defaultBackupPath = `${options.targetPath}.backup.${Date.now()}`;
+  return {
+    planId,
+    harnessId: options.harnessId,
+    targetPath: options.targetPath,
+    preconditionHash,
+    plannedContent: options.plannedContent,
+    backupPath: options.backupPath ?? defaultBackupPath,
+    description: options.description ?? `Update configuration for ${options.harnessId}`,
+    createdAt: now,
+    metadata: options.metadata ?? {}
+  };
+}
+function isResinExecutable(command) {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed === "resin" || trimmed.endsWith("/resin") || trimmed.endsWith("\\resin") || /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(trimmed)) {
+    return true;
+  }
+  const tokens = trimmed.split(/\s+/);
+  for (const token of tokens) {
+    if (token === "resin" || token.endsWith("/resin") || token.endsWith("\\resin") || /(?:^|[/\\])resin(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(token)) {
+      return true;
+    }
+  }
+  return false;
+}
+function isResinMcpCommand(command) {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed === "resin-mcp" || trimmed.endsWith("/resin-mcp") || trimmed.endsWith("\\resin-mcp") || /(?:^|[/\\])resin-mcp(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(trimmed)) {
+    return true;
+  }
+  const tokens = trimmed.split(/\s+/);
+  for (const token of tokens) {
+    if (token === "resin-mcp" || token.endsWith("/resin-mcp") || token.endsWith("\\resin-mcp") || /(?:^|[/\\])resin-mcp(?:\.(?:exe|cmd|bat|js|mjs|cjs))?$/i.test(token)) {
+      return true;
+    }
+  }
+  return false;
+}
+function isRecognizedResinMcpEntry(entry, configuredGatewayUrl) {
+  if (entry === null || entry === void 0 || Object.prototype.toString.call(entry) !== "[object Object]") {
+    return false;
+  }
+  const record = entry;
+  const urlCandidate = Object.prototype.toString.call(record.url) === "[object String]" ? String(record.url) : Object.prototype.toString.call(record.endpoint) === "[object String]" ? String(record.endpoint) : null;
+  if (urlCandidate !== null) {
+    const trimmedUrl = urlCandidate.trim();
+    if (configuredGatewayUrl && trimmedUrl === configuredGatewayUrl.trim()) {
+      return true;
+    }
+    if (trimmedUrl === LEGACY_RESIN_GATEWAY_URL || trimmedUrl === DEFAULT_RESIN_GATEWAY_URL || /^https?:\/\/(?:127\.0\.0\.1|localhost):9400(?:\/.*)?$/i.test(trimmedUrl)) {
+      return true;
+    }
+  }
+  const commandCandidate = Object.prototype.toString.call(record.command) === "[object String]" ? String(record.command).trim() : null;
+  const rawArgs = Array.isArray(record.args) ? record.args : null;
+  const stringArgs = rawArgs?.map((a) => typeof a === "string" ? a : String(a)) ?? [];
+  if (commandCandidate && isResinMcpCommand(commandCandidate)) {
+    return true;
+  }
+  if (rawArgs) {
+    for (const arg of rawArgs) {
+      if (typeof arg === "string" && isResinMcpCommand(arg)) {
+        return true;
+      }
+    }
+  }
+  if (commandCandidate && isResinExecutable(commandCandidate)) {
+    const tokens = commandCandidate.split(/\s+/);
+    const resinIndex = tokens.findIndex((t) => isResinExecutable(t));
+    if (resinIndex !== -1 && tokens.length > resinIndex + 1 && tokens[resinIndex + 1] === "mcp") {
+      return true;
+    }
+    if (stringArgs.length > 0 && stringArgs[0] === "mcp") {
+      return true;
+    }
+    return false;
+  }
+  if (rawArgs) {
+    const resinArgIndex = stringArgs.findIndex((a) => isResinExecutable(a));
+    if (resinArgIndex !== -1 && stringArgs.length > resinArgIndex + 1 && stringArgs[resinArgIndex + 1] === "mcp") {
+      return true;
+    }
+  }
+  return false;
+}
+function migrateJsonMcpServers(existingServers, newServerConfig, configuredGatewayUrl, canonicalKey = CANONICAL_RESIN_MCP_SERVER_KEY) {
+  const result = { ...existingServers };
+  const transportFieldNames = ["type", "url", "command", "args", "endpoint"];
+  const canonicalExisting = result[canonicalKey];
+  const inheritedExtras = {};
+  if (canonicalExisting && Object.prototype.toString.call(canonicalExisting) === "[object Object]") {
+    const canonicalObj = canonicalExisting;
+    for (const [k, v] of Object.entries(canonicalObj)) {
+      if (!transportFieldNames.includes(k)) {
+        inheritedExtras[k] = v;
+      }
+    }
+  } else {
+    for (const [key, entry] of Object.entries(result)) {
+      if (key !== canonicalKey && isRecognizedResinMcpEntry(entry, configuredGatewayUrl) && entry && Object.prototype.toString.call(entry) === "[object Object]") {
+        const entryObj = entry;
+        for (const [k, v] of Object.entries(entryObj)) {
+          if (!transportFieldNames.includes(k) && !(k in inheritedExtras)) {
+            inheritedExtras[k] = v;
+          }
+        }
+      }
+    }
+  }
+  for (const [key, entry] of Object.entries(result)) {
+    if (key !== canonicalKey && isRecognizedResinMcpEntry(entry, configuredGatewayUrl)) {
+      delete result[key];
+    }
+  }
+  for (const legacyAlias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
+    if (legacyAlias in result && legacyAlias !== canonicalKey) {
+      const entry = result[legacyAlias];
+      if (isRecognizedResinMcpEntry(entry, configuredGatewayUrl)) {
+        delete result[legacyAlias];
+      }
+    }
+  }
+  if (newServerConfig && Object.prototype.toString.call(newServerConfig) === "[object Object]") {
+    result[canonicalKey] = {
+      ...inheritedExtras,
+      ...newServerConfig
+    };
+  } else {
+    result[canonicalKey] = newServerConfig;
+  }
+  return result;
+}
+var NodeConfigFsBridge, defaultFsBridge, CANONICAL_RESIN_MCP_SERVER_KEY, CANONICAL_RESIN_MCP_COMMAND, CANONICAL_RESIN_MCP_ARGS, LEGACY_RESIN_MCP_SERVER_ALIASES, LEGACY_RESIN_GATEWAY_URL, DEFAULT_RESIN_GATEWAY_URL;
 var init_config = __esm({
   "packages/harness-contracts/dist/config.js"() {
     "use strict";
@@ -4457,6 +4607,12 @@ var init_config = __esm({
       }
     };
     defaultFsBridge = new NodeConfigFsBridge();
+    CANONICAL_RESIN_MCP_SERVER_KEY = "resin";
+    CANONICAL_RESIN_MCP_COMMAND = "resin";
+    CANONICAL_RESIN_MCP_ARGS = ["mcp"];
+    LEGACY_RESIN_MCP_SERVER_ALIASES = ["resin_gateway", "resin-gateway"];
+    LEGACY_RESIN_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
+    DEFAULT_RESIN_GATEWAY_URL = LEGACY_RESIN_GATEWAY_URL;
   }
 });
 
@@ -4487,70 +4643,10 @@ var init_refresh = __esm({
 });
 
 // packages/harness-contracts/dist/fidelity.js
-function calculateFidelityScore(components) {
-  const transcriptScore = FIDELITY_WEIGHTS.transcriptAvailability[components.transcriptAvailability] ?? 0;
-  const callScore = FIDELITY_WEIGHTS.toolCallVisibility[components.toolCallVisibility] ?? 0;
-  const resultScore = FIDELITY_WEIGHTS.toolResultVisibility[components.toolResultVisibility] ?? 0;
-  const subagentScore = FIDELITY_WEIGHTS.subagentVisibility[components.subagentVisibility] ?? 0;
-  const listChangeScore = FIDELITY_WEIGHTS.mcpListChange[components.mcpListChange] ?? 0;
-  const nudgeScore = FIDELITY_WEIGHTS.contextNudge[components.contextNudge] ?? 0;
-  const total = transcriptScore + callScore + resultScore + subagentScore + listChangeScore + nudgeScore;
-  return Math.min(100, Math.max(0, total));
-}
-function createObservationFidelity(components) {
-  const computedScore = components.overallScore ?? calculateFidelityScore(components);
-  return {
-    transcriptAvailability: components.transcriptAvailability,
-    toolCallVisibility: components.toolCallVisibility,
-    toolResultVisibility: components.toolResultVisibility,
-    subagentVisibility: components.subagentVisibility,
-    mcpListChange: components.mcpListChange,
-    contextNudge: components.contextNudge,
-    overallScore: computedScore,
-    notes: components.notes
-  };
-}
-var FIDELITY_WEIGHTS, TIER1_HIGH_FIDELITY, TIER2_MEDIUM_FIDELITY, TIER3_LOW_FIDELITY;
+var TIER1_HIGH_FIDELITY, TIER2_MEDIUM_FIDELITY, TIER3_LOW_FIDELITY;
 var init_fidelity = __esm({
   "packages/harness-contracts/dist/fidelity.js"() {
     "use strict";
-    FIDELITY_WEIGHTS = {
-      transcriptAvailability: {
-        none: 0,
-        polling: 10,
-        file_tail: 20,
-        stream: 25,
-        websocket: 25
-      },
-      toolCallVisibility: {
-        none: 0,
-        partial: 10,
-        sanitized: 15,
-        full: 20
-      },
-      toolResultVisibility: {
-        none: 0,
-        partial: 10,
-        sanitized: 15,
-        full: 20
-      },
-      subagentVisibility: {
-        none: 0,
-        shallow: 10,
-        full: 15
-      },
-      mcpListChange: {
-        unsupported: 0,
-        requires_restart: 5,
-        supported: 10
-      },
-      contextNudge: {
-        unsupported: 0,
-        via_file: 5,
-        via_prompt: 8,
-        supported: 10
-      }
-    };
     TIER1_HIGH_FIDELITY = Object.freeze({
       transcriptAvailability: "stream",
       toolCallVisibility: "full",
@@ -4591,6 +4687,81 @@ var init_decoder = __esm({
   }
 });
 
+// packages/harness-contracts/dist/definition.js
+function classifyHarnessVersion(installed, testedVersions) {
+  const version = installed?.trim();
+  if (!version || version === UNKNOWN_HARNESS_VERSION) {
+    return "unknown";
+  }
+  return testedVersions.includes(version) ? "tested" : "untested";
+}
+var UNKNOWN_HARNESS_VERSION;
+var init_definition = __esm({
+  "packages/harness-contracts/dist/definition.js"() {
+    "use strict";
+    UNKNOWN_HARNESS_VERSION = "0.0.0";
+  }
+});
+
+// packages/harness-contracts/dist/managed-block.js
+import * as path2 from "node:path";
+function editManagedBlock(current, markers, body) {
+  const start = current === null ? -1 : current.indexOf(markers.start);
+  const end = start === -1 || current === null ? -1 : current.indexOf(markers.end, start);
+  const parts = current !== null && end !== -1 ? { before: current.slice(0, start), after: current.slice(end + markers.end.length) } : null;
+  if (body === null) {
+    if (current === null || parts === null) {
+      return { action: "unchanged", content: current };
+    }
+    const before = parts.before.replace(/\n*$/, "");
+    const after = parts.after.replace(/^\n*/, "");
+    const remaining = before && after ? `${before}
+
+${after}` : `${before}${after}`;
+    if (remaining.trim().length === 0) {
+      return { action: "removed", content: null };
+    }
+    return { action: "removed", content: remaining.endsWith("\n") ? remaining : `${remaining}
+` };
+  }
+  const block = `${markers.start}
+${body}
+${markers.end}`;
+  let next;
+  if (current === null || current.trim().length === 0) {
+    next = `${block}
+`;
+  } else if (parts === null) {
+    next = `${current.replace(/\n*$/, "")}
+
+${block}
+`;
+  } else {
+    next = `${parts.before}${block}${parts.after}`;
+  }
+  if (next === current) {
+    return { action: "unchanged", content: current };
+  }
+  return { action: current === null ? "created" : "updated", content: next };
+}
+async function applyManagedBlock(fs11, filePath, markers, body, options = {}) {
+  const edit = editManagedBlock(await fs11.readFile(filePath), markers, body);
+  if (edit.action !== "unchanged" && !options.dryRun) {
+    if (edit.content === null) {
+      await fs11.unlink(filePath);
+    } else {
+      await fs11.mkdirp(path2.dirname(filePath));
+      await fs11.writeFile(filePath, edit.content);
+    }
+  }
+  return { path: filePath, action: edit.action };
+}
+var init_managed_block = __esm({
+  "packages/harness-contracts/dist/managed-block.js"() {
+    "use strict";
+  }
+});
+
 // packages/harness-contracts/dist/index.js
 var init_dist = __esm({
   "packages/harness-contracts/dist/index.js"() {
@@ -4603,949 +4774,45 @@ var init_dist = __esm({
     init_fidelity();
     init_errors2();
     init_decoder();
-  }
-});
-
-// packages/contracts/dist/events.js
-var ProviderUsageAvailabilitySchema, ProviderReportedUsageSchema, BaseEventFields, MessageContentPartSchema, NormalizedMessageEventSchema, NormalizedModelReasoningEventSchema, DiscoveredToolEntrySchema, NormalizedToolDiscoveryEventSchema, NormalizedToolCallEventSchema, NormalizedToolResultEventSchema, NormalizedCommandExecEventSchema, FileDiffStatsSchema, NormalizedFileEditEventSchema, NormalizedErrorEventSchema, NormalizedCompactionEventSchema, NormalizedBranchForkEventSchema, NormalizedSubagentLifecycleEventSchema, NormalizedSessionLifecycleEventSchema, NormalizedUnknownPassthroughEventSchema, NormalizedSessionEventSchema;
-var init_events = __esm({
-  "packages/contracts/dist/events.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    ProviderUsageAvailabilitySchema = external_exports.enum(["complete", "partial", "unavailable"]);
-    ProviderReportedUsageSchema = external_exports.object({
-      provider: external_exports.string().min(1),
-      model: external_exports.string().min(1).optional().nullable(),
-      accountingVersion: external_exports.string().min(1),
-      availability: ProviderUsageAvailabilitySchema,
-      inputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-      outputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-      reasoningTokens: external_exports.number().int().nonnegative().optional().nullable(),
-      cachedInputTokens: external_exports.number().int().nonnegative().optional().nullable(),
-      totalTokens: external_exports.number().int().nonnegative().optional().nullable(),
-      costMicroUsd: external_exports.number().int().nonnegative().optional().nullable(),
-      // Omission supports legacy records; unpriced means no usable monetary value, not free.
-      costProvenance: external_exports.enum(["source_reported", "harness_estimate", "unpriced"]).optional(),
-      durationMs: external_exports.number().int().nonnegative().optional().nullable()
-    }).strict().superRefine((val, ctx) => {
-      if (val.availability === "complete") {
-        if (val.totalTokens === void 0 || val.totalTokens === null) {
-          ctx.addIssue({
-            code: external_exports.ZodIssueCode.custom,
-            message: "Complete provider usage requires totalTokens to be present",
-            path: ["totalTokens"]
-          });
-        }
-      } else if (val.availability === "unavailable") {
-        const metricFields = [
-          "inputTokens",
-          "outputTokens",
-          "reasoningTokens",
-          "cachedInputTokens",
-          "totalTokens",
-          "costMicroUsd",
-          "durationMs"
-        ];
-        for (const field of metricFields) {
-          if (val[field] !== void 0 && val[field] !== null) {
-            ctx.addIssue({
-              code: external_exports.ZodIssueCode.custom,
-              message: `Unavailable provider usage cannot specify ${field}`,
-              path: [field]
-            });
-          }
-        }
-      }
-    });
-    BaseEventFields = {
-      eventId: IdentifierSchema,
-      schemaVersion: SchemaVersionSchema,
-      sessionId: IdentifierSchema,
-      timestamp: ISOTimestampSchema,
-      causalRef: CausalRefSchema,
-      redaction: RedactionMetaSchema,
-      metadata: external_exports.record(external_exports.unknown()).optional(),
-      providerUsage: ProviderReportedUsageSchema.optional()
-    };
-    MessageContentPartSchema = external_exports.object({
-      type: external_exports.enum(["text", "image", "resource", "json"]),
-      text: external_exports.string().optional(),
-      data: external_exports.string().optional(),
-      mimeType: external_exports.string().optional(),
-      metadata: external_exports.record(external_exports.unknown()).optional()
-    });
-    NormalizedMessageEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("message"),
-      role: external_exports.enum(["user", "assistant", "system", "tool"]),
-      content: external_exports.string(),
-      contentParts: external_exports.array(MessageContentPartSchema).optional(),
-      model: external_exports.string().optional()
-    });
-    NormalizedModelReasoningEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("model_reasoning"),
-      reasoningContent: external_exports.string(),
-      signature: external_exports.string().optional(),
-      tokenCount: external_exports.number().int().nonnegative().optional(),
-      model: external_exports.string().optional(),
-      durationMs: external_exports.number().nonnegative().optional()
-    });
-    DiscoveredToolEntrySchema = external_exports.object({
-      name: external_exports.string().min(1),
-      description: external_exports.string().optional(),
-      inputSchema: external_exports.record(external_exports.unknown()).optional(),
-      /**
-       * The protocol connection the callable was reached over, when the harness reports one — the
-       * same identity `NormalizedToolCallEvent.connection` carries on a call. Absent means the
-       * connection is unknown; it is never guessed from the name.
-       */
-      provider: external_exports.string().optional()
-    });
-    NormalizedToolDiscoveryEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("tool_discovery"),
-      tools: external_exports.array(DiscoveredToolEntrySchema),
-      provider: external_exports.string().optional(),
-      source: external_exports.enum(["mcp", "builtin", "dynamic", "harness"]).default("mcp")
-    });
-    NormalizedToolCallEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("tool_call"),
-      callId: IdentifierSchema,
-      toolName: external_exports.string().min(1),
-      /**
-       * The protocol connection this callable was reached over, when the recording established one
-       * (for example the MCP server behind a harness device-surface path). Absent means the
-       * connection is unknown: it is never defaulted to the harness or derived from the tool name.
-       */
-      connection: external_exports.string().min(1).optional(),
-      parameters: external_exports.record(external_exports.unknown()),
-      candidateRef: IdentifierSchema.optional(),
-      isShadow: external_exports.boolean().default(false)
-    });
-    NormalizedToolResultEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("tool_result"),
-      callId: IdentifierSchema,
-      toolName: external_exports.string().min(1),
-      result: external_exports.unknown(),
-      isError: external_exports.boolean(),
-      executionDurationMs: external_exports.number().nonnegative(),
-      outputSizeBytes: external_exports.number().int().nonnegative().optional(),
-      isShadow: external_exports.boolean().default(false)
-    });
-    NormalizedCommandExecEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("command_exec"),
-      command: external_exports.string(),
-      args: external_exports.array(external_exports.string()).default([]),
-      cwd: external_exports.string().optional(),
-      exitCode: external_exports.number().int(),
-      stdout: external_exports.string().optional(),
-      stderr: external_exports.string().optional(),
-      durationMs: external_exports.number().nonnegative()
-    });
-    FileDiffStatsSchema = external_exports.object({
-      linesAdded: external_exports.number().int().nonnegative(),
-      linesRemoved: external_exports.number().int().nonnegative()
-    });
-    NormalizedFileEditEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("file_edit"),
-      filePath: external_exports.string().min(1),
-      operation: external_exports.enum(["create", "update", "delete", "patch"]),
-      patch: external_exports.string().optional(),
-      beforeHash: Sha256DigestSchema.optional(),
-      afterHash: Sha256DigestSchema.optional(),
-      diffStats: FileDiffStatsSchema.optional()
-    });
-    NormalizedErrorEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("error"),
-      errorType: external_exports.string().min(1),
-      message: external_exports.string(),
-      stack: external_exports.string().optional(),
-      recoverable: external_exports.boolean(),
-      details: external_exports.record(external_exports.unknown()).optional()
-    });
-    NormalizedCompactionEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("compaction"),
-      triggerReason: external_exports.enum(["context_limit", "manual", "scheduled", "turn_threshold"]),
-      tokensBefore: external_exports.number().int().nonnegative(),
-      tokensAfter: external_exports.number().int().nonnegative(),
-      preservedContextSummary: external_exports.string().optional()
-    });
-    NormalizedBranchForkEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("branch_fork"),
-      sourceSessionId: IdentifierSchema,
-      branchPointEventId: IdentifierSchema,
-      forkReason: external_exports.string().optional(),
-      branchName: external_exports.string().optional()
-    });
-    NormalizedSubagentLifecycleEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("subagent_lifecycle"),
-      subagentId: IdentifierSchema,
-      lifecycleType: external_exports.enum(["spawn", "start", "pause", "resume", "terminate", "settle"]),
-      parentId: IdentifierSchema.optional(),
-      role: external_exports.string().optional(),
-      reason: external_exports.string().optional()
-    });
-    NormalizedSessionLifecycleEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("session_lifecycle"),
-      lifecycleType: external_exports.enum(["start", "pause", "resume", "end", "crash"]),
-      exitReason: external_exports.string().optional(),
-      harnessName: external_exports.string().optional(),
-      workspaceId: IdentifierSchema.optional()
-    });
-    NormalizedUnknownPassthroughEventSchema = external_exports.object({
-      ...BaseEventFields,
-      type: external_exports.literal("unknown_passthrough"),
-      rawEventType: external_exports.string().min(1),
-      rawPayload: external_exports.record(external_exports.unknown())
-    });
-    NormalizedSessionEventSchema = external_exports.discriminatedUnion("type", [
-      NormalizedMessageEventSchema,
-      NormalizedModelReasoningEventSchema,
-      NormalizedToolDiscoveryEventSchema,
-      NormalizedToolCallEventSchema,
-      NormalizedToolResultEventSchema,
-      NormalizedCommandExecEventSchema,
-      NormalizedFileEditEventSchema,
-      NormalizedErrorEventSchema,
-      NormalizedCompactionEventSchema,
-      NormalizedBranchForkEventSchema,
-      NormalizedSubagentLifecycleEventSchema,
-      NormalizedSessionLifecycleEventSchema,
-      NormalizedUnknownPassthroughEventSchema
-    ]);
-  }
-});
-
-// packages/contracts/dist/capabilities.js
-var FsCapabilitySchema, NetCapabilitySchema, CommandCapabilitySchema, SecretCapabilitySchema, CapabilityLimitsSchema, CapabilityManifestSchema, CapabilityGrantSchema, CapabilityEnvelopeSchema;
-var init_capabilities = __esm({
-  "packages/contracts/dist/capabilities.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    FsCapabilitySchema = external_exports.object({
-      readPaths: external_exports.array(external_exports.string()).default([]),
-      writePaths: external_exports.array(external_exports.string()).default([]),
-      allowWorkspaceRoot: external_exports.boolean().default(true),
-      allowTemp: external_exports.boolean().default(true),
-      denyPaths: external_exports.array(external_exports.string()).default([]),
-      maxFileSizeBytes: external_exports.number().int().positive().default(10485760)
-      // 10MB
-    });
-    NetCapabilitySchema = external_exports.object({
-      allowOutbound: external_exports.boolean().default(false),
-      allowedDomains: external_exports.array(external_exports.string()).default([]),
-      allowedHosts: external_exports.array(external_exports.string()).default([]),
-      allowedPorts: external_exports.array(external_exports.number().int().min(1).max(65535)).default([]),
-      allowedProtocols: external_exports.array(external_exports.enum(["http", "https", "ws", "wss"])).default(["https"]),
-      allowLocalhost: external_exports.boolean().default(false),
-      denyPrivateRanges: external_exports.boolean().default(true)
-    });
-    CommandCapabilitySchema = external_exports.object({
-      allowShellExecution: external_exports.boolean().default(false),
-      allowedCommands: external_exports.array(external_exports.string()).default([]),
-      allowedBinaries: external_exports.array(external_exports.string()).default([]),
-      forbiddenPatterns: external_exports.array(external_exports.string()).default([]),
-      allowEnvPassthrough: external_exports.array(external_exports.string()).default([])
-    });
-    SecretCapabilitySchema = external_exports.object({
-      allowedSecretNames: external_exports.array(external_exports.string()).default([]),
-      allowedPrefixes: external_exports.array(external_exports.string()).default([]),
-      denyDirectRead: external_exports.boolean().default(true),
-      injectAsEnv: external_exports.boolean().default(true)
-    });
-    CapabilityLimitsSchema = external_exports.object({
-      maxConcurrentExecutions: external_exports.number().int().positive().default(4),
-      maxCpuUsagePercent: external_exports.number().int().min(1).max(100).default(100),
-      maxMemoryMb: external_exports.number().int().positive().default(128),
-      maxExecutionTimeMs: external_exports.number().int().positive().default(3e4),
-      maxOutputSizeBytes: external_exports.number().int().positive().default(1048576)
-      // 1MB
-    });
-    CapabilityManifestSchema = external_exports.object({
-      manifestId: IdentifierSchema.optional(),
-      fs: FsCapabilitySchema.default({}),
-      net: NetCapabilitySchema.default({}),
-      command: CommandCapabilitySchema.default({}),
-      secrets: SecretCapabilitySchema.default({}),
-      limits: CapabilityLimitsSchema.default({})
-    });
-    CapabilityGrantSchema = external_exports.object({
-      grantId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      toolId: IdentifierSchema,
-      grantedAt: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema.optional(),
-      grantType: external_exports.enum(["implicit", "explicit", "policy"]),
-      capabilities: CapabilityManifestSchema,
-      actor: external_exports.object({
-        type: external_exports.enum(["user", "admin", "policy_engine", "default"]),
-        id: external_exports.string()
-      }),
-      reason: external_exports.string().optional()
-    });
-    CapabilityEnvelopeSchema = external_exports.object({
-      envelopeId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      version: SchemaVersionSchema,
-      fs: FsCapabilitySchema.default({}),
-      net: NetCapabilitySchema.default({}),
-      command: CommandCapabilitySchema.default({}),
-      secrets: SecretCapabilitySchema.default({}),
-      limits: CapabilityLimitsSchema.default({}),
-      isFrozen: external_exports.boolean().default(false),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema.optional()
-    });
-  }
-});
-
-// packages/contracts/dist/tools.js
-var ToolScopeSchema, ToolParameterSchema, ToolOutputSchema, ToolRuntimeRequirementSchema, ToolLimitConfigSchema, ToolManifestSchema;
-var init_tools = __esm({
-  "packages/contracts/dist/tools.js"() {
-    "use strict";
-    init_zod();
-    init_capabilities();
-    init_common();
-    ToolScopeSchema = external_exports.enum(["workspace", "user", "global", "session"]);
-    ToolParameterSchema = external_exports.object({
-      type: external_exports.literal("object").default("object"),
-      properties: external_exports.record(external_exports.record(external_exports.unknown())).default({}),
-      required: external_exports.array(external_exports.string()).default([]),
-      additionalProperties: external_exports.boolean().default(false),
-      description: external_exports.string().optional()
-    });
-    ToolOutputSchema = external_exports.object({
-      type: external_exports.string().default("object"),
-      properties: external_exports.record(external_exports.record(external_exports.unknown())).optional(),
-      description: external_exports.string().optional(),
-      schema: external_exports.record(external_exports.unknown()).optional()
-    });
-    ToolRuntimeRequirementSchema = external_exports.object({
-      runtime: external_exports.enum(["deno", "node", "python", "wasm", "shell", "builtin", "recorded-workflow"]),
-      minRuntimeVersion: external_exports.string().optional(),
-      memoryLimitMb: external_exports.number().int().positive().default(128),
-      timeoutMs: external_exports.number().int().positive().default(3e4),
-      cpuLimitPercent: external_exports.number().int().min(1).max(100).default(100),
-      maxOutputSizeBytes: external_exports.number().int().positive().default(1048576)
-      // 1MB
-    });
-    ToolLimitConfigSchema = external_exports.object({
-      timeoutMs: external_exports.number().int().positive().default(3e4),
-      maxOutputBytes: external_exports.number().int().positive().default(1048576),
-      maxMemoryBytes: external_exports.number().int().positive().default(134217728),
-      // 128MB
-      maxConcurrentInvocations: external_exports.number().int().positive().default(4)
-    });
-    ToolManifestSchema = external_exports.object({
-      id: IdentifierSchema,
-      name: external_exports.string().min(1).max(128),
-      version: SchemaVersionSchema,
-      description: external_exports.string().min(1).max(4096),
-      parameters: ToolParameterSchema,
-      outputSchema: ToolOutputSchema.optional(),
-      runtime: ToolRuntimeRequirementSchema,
-      capabilities: CapabilityManifestSchema,
-      limits: ToolLimitConfigSchema.default({}),
-      scope: ToolScopeSchema.default("workspace"),
-      digest: Sha256DigestSchema,
-      metadata: external_exports.record(external_exports.unknown()).default({}),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema.optional()
-    });
-  }
-});
-
-// packages/contracts/dist/versions.js
-var BundleReferenceSchema, ToolArtifactSchema, ProvenanceBaseSchema, ProvenanceMetadataSchema, SignatureMetadataSchema, ToolVersionStatusSchema, ToolVersionSchema;
-var init_versions = __esm({
-  "packages/contracts/dist/versions.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    init_tools();
-    BundleReferenceSchema = external_exports.object({
-      uri: external_exports.string().min(1),
-      hash: Sha256DigestSchema,
-      sizeBytes: external_exports.number().int().nonnegative(),
-      format: external_exports.enum(["js_bundle", "zip", "tar_gz", "embedded", "wasm"])
-    });
-    ToolArtifactSchema = external_exports.object({
-      artifactDigest: Sha256DigestSchema,
-      bundleReference: BundleReferenceSchema,
-      entrypoint: external_exports.string().min(1),
-      sourceCode: external_exports.string().optional(),
-      sourceMap: external_exports.string().optional(),
-      checksums: external_exports.record(external_exports.string()).default({})
-    });
-    ProvenanceBaseSchema = external_exports.object({
-      sourceCandidateId: IdentifierSchema.optional(),
-      synthesizedAt: ISOTimestampSchema,
-      gitCommitSha: external_exports.string().optional(),
-      deterministicBuildHash: Sha256DigestSchema,
-      environment: external_exports.record(external_exports.string()).default({})
-    });
-    ProvenanceMetadataSchema = external_exports.union([
-      ProvenanceBaseSchema.extend({
-        authoring: external_exports.object({ kind: external_exports.literal("model") }).optional(),
-        synthesizerModel: external_exports.string().min(1),
-        promptHash: Sha256DigestSchema.optional()
-      }),
-      ProvenanceBaseSchema.extend({
-        authoring: external_exports.object({
-          kind: external_exports.literal("compiler"),
-          compilerId: external_exports.string().min(1),
-          compilerVersion: external_exports.string().min(1),
-          inputDigest: Sha256DigestSchema
-        }).strict(),
-        synthesizerModel: external_exports.never().optional(),
-        promptHash: external_exports.never().optional()
-      })
-    ]);
-    SignatureMetadataSchema = external_exports.object({
-      signature: external_exports.string().min(1),
-      keyId: external_exports.string().min(1),
-      algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
-      signedAt: ISOTimestampSchema,
-      certificateChain: external_exports.array(external_exports.string()).optional()
-    });
-    ToolVersionStatusSchema = external_exports.enum(["draft", "active", "deprecated", "revoked"]);
-    ToolVersionSchema = external_exports.object({
-      toolId: IdentifierSchema,
-      version: SchemaVersionSchema,
-      manifestDigest: Sha256DigestSchema,
-      artifactDigest: Sha256DigestSchema,
-      manifest: ToolManifestSchema,
-      artifact: ToolArtifactSchema,
-      provenance: ProvenanceMetadataSchema,
-      signature: SignatureMetadataSchema.optional(),
-      status: ToolVersionStatusSchema.default("draft"),
-      supersededBy: SchemaVersionSchema.nullable().optional(),
-      createdAt: ISOTimestampSchema,
-      createdBy: external_exports.string().min(1)
-    });
-  }
-});
-
-// packages/contracts/dist/deployments.js
-var DeploymentStateSchema, DeploymentTransitionReasonSchema, DeploymentTransitionSchema, AutoRollbackThresholdsSchema, CanaryConfigSchema, DeploymentRecordSchema;
-var init_deployments = __esm({
-  "packages/contracts/dist/deployments.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    DeploymentStateSchema = external_exports.enum([
-      "drafted",
-      "validating",
-      "rejected",
-      "replaying",
-      "eligible",
-      "canary",
-      "promoted",
-      "suspended",
-      "rolling_back",
-      "rolled_back",
-      "retired"
-    ]);
-    DeploymentTransitionReasonSchema = external_exports.enum([
-      "initial_draft",
-      "validation_started",
-      "validation_passed",
-      "validation_failed",
-      "replay_started",
-      "replay_passed",
-      "replay_failed",
-      "marked_eligible",
-      "canary_started",
-      "canary_passed",
-      "canary_failed",
-      "manual_promotion",
-      "auto_promotion",
-      "manual_suspension",
-      "health_check_failed",
-      "manual_rollback",
-      "automated_rollback",
-      "rollback_completed",
-      "retired_by_superseded",
-      "manual_retirement"
-    ]);
-    DeploymentTransitionSchema = external_exports.object({
-      fromState: DeploymentStateSchema,
-      toState: DeploymentStateSchema,
-      timestamp: ISOTimestampSchema,
-      reason: DeploymentTransitionReasonSchema,
-      actor: external_exports.object({
-        type: external_exports.enum(["daemon", "user", "policy_engine", "gateway", "system"]),
-        id: external_exports.string().min(1)
-      }),
-      message: external_exports.string().optional(),
-      metadata: external_exports.record(external_exports.unknown()).default({})
-    });
-    AutoRollbackThresholdsSchema = external_exports.object({
-      maxErrorRate: external_exports.number().min(0).max(1).default(0.05),
-      maxLatencyP95Ms: external_exports.number().positive().default(5e3),
-      maxSchemaMismatchRate: external_exports.number().min(0).max(1).default(0.01),
-      consecutiveFailureThreshold: external_exports.number().int().positive().default(3)
-    });
-    CanaryConfigSchema = external_exports.object({
-      strategy: external_exports.enum(["shadow", "traffic_split", "developer_opt_in"]).default("shadow"),
-      trafficPercentage: external_exports.number().min(0).max(100).default(0),
-      durationMinutes: external_exports.number().int().positive().default(30),
-      maxShadowWorkers: external_exports.number().int().min(1).max(8).default(2),
-      autoRollbackThresholds: AutoRollbackThresholdsSchema.default({})
-    });
-    DeploymentRecordSchema = external_exports.object({
-      deploymentId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      toolId: IdentifierSchema,
-      toolVersion: SchemaVersionSchema,
-      state: DeploymentStateSchema,
-      canaryConfig: CanaryConfigSchema.optional(),
-      history: external_exports.array(DeploymentTransitionSchema).default([]),
-      activeTrafficPercentage: external_exports.number().min(0).max(100).default(0),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema.optional()
-    });
-  }
-});
-
-// packages/contracts/dist/records.js
-var WorkspaceRecordSchema, DeviceRecordSchema, InstallationRecordSchema, CatalogToolSummarySchema, CatalogSnapshotSchema, InvocationResourceUsageSchema, InvocationErrorDetailsSchema, TOOL_IO_UTF8_METHOD, InvocationUsageEstimateSchema, InvocationRecordSchema, AuditActorSchema, AuditRecordSchema, TelemetryRecordSchema, SyncCursorSchema, DeadLetterRecordSchema, VerificationDigestsSchema, VerificationChecksSchema, ProbeResultEntrySchema, VerificationEvidenceRecordSchema, RecordVisibilitySchema, PersonalOwnershipRecordSchema, WorkspaceOwnershipRecordSchema, RecordOwnershipSchema, SessionRecordBaseSchema, PersonalSessionRecordSchema, WorkspaceSessionRecordSchema, SessionRecordSchema, EvidenceSetRecordBaseSchema, PersonalEvidenceSetRecordSchema, WorkspaceEvidenceSetRecordSchema, EvidenceSetRecordSchema;
-var init_records = __esm({
-  "packages/contracts/dist/records.js"() {
-    "use strict";
-    init_zod();
-    init_capabilities();
-    init_common();
-    init_tools();
-    init_versions();
-    WorkspaceRecordSchema = external_exports.object({
-      workspaceId: IdentifierSchema,
-      rootPath: external_exports.string().min(1),
-      name: external_exports.string().min(1),
-      config: external_exports.record(external_exports.unknown()).default({}),
-      capabilityEnvelope: CapabilityEnvelopeSchema,
-      activeTools: external_exports.record(SchemaVersionSchema).default({}),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema.optional()
-    });
-    DeviceRecordSchema = external_exports.object({
-      deviceId: IdentifierSchema,
-      hostname: external_exports.string().min(1),
-      platform: external_exports.enum(["darwin", "linux", "win32", "other"]),
-      arch: external_exports.enum(["arm64", "x64", "arm", "ia32", "other"]),
-      osVersion: external_exports.string(),
-      cpuCores: external_exports.number().int().positive(),
-      totalMemoryMb: external_exports.number().int().positive(),
-      daemonVersion: SchemaVersionSchema,
-      registeredAt: ISOTimestampSchema,
-      lastSeenAt: ISOTimestampSchema
-    });
-    InstallationRecordSchema = external_exports.object({
-      installationId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      toolId: IdentifierSchema,
-      toolVersion: SchemaVersionSchema,
-      deploymentId: IdentifierSchema,
-      installedAt: ISOTimestampSchema,
-      state: external_exports.enum(["active", "inactive", "broken", "uninstalled"]),
-      configOverrides: external_exports.record(external_exports.unknown()).default({})
-    });
-    CatalogToolSummarySchema = external_exports.object({
-      toolId: IdentifierSchema,
-      version: SchemaVersionSchema,
-      manifestDigest: Sha256DigestSchema,
-      scope: ToolScopeSchema,
-      status: external_exports.enum(["active", "draft", "deprecated", "revoked"])
-    });
-    CatalogSnapshotSchema = external_exports.object({
-      snapshotId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      timestamp: ISOTimestampSchema,
-      tools: external_exports.record(CatalogToolSummarySchema).default({}),
-      digest: Sha256DigestSchema
-    });
-    InvocationResourceUsageSchema = external_exports.object({
-      cpuTimeMs: external_exports.number().nonnegative(),
-      memoryBytes: external_exports.number().int().nonnegative(),
-      shadowRun: external_exports.boolean().default(false)
-    });
-    InvocationErrorDetailsSchema = external_exports.object({
-      errorType: external_exports.string().min(1),
-      message: external_exports.string(),
-      stack: external_exports.string().optional()
-    });
-    TOOL_IO_UTF8_METHOD = "tool_io_utf8_v1";
-    InvocationUsageEstimateSchema = external_exports.object({
-      method: external_exports.literal(TOOL_IO_UTF8_METHOD),
-      inputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      outputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      discoveryTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-      totalTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
-    }).refine((val) => val.totalTokens === val.inputTokens + val.outputTokens + val.discoveryTokens, {
-      message: "totalTokens must equal sum of inputTokens, outputTokens, and discoveryTokens"
-    });
-    InvocationRecordSchema = external_exports.object({
-      invocationId: IdentifierSchema,
-      sessionId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      toolId: IdentifierSchema,
-      toolVersion: SchemaVersionSchema,
-      startedAt: ISOTimestampSchema,
-      completedAt: ISOTimestampSchema,
-      durationMs: external_exports.number().nonnegative(),
-      status: external_exports.enum(["success", "error", "timeout", "rejected_capability"]),
-      inputDigest: Sha256DigestSchema,
-      outputDigest: Sha256DigestSchema.optional(),
-      errorDetails: InvocationErrorDetailsSchema.optional(),
-      resourceUsage: InvocationResourceUsageSchema.optional(),
-      usageEstimate: InvocationUsageEstimateSchema.optional()
-    });
-    AuditActorSchema = external_exports.object({
-      type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),
-      id: external_exports.string().min(1)
-    });
-    AuditRecordSchema = external_exports.object({
-      auditId: IdentifierSchema,
-      timestamp: ISOTimestampSchema,
-      eventType: external_exports.string().min(1),
-      actor: AuditActorSchema,
-      workspaceId: IdentifierSchema.optional(),
-      resourceType: external_exports.enum([
-        "tool",
-        "deployment",
-        "candidate",
-        "workspace",
-        "capability",
-        "session",
-        "device",
-        "config"
-      ]),
-      resourceId: external_exports.string().min(1),
-      action: external_exports.string().min(1),
-      status: external_exports.enum(["success", "failure", "denied"]),
-      details: external_exports.record(external_exports.unknown()).default({}),
-      clientIp: external_exports.string().optional()
-    });
-    TelemetryRecordSchema = external_exports.object({
-      telemetryId: IdentifierSchema,
-      timestamp: ISOTimestampSchema,
-      deviceId: IdentifierSchema,
-      workspaceId: IdentifierSchema.optional(),
-      metricName: external_exports.string().min(1),
-      metricType: external_exports.enum(["counter", "gauge", "histogram"]),
-      value: external_exports.number(),
-      tags: external_exports.record(external_exports.string()).default({})
-    });
-    SyncCursorSchema = external_exports.object({
-      cursorId: IdentifierSchema,
-      deviceId: IdentifierSchema,
-      workspaceId: IdentifierSchema.optional(),
-      entityType: external_exports.string().min(1),
-      lastSyncedSequence: external_exports.number().int().nonnegative(),
-      lastSyncedTimestamp: ISOTimestampSchema,
-      syncToken: external_exports.string().min(1)
-    });
-    DeadLetterRecordSchema = external_exports.object({
-      deadLetterId: IdentifierSchema,
-      originalEventType: external_exports.string().min(1),
-      payload: external_exports.record(external_exports.unknown()),
-      errorReason: external_exports.string().min(1),
-      failedAt: ISOTimestampSchema,
-      retryCount: external_exports.number().int().nonnegative().default(0),
-      nextRetryAt: ISOTimestampSchema.optional(),
-      status: external_exports.enum(["pending", "exhausted", "resolved", "discarded"]).default("pending")
-    });
-    VerificationDigestsSchema = external_exports.object({
-      sourceDigest: Sha256DigestSchema,
-      manifestDigest: Sha256DigestSchema,
-      testsDigest: Sha256DigestSchema,
-      sdkDigest: Sha256DigestSchema,
-      runtimeDigest: Sha256DigestSchema,
-      policyDigest: Sha256DigestSchema,
-      denoDigest: Sha256DigestSchema,
-      artifactDigest: Sha256DigestSchema,
-      compositeEvidenceDigest: Sha256DigestSchema
-    });
-    VerificationChecksSchema = external_exports.object({
-      compilationAndTypeCheck: external_exports.boolean(),
-      staticAnalysis: external_exports.boolean(),
-      schemaValidation: external_exports.boolean(),
-      unitTests: external_exports.boolean(),
-      securityProbes: external_exports.boolean(),
-      deterministicPackaging: external_exports.boolean()
-    });
-    ProbeResultEntrySchema = external_exports.object({
-      probeId: external_exports.string().min(1),
-      name: external_exports.string().min(1),
-      passed: external_exports.boolean(),
-      details: external_exports.string().optional()
-    });
-    VerificationEvidenceRecordSchema = external_exports.object({
-      evidenceId: IdentifierSchema,
-      toolId: IdentifierSchema,
-      version: SchemaVersionSchema,
-      status: external_exports.enum(["passed", "failed"]),
-      verifiedAt: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema,
-      digests: VerificationDigestsSchema,
-      checks: VerificationChecksSchema,
-      probeResults: external_exports.array(ProbeResultEntrySchema).default([]),
-      metadata: external_exports.record(external_exports.unknown()).optional(),
-      signature: SignatureMetadataSchema.optional()
-    });
-    RecordVisibilitySchema = external_exports.enum(["personal", "workspace"]);
-    PersonalOwnershipRecordSchema = external_exports.object({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-      visibility: external_exports.literal("personal")
-    });
-    WorkspaceOwnershipRecordSchema = external_exports.object({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-      visibility: external_exports.literal("workspace")
-    });
-    RecordOwnershipSchema = external_exports.discriminatedUnion("visibility", [
-      PersonalOwnershipRecordSchema,
-      WorkspaceOwnershipRecordSchema
-    ]);
-    SessionRecordBaseSchema = external_exports.object({
-      id: IdentifierSchema,
-      accountId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      harnessType: external_exports.string().min(1).default("default"),
-      status: external_exports.enum(["active", "idle", "completed", "failed", "archived", "terminated"]).default("active"),
-      fidelity: external_exports.enum(["full", "compact", "summary", "lossless"]).default("full"),
-      startedAt: ISOTimestampSchema,
-      endedAt: ISOTimestampSchema.nullable().optional(),
-      cursor: external_exports.string().nullable().optional(),
-      eventCount: external_exports.number().int().nonnegative().default(0),
-      summaryByKind: external_exports.record(external_exports.number().int().nonnegative()).default({}),
-      metadata: external_exports.record(external_exports.unknown()).default({}),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema
-    });
-    PersonalSessionRecordSchema = SessionRecordBaseSchema.extend({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-      visibility: external_exports.literal("personal")
-    });
-    WorkspaceSessionRecordSchema = SessionRecordBaseSchema.extend({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-      visibility: external_exports.literal("workspace")
-    });
-    SessionRecordSchema = external_exports.discriminatedUnion("visibility", [
-      PersonalSessionRecordSchema,
-      WorkspaceSessionRecordSchema
-    ]);
-    EvidenceSetRecordBaseSchema = external_exports.object({
-      id: IdentifierSchema,
-      accountId: IdentifierSchema,
-      workspaceId: IdentifierSchema,
-      sessionId: IdentifierSchema.nullable().optional(),
-      name: external_exports.string().min(1),
-      description: external_exports.string().default(""),
-      revision: external_exports.number().int().positive().default(1),
-      rootDigest: Sha256DigestSchema,
-      memberCount: external_exports.number().int().nonnegative().default(0),
-      metadata: external_exports.record(external_exports.unknown()).default({}),
-      createdAt: ISOTimestampSchema
-    });
-    PersonalEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
-      visibility: external_exports.literal("personal")
-    });
-    WorkspaceEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
-      ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
-      visibility: external_exports.literal("workspace")
-    });
-    EvidenceSetRecordSchema = external_exports.discriminatedUnion("visibility", [
-      PersonalEvidenceSetRecordSchema,
-      WorkspaceEvidenceSetRecordSchema
-    ]);
-  }
-});
-
-// packages/contracts/dist/v1.js
-var V1_SCHEMA_VERSION, V1_SCHEMA_KINDS, V1Sha256DigestSchema, V1ExactSemVerSchema, V1OwnerTypeSchema, V1RoleSchema, V1OwnerReferenceSchema, V1PersonalScopeSchema, V1WorkspaceScopeSchema, V1AccountScopeSchema, V1OrganizationScopeSchema, V1AuthorizationScopeSchema, V1SubjectTypeSchema, V1OwnerAuthorizationSchema, V1ProjectSettingsSchema, V1ProjectMetadataSchema, V1LockSignatureIdentitySchema, V1LockedToolEntrySchema, V1ToolLockSchema, V1CertificateSubjectSchema, V1ActivationCertificateSchema, V1RevokedToolEntrySchema, V1RevokedCertificateEntrySchema, V1RevocationMetadataSchema;
-var init_v1 = __esm({
-  "packages/contracts/dist/v1.js"() {
-    "use strict";
-    init_zod();
-    init_common();
-    init_versions();
-    V1_SCHEMA_VERSION = "1.0.0";
-    V1_SCHEMA_KINDS = {
-      OWNER_AUTHORIZATION: "owner_authorization",
-      PROJECT_METADATA: "project_metadata",
-      TOOL_LOCK: "tool_lock",
-      ACTIVATION_CERTIFICATE: "activation_certificate",
-      REVOCATION_METADATA: "revocation_metadata",
-      SAVINGS_EVIDENCE: "savings_evidence"
-    };
-    V1Sha256DigestSchema = external_exports.string().regex(/^(sha256:)?[a-f0-9]{64}$/i, "Invalid SHA-256 digest format (expected 64 hex characters with optional sha256: prefix)").transform((val) => normalizeSha256(val, false));
-    V1ExactSemVerSchema = external_exports.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/, "Invalid semantic version string").refine((val) => !/[*^~><=]/.test(val), {
-      message: "Version ranges and wildcards (^, ~, *, >, <) are prohibited in exact pinned versions"
-    });
-    V1OwnerTypeSchema = external_exports.enum(["user", "workspace", "account", "organization"]);
-    V1RoleSchema = external_exports.enum(["owner", "admin", "member", "viewer"]);
-    V1OwnerReferenceSchema = external_exports.object({
-      ownerType: V1OwnerTypeSchema,
-      ownerId: UUIDSchema,
-      accountId: UUIDSchema
-    }).strict();
-    V1PersonalScopeSchema = external_exports.object({
-      scopeType: external_exports.literal("personal"),
-      userId: UUIDSchema,
-      accountId: UUIDSchema
-    }).strict();
-    V1WorkspaceScopeSchema = external_exports.object({
-      scopeType: external_exports.literal("workspace"),
-      workspaceId: UUIDSchema,
-      accountId: UUIDSchema
-    }).strict();
-    V1AccountScopeSchema = external_exports.object({
-      scopeType: external_exports.literal("account"),
-      accountId: UUIDSchema
-    }).strict();
-    V1OrganizationScopeSchema = external_exports.object({
-      scopeType: external_exports.literal("organization"),
-      organizationId: UUIDSchema,
-      accountId: UUIDSchema
-    }).strict();
-    V1AuthorizationScopeSchema = external_exports.discriminatedUnion("scopeType", [
-      V1PersonalScopeSchema,
-      V1WorkspaceScopeSchema,
-      V1AccountScopeSchema,
-      V1OrganizationScopeSchema
-    ]);
-    V1SubjectTypeSchema = external_exports.enum(["user", "service_account", "device", "mcp_client"]);
-    V1OwnerAuthorizationSchema = external_exports.object({
-      schemaKind: external_exports.literal(V1_SCHEMA_KINDS.OWNER_AUTHORIZATION),
-      schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-      authorizationId: UUIDSchema,
-      subjectId: UUIDSchema,
-      subjectType: V1SubjectTypeSchema,
-      owner: V1OwnerReferenceSchema,
-      scope: V1AuthorizationScopeSchema,
-      roles: external_exports.array(V1RoleSchema).min(1),
-      permissions: external_exports.array(external_exports.string().min(1)),
-      issuedAt: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema.optional()
-    }).strict();
-    V1ProjectSettingsSchema = external_exports.object({
-      defaultRuntimeVersion: V1ExactSemVerSchema.optional(),
-      environment: external_exports.string().min(1).max(64).optional(),
-      tags: external_exports.array(external_exports.string().min(1).max(64)).optional()
-    }).strict();
-    V1ProjectMetadataSchema = external_exports.object({
-      schemaKind: external_exports.literal(V1_SCHEMA_KINDS.PROJECT_METADATA),
-      schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-      projectId: UUIDSchema,
-      name: external_exports.string().min(1).max(128),
-      settings: V1ProjectSettingsSchema.optional(),
-      createdAt: ISOTimestampSchema,
-      updatedAt: ISOTimestampSchema.optional()
-    }).strict();
-    V1LockSignatureIdentitySchema = external_exports.object({
-      keyId: external_exports.string().min(1),
-      algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
-      signer: external_exports.string().min(1).optional()
-    }).strict();
-    V1LockedToolEntrySchema = external_exports.object({
-      toolId: UUIDSchema,
-      name: IdentifierSchema,
-      version: V1ExactSemVerSchema,
-      manifestDigest: Sha256DigestSchema,
-      artifactDigest: Sha256DigestSchema,
-      envelopeDigest: Sha256DigestSchema.optional(),
-      signatureIdentity: V1LockSignatureIdentitySchema.optional(),
-      status: external_exports.enum(["active", "pinned", "disabled"]).default("active")
-    }).strict();
-    V1ToolLockSchema = external_exports.object({
-      schemaKind: external_exports.literal(V1_SCHEMA_KINDS.TOOL_LOCK),
-      schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-      projectId: UUIDSchema,
-      updatedAt: ISOTimestampSchema,
-      tools: external_exports.record(IdentifierSchema, V1LockedToolEntrySchema)
-    }).strict();
-    V1CertificateSubjectSchema = external_exports.object({
-      userId: UUIDSchema,
-      accountId: UUIDSchema,
-      deviceId: UUIDSchema.optional()
-    }).strict();
-    V1ActivationCertificateSchema = external_exports.object({
-      schemaKind: external_exports.literal(V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE),
-      schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-      certificateId: UUIDSchema,
-      subject: V1CertificateSubjectSchema,
-      projectId: UUIDSchema,
-      toolId: UUIDSchema,
-      toolName: IdentifierSchema,
-      version: V1ExactSemVerSchema,
-      manifestDigest: Sha256DigestSchema,
-      artifactDigest: Sha256DigestSchema,
-      capabilityEnvelopeDigest: Sha256DigestSchema,
-      qualificationEvidenceDigest: Sha256DigestSchema,
-      counter: external_exports.number().int().nonnegative(),
-      nonce: external_exports.string().min(8),
-      issuedAt: ISOTimestampSchema,
-      notBefore: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema,
-      status: external_exports.enum(["active", "suspended", "revoked"]).default("active"),
-      signature: SignatureMetadataSchema
-    }).strict().refine((data) => {
-      const issued = new Date(data.issuedAt).getTime();
-      const notBefore = new Date(data.notBefore).getTime();
-      const expires = new Date(data.expiresAt).getTime();
-      return !Number.isNaN(issued) && !Number.isNaN(notBefore) && !Number.isNaN(expires) && notBefore <= expires && issued <= expires;
-    }, {
-      message: "Certificate validity window invalid: issuedAt and notBefore must be before or equal to expiresAt"
-    });
-    V1RevokedToolEntrySchema = external_exports.object({
-      toolId: UUIDSchema,
-      version: V1ExactSemVerSchema.optional(),
-      revokedAt: ISOTimestampSchema,
-      reason: external_exports.string().min(1)
-    }).strict();
-    V1RevokedCertificateEntrySchema = external_exports.object({
-      certificateId: UUIDSchema,
-      revokedAt: ISOTimestampSchema,
-      reason: external_exports.string().min(1)
-    }).strict();
-    V1RevocationMetadataSchema = external_exports.object({
-      schemaKind: external_exports.literal(V1_SCHEMA_KINDS.REVOCATION_METADATA),
-      schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-      revocationListId: UUIDSchema,
-      authorityId: external_exports.string().min(1),
-      accountId: UUIDSchema,
-      sequenceNumber: external_exports.number().int().nonnegative(),
-      issuedAt: ISOTimestampSchema,
-      expiresAt: ISOTimestampSchema,
-      revokedTools: external_exports.array(V1RevokedToolEntrySchema).default([]),
-      revokedCertificates: external_exports.array(V1RevokedCertificateEntrySchema).default([]),
-      revokedKeys: external_exports.array(external_exports.string().min(1)).default([]),
-      signature: SignatureMetadataSchema
-    }).strict().refine((data) => {
-      const issued = new Date(data.issuedAt).getTime();
-      const expires = new Date(data.expiresAt).getTime();
-      return !Number.isNaN(issued) && !Number.isNaN(expires) && issued <= expires;
-    }, {
-      message: "Revocation metadata timestamps invalid: issuedAt must be before or equal to expiresAt"
-    });
+    init_definition();
+    init_managed_block();
   }
 });
 
 // adapters/claude-code/dist/config-planner.js
+function generatePlannedClaudeConfig(currentContent, gatewayUrl, serverKey = CANONICAL_RESIN_MCP_SERVER_KEY, command = CANONICAL_RESIN_MCP_COMMAND) {
+  let doc = {};
+  if (currentContent && currentContent.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(currentContent);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        doc = parsed;
+      }
+    } catch {
+      doc = {};
+    }
+  }
+  const existingServers = doc.mcpServers && doc.mcpServers instanceof Object && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
+  const serverConfig = {
+    command,
+    args: [...CANONICAL_RESIN_MCP_ARGS]
+  };
+  doc.mcpServers = migrateJsonMcpServers(existingServers, serverConfig, gatewayUrl, serverKey);
+  return `${JSON.stringify(doc, null, 2)}
+`;
+}
+async function planClaudeMcpConfig(workspace, gatewayUrl, fsBridge = defaultFsBridge, command = CANONICAL_RESIN_MCP_COMMAND) {
+  const targetPath = workspace.mcpConfigPath || workspace.configPath;
+  const currentContent = await fsBridge.readFile(targetPath);
+  const plannedContent = generatePlannedClaudeConfig(currentContent, gatewayUrl, CANONICAL_RESIN_MCP_SERVER_KEY, command);
+  return planConfigMutation({
+    harnessId: "claude-code",
+    targetPath,
+    currentContent,
+    plannedContent,
+    description: "Register Resin Gateway in Claude Code MCP settings"
+  });
+}
 var init_config_planner = __esm({
   "adapters/claude-code/dist/config-planner.js"() {
     "use strict";
@@ -5555,14 +4822,211 @@ var init_config_planner = __esm({
 
 // adapters/claude-code/dist/discovery.js
 import { execFile } from "node:child_process";
+import * as os from "node:os";
+import * as path3 from "node:path";
 import { promisify } from "node:util";
-var execFileAsync, PROJECT_METADATA_BYTES, projectIndexSchema, transcriptMetadataSchema;
+function isSupportedClaudeVersion(versionStr, minMajor = 0, minMinor = 1) {
+  const match = versionStr.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match)
+    return false;
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  if (major > minMajor)
+    return true;
+  if (major === minMajor)
+    return minor >= minMinor;
+  return false;
+}
+function detectPlatform(platform = process.platform) {
+  if (platform === "darwin")
+    return "darwin";
+  if (platform === "win32")
+    return "win32";
+  if (platform === "linux") {
+    if (process.env.WSL_DISTRO_NAME || process.env.WSLENV || process.env.IS_WSL && process.env.IS_WSL !== "0") {
+      return "wsl";
+    }
+    return "linux";
+  }
+  return "other";
+}
+function resolveClaudeHomeCandidates(platform = detectPlatform(), homeDir = os.homedir()) {
+  const candidates = [];
+  switch (platform) {
+    case "darwin":
+      candidates.push(path3.join(homeDir, "Library", "Application Support", "Claude"));
+      candidates.push(path3.join(homeDir, ".claude"));
+      candidates.push(path3.join(homeDir, ".config", "claude"));
+      break;
+    case "wsl":
+      candidates.push(path3.join(homeDir, ".claude"));
+      candidates.push(path3.join(homeDir, ".config", "claude"));
+      if (process.env.USERPROFILE) {
+        candidates.push(path3.join(process.env.USERPROFILE, ".claude"));
+      }
+      break;
+    default:
+      candidates.push(path3.join(homeDir, ".claude"));
+      if (process.env.XDG_CONFIG_HOME) {
+        candidates.push(path3.join(process.env.XDG_CONFIG_HOME, "claude"));
+      }
+      candidates.push(path3.join(homeDir, ".config", "claude"));
+      break;
+  }
+  return candidates;
+}
+function resolveClaudeConfigFileCandidates(homeDir = os.homedir(), platform = detectPlatform()) {
+  const homes = resolveClaudeHomeCandidates(platform, homeDir);
+  const candidates = [];
+  candidates.push(path3.join(homeDir, ".claude.json"));
+  for (const home of homes) {
+    candidates.push(path3.join(home, "claude.json"));
+    candidates.push(path3.join(home, "mcp_settings.json"));
+    candidates.push(path3.join(home, "settings.json"));
+  }
+  return candidates;
+}
+function resolveClaudeExecutableCandidates(homeDir = os.homedir(), platform = detectPlatform()) {
+  const candidates = [];
+  if (platform === "darwin") {
+    candidates.push("/usr/local/bin/claude");
+    candidates.push("/opt/homebrew/bin/claude");
+  } else {
+    candidates.push("/usr/local/bin/claude");
+    candidates.push("/usr/bin/claude");
+  }
+  candidates.push(path3.join(homeDir, ".npm-global", "bin", "claude"));
+  candidates.push(path3.join(homeDir, ".local", "bin", "claude"));
+  candidates.push("claude");
+  return candidates;
+}
+async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, execFn) {
+  const platform = detectPlatform();
+  const homeDir = os.homedir();
+  const detectedAt = nowIso();
+  let executablePath = options?.customExecutablePath ?? options?.executablePath;
+  let rawVersionString = null;
+  let status = "unknown";
+  let isInstalled = false;
+  const runner = execFn || (async (file, args) => {
+    return await execFileAsync(file, args, { timeout: 5e3 });
+  });
+  if (!executablePath) {
+    const candidates = resolveClaudeExecutableCandidates(homeDir, platform);
+    for (const candidate of candidates) {
+      if (candidate === "claude") {
+        try {
+          const { stdout } = await runner(candidate, ["--version"]);
+          executablePath = candidate;
+          rawVersionString = stdout.trim();
+          break;
+        } catch {
+        }
+      } else {
+        const exists = await fsBridge.exists(candidate);
+        if (exists) {
+          executablePath = candidate;
+          break;
+        }
+      }
+    }
+  }
+  let configPath = options?.customConfigPath ?? options?.configPath;
+  let homePath;
+  const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir);
+  for (const candidate of homeCandidates) {
+    if (await fsBridge.exists(candidate)) {
+      homePath = candidate;
+      break;
+    }
+  }
+  if (!homePath && homeCandidates.length > 0) {
+    homePath = homeCandidates[0];
+  }
+  if (!configPath) {
+    const configCandidates = resolveClaudeConfigFileCandidates(homeDir, platform);
+    for (const candidate of configCandidates) {
+      if (await fsBridge.exists(candidate)) {
+        configPath = candidate;
+        break;
+      }
+    }
+    if (!configPath) {
+      configPath = path3.join(homePath ?? homeDir, "claude.json");
+    }
+  }
+  if (executablePath && !rawVersionString) {
+    try {
+      const { stdout } = await runner(executablePath, ["--version"]);
+      rawVersionString = stdout.trim();
+    } catch {
+    }
+  }
+  let parsedVersion;
+  if (rawVersionString) {
+    const match = rawVersionString.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+    if (match) {
+      parsedVersion = match[1];
+    }
+  }
+  if (executablePath && parsedVersion) {
+    if (isSupportedClaudeVersion(parsedVersion)) {
+      status = "ready";
+      isInstalled = true;
+    } else {
+      status = "unsupported_version";
+      isInstalled = true;
+    }
+  } else if (executablePath && !parsedVersion) {
+    status = "corrupt";
+    isInstalled = false;
+  } else {
+    status = "missing_executable";
+    isInstalled = false;
+  }
+  if (options?.checkPermissions && configPath && isInstalled) {
+    try {
+      const configExists = await fsBridge.exists(configPath);
+      if (configExists) {
+        const content = await fsBridge.readFile(configPath);
+        if (content !== null && content.trim().length > 0) {
+          try {
+            JSON.parse(content);
+          } catch {
+            status = "config_error";
+          }
+        }
+      }
+    } catch {
+      status = "config_error";
+    }
+  }
+  return {
+    harnessId: "claude-code",
+    displayName: "Claude Code",
+    version: parsedVersion ?? "0.0.0",
+    executablePath,
+    configPath,
+    homePath: homePath ?? homeDir,
+    isInstalled,
+    status,
+    detectedAt,
+    metadata: {
+      platform,
+      rawVersionString,
+      checkedPermissions: Boolean(options?.checkPermissions)
+    }
+  };
+}
+var execFileAsync, CLAUDE_TESTED_VERSIONS, PROJECT_METADATA_BYTES, projectIndexSchema, transcriptMetadataSchema, subagentMetaSchema;
 var init_discovery = __esm({
   "adapters/claude-code/dist/discovery.js"() {
     "use strict";
+    init_common();
     init_dist();
     init_zod();
     execFileAsync = promisify(execFile);
+    CLAUDE_TESTED_VERSIONS = ["2.1.283"];
     PROJECT_METADATA_BYTES = 64 * 1024;
     projectIndexSchema = external_exports.object({
       originalPath: external_exports.string().optional(),
@@ -5574,77 +5038,374 @@ var init_discovery = __esm({
       cwd: external_exports.string(),
       isSidechain: external_exports.boolean().optional()
     });
+    subagentMetaSchema = external_exports.object({
+      agentType: external_exports.string().optional(),
+      toolUseId: external_exports.string().optional()
+    });
   }
 });
 
-// adapters/claude-code/dist/refresh.js
-var init_refresh2 = __esm({
-  "adapters/claude-code/dist/refresh.js"() {
+// adapters/claude-code/dist/install.js
+import * as path4 from "node:path";
+function resolveClaudeConfigDir(home, env) {
+  const configured = env.CLAUDE_CONFIG_DIR;
+  return configured && configured.trim().length > 0 ? path4.resolve(configured) : path4.join(home, ".claude");
+}
+function resolveClaudeMcpConfigPath(home, env) {
+  const configured = env.CLAUDE_CONFIG_DIR;
+  return configured && configured.trim().length > 0 ? path4.join(path4.resolve(configured), ".claude.json") : path4.join(home, ".claude.json");
+}
+function resolveClaudeGuidancePath(home, env) {
+  return path4.join(resolveClaudeConfigDir(home, env), "CLAUDE.md");
+}
+var CLAUDE_GUIDANCE_MARKERS, CLAUDE_RESIN_GUIDANCE, claudeCodeInstallHarness;
+var init_install = __esm({
+  "adapters/claude-code/dist/install.js"() {
     "use strict";
-    init_dist();
-  }
-});
-
-// adapters/claude-code/dist/source.js
-var init_source2 = __esm({
-  "adapters/claude-code/dist/source.js"() {
-    "use strict";
-    init_dist();
-  }
-});
-
-// adapters/claude-code/dist/adapter.js
-var init_adapter2 = __esm({
-  "adapters/claude-code/dist/adapter.js"() {
-    "use strict";
-    init_dist();
     init_config_planner();
     init_discovery();
-    init_refresh2();
-    init_source2();
-  }
-});
+    CLAUDE_GUIDANCE_MARKERS = {
+      start: "<!-- resin:claude-guidance:start -->",
+      end: "<!-- resin:claude-guidance:end -->"
+    };
+    CLAUDE_RESIN_GUIDANCE = `# Resin learned tools
 
-// adapters/claude-code/dist/decoder.js
-var ClaudeTranscriptValueSchema, ClaudeTranscriptPayloadSchema;
-var init_decoder2 = __esm({
-  "adapters/claude-code/dist/decoder.js"() {
-    "use strict";
-    init_zod();
-    ClaudeTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
-      external_exports.string(),
-      external_exports.number(),
-      external_exports.boolean(),
-      external_exports.null(),
-      external_exports.undefined(),
-      external_exports.record(ClaudeTranscriptValueSchema),
-      external_exports.array(ClaudeTranscriptValueSchema)
-    ]));
-    ClaudeTranscriptPayloadSchema = external_exports.lazy(() => external_exports.record(ClaudeTranscriptValueSchema));
-  }
-});
+Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-// adapters/claude-code/dist/index.js
-var init_dist2 = __esm({
-  "adapters/claude-code/dist/index.js"() {
-    "use strict";
-    init_adapter2();
-    init_discovery();
-    init_config_planner();
-    init_decoder2();
-    init_source2();
-    init_refresh2();
+- In your first step, next to your own first look at the task, list the \`mcp__resin__\` tools and their descriptions; if they are deferred, load them with tool search (query \`resin\`).
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
+    claudeCodeInstallHarness = {
+      id: "claude-code",
+      displayName: "Claude Code CLI",
+      shortName: "Claude Code",
+      adapterPackage: "@resin/adapter-claude-code",
+      testedVersions: CLAUDE_TESTED_VERSIONS,
+      knownLimits: [
+        "Only user-scope MCP registration (.claude.json) is managed; project .mcp.json files are left alone.",
+        "Edit/Write steps are learned only when Claude recorded the resulting patch (toolUseResult.structuredPatch or created-file content)."
+      ],
+      probeInstallation: ({ targetPath, fsBridge }) => probeClaudeInstallation({ customConfigPath: targetPath }, fsBridge),
+      mcpConfig: {
+        resolvePath: resolveClaudeMcpConfigPath,
+        uninstallPaths: (home, env) => [
+          resolveClaudeMcpConfigPath(home, env),
+          path4.join(home, ".claude.json"),
+          path4.join(home, ".claude", "claude.json"),
+          path4.join(home, ".claude", "config.json")
+        ],
+        format: "json",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcpServers"],
+        transports: ["stdio"],
+        planRegistration: ({ workspace, gatewayUrl, command, fsBridge }) => planClaudeMcpConfig(workspace, gatewayUrl, fsBridge, command)
+      },
+      guidance: {
+        resolvePath: resolveClaudeGuidancePath,
+        markers: CLAUDE_GUIDANCE_MARKERS,
+        body: CLAUDE_RESIN_GUIDANCE
+      }
+    };
   }
 });
 
 // adapters/codex-cli/dist/discovery.js
 import { execFile as execFile2 } from "node:child_process";
+import * as fs2 from "node:fs/promises";
+import * as os2 from "node:os";
+import * as path5 from "node:path";
 import { promisify as promisify2 } from "node:util";
-var execFileAsync2, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
+function getCandidateBinaryNames(platform = process.platform) {
+  if (platform === "win32") {
+    return [
+      "codex.exe",
+      "codex.cmd",
+      "codex.bat",
+      "codex-cli.exe",
+      "codex-cli.cmd",
+      "codex-cli.bat",
+      "codex"
+    ];
+  }
+  return ["codex", "codex-cli"];
+}
+async function fileExists(filePath) {
+  try {
+    await fs2.access(filePath, fs2.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function defaultPathLookup(binName, env = process.env, platform = process.platform) {
+  const pathEnv = env.PATH || env.Path || "";
+  const delimiter5 = platform === "win32" ? ";" : ":";
+  const searchDirs = pathEnv.split(delimiter5).filter(Boolean);
+  const home = env.CODEX_HOME || env.HOME || env.USERPROFILE || os2.homedir();
+  if (home) {
+    searchDirs.push(path5.join(home, ".codex", "bin"), path5.join(home, ".cargo", "bin"), path5.join(home, ".local", "bin"), path5.join(home, "bin"));
+  }
+  for (const dir of searchDirs) {
+    const fullPath = path5.join(dir, binName);
+    if (await fileExists(fullPath)) {
+      return fullPath;
+    }
+  }
+  return null;
+}
+async function findCodexExecutable(options) {
+  const explicitPath = options?.executablePath ?? options?.customExecutablePath;
+  if (explicitPath) {
+    if (await fileExists(explicitPath)) {
+      return path5.resolve(explicitPath);
+    }
+    return null;
+  }
+  const platform = options?.platform ?? process.platform;
+  const env = options?.env ?? process.env;
+  const lookup = options?.pathLookup ?? ((bin) => defaultPathLookup(bin, env, platform));
+  const candidateNames = getCandidateBinaryNames(platform);
+  for (const candidate of candidateNames) {
+    const resolved = await lookup(candidate);
+    if (resolved) {
+      return path5.resolve(resolved);
+    }
+  }
+  return null;
+}
+function extractSemver(output) {
+  const semverRegex = /(?:(?:codex(?:-cli)?|version|v)?\s*)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/i;
+  const match = output.match(semverRegex);
+  return match?.[1] ? match[1] : null;
+}
+async function probeCodexVersion(executablePath, executor = defaultCommandExecutor) {
+  for (const flag of ["--version", "-V", "version"]) {
+    const result = await executor(executablePath, [flag]);
+    if (result.exitCode === 0 && (result.stdout.trim() || result.stderr.trim())) {
+      const combined = `${result.stdout} ${result.stderr}`.trim();
+      const version = extractSemver(combined);
+      if (version) {
+        return { version, rawOutput: combined };
+      }
+    }
+  }
+  return { version: null, rawOutput: "" };
+}
+async function resolveCodexPaths(options) {
+  const env = options?.env ?? process.env;
+  const home = env.CODEX_HOME || options?.homeDir || (env.HOME || env.USERPROFILE ? path5.join(env.HOME || env.USERPROFILE, ".codex") : os2.homedir());
+  let configPath;
+  let configFormat = "toml";
+  if (options?.customConfigPath) {
+    configPath = path5.resolve(options.customConfigPath);
+    configFormat = configPath.endsWith(".json") ? "json" : "toml";
+  } else if (env.CODEX_CONFIG_PATH) {
+    configPath = path5.resolve(env.CODEX_CONFIG_PATH);
+    configFormat = configPath.endsWith(".json") ? "json" : "toml";
+  } else {
+    const tomlPath = path5.join(home, "config.toml");
+    const jsonPath = path5.join(home, "config.json");
+    const mcpJsonPath = path5.join(home, "mcp.json");
+    if (await fileExists(tomlPath)) {
+      configPath = tomlPath;
+      configFormat = "toml";
+    } else if (await fileExists(jsonPath)) {
+      configPath = jsonPath;
+      configFormat = "json";
+    } else if (await fileExists(mcpJsonPath)) {
+      configPath = mcpJsonPath;
+      configFormat = "json";
+    } else {
+      configPath = tomlPath;
+      configFormat = "toml";
+    }
+  }
+  let sessionRoot;
+  if (options?.customSessionRoot) {
+    sessionRoot = path5.resolve(options.customSessionRoot);
+  } else if (env.CODEX_SESSIONS_DIR) {
+    sessionRoot = path5.resolve(env.CODEX_SESSIONS_DIR);
+  } else {
+    const defaultSessions = path5.join(home, "sessions");
+    const rollouts = path5.join(home, "rollouts");
+    const history = path5.join(home, "history");
+    if (await fileExists(defaultSessions)) {
+      sessionRoot = defaultSessions;
+    } else if (await fileExists(rollouts)) {
+      sessionRoot = rollouts;
+    } else if (await fileExists(history)) {
+      sessionRoot = history;
+    } else {
+      sessionRoot = defaultSessions;
+    }
+  }
+  return {
+    homeDir: home,
+    configPath,
+    sessionRoot,
+    configFormat
+  };
+}
+async function probeCodexInstallation(options) {
+  const detectedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const testedVersions = options?.testedVersions ?? CODEX_TESTED_VERSIONS;
+  const resolvedPaths = await resolveCodexPaths({
+    customConfigPath: options?.customConfigPath,
+    env: options?.env
+  });
+  const executablePath = await findCodexExecutable({
+    executablePath: options?.executablePath,
+    customExecutablePath: options?.customExecutablePath,
+    platform: options?.platform,
+    env: options?.env,
+    pathLookup: options?.pathLookup
+  });
+  if (!executablePath) {
+    return {
+      harnessId: CODEX_HARNESS_ID,
+      displayName: CODEX_DISPLAY_NAME,
+      version: "0.0.0",
+      isInstalled: false,
+      status: "missing_executable",
+      executablePath: void 0,
+      configPath: resolvedPaths.configPath,
+      homePath: resolvedPaths.homeDir,
+      detectedAt,
+      metadata: {
+        searchedCustomPath: options?.customExecutablePath,
+        homeDir: resolvedPaths.homeDir,
+        sessionRoot: resolvedPaths.sessionRoot,
+        configFormat: resolvedPaths.configFormat,
+        diagnostics: [
+          {
+            code: "MISSING_EXECUTABLE",
+            severity: "error",
+            message: "Codex CLI executable ('codex' or 'codex-cli') not found on system PATH.",
+            path: options?.customExecutablePath,
+            timestamp: detectedAt
+          }
+        ]
+      }
+    };
+  }
+  const { version, rawOutput } = await probeCodexVersion(executablePath, options?.executor ?? defaultCommandExecutor);
+  if (!version) {
+    return {
+      harnessId: CODEX_HARNESS_ID,
+      displayName: CODEX_DISPLAY_NAME,
+      version: "0.0.0",
+      isInstalled: true,
+      status: "corrupt",
+      executablePath,
+      configPath: resolvedPaths.configPath,
+      homePath: resolvedPaths.homeDir,
+      detectedAt,
+      metadata: {
+        rawOutput,
+        homeDir: resolvedPaths.homeDir,
+        sessionRoot: resolvedPaths.sessionRoot,
+        configFormat: resolvedPaths.configFormat,
+        diagnostics: [
+          {
+            code: "VERSION_PROBE_FAILED",
+            severity: "error",
+            message: `Failed to detect version from Codex CLI executable at ${executablePath}. Output: ${rawOutput}`,
+            path: executablePath,
+            timestamp: detectedAt
+          }
+        ]
+      }
+    };
+  }
+  if (options?.checkPermissions) {
+    try {
+      const configDir = path5.dirname(resolvedPaths.configPath);
+      await fs2.mkdir(configDir, { recursive: true });
+      await fs2.access(configDir, fs2.constants.R_OK | fs2.constants.W_OK);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return {
+        harnessId: CODEX_HARNESS_ID,
+        displayName: CODEX_DISPLAY_NAME,
+        version,
+        isInstalled: true,
+        status: "config_error",
+        executablePath,
+        configPath: resolvedPaths.configPath,
+        homePath: resolvedPaths.homeDir,
+        detectedAt,
+        metadata: {
+          permissionError: errorMsg,
+          homeDir: resolvedPaths.homeDir,
+          sessionRoot: resolvedPaths.sessionRoot,
+          configFormat: resolvedPaths.configFormat,
+          diagnostics: [
+            {
+              code: "CONFIG_PERMISSION_DENIED",
+              severity: "error",
+              message: `Cannot read/write Codex configuration directory: ${errorMsg}`,
+              path: resolvedPaths.configPath,
+              timestamp: detectedAt
+            }
+          ]
+        }
+      };
+    }
+  }
+  const versionClassification = classifyHarnessVersion(version, testedVersions);
+  return {
+    harnessId: CODEX_HARNESS_ID,
+    displayName: CODEX_DISPLAY_NAME,
+    version,
+    isInstalled: true,
+    status: "ready",
+    executablePath,
+    configPath: resolvedPaths.configPath,
+    homePath: resolvedPaths.homeDir,
+    detectedAt,
+    metadata: {
+      homeDir: resolvedPaths.homeDir,
+      sessionRoot: resolvedPaths.sessionRoot,
+      configFormat: resolvedPaths.configFormat,
+      versionClassification,
+      testedVersions: [...testedVersions],
+      diagnostics: versionClassification === "tested" ? [] : [
+        {
+          code: "UNTESTED_VERSION",
+          severity: "warning",
+          message: `Codex CLI ${version} has not been qualified by Resin; tested versions: ${testedVersions.join(", ")}. Capture may miss records whose shape changed.`,
+          path: executablePath,
+          timestamp: detectedAt
+        }
+      ]
+    }
+  };
+}
+var execFileAsync2, CODEX_HARNESS_ID, CODEX_DISPLAY_NAME, CODEX_TESTED_VERSIONS, defaultCommandExecutor, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
 var init_discovery2 = __esm({
   "adapters/codex-cli/dist/discovery.js"() {
     "use strict";
+    init_dist();
     execFileAsync2 = promisify2(execFile2);
+    CODEX_HARNESS_ID = "codex-cli";
+    CODEX_DISPLAY_NAME = "Codex CLI";
+    CODEX_TESTED_VERSIONS = ["0.156.1", "0.157.1"];
+    defaultCommandExecutor = async (file, args) => {
+      try {
+        const { stdout, stderr } = await execFileAsync2(file, args, {
+          timeout: 5e3,
+          encoding: "utf8"
+        });
+        return { stdout, stderr, exitCode: 0 };
+      } catch (err) {
+        const error = err;
+        return {
+          stdout: error.stdout ?? "",
+          stderr: error.stderr ?? error.message ?? String(err),
+          exitCode: error.code ?? 1
+        };
+      }
+    };
     CODEX_HEADER_MAX_BYTES = 1024 * 1024;
     CODEX_TAIL_BYTES = 16 * 1024;
     CODEX_READ_CHUNK_BYTES = 64 * 1024;
@@ -5653,170 +5414,2032 @@ var init_discovery2 = __esm({
 });
 
 // adapters/codex-cli/dist/config-planner.js
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function serializeTomlString(value) {
+  return JSON.stringify(value);
+}
+function parseTomlStringLiteral(source) {
+  const trimmed = source.trimStart();
+  if (trimmed.startsWith("'")) {
+    const end = trimmed.indexOf("'", 1);
+    return end < 0 ? void 0 : trimmed.slice(1, end);
+  }
+  const match = trimmed.match(/^"(?:\\.|[^"\\])*"/);
+  if (!match) {
+    return void 0;
+  }
+  try {
+    const parsed = JSON.parse(match[0]);
+    return typeof parsed === "string" ? parsed : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function findTomlStringProperty(source, property) {
+  const match = new RegExp(`(?:^|[,\\s])${escapeRegExp(property)}\\s*=\\s*`).exec(source);
+  if (!match) {
+    return void 0;
+  }
+  return parseTomlStringLiteral(source.slice(match.index + match[0].length));
+}
+function findTomlLineStringProperty(source, property) {
+  const match = new RegExp(`^${escapeRegExp(property)}\\s*=\\s*`).exec(source);
+  if (!match) {
+    return void 0;
+  }
+  return parseTomlStringLiteral(source.slice(match[0].length));
+}
+function resolveServerConfig(serverConfigOrUrl) {
+  if (!serverConfigOrUrl) {
+    return {
+      command: CANONICAL_RESIN_MCP_COMMAND,
+      args: [...CANONICAL_RESIN_MCP_ARGS]
+    };
+  }
+  if (typeof serverConfigOrUrl === "string") {
+    if (serverConfigOrUrl.startsWith("http://") || serverConfigOrUrl.startsWith("https://")) {
+      return { url: serverConfigOrUrl };
+    }
+    return {
+      command: serverConfigOrUrl,
+      args: []
+    };
+  }
+  const config = { ...serverConfigOrUrl };
+  if (config.command === void 0 && config.url === void 0) {
+    config.command = CANONICAL_RESIN_MCP_COMMAND;
+    if (config.args === void 0) {
+      config.args = [...CANONICAL_RESIN_MCP_ARGS];
+    }
+  }
+  return config;
+}
+function updateTomlMcpConfig(content, serverName = DEFAULT_GATEWAY_SERVER_NAME, serverConfigOrUrl, configuredGatewayUrl) {
+  const serverConfig = resolveServerConfig(serverConfigOrUrl);
+  const trimmed = content.trim();
+  if (!trimmed) {
+    let freshSection = `[mcp_servers.${serverName}]
+`;
+    if (serverConfig.command !== void 0) {
+      freshSection += `command = ${serializeTomlString(serverConfig.command)}
+`;
+      if (serverConfig.args !== void 0 && serverConfig.args.length > 0) {
+        freshSection += `args = ${JSON.stringify(serverConfig.args)}
+`;
+      }
+    } else if (serverConfig.url !== void 0) {
+      freshSection += `url = ${serializeTomlString(serverConfig.url)}
+`;
+    }
+    return `# Codex CLI Configuration
+
+${freshSection}`;
+  }
+  const existingServer = parseCodexTomlServerConfig(content, serverName);
+  const hasLegacyAlias = LEGACY_RESIN_MCP_SERVER_ALIASES.some((alias) => alias !== serverName && parseCodexTomlServerConfig(content, alias) !== null);
+  if (!hasLegacyAlias && serverConfig.command === CANONICAL_RESIN_MCP_COMMAND && (serverConfig.args === void 0 || serverConfig.args.length === 0) && serverConfig.url === void 0 && serverConfig.type === void 0 && serverConfig.env === void 0 && existingServer?.command === CANONICAL_RESIN_MCP_COMMAND && existingServer.url === void 0) {
+    return content;
+  }
+  let cleanedContent = content;
+  const legacyExtraLines = [];
+  for (const alias of [...LEGACY_RESIN_MCP_SERVER_ALIASES, serverName]) {
+    const escapedAlias = escapeRegExp(alias);
+    const sectionRegex = new RegExp(`^[ \\t]*\\[[ \\t]*(?:"(?:mcp_servers|mcpServers)"|'(?:mcp_servers|mcpServers)'|mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*\\][ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`, "m");
+    const sectionMatch = cleanedContent.match(sectionRegex);
+    if (sectionMatch && sectionMatch.index !== void 0) {
+      const sectionStart = sectionMatch.index;
+      const bodyStart = sectionStart + sectionMatch[0].length;
+      const rest = cleanedContent.slice(bodyStart);
+      const nextSectionMatch = rest.match(/^[ \t]*\[/m);
+      const sectionEnd = nextSectionMatch && nextSectionMatch.index !== void 0 ? bodyStart + nextSectionMatch.index : cleanedContent.length;
+      const sectionBody = cleanedContent.slice(bodyStart, sectionEnd);
+      const urlMatch = sectionBody.match(/url[ \t]*=[ \t]*["']([^"']+)["']/);
+      const commandMatch = sectionBody.match(/command[ \t]*=[ \t]*["']([^"']+)["']/);
+      const entryObj = {
+        url: urlMatch ? urlMatch[1] : void 0,
+        command: commandMatch ? commandMatch[1] : void 0
+      };
+      if (alias === serverName || isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)) {
+        const lines2 = sectionBody.split(/\r?\n/);
+        let skippingArgs = false;
+        for (const line of lines2) {
+          if (skippingArgs) {
+            if (line.includes("]")) {
+              skippingArgs = false;
+            }
+            continue;
+          }
+          if (/^\s*args\s*=/.test(line)) {
+            skippingArgs = !line.includes("]");
+            continue;
+          }
+          const trimmedLine = line.trim();
+          if (trimmedLine && !/^\s*url\s*=/.test(line) && !/^\s*command\s*=/.test(line) && !/^\s*type\s*=/.test(line)) {
+            legacyExtraLines.push(line);
+          }
+        }
+        cleanedContent = `${cleanedContent.slice(0, sectionStart)}${cleanedContent.slice(sectionEnd)}`;
+      }
+    }
+    const dottedInlineRegex = new RegExp(`^[ \\t]*(?:mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*=[ \\t]*\\{([^\\r\\n]*)\\}[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`, "m");
+    const dottedInlineMatch = cleanedContent.match(dottedInlineRegex);
+    if (dottedInlineMatch && dottedInlineMatch.index !== void 0) {
+      const inlineBody = dottedInlineMatch[1] ?? "";
+      const urlMatch = inlineBody.match(/url\s*=\s*["']([^"']+)["']/);
+      const commandMatch = inlineBody.match(/command\s*=\s*["']([^"']+)["']/);
+      if (alias === serverName || isRecognizedResinMcpEntry({
+        url: urlMatch?.[1],
+        command: commandMatch?.[1]
+      }, configuredGatewayUrl ?? serverConfig.url)) {
+        for (const extraMatch of inlineBody.matchAll(/\b(headers|env)\s*=\s*(\{[^}]*\})/g)) {
+          legacyExtraLines.push(`${extraMatch[1]} = ${extraMatch[2]}`);
+        }
+        const removeStart = dottedInlineMatch.index;
+        const removeEnd = removeStart + dottedInlineMatch[0].length;
+        cleanedContent = `${cleanedContent.slice(0, removeStart)}${cleanedContent.slice(removeEnd)}`;
+      }
+    }
+    const containerSectionRegex = /^[ \t]*\[[ \t]*(?:mcp_servers|mcpServers|mcp\.servers)[ \t]*\][ \t]*(?:#[^\r\n]*)?(?:\r?\n)?/m;
+    const containerMatch = cleanedContent.match(containerSectionRegex);
+    if (containerMatch && containerMatch.index !== void 0) {
+      const containerStart = containerMatch.index + containerMatch[0].length;
+      const rest = cleanedContent.slice(containerStart);
+      const nextSectionMatch = rest.match(/^[ \t]*\[/m);
+      const containerEnd = nextSectionMatch && nextSectionMatch.index !== void 0 ? containerStart + nextSectionMatch.index : cleanedContent.length;
+      const containerBody = cleanedContent.slice(containerStart, containerEnd);
+      const inlineInContainerRegex = new RegExp(`^[ \\t]*(?:"${escapedAlias}"|'${escapedAlias}'|${escapedAlias})[ \\t]*=[ \\t]*\\{([^\\r\\n]*)\\}[ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`, "m");
+      const matchInContainer = containerBody.match(inlineInContainerRegex);
+      if (matchInContainer && matchInContainer.index !== void 0) {
+        const inlineBody = matchInContainer[1];
+        const urlMatch = inlineBody.match(/url[ \t]*=[ \t]*["']([^"']+)["']/);
+        const commandMatch = inlineBody.match(/command[ \t]*=[ \t]*["']([^"']+)["']/);
+        const entryObj = {
+          url: urlMatch ? urlMatch[1] : void 0,
+          command: commandMatch ? commandMatch[1] : void 0
+        };
+        if (alias === serverName || isRecognizedResinMcpEntry(entryObj, configuredGatewayUrl ?? serverConfig.url)) {
+          const inlineBody2 = matchInContainer[1] ?? "";
+          for (const extraMatch of inlineBody2.matchAll(/\b(headers|env)\s*=\s*(\{[^}]*\})/g)) {
+            legacyExtraLines.push(`${extraMatch[1]} = ${extraMatch[2]}`);
+          }
+          const removeStart = containerStart + matchInContainer.index;
+          const removeEnd = removeStart + matchInContainer[0].length;
+          cleanedContent = `${cleanedContent.slice(0, removeStart)}${cleanedContent.slice(removeEnd)}`;
+        }
+      }
+    }
+  }
+  const escapedServerName = escapeRegExp(serverName);
+  const canonicalSectionRegex = new RegExp(`^[ \\t]*\\[[ \\t]*(?:mcp_servers|mcpServers|mcp\\.servers)[ \\t]*\\.[ \\t]*(?:"${escapedServerName}"|'${escapedServerName}'|${escapedServerName})[ \\t]*\\][ \\t]*(?:#[^\\r\\n]*)?(?:\\r?\\n)?`, "m");
+  const match = cleanedContent.match(canonicalSectionRegex);
+  if (match && match.index !== void 0) {
+    const sectionStart = match.index;
+    const bodyStart = sectionStart + match[0].length;
+    const rest = cleanedContent.slice(bodyStart);
+    const nextSectionMatch = rest.match(/^[ \t]*\[/m);
+    const sectionEnd = nextSectionMatch && nextSectionMatch.index !== void 0 ? bodyStart + nextSectionMatch.index : cleanedContent.length;
+    const sectionBody = cleanedContent.slice(bodyStart, sectionEnd);
+    const lines2 = sectionBody.split(/\r?\n/);
+    const updatedLines = [];
+    let commandHandled = false;
+    let urlHandled = false;
+    let argsHandled = false;
+    for (const line of lines2) {
+      if (/^\s*url\s*=/m.test(line)) {
+        if (serverConfig.command !== void 0) {
+          if (!commandHandled) {
+            updatedLines.push(`command = ${serializeTomlString(serverConfig.command)}`);
+            commandHandled = true;
+          }
+        } else if (serverConfig.url !== void 0) {
+          updatedLines.push(`url = ${serializeTomlString(serverConfig.url)}`);
+          urlHandled = true;
+        }
+      } else if (/^\s*command\s*=/m.test(line)) {
+        if (serverConfig.command !== void 0) {
+          updatedLines.push(`command = ${serializeTomlString(serverConfig.command)}`);
+          commandHandled = true;
+        } else if (serverConfig.url !== void 0) {
+          if (!urlHandled) {
+            updatedLines.push(`url = ${serializeTomlString(serverConfig.url)}`);
+            urlHandled = true;
+          }
+        }
+      } else if (/^\s*args\s*=/m.test(line)) {
+        if (serverConfig.args !== void 0) {
+          if (serverConfig.args.length > 0) {
+            updatedLines.push(`args = ${JSON.stringify(serverConfig.args)}`);
+          }
+          argsHandled = true;
+        } else {
+          updatedLines.push(line);
+        }
+      } else {
+        updatedLines.push(line);
+      }
+    }
+    if (serverConfig.command !== void 0 && !commandHandled) {
+      updatedLines.unshift(`command = ${serializeTomlString(serverConfig.command)}`);
+    } else if (serverConfig.url !== void 0 && !urlHandled) {
+      updatedLines.unshift(`url = ${serializeTomlString(serverConfig.url)}`);
+    }
+    if (serverConfig.args !== void 0 && serverConfig.args.length > 0 && !argsHandled) {
+      updatedLines.push(`args = ${JSON.stringify(serverConfig.args)}`);
+    }
+    let newBody = updatedLines.join("\n");
+    newBody = newBody.replace(/\n+$/, "");
+    const before = cleanedContent.slice(0, sectionStart);
+    const after = cleanedContent.slice(sectionEnd);
+    const newSection2 = `${match[0]}${newBody}
+`;
+    return `${before}${newSection2}${after}`;
+  }
+  const lines = [`[mcp_servers.${serverName}]`];
+  if (serverConfig.command !== void 0) {
+    lines.push(`command = ${serializeTomlString(serverConfig.command)}`);
+    if (serverConfig.args !== void 0 && serverConfig.args.length > 0) {
+      lines.push(`args = ${JSON.stringify(serverConfig.args)}`);
+    }
+  } else if (serverConfig.url !== void 0) {
+    lines.push(`url = ${serializeTomlString(serverConfig.url)}`);
+  }
+  if (serverConfig.type !== void 0) {
+    lines.push(`type = ${serializeTomlString(serverConfig.type)}`);
+  }
+  if (serverConfig.env !== void 0) {
+    lines.push(`env = ${JSON.stringify(serverConfig.env)}`);
+  }
+  for (const extra of legacyExtraLines) {
+    lines.push(extra);
+  }
+  const newSection = lines.join("\n");
+  return `${cleanedContent.trimEnd()}
+
+${newSection}
+`;
+}
+function updateJsonMcpConfig(content, serverName = DEFAULT_GATEWAY_SERVER_NAME, serverConfigOrUrl, configuredGatewayUrl) {
+  const serverConfig = resolveServerConfig(serverConfigOrUrl);
+  let doc = {};
+  const trimmed = content.trim();
+  if (trimmed.length > 0) {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        doc = parsed;
+      }
+    } catch {
+      doc = {};
+    }
+  }
+  const targetKey = doc.mcpServers ? "mcpServers" : doc.mcp_servers ? "mcp_servers" : "mcpServers";
+  const existingServers = doc[targetKey] && doc[targetKey] instanceof Object && !Array.isArray(doc[targetKey]) ? { ...doc[targetKey] } : {};
+  const updatedServers = migrateJsonMcpServers(existingServers, serverConfig, configuredGatewayUrl ?? serverConfig.url, serverName);
+  const updatedConfig = {
+    ...doc,
+    [targetKey]: updatedServers
+  };
+  return `${JSON.stringify(updatedConfig, null, 2)}
+`;
+}
+async function planCodexMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const serverName = options.serverName ?? DEFAULT_GATEWAY_SERVER_NAME;
+  let currentContent = null;
+  if (options.currentContent !== void 0) {
+    currentContent = options.currentContent;
+  } else {
+    currentContent = await fsBridge.readFile(options.targetPath);
+  }
+  const explicitType = options.serverType ?? options.type;
+  let serverEntry;
+  if (options.command !== void 0) {
+    serverEntry = {
+      command: options.command,
+      args: options.args ?? []
+    };
+    if (explicitType !== void 0) {
+      serverEntry.type = explicitType;
+    }
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+    if (options.url !== void 0) {
+      serverEntry.url = options.url;
+    }
+  } else if (options.url !== void 0 && explicitType === "sse") {
+    serverEntry = {
+      type: "sse",
+      url: options.url
+    };
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+  } else {
+    serverEntry = {
+      command: CANONICAL_RESIN_MCP_COMMAND,
+      args: options.args !== void 0 ? options.args : [...CANONICAL_RESIN_MCP_ARGS]
+    };
+    if (explicitType !== void 0) {
+      serverEntry.type = explicitType;
+    }
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+  }
+  const configuredGatewayUrl = options.gatewayUrl ?? options.url;
+  const isJson = options.targetPath.endsWith(".json");
+  const plannedContent = isJson ? updateJsonMcpConfig(currentContent ?? "", serverName, serverEntry, configuredGatewayUrl) : updateTomlMcpConfig(currentContent ?? "", serverName, serverEntry, configuredGatewayUrl);
+  const diffDescription = `Register Resin Gateway MCP server (${serverName} -> ${serverEntry.command ?? serverEntry.url}) in ${options.targetPath}`;
+  return planConfigMutation({
+    harnessId: CODEX_HARNESS_ID,
+    targetPath: options.targetPath,
+    currentContent,
+    plannedContent,
+    description: diffDescription,
+    metadata: {
+      serverName,
+      serverConfig: serverEntry,
+      changesSummary: isJson ? `Add/update mcpServers.${serverName}` : `Add/update [mcp_servers.${serverName}]`
+    }
+  });
+}
+function parseTomlKeySegments(source) {
+  const segments = [];
+  let index = 0;
+  const trimmed = source.trim();
+  if (!trimmed)
+    return null;
+  while (index < trimmed.length) {
+    while (index < trimmed.length && /\s/.test(trimmed[index])) {
+      index++;
+    }
+    if (index >= trimmed.length)
+      break;
+    const char = trimmed[index];
+    if (char === '"' || char === "'") {
+      const quote = char;
+      index++;
+      let token = "";
+      let escaped = false;
+      let closed = false;
+      while (index < trimmed.length) {
+        const c = trimmed[index];
+        index++;
+        if (quote === '"' && escaped) {
+          token += c;
+          escaped = false;
+        } else if (quote === '"' && c === "\\") {
+          escaped = true;
+        } else if (c === quote) {
+          closed = true;
+          break;
+        } else {
+          token += c;
+        }
+      }
+      if (!closed)
+        return null;
+      segments.push(token);
+    } else {
+      let token = "";
+      while (index < trimmed.length && trimmed[index] !== "." && !/\s/.test(trimmed[index])) {
+        token += trimmed[index];
+        index++;
+      }
+      if (!token)
+        return null;
+      segments.push(token);
+    }
+    while (index < trimmed.length && /\s/.test(trimmed[index])) {
+      index++;
+    }
+    if (index < trimmed.length) {
+      if (trimmed[index] === ".") {
+        index++;
+      } else {
+        return null;
+      }
+    }
+  }
+  return segments.length > 0 ? segments : null;
+}
+function isContainerPath(segments) {
+  if (segments.length === 1 && (segments[0] === "mcp_servers" || segments[0] === "mcpServers")) {
+    return true;
+  }
+  if (segments.length === 2 && segments[0] === "mcp" && segments[1] === "servers") {
+    return true;
+  }
+  return false;
+}
+function isDedicatedServerSection(segments, serverName) {
+  if (segments.length === 2 && (segments[0] === "mcp_servers" || segments[0] === "mcpServers") && segments[1] === serverName) {
+    return true;
+  }
+  if (segments.length === 3 && segments[0] === "mcp" && segments[1] === "servers" && segments[2] === serverName) {
+    return true;
+  }
+  return false;
+}
+function applyDottedKeyValue(config, propSegments, valPart) {
+  const prop = propSegments[0];
+  if (prop === "command") {
+    config.command = parseTomlStringLiteral(valPart);
+  } else if (prop === "url") {
+    config.url = parseTomlStringLiteral(valPart);
+  } else if (prop === "type") {
+    config.type = parseTomlStringLiteral(valPart);
+  } else if (prop === "args") {
+    const m = valPart.match(/^\[([^\]]*)\]/);
+    if (m) {
+      const rawItems = m[1].split(",");
+      const parsedArgs = [];
+      for (const item of rawItems) {
+        const itemMatch = item.trim().match(/^["']([^"']*)["']$/);
+        if (itemMatch)
+          parsedArgs.push(itemMatch[1]);
+      }
+      config.args = parsedArgs;
+    }
+  } else if (prop === "env") {
+    if (propSegments.length === 2) {
+      const envKey = propSegments[1];
+      const m = valPart.match(/^["']([^"']*)["']/);
+      if (m) {
+        if (!config.env)
+          config.env = {};
+        config.env[envKey] = m[1];
+      }
+    } else {
+      const m = valPart.match(/^\{([^}]+)\}/);
+      if (m) {
+        const envObj = {};
+        const pairs = m[1].split(",");
+        for (const pair of pairs) {
+          const pairMatch = pair.trim().match(/^(?:["']([^"']+)["']|([a-zA-Z0-9_-]+))\s*=\s*["']([^"']*)["']/);
+          if (pairMatch) {
+            const key = pairMatch[1] ?? pairMatch[2];
+            const val = pairMatch[3];
+            envObj[key] = val;
+          }
+        }
+        config.env = envObj;
+      }
+    }
+  }
+}
+function parseTomlServerBody(body) {
+  const result = {};
+  const lines = body.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#"))
+      continue;
+    const command = findTomlLineStringProperty(trimmed, "command");
+    if (command !== void 0) {
+      result.command = command;
+      continue;
+    }
+    const url = findTomlLineStringProperty(trimmed, "url");
+    if (url !== void 0) {
+      result.url = url;
+      continue;
+    }
+    const type = findTomlLineStringProperty(trimmed, "type");
+    if (type !== void 0) {
+      result.type = type;
+      continue;
+    }
+    const argsMatch = trimmed.match(/^args\s*=\s*\[([^\]]*)\]/);
+    if (argsMatch) {
+      const rawItems = argsMatch[1].split(",");
+      const parsedArgs = [];
+      for (const item of rawItems) {
+        const itemMatch = item.trim().match(/^["']([^"']*)["']$/);
+        if (itemMatch) {
+          parsedArgs.push(itemMatch[1]);
+        }
+      }
+      result.args = parsedArgs;
+      continue;
+    }
+    const envDottedMatch = trimmed.match(/^env\.(?:["']([^"']+)["']|([a-zA-Z0-9_.-]+))\s*=\s*["']([^"']*)["']/);
+    if (envDottedMatch) {
+      const key = envDottedMatch[1] ?? envDottedMatch[2];
+      const val = envDottedMatch[3];
+      if (!result.env)
+        result.env = {};
+      result.env[key] = val;
+      continue;
+    }
+    const envMatch = trimmed.match(/^env\s*=\s*\{([^}]+)\}/);
+    if (envMatch) {
+      const envObj = {};
+      const pairs = envMatch[1].split(",");
+      for (const pair of pairs) {
+        const pairMatch = pair.trim().match(/^(?:["']([^"']+)["']|([a-zA-Z0-9_-]+))\s*=\s*["']([^"']*)["']/);
+        if (pairMatch) {
+          const key = pairMatch[1] ?? pairMatch[2];
+          const val = pairMatch[3];
+          envObj[key] = val;
+        }
+      }
+      result.env = envObj;
+    }
+  }
+  return result;
+}
+function parseTomlInlineServerBody(inlineContent) {
+  const result = {};
+  const command = findTomlStringProperty(inlineContent, "command");
+  if (command !== void 0) {
+    result.command = command;
+  }
+  const url = findTomlStringProperty(inlineContent, "url");
+  if (url !== void 0) {
+    result.url = url;
+  }
+  const type = findTomlStringProperty(inlineContent, "type");
+  if (type !== void 0) {
+    result.type = type;
+  }
+  const argsMatch = inlineContent.match(/args\s*=\s*\[([^\]]*)\]/);
+  if (argsMatch) {
+    const rawItems = argsMatch[1].split(",");
+    const parsedArgs = [];
+    for (const item of rawItems) {
+      const itemMatch = item.trim().match(/^["']([^"']*)["']$/);
+      if (itemMatch) {
+        parsedArgs.push(itemMatch[1]);
+      }
+    }
+    result.args = parsedArgs;
+  }
+  const envMatch = inlineContent.match(/env\s*=\s*\{([^}]+)\}/);
+  if (envMatch) {
+    const envObj = {};
+    const pairs = envMatch[1].split(",");
+    for (const pair of pairs) {
+      const pairMatch = pair.trim().match(/^(?:["']([^"']+)["']|([a-zA-Z0-9_-]+))\s*=\s*["']([^"']*)["']/);
+      if (pairMatch) {
+        const key = pairMatch[1] ?? pairMatch[2];
+        const val = pairMatch[3];
+        envObj[key] = val;
+      }
+    }
+    result.env = envObj;
+  }
+  return result;
+}
+function parseCodexTomlServerConfig(content, serverName = DEFAULT_GATEWAY_SERVER_NAME) {
+  const trimmed = content.trim();
+  if (!trimmed)
+    return null;
+  let currentSectionPath = null;
+  let dedicatedSectionBodyLines = null;
+  let containerServerConfig = null;
+  let topLevelServerConfig = null;
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const line = rawLine.replace(/#.*$/, "").trim();
+    if (!line)
+      continue;
+    const headerMatch = rawLine.match(/^[ \t]*\[([^[\]]+)\][ \t]*(?:#[^\r\n]*)?$/);
+    if (headerMatch && headerMatch[1]) {
+      if (dedicatedSectionBodyLines !== null) {
+        break;
+      }
+      const headerContent = headerMatch[1].trim();
+      const segments = parseTomlKeySegments(headerContent);
+      if (segments && isDedicatedServerSection(segments, serverName)) {
+        currentSectionPath = segments;
+        dedicatedSectionBodyLines = [];
+        continue;
+      }
+      if (segments && isContainerPath(segments)) {
+        currentSectionPath = segments;
+        continue;
+      }
+      currentSectionPath = segments;
+      continue;
+    }
+    if (dedicatedSectionBodyLines !== null) {
+      dedicatedSectionBodyLines.push(rawLine);
+      continue;
+    }
+    if (currentSectionPath && isContainerPath(currentSectionPath)) {
+      const inlineMatch = rawLine.match(/^[ \t]*(?:"([^"]+)"|'([^']+)'|([a-zA-Z0-9_-]+))[ \t]*=[ \t]*\{([^}]+)\}/);
+      if (inlineMatch) {
+        const key = inlineMatch[1] ?? inlineMatch[2] ?? inlineMatch[3];
+        if (key === serverName) {
+          containerServerConfig = parseTomlInlineServerBody(inlineMatch[4]);
+          continue;
+        }
+      }
+      const equalsIdx = line.indexOf("=");
+      if (equalsIdx !== -1) {
+        const keyPart = line.slice(0, equalsIdx).trim();
+        const valPart = line.slice(equalsIdx + 1).trim();
+        const keySegments = parseTomlKeySegments(keyPart);
+        if (keySegments && keySegments.length >= 2 && keySegments[0] === serverName) {
+          if (!containerServerConfig)
+            containerServerConfig = {};
+          applyDottedKeyValue(containerServerConfig, keySegments.slice(1), valPart);
+        }
+      }
+      continue;
+    }
+    if (currentSectionPath === null) {
+      const equalsIdx = rawLine.indexOf("=");
+      if (equalsIdx !== -1) {
+        const keyPart = rawLine.slice(0, equalsIdx).trim();
+        const valPart = rawLine.slice(equalsIdx + 1).trim();
+        const keySegments = parseTomlKeySegments(keyPart);
+        if (keySegments) {
+          if (isDedicatedServerSection(keySegments, serverName) && valPart.startsWith("{") && valPart.includes("}")) {
+            const tableContent = valPart.slice(valPart.indexOf("{") + 1, valPart.lastIndexOf("}"));
+            topLevelServerConfig = parseTomlInlineServerBody(tableContent);
+            continue;
+          }
+          if (keySegments.length >= 3) {
+            const containerSegs = keySegments.slice(0, -2);
+            const sNameSeg = keySegments[keySegments.length - 2];
+            const propSeg = keySegments[keySegments.length - 1];
+            if (isContainerPath(containerSegs) && sNameSeg === serverName) {
+              if (!topLevelServerConfig)
+                topLevelServerConfig = {};
+              applyDottedKeyValue(topLevelServerConfig, [propSeg], valPart);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (dedicatedSectionBodyLines !== null) {
+    return parseTomlServerBody(dedicatedSectionBodyLines.join("\n"));
+  }
+  if (containerServerConfig !== null) {
+    return containerServerConfig;
+  }
+  if (topLevelServerConfig !== null) {
+    return topLevelServerConfig;
+  }
+  return null;
+}
+var DEFAULT_GATEWAY_SERVER_NAME;
 var init_config_planner2 = __esm({
   "adapters/codex-cli/dist/config-planner.js"() {
     "use strict";
     init_dist();
     init_discovery2();
+    DEFAULT_GATEWAY_SERVER_NAME = CANONICAL_RESIN_MCP_SERVER_KEY;
   }
 });
 
-// adapters/codex-cli/dist/refresh.js
-var CODEX_DEFAULT_REFRESH_CAPABILITY;
-var init_refresh3 = __esm({
-  "adapters/codex-cli/dist/refresh.js"() {
+// adapters/codex-cli/dist/instructions.js
+import path6 from "node:path";
+function resolveCodexHome(customHome, env = {}) {
+  const codexHome = env.CODEX_HOME;
+  return codexHome && codexHome.trim().length > 0 ? path6.resolve(codexHome) : path6.join(customHome, ".codex");
+}
+function resolveCodexAgentsPath(customHome, env = {}) {
+  return path6.join(resolveCodexHome(customHome, env), "AGENTS.md");
+}
+var CODEX_GUIDANCE_MARKERS, CODEX_RESIN_GUIDANCE;
+var init_instructions = __esm({
+  "adapters/codex-cli/dist/instructions.js"() {
     "use strict";
-    init_dist();
-    CODEX_DEFAULT_REFRESH_CAPABILITY = Object.freeze({
-      supportsNativeListChange: false,
-      supportsContextNudge: false,
-      requiresSessionRestart: true,
-      description: "Codex CLI loads MCP tools at session startup; catalog updates take effect on the next session without modifying config files."
-    });
+    CODEX_GUIDANCE_MARKERS = {
+      start: "<!-- resin:codex-guidance:start -->",
+      end: "<!-- resin:codex-guidance:end -->"
+    };
+    CODEX_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are nested tools named \`mcp__resin__<name>\`; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first \`exec\` call, print them next to your own first look at the task: \`text(ALL_TOOLS.filter(t => t.name.startsWith("mcp__resin__") && !/__(search_tools|get_tool_schema|invoke_tool|manage_tools)$/.test(t.name)).map(t => t.name + "\\n" + t.description).join("\\n\\n"))\`.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Several at once: \`const [a, b] = await Promise.all([tools.mcp__resin__x({}), tools.mcp__resin__y({})]); text(a.content[0].text); text(b.content[0].text);\`. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
+`;
   }
 });
 
-// adapters/codex-cli/dist/source.js
-var CODEX_READ_CHUNK_BYTES2, CODEX_READ_QUANTUM_BYTES, CODEX_MAX_PENDING_RECORD_BYTES;
-var init_source3 = __esm({
-  "adapters/codex-cli/dist/source.js"() {
-    "use strict";
-    init_discovery2();
-    CODEX_READ_CHUNK_BYTES2 = 64 * 1024;
-    CODEX_READ_QUANTUM_BYTES = 1024 * 1024;
-    CODEX_MAX_PENDING_RECORD_BYTES = 8 * 1024 * 1024;
+// adapters/codex-cli/dist/install.js
+import path7 from "node:path";
+function resolveCodexConfigPath(home, env) {
+  const configPath = env.CODEX_CONFIG_PATH;
+  if (configPath && configPath.trim().length > 0) {
+    return path7.resolve(configPath);
   }
-});
-
-// adapters/codex-cli/dist/adapter.js
-var CODEX_OBSERVATION_FIDELITY, CODEX_ADAPTER_CAPABILITIES;
-var init_adapter3 = __esm({
-  "adapters/codex-cli/dist/adapter.js"() {
+  return path7.join(resolveCodexHome(home, env), "config.toml");
+}
+var codexInstallHarness;
+var init_install2 = __esm({
+  "adapters/codex-cli/dist/install.js"() {
     "use strict";
-    init_dist();
     init_config_planner2();
     init_discovery2();
-    init_refresh3();
-    init_source3();
-    CODEX_OBSERVATION_FIDELITY = Object.freeze(createObservationFidelity({
-      transcriptAvailability: "file_tail",
-      toolCallVisibility: "full",
-      toolResultVisibility: "full",
-      subagentVisibility: "shallow",
-      mcpListChange: "requires_restart",
-      contextNudge: "unsupported",
-      notes: "File-tailing of JSONL rollouts with full tool call and result visibility; session restart required for MCP catalog updates."
-    }));
-    CODEX_ADAPTER_CAPABILITIES = Object.freeze({
-      fidelity: CODEX_OBSERVATION_FIDELITY,
-      refresh: CODEX_DEFAULT_REFRESH_CAPABILITY,
-      supportedTransports: ["stdio", "sse"],
-      supportsMultiWorkspace: true,
-      supportsConcurrentSessions: true,
-      features: {
-        atomicConfig: true,
-        fileTailing: true,
-        subagents: true
+    init_instructions();
+    codexInstallHarness = {
+      id: "codex-cli",
+      displayName: "Codex CLI",
+      shortName: "Codex CLI",
+      adapterPackage: "@resin/adapter-codex",
+      testedVersions: CODEX_TESTED_VERSIONS,
+      knownLimits: [
+        "No native-tool invoker: learned tools replay Codex built-in steps only as shell commands and apply_patch edits; web search and multi-agent steps are recorded but not replayable.",
+        "Multi-agent child threads are separate rollouts, bound to the parent's project through their own session_meta cwd.",
+        "Compaction boundaries are captured, but Codex does not record the token count after compaction."
+      ],
+      probeInstallation: ({ targetPath, home, env }) => probeCodexInstallation({ customConfigPath: targetPath, env: { ...env, HOME: home } }),
+      mcpConfig: {
+        resolvePath: resolveCodexConfigPath,
+        uninstallPaths: (home, env) => [
+          resolveCodexConfigPath(home, env),
+          path7.join(home, ".codex", "config.toml"),
+          path7.join(home, ".codex", "config.json"),
+          path7.join(home, ".codex", "mcp.json")
+        ],
+        format: "codex-toml",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcpServers", "mcp_servers"],
+        transports: ["stdio", "sse"],
+        planRegistration: ({ targetPath, command, args, fsBridge }) => planCodexMcpConfig({ targetPath, command, args: [...args], fsBridge })
+      },
+      guidance: {
+        resolvePath: resolveCodexAgentsPath,
+        markers: CODEX_GUIDANCE_MARKERS,
+        body: CODEX_RESIN_GUIDANCE.trimEnd()
       }
-    });
+    };
   }
 });
 
-// adapters/codex-cli/dist/code-command.js
-var init_code_command = __esm({
-  "adapters/codex-cli/dist/code-command.js"() {
-    "use strict";
+// adapters/copilot-cli/dist/discovery.js
+import { constants as fsConstants } from "node:fs";
+import * as fs3 from "node:fs/promises";
+import * as path8 from "node:path";
+function resolveCopilotHome(home, env) {
+  const override = env.COPILOT_HOME?.trim();
+  if (override) {
+    return override === "~" || override.startsWith("~/") ? path8.join(home, override.slice(1)) : path8.resolve(override);
   }
-});
-
-// adapters/codex-cli/dist/file-change.js
-var ChangeSchema, FileChangeItemSchema;
-var init_file_change = __esm({
-  "adapters/codex-cli/dist/file-change.js"() {
-    "use strict";
-    init_zod();
-    ChangeSchema = external_exports.discriminatedUnion("type", [
-      external_exports.object({ type: external_exports.literal("update"), unified_diff: external_exports.string(), move_path: external_exports.null() }).strict(),
-      external_exports.object({ type: external_exports.literal("add"), content: external_exports.string() }).strict(),
-      external_exports.object({ type: external_exports.literal("delete"), content: external_exports.string() }).strict()
-    ]);
-    FileChangeItemSchema = external_exports.object({
-      type: external_exports.literal("FileChange"),
-      status: external_exports.literal("completed"),
-      changes: external_exports.record(external_exports.string(), ChangeSchema)
-    });
+  return path8.join(home, ".copilot");
+}
+function resolveCopilotMcpConfigPath(home, env) {
+  return path8.join(resolveCopilotHome(home, env), COPILOT_MCP_CONFIG_FILENAME);
+}
+function resolveCopilotInstructionsPath(home, env) {
+  return path8.join(resolveCopilotHome(home, env), COPILOT_INSTRUCTIONS_FILENAME);
+}
+async function findCopilotExecutable(executable, env) {
+  const candidates = executable && executable.includes(path8.sep) ? [executable] : (env.PATH ?? "").split(path8.delimiter).filter(Boolean).map((dir) => path8.join(dir, executable ?? "copilot"));
+  for (const candidate of candidates) {
+    try {
+      if (!(await fs3.stat(candidate)).isFile())
+        continue;
+      await fs3.access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+    }
   }
-});
-
-// adapters/codex-cli/dist/decoder.js
-var CodexTranscriptValueSchema, CodexTranscriptPayloadSchema, CodexDecoderOptionsSchema;
-var init_decoder3 = __esm({
-  "adapters/codex-cli/dist/decoder.js"() {
+  return null;
+}
+async function readCopilotVersion(executablePath) {
+  let dir = path8.dirname(await fs3.realpath(executablePath).catch(() => executablePath));
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const pkg = JSON.parse(await fs3.readFile(path8.join(dir, "package.json"), "utf8"));
+      if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+    }
+    const parent = path8.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return null;
+}
+async function probeCopilotInstallation(options) {
+  const copilotHome = resolveCopilotHome(options.home, options.env);
+  const executable = await findCopilotExecutable(options.executable, options.env);
+  const version = executable ? await readCopilotVersion(executable) : null;
+  const homeExists = await isDirectory(copilotHome);
+  if (!executable && !homeExists) {
+    return null;
+  }
+  return {
+    harnessId: COPILOT_HARNESS_ID,
+    displayName: COPILOT_DISPLAY_NAME,
+    version: version ?? UNKNOWN_HARNESS_VERSION,
+    executablePath: executable ?? void 0,
+    configPath: path8.join(copilotHome, COPILOT_MCP_CONFIG_FILENAME),
+    homePath: copilotHome,
+    isInstalled: executable !== null,
+    status: executable ? "ready" : "missing_executable",
+    detectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    metadata: { copilotHome }
+  };
+}
+async function isDirectory(target) {
+  try {
+    return (await fs3.stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+var COPILOT_HARNESS_ID, COPILOT_DISPLAY_NAME, COPILOT_TESTED_VERSIONS, COPILOT_MCP_CONFIG_FILENAME, COPILOT_INSTRUCTIONS_FILENAME, COPILOT_ACTIVE_WINDOW_MS, COPILOT_PACKAGE_NAME;
+var init_discovery3 = __esm({
+  "adapters/copilot-cli/dist/discovery.js"() {
     "use strict";
     init_dist();
-    init_zod();
-    init_code_command();
-    init_file_change();
-    CodexTranscriptValueSchema = external_exports.lazy(() => external_exports.union([
-      external_exports.string(),
-      external_exports.number(),
-      external_exports.boolean(),
-      external_exports.null(),
-      external_exports.undefined(),
-      external_exports.array(CodexTranscriptValueSchema),
-      external_exports.record(CodexTranscriptValueSchema)
-    ]));
-    CodexTranscriptPayloadSchema = external_exports.record(CodexTranscriptValueSchema);
-    CodexDecoderOptionsSchema = external_exports.object({
-      sessionId: external_exports.string().optional(),
-      initialSequence: external_exports.number().optional(),
-      lastCausalSequence: external_exports.number().optional(),
-      workspaceId: external_exports.string().optional()
+    COPILOT_HARNESS_ID = "copilot-cli";
+    COPILOT_DISPLAY_NAME = "GitHub Copilot CLI";
+    COPILOT_TESTED_VERSIONS = ["1.0.88"];
+    COPILOT_MCP_CONFIG_FILENAME = "mcp-config.json";
+    COPILOT_INSTRUCTIONS_FILENAME = "copilot-instructions.md";
+    COPILOT_ACTIVE_WINDOW_MS = 2 * 60 * 1e3;
+    COPILOT_PACKAGE_NAME = "@github/copilot";
+  }
+});
+
+// adapters/copilot-cli/dist/config-planner.js
+function copilotResinServerEntry(command, args = CANONICAL_RESIN_MCP_ARGS) {
+  return { type: "local", command, args: [...args] };
+}
+function parseConfigDocument(content, targetPath) {
+  if (content === null || content.trim().length === 0)
+    return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (cause) {
+    throw new HarnessError(HarnessErrorCode.MALFORMED_RECORD, `Copilot MCP config ${targetPath} is not valid JSON`, {
+      harnessId: COPILOT_HARNESS_ID,
+      cause
     });
   }
-});
-
-// adapters/codex-cli/dist/index.js
-var init_dist3 = __esm({
-  "adapters/codex-cli/dist/index.js"() {
-    "use strict";
-    init_adapter3();
-    init_discovery2();
-    init_config_planner2();
-    init_decoder3();
-    init_source3();
-    init_refresh3();
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new HarnessError(HarnessErrorCode.MALFORMED_RECORD, `Copilot MCP config ${targetPath} is not a JSON object`, {
+      harnessId: COPILOT_HARNESS_ID
+    });
   }
-});
-
-// adapters/omp/dist/device-surface.js
-var init_device_surface = __esm({
-  "adapters/omp/dist/device-surface.js"() {
+  return parsed;
+}
+function renderCopilotMcpConfig(currentContent, targetPath, command, args = CANONICAL_RESIN_MCP_ARGS, gatewayUrl) {
+  const doc = parseConfigDocument(currentContent, targetPath);
+  const servers = doc.mcpServers !== null && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? doc.mcpServers : {};
+  const next = {
+    ...doc,
+    mcpServers: migrateJsonMcpServers(servers, copilotResinServerEntry(command, args), gatewayUrl, CANONICAL_RESIN_MCP_SERVER_KEY)
+  };
+  return `${JSON.stringify(next, null, 2)}
+`;
+}
+async function planCopilotMcpRegistration(options) {
+  const currentContent = await options.fsBridge.readFile(options.targetPath);
+  return planConfigMutation({
+    harnessId: COPILOT_HARNESS_ID,
+    targetPath: options.targetPath,
+    currentContent,
+    plannedContent: renderCopilotMcpConfig(currentContent, options.targetPath, options.command, options.args, options.gatewayUrl),
+    description: "Register Resin Gateway in GitHub Copilot CLI mcp-config.json"
+  });
+}
+async function verifyCopilotMcpRegistration(options) {
+  const content = await options.fsBridge.readFile(options.targetPath);
+  if (content === null)
+    return false;
+  let doc;
+  try {
+    doc = parseConfigDocument(content, options.targetPath);
+  } catch {
+    return false;
+  }
+  const servers = doc.mcpServers;
+  const entry = servers?.[CANONICAL_RESIN_MCP_SERVER_KEY];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry))
+    return false;
+  const type = entry.type;
+  const tools = entry.tools;
+  return (type === void 0 || type === "local" || type === "stdio") && entry.url === void 0 && entry.command === options.command && Array.isArray(entry.args) && entry.args.length === CANONICAL_RESIN_MCP_ARGS.length && entry.args.every((arg, index) => arg === CANONICAL_RESIN_MCP_ARGS[index]) && // Copilot treats a missing `tools` as all tools; an explicit list must include "*".
+  (tools === void 0 || Array.isArray(tools) && tools.includes("*"));
+}
+async function removeCopilotMcpRegistration(options) {
+  const content = await options.fsBridge.readFile(options.targetPath);
+  if (content === null)
+    return false;
+  let doc;
+  try {
+    doc = parseConfigDocument(content, options.targetPath);
+  } catch {
+    return false;
+  }
+  const servers = doc.mcpServers;
+  if (servers === null || typeof servers !== "object" || Array.isArray(servers))
+    return false;
+  const kept = Object.fromEntries(Object.entries(servers).filter(([key, entry]) => key !== CANONICAL_RESIN_MCP_SERVER_KEY && !isRecognizedResinMcpEntry(entry)));
+  if (Object.keys(kept).length === Object.keys(servers).length)
+    return false;
+  if (!options.dryRun) {
+    await options.fsBridge.writeFile(options.targetPath, `${JSON.stringify({ ...doc, mcpServers: kept }, null, 2)}
+`);
+  }
+  return true;
+}
+var init_config_planner3 = __esm({
+  "adapters/copilot-cli/dist/config-planner.js"() {
     "use strict";
-    init_config_planner3();
+    init_dist();
     init_discovery3();
   }
 });
 
-// adapters/omp/dist/decoder.js
-var init_decoder4 = __esm({
-  "adapters/omp/dist/decoder.js"() {
+// adapters/copilot-cli/dist/instructions.js
+var COPILOT_GUIDANCE_MARKERS, COPILOT_RESIN_GUIDANCE;
+var init_instructions2 = __esm({
+  "adapters/copilot-cli/dist/instructions.js"() {
     "use strict";
-    init_device_surface();
+    COPILOT_GUIDANCE_MARKERS = {
+      start: "<!-- resin:copilot-guidance:start -->",
+      end: "<!-- resin:copilot-guidance:end -->"
+    };
+    COPILOT_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server, named \`resin-<name>\` in your tool list (besides \`resin-search_tools\`, \`resin-get_tool_schema\`, \`resin-invoke_tool\` and \`resin-manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, go through the \`resin-\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
+- Resin can add tools while you work. A tool added during a task appears in your tool list on your next step; use it from then on.
+`;
+  }
+});
+
+// adapters/copilot-cli/dist/install.js
+var copilotInstallHarness;
+var init_install3 = __esm({
+  "adapters/copilot-cli/dist/install.js"() {
+    "use strict";
+    init_config_planner3();
+    init_discovery3();
+    init_instructions2();
+    copilotInstallHarness = {
+      id: COPILOT_HARNESS_ID,
+      displayName: COPILOT_DISPLAY_NAME,
+      shortName: "Copilot CLI",
+      adapterPackage: "@resin/adapter-copilot-cli",
+      testedVersions: COPILOT_TESTED_VERSIONS,
+      knownLimits: [
+        "Token usage is recorded per Copilot process run (session.shutdown), not per model call: per-call usage events are ephemeral and never written to session-state.",
+        "A Copilot process killed outright (not Ctrl+C, which still shuts down cleanly) writes no session.shutdown, so that run's token usage is not captured.",
+        "File edits are decoded from apply_patch (the tool GPT-family models use); other models' edit tools are captured as exact tool calls/results without file_edit events."
+      ],
+      probeInstallation: ({ home, env }) => probeCopilotInstallation({ home, env }),
+      mcpConfig: {
+        resolvePath: resolveCopilotMcpConfigPath,
+        uninstallPaths: (home, env) => [resolveCopilotMcpConfigPath(home, env)],
+        format: "json",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcpServers"],
+        transports: ["stdio", "http", "sse"],
+        planRegistration: ({ targetPath, command, args, gatewayUrl, fsBridge }) => planCopilotMcpRegistration({ targetPath, command, args, gatewayUrl, fsBridge }),
+        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyCopilotMcpRegistration({ targetPath, command, fsBridge }),
+        removeRegistration: ({ home, env, fsBridge, dryRun }) => removeCopilotMcpRegistration({
+          targetPath: resolveCopilotMcpConfigPath(home, env),
+          fsBridge,
+          dryRun
+        })
+      },
+      guidance: {
+        resolvePath: resolveCopilotInstructionsPath,
+        markers: COPILOT_GUIDANCE_MARKERS,
+        body: COPILOT_RESIN_GUIDANCE
+      }
+    };
+  }
+});
+
+// adapters/cursor-cli/dist/guards.js
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+var init_guards = __esm({
+  "adapters/cursor-cli/dist/guards.js"() {
+    "use strict";
+  }
+});
+
+// adapters/cursor-cli/dist/paths.js
+import path9 from "node:path";
+function resolveCursorHome(home) {
+  return path9.join(path9.resolve(home), ".cursor");
+}
+function resolveCursorMcpConfigPath(home) {
+  return path9.join(resolveCursorHome(home), "mcp.json");
+}
+function resolveCursorHooksPath(home) {
+  return path9.join(resolveCursorHome(home), "hooks.json");
+}
+function resolveResinHome(home, env = {}) {
+  const configured = env.RESIN_HOME?.trim();
+  return configured ? path9.resolve(configured) : path9.join(path9.resolve(home), ".resin");
+}
+function resolveCursorHookScriptPath(home, env = {}) {
+  return path9.join(resolveResinHome(home, env), "hooks", "cursor-capture.mjs");
+}
+function normalizeCursorVersion(raw) {
+  const match = raw.trim().match(/(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+  if (!match)
+    return null;
+  const [, major, minor, patch, pre] = match;
+  const core = [major, minor, patch].map((part) => String(Number(part))).join(".");
+  return pre ? `${core}-${pre}` : core;
+}
+var CURSOR_HARNESS_ID, CURSOR_TARGET_VERSION, CURSOR_TESTED_VERSIONS;
+var init_paths = __esm({
+  "adapters/cursor-cli/dist/paths.js"() {
+    "use strict";
+    CURSOR_HARNESS_ID = "cursor-cli";
+    CURSOR_TARGET_VERSION = "2026.9.26-dd393fe";
+    CURSOR_TESTED_VERSIONS = [CURSOR_TARGET_VERSION];
+  }
+});
+
+// adapters/cursor-cli/dist/config-planner.js
+async function planCursorMcpConfig(context) {
+  const fsBridge = context.fsBridge ?? defaultFsBridge;
+  const current = await fsBridge.readFile(context.targetPath);
+  let doc = {};
+  if (current !== null && current.trim().length > 0) {
+    const parsed = JSON.parse(current);
+    if (!isRecord(parsed)) {
+      throw new Error(`Cursor MCP config ${context.targetPath} is not a JSON object`);
+    }
+    doc = parsed;
+  }
+  if (doc.mcpServers !== void 0 && !isRecord(doc.mcpServers)) {
+    throw new Error(`Cursor MCP config ${context.targetPath} has a non-object mcpServers`);
+  }
+  const servers = { ...doc.mcpServers ?? {} };
+  for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
+    const entry = servers[alias];
+    if (isRecord(entry) && isRecognizedResinMcpEntry(entry))
+      delete servers[alias];
+  }
+  servers[CANONICAL_RESIN_MCP_SERVER_KEY] = { command: context.command, args: [...context.args] };
+  return planConfigMutation({
+    harnessId: CURSOR_HARNESS_ID,
+    targetPath: context.targetPath,
+    currentContent: current,
+    plannedContent: `${JSON.stringify({ ...doc, mcpServers: servers }, null, 2)}
+`,
+    description: "Register the Resin MCP server in Cursor's user-level mcp.json"
+  });
+}
+var init_config_planner4 = __esm({
+  "adapters/cursor-cli/dist/config-planner.js"() {
+    "use strict";
+    init_dist();
+    init_guards();
+    init_paths();
+  }
+});
+
+// adapters/cursor-cli/dist/hook-records.js
+var init_hook_records = __esm({
+  "adapters/cursor-cli/dist/hook-records.js"() {
+    "use strict";
+    init_guards();
+  }
+});
+
+// adapters/cursor-cli/dist/discovery.js
+import * as fsp from "node:fs/promises";
+import os3 from "node:os";
+import path10 from "node:path";
+function resolveHome(options) {
+  return options.home ?? options.env?.HOME ?? os3.homedir();
+}
+async function findExecutable(options, home) {
+  const env = options.env ?? process.env;
+  const candidates = [
+    options.executablePath,
+    ...(env.PATH ?? "").split(path10.delimiter).filter(Boolean).map((dir) => path10.join(dir, "cursor-agent")),
+    path10.join(home, ".local", "bin", "cursor-agent")
+  ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+  for (const candidate of candidates) {
+    try {
+      await fsp.access(candidate, 1);
+      return candidate;
+    } catch {
+    }
+  }
+  return null;
+}
+async function readCursorRawVersion(executablePath) {
+  const target = await fsp.realpath(executablePath).catch(() => executablePath);
+  const versionDir = path10.dirname(target);
+  if (path10.basename(path10.dirname(versionDir)) !== "versions")
+    return null;
+  const raw = path10.basename(versionDir);
+  return normalizeCursorVersion(raw) ? raw : null;
+}
+async function probeCursorInstallation(options = {}) {
+  const home = resolveHome(options);
+  const executablePath = await findExecutable(options, home);
+  const configPath = options.configPath ?? resolveCursorMcpConfigPath(home);
+  if (executablePath === null)
+    return null;
+  const rawVersion = await readCursorRawVersion(executablePath);
+  const version = rawVersion && normalizeCursorVersion(rawVersion) || UNKNOWN_HARNESS_VERSION;
+  return {
+    harnessId: CURSOR_HARNESS_ID,
+    displayName: "Cursor CLI",
+    version,
+    executablePath,
+    configPath,
+    homePath: path10.join(home, ".cursor"),
+    isInstalled: true,
+    status: "ready",
+    detectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    metadata: {
+      rawVersion,
+      versionClassification: classifyHarnessVersion(version, CURSOR_TESTED_VERSIONS)
+    }
+  };
+}
+var init_discovery4 = __esm({
+  "adapters/cursor-cli/dist/discovery.js"() {
+    "use strict";
+    init_dist();
+    init_hook_records();
+    init_paths();
+  }
+});
+
+// adapters/cursor-cli/dist/hooks.js
+import path11 from "node:path";
+function shellQuote(value) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function renderCursorHookCommand(scriptPath) {
+  return `node ${shellQuote(scriptPath)}`;
+}
+function isResinHookEntry(entry) {
+  return isRecord(entry) && typeof entry.command === "string" && entry.command.includes(`/.resin/hooks/${SCRIPT_BASENAME}`);
+}
+function parseHooksDocument(content, filePath) {
+  if (content === null || content.trim().length === 0)
+    return { version: 1, hooks: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    throw new Error(`Cursor hooks config ${filePath} is not valid JSON; refusing to rewrite it`, {
+      cause: error
+    });
+  }
+  if (!isRecord(parsed) || parsed.hooks !== void 0 && !isRecord(parsed.hooks)) {
+    throw new Error(`Cursor hooks config ${filePath} has an unexpected shape; refusing to rewrite it`);
+  }
+  return { ...parsed, hooks: { ...parsed.hooks ?? {} } };
+}
+function editCursorHooksDocument(doc, command, install) {
+  const hooks = { ...doc.hooks };
+  const captureEvents = CURSOR_CAPTURE_HOOK_EVENTS;
+  for (const event of /* @__PURE__ */ new Set([...Object.keys(hooks), ...install ? captureEvents : []])) {
+    const existing = hooks[event];
+    if (existing !== void 0 && !Array.isArray(existing))
+      continue;
+    const entries = existing ?? [];
+    const others = entries.filter((entry) => !isResinHookEntry(entry));
+    const next = install && captureEvents.includes(event) ? [...others, { command, timeout: CURSOR_HOOK_TIMEOUT_SECONDS }] : others;
+    if (next.length === 0 && entries.length > 0)
+      delete hooks[event];
+    else if (next.length > 0)
+      hooks[event] = next;
+  }
+  return { ...doc, version: doc.version ?? 1, hooks };
+}
+async function writeOwned(fs11, filePath, content, dryRun) {
+  const current = await fs11.readFile(filePath);
+  let action;
+  if (content === null)
+    action = current === null ? "unchanged" : "removed";
+  else if (current === content)
+    action = "unchanged";
+  else
+    action = current === null ? "created" : "updated";
+  if (!dryRun && action !== "unchanged") {
+    if (content === null) {
+      await fs11.unlink(filePath);
+    } else {
+      await fs11.mkdirp(path11.dirname(filePath));
+      await fs11.writeFile(filePath, content);
+    }
+  }
+  return { path: filePath, action };
+}
+async function syncHooksFile(context, install) {
+  const hooksPath = resolveCursorHooksPath(context.home);
+  const command = renderCursorHookCommand(resolveCursorHookScriptPath(context.home, context.env));
+  const current = await context.fsBridge.readFile(hooksPath);
+  if (!install && current === null)
+    return { path: hooksPath, action: "unchanged" };
+  const next = editCursorHooksDocument(parseHooksDocument(current, hooksPath), command, install);
+  const emptied = !install && Object.keys(next.hooks).length === 0 && Object.keys(next).length <= 2;
+  const rendered = emptied ? null : `${JSON.stringify(next, null, 2)}
+`;
+  if (current !== null && rendered !== null && JSON.stringify(JSON.parse(current)) === JSON.stringify(next)) {
+    return { path: hooksPath, action: "unchanged" };
+  }
+  return writeOwned(context.fsBridge, hooksPath, rendered, context.dryRun ?? false);
+}
+async function installCursorCaptureHooks(context) {
+  const scriptPath = resolveCursorHookScriptPath(context.home, context.env);
+  const script = await writeOwned(context.fsBridge, scriptPath, CURSOR_HOOK_SCRIPT, context.dryRun ?? false);
+  return [script, await syncHooksFile(context, true)];
+}
+async function uninstallCursorCaptureHooks(context) {
+  const hooks = await syncHooksFile(context, false);
+  const scriptPath = resolveCursorHookScriptPath(context.home, context.env);
+  return [hooks, await writeOwned(context.fsBridge, scriptPath, null, context.dryRun ?? false)];
+}
+async function verifyCursorCaptureHooks(context) {
+  const scriptPath = resolveCursorHookScriptPath(context.home, context.env);
+  if (await context.fsBridge.readFile(scriptPath) !== CURSOR_HOOK_SCRIPT)
+    return false;
+  const hooksPath = resolveCursorHooksPath(context.home);
+  let doc;
+  try {
+    doc = parseHooksDocument(await context.fsBridge.readFile(hooksPath), hooksPath);
+  } catch {
+    return false;
+  }
+  const command = renderCursorHookCommand(scriptPath);
+  const hooks = doc.hooks;
+  return CURSOR_CAPTURE_HOOK_EVENTS.every((event) => {
+    const entries = hooks[event];
+    return Array.isArray(entries) && entries.filter((entry) => isRecord(entry) && entry.command === command).length === 1;
+  });
+}
+var CURSOR_CAPTURE_HOOK_EVENTS, CURSOR_HOOK_TIMEOUT_SECONDS, SCRIPT_BASENAME, CURSOR_HOOK_SCRIPT, cursorCaptureHooksExtension;
+var init_hooks = __esm({
+  "adapters/cursor-cli/dist/hooks.js"() {
+    "use strict";
+    init_guards();
+    init_paths();
+    CURSOR_CAPTURE_HOOK_EVENTS = [
+      "sessionStart",
+      "sessionEnd",
+      "beforeSubmitPrompt",
+      "afterAgentThought",
+      "afterAgentResponse",
+      "postToolUse",
+      "postToolUseFailure",
+      "afterFileEdit",
+      "preCompact",
+      "subagentStart",
+      "subagentStop",
+      "stop"
+    ];
+    CURSOR_HOOK_TIMEOUT_SECONDS = 10;
+    SCRIPT_BASENAME = "cursor-capture.mjs";
+    CURSOR_HOOK_SCRIPT = `#!/usr/bin/env node
+// Resin capture hook for Cursor CLI. Managed by Resin (\`resin init\` / \`resin uninstall\`); edits are overwritten.
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const chunks = [];
+try {
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+    delete payload.user_email;
+    const rawId = [payload.conversation_id, payload.session_id].find(
+      (value) => typeof value === "string" && value.length > 0,
+    );
+    const fileId = (rawId ?? "unknown").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120);
+    const spool = join(dirname(fileURLToPath(import.meta.url)), "..", "capture", "cursor-cli");
+    mkdirSync(spool, { recursive: true, mode: 0o700 });
+    appendFileSync(
+      join(spool, \`\${fileId}.jsonl\`),
+      \`\${JSON.stringify({ resin_received_at: new Date().toISOString(), ...payload })}\\n\`,
+      { mode: 0o600 },
+    );
+  }
+} catch {
+  // Capture is best effort; never fail the harness.
+}
+`;
+    cursorCaptureHooksExtension = {
+      name: "Cursor capture hooks",
+      install: installCursorCaptureHooks,
+      uninstall: uninstallCursorCaptureHooks,
+      verify: verifyCursorCaptureHooks
+    };
+  }
+});
+
+// adapters/cursor-cli/dist/install.js
+import path12 from "node:path";
+var cursorGuidance, cursorInstallHarness;
+var init_install4 = __esm({
+  "adapters/cursor-cli/dist/install.js"() {
+    "use strict";
+    init_dist();
+    init_config_planner4();
+    init_discovery4();
+    init_hooks();
+    init_paths();
+    cursorGuidance = {
+      resolvePath: (home) => path12.join(resolveCursorHome(home), "rules", "resin.mdc"),
+      markers: {
+        start: "---\ndescription: Resin learned tools\nalwaysApply: true\n---\n<!-- resin:cursor-guidance:start -->",
+        end: "<!-- resin:cursor-guidance:end -->"
+      },
+      body: `# Resin learned tools
+
+Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, list the \`resin\` server's tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`
+    };
+    cursorInstallHarness = {
+      id: CURSOR_HARNESS_ID,
+      displayName: "Cursor CLI",
+      shortName: "Cursor",
+      adapterPackage: "@resin/adapter-cursor-cli",
+      testedVersions: CURSOR_TESTED_VERSIONS,
+      knownLimits: [
+        "Capture requires Resin's hooks in ~/.cursor/hooks.json (installed by `resin init`); sessions from before installation, or run while hooks were removed, are reported as uncaptured, not decoded.",
+        "Cursor Cloud Agents that run on Cursor's machines leave no local record and cannot be captured; cursor-agent 2026.09.26 removed the CLI's --cloud/--background flags. Self-hosted `cursor-agent worker` sessions are captured and flagged isBackgroundAgent.",
+        "Hook payloads carry no timestamps; event times are when Resin's hook received them.",
+        "Token usage is per turn, from the `stop` hook (input, output, cache-read tokens). Headless `cursor-agent -p` runs fire no beforeSubmitPrompt, afterAgentResponse or stop hooks (verified with 2026.09.26), so their prompt, final answer and usage are not captured; their tool calls, edits and session end are.",
+        "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
+        "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
+        "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
+        "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session. Whether user rules in ~/.cursor/rules are applied is unverified."
+      ],
+      probeInstallation: (context) => probeCursorInstallation({
+        home: context.home,
+        env: context.env,
+        configPath: context.targetPath
+      }),
+      mcpConfig: {
+        resolvePath: (home) => resolveCursorMcpConfigPath(home),
+        uninstallPaths: (home) => [resolveCursorMcpConfigPath(home)],
+        format: "json",
+        serverKey: CANONICAL_RESIN_MCP_SERVER_KEY,
+        jsonContainerKeys: ["mcpServers"],
+        transports: ["stdio", "http", "sse"],
+        planRegistration: (context) => planCursorMcpConfig(context)
+      },
+      guidance: cursorGuidance,
+      installExtensions: [cursorCaptureHooksExtension]
+    };
+  }
+});
+
+// adapters/grok-build/dist/paths.js
+import * as path13 from "node:path";
+function resolveGrokHome(home, env = {}) {
+  const override = env.GROK_HOME?.trim();
+  return override ? path13.resolve(override) : path13.join(home, ".grok");
+}
+function resolveGrokConfigPath(home, env = {}) {
+  return path13.join(resolveGrokHome(home, env), "config.toml");
+}
+function resolveGrokAgentsPath(home, env = {}) {
+  return path13.join(resolveGrokHome(home, env), "AGENTS.md");
+}
+var GROK_HARNESS_ID, GROK_DISPLAY_NAME;
+var init_paths2 = __esm({
+  "adapters/grok-build/dist/paths.js"() {
+    "use strict";
+    GROK_HARNESS_ID = "grok-build";
+    GROK_DISPLAY_NAME = "Grok Build";
+  }
+});
+
+// adapters/grok-build/dist/config-planner.js
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+function headerPath(line) {
+  const match = HEADER_PATTERN.exec(line);
+  return match?.[1] ? match[1].replace(/\s*\.\s*/g, ".").replace(/"/g, "") : null;
+}
+function isServerTable(path33, key) {
+  const table = `mcp_servers.${key}`;
+  return path33 === table || path33.startsWith(`${table}.`);
+}
+function updateGrokTomlServer(content, key, entry) {
+  const kept = [];
+  let skipping = false;
+  for (const line of content.split("\n")) {
+    const path33 = headerPath(line);
+    if (path33 !== null)
+      skipping = isServerTable(path33, key);
+    if (!skipping)
+      kept.push(line);
+  }
+  const base = kept.join("\n").replace(/\s+$/, "");
+  if (!entry)
+    return base.length > 0 ? `${base}
+` : "";
+  const table = [
+    `[mcp_servers.${key}]`,
+    `command = ${tomlString(entry.command)}`,
+    `args = [${entry.args.map(tomlString).join(", ")}]`
+  ].join("\n");
+  return base.length > 0 ? `${base}
+
+${table}
+` : `${table}
+`;
+}
+async function planGrokMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const currentContent = await fsBridge.readFile(options.targetPath);
+  return planConfigMutation({
+    harnessId: GROK_HARNESS_ID,
+    targetPath: options.targetPath,
+    currentContent,
+    plannedContent: updateGrokTomlServer(currentContent ?? "", GROK_RESIN_SERVER_KEY, {
+      command: options.command,
+      args: options.args
+    }),
+    description: `Register Resin Gateway MCP server (${GROK_RESIN_SERVER_KEY} -> ${options.command}) in ${options.targetPath}`
+  });
+}
+var GROK_RESIN_SERVER_KEY, HEADER_PATTERN;
+var init_config_planner5 = __esm({
+  "adapters/grok-build/dist/config-planner.js"() {
+    "use strict";
+    init_dist();
+    init_paths2();
+    GROK_RESIN_SERVER_KEY = CANONICAL_RESIN_MCP_SERVER_KEY;
+    HEADER_PATTERN = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$/;
+  }
+});
+
+// adapters/grok-build/dist/discovery.js
+import * as fs4 from "node:fs/promises";
+import * as path14 from "node:path";
+async function isExecutable(filePath) {
+  try {
+    await fs4.access(filePath, fs4.constants.X_OK);
+    return (await fs4.stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+async function findGrokExecutable(home, env) {
+  const candidates = [path14.join(resolveGrokHome(home, env), "bin", "grok")];
+  for (const dir of (env.PATH ?? "").split(path14.delimiter)) {
+    if (dir)
+      candidates.push(path14.join(dir, "grok"));
+  }
+  for (const candidate of candidates) {
+    if (await isExecutable(candidate))
+      return candidate;
+  }
+  return null;
+}
+async function probeGrokInstallation(options) {
+  const executablePath = await findGrokExecutable(options.home, options.env);
+  const grokHome = resolveGrokHome(options.home, options.env);
+  const homeExists = await fs4.stat(grokHome).then((stat7) => stat7.isDirectory()).catch(() => false);
+  if (!executablePath && !homeExists)
+    return null;
+  const version = executablePath ? await (options.readVersion ?? readGrokVersion)(executablePath) : null;
+  return {
+    harnessId: GROK_HARNESS_ID,
+    displayName: GROK_DISPLAY_NAME,
+    version: version ?? UNKNOWN_HARNESS_VERSION,
+    ...executablePath ? { executablePath } : {},
+    configPath: options.configPath,
+    homePath: grokHome,
+    isInstalled: executablePath !== null,
+    status: executablePath ? "ready" : "missing_executable",
+    detectedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    metadata: {}
+  };
+}
+var GROK_TESTED_VERSIONS, readGrokVersion;
+var init_discovery5 = __esm({
+  "adapters/grok-build/dist/discovery.js"() {
+    "use strict";
+    init_dist();
+    init_paths2();
+    GROK_TESTED_VERSIONS = Object.freeze(["1.0.13"]);
+    readGrokVersion = async (executablePath) => {
+      const target = await fs4.realpath(executablePath).catch(() => executablePath);
+      return /^grok-v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/.exec(path14.basename(target))?.[1] ?? null;
+    };
+  }
+});
+
+// adapters/grok-build/dist/install.js
+var GROK_GUIDANCE_MARKERS, GROK_RESIN_GUIDANCE, grokBuildInstallHarness;
+var init_install5 = __esm({
+  "adapters/grok-build/dist/install.js"() {
+    "use strict";
+    init_dist();
+    init_config_planner5();
+    init_discovery5();
+    init_paths2();
+    GROK_GUIDANCE_MARKERS = Object.freeze({
+      start: "<!-- resin:grok-guidance:start -->",
+      end: "<!-- resin:grok-guidance:end -->"
+    });
+    GROK_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`, and each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, call \`search_tool\` with a few words describing the task to list the matching \`resin__\` tools.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call it with \`use_tool\` (\`tool_name: "resin__<name>"\`). Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
+    grokBuildInstallHarness = {
+      id: GROK_HARNESS_ID,
+      displayName: GROK_DISPLAY_NAME,
+      shortName: "Grok",
+      adapterPackage: "@resin/adapter-grok-build",
+      testedVersions: GROK_TESTED_VERSIONS,
+      knownLimits: [
+        "A rewind keeps the abandoned turns in the captured trajectory; the rewind is recorded as a branch point before the replacement turns.",
+        "Sessions continued from another harness with /resume-claude, /resume-codex or /resume-cursor capture only Grok's new work; the original transcript is captured by that harness's adapter.",
+        "A fork whose parent session was deleted is captured in full.",
+        'Grok also starts MCP servers from ~/.claude.json, ~/.cursor/mcp.json and .mcp.json; a Resin entry there under a name other than "resin" starts a second gateway.'
+      ],
+      probeInstallation: ({ targetPath, home, env }) => probeGrokInstallation({ home, env, configPath: targetPath }),
+      mcpConfig: {
+        resolvePath: resolveGrokConfigPath,
+        uninstallPaths: (home, env) => [resolveGrokConfigPath(home, env)],
+        format: "codex-toml",
+        serverKey: CANONICAL_RESIN_MCP_SERVER_KEY,
+        jsonContainerKeys: [],
+        transports: ["stdio", "http", "sse"],
+        planRegistration: ({ targetPath, command, args, fsBridge }) => planGrokMcpConfig({ targetPath, command, args, fsBridge })
+      },
+      guidance: {
+        resolvePath: resolveGrokAgentsPath,
+        markers: GROK_GUIDANCE_MARKERS,
+        body: GROK_RESIN_GUIDANCE
+      }
+    };
+  }
+});
+
+// adapters/muse-code/dist/discovery.js
+import { execFile as execFile3 } from "node:child_process";
+import * as fs5 from "node:fs/promises";
+import * as os4 from "node:os";
+import * as path15 from "node:path";
+import { promisify as promisify3 } from "node:util";
+function resolveMuseConfigDir(home, env = process.env) {
+  const xdg2 = env.XDG_CONFIG_HOME?.trim();
+  return xdg2 ? path15.join(xdg2, "muse") : path15.join(home, ".config", "muse");
+}
+function resolveMuseSettingsPath(home, env = process.env) {
+  return path15.join(resolveMuseConfigDir(home, env), "settings.json");
+}
+function resolveMuseUserRulesPath(home, env = process.env) {
+  return path15.join(resolveMuseConfigDir(home, env), "AGENTS.md");
+}
+function resolveMuseSessionRoot(home, env = process.env) {
+  const xdg2 = env.XDG_DATA_HOME?.trim();
+  return xdg2 ? path15.join(xdg2, "muse", "sessions") : path15.join(home, ".local", "share", "muse", "sessions");
+}
+function parseMuseVersion(text) {
+  const match = /(\d+\.\d+\.\d+)/.exec(text);
+  return match?.[1] ?? null;
+}
+async function isExecutableFile(filePath) {
+  try {
+    const stat7 = await fs5.stat(filePath);
+    if (!stat7.isFile())
+      return false;
+    await fs5.access(filePath, fs5.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function findMuseExecutable(env = process.env) {
+  const names = process.platform === "win32" ? ["muse.exe", "muse.cmd", "muse"] : ["muse"];
+  for (const dir of (env.PATH ?? "").split(path15.delimiter)) {
+    if (!dir)
+      continue;
+    for (const name of names) {
+      const candidate = path15.join(dir, name);
+      if (await isExecutableFile(candidate))
+        return candidate;
+    }
+  }
+  return null;
+}
+async function readMuseVersion(executable, env = process.env, executor = defaultVersionExecutor) {
+  try {
+    const recorded = await fs5.readFile(path15.join(path15.dirname(executable), ".muse-version"), "utf8");
+    const version = parseMuseVersion(recorded);
+    if (version)
+      return version;
+  } catch {
+  }
+  try {
+    return parseMuseVersion(await executor(executable, env)) ?? UNKNOWN_HARNESS_VERSION;
+  } catch {
+    return UNKNOWN_HARNESS_VERSION;
+  }
+}
+async function probeMuseInstallation(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.home ?? os4.homedir();
+  const configDir = resolveMuseConfigDir(home, env);
+  const executable = options.executablePath && await isExecutableFile(options.executablePath) ? options.executablePath : await findMuseExecutable(env);
+  const configExists = await fs5.stat(configDir).then((stat7) => stat7.isDirectory()).catch(() => false);
+  if (!executable && !configExists)
+    return null;
+  const version = executable ? await readMuseVersion(executable, env, options.executor) : UNKNOWN_HARNESS_VERSION;
+  return {
+    harnessId: MUSE_HARNESS_ID,
+    displayName: MUSE_DISPLAY_NAME,
+    version,
+    ...executable ? { executablePath: executable } : {},
+    configPath: resolveMuseSettingsPath(home, env),
+    homePath: configDir,
+    isInstalled: executable !== null,
+    status: executable ? "ready" : "missing_executable",
+    detectedAt: nowIso(),
+    metadata: { sessionRoot: resolveMuseSessionRoot(home, env) }
+  };
+}
+var MUSE_HARNESS_ID, MUSE_DISPLAY_NAME, MUSE_TESTED_VERSIONS, ACTIVE_WINDOW_MS, HEAD_INSPECTION_BYTES, execFileAsync3, defaultVersionExecutor;
+var init_discovery6 = __esm({
+  "adapters/muse-code/dist/discovery.js"() {
+    "use strict";
+    init_common();
+    init_dist();
+    MUSE_HARNESS_ID = "muse-code";
+    MUSE_DISPLAY_NAME = "Muse Code";
+    MUSE_TESTED_VERSIONS = ["1.4.0"];
+    ACTIVE_WINDOW_MS = 5 * 60 * 1e3;
+    HEAD_INSPECTION_BYTES = 256 * 1024;
+    execFileAsync3 = promisify3(execFile3);
+    defaultVersionExecutor = async (executable, env) => {
+      const scratch = await fs5.mkdtemp(path15.join(os4.tmpdir(), "resin-muse-probe-"));
+      try {
+        const { stdout } = await execFileAsync3(executable, ["--version"], {
+          env: {
+            ...env,
+            MUSE_NO_AUTO_UPDATE: "1",
+            HOME: scratch,
+            XDG_CONFIG_HOME: path15.join(scratch, "config"),
+            XDG_DATA_HOME: path15.join(scratch, "data"),
+            XDG_CACHE_HOME: path15.join(scratch, "cache"),
+            XDG_STATE_HOME: path15.join(scratch, "state")
+          },
+          timeout: 5e3
+        });
+        return String(stdout);
+      } finally {
+        await fs5.rm(scratch, { recursive: true, force: true });
+      }
+    };
+  }
+});
+
+// adapters/muse-code/dist/config-planner.js
+function parseSettings(currentContent, targetPath) {
+  if (currentContent === null || currentContent.trim().length === 0)
+    return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(currentContent);
+  } catch {
+    throw new MuseSettingsError(`Muse settings at ${targetPath} are not valid JSON`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new MuseSettingsError(`Muse settings at ${targetPath} are not a JSON object`);
+  }
+  return parsed;
+}
+function renderMuseSettings(options) {
+  const doc = parseSettings(options.currentContent, options.targetPath);
+  const existing = doc.mcp_servers;
+  const servers = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
+  const next = {
+    schema_version: doc.schema_version ?? MUSE_SETTINGS_SCHEMA_VERSION,
+    ...doc
+  };
+  next.mcp_servers = migrateJsonMcpServers(servers, {
+    command: options.command ?? CANONICAL_RESIN_MCP_COMMAND,
+    args: [...options.args ?? CANONICAL_RESIN_MCP_ARGS]
+  }, options.gatewayUrl, options.serverKey ?? CANONICAL_RESIN_MCP_SERVER_KEY);
+  return `${JSON.stringify(next, null, 2)}
+`;
+}
+async function planMuseMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const currentContent = await fsBridge.readFile(options.targetPath);
+  return planConfigMutation({
+    harnessId: MUSE_HARNESS_ID,
+    targetPath: options.targetPath,
+    currentContent,
+    plannedContent: renderMuseSettings({ ...options, currentContent }),
+    description: "Register Resin Gateway in Muse Code settings.json mcp_servers"
+  });
+}
+var MUSE_SETTINGS_SCHEMA_VERSION, MuseSettingsError;
+var init_config_planner6 = __esm({
+  "adapters/muse-code/dist/config-planner.js"() {
+    "use strict";
+    init_dist();
+    init_discovery6();
+    MUSE_SETTINGS_SCHEMA_VERSION = 1;
+    MuseSettingsError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "MuseSettingsError";
+      }
+    };
+  }
+});
+
+// adapters/muse-code/dist/instructions.js
+var MUSE_GUIDANCE_MARKERS, MUSE_RESIN_GUIDANCE;
+var init_instructions3 = __esm({
+  "adapters/muse-code/dist/instructions.js"() {
+    "use strict";
+    MUSE_GUIDANCE_MARKERS = {
+      start: "<!-- resin:muse-guidance:start -->",
+      end: "<!-- resin:muse-guidance:end -->"
+    };
+    MUSE_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
+`;
+  }
+});
+
+// adapters/muse-code/dist/install.js
+var museCodeInstallHarness;
+var init_install6 = __esm({
+  "adapters/muse-code/dist/install.js"() {
+    "use strict";
+    init_config_planner6();
+    init_discovery6();
+    init_instructions3();
+    museCodeInstallHarness = {
+      id: "muse-code",
+      displayName: MUSE_DISPLAY_NAME,
+      shortName: "Muse",
+      adapterPackage: "@resin/adapter-muse-code",
+      testedVersions: MUSE_TESTED_VERSIONS,
+      knownLimits: [
+        "Background skill-reminder observer model calls are not written to muse 1.4.0 session logs, so their token usage cannot be counted; the verify-reminder observer's calls are.",
+        "The muse launcher updates itself hourly; set MUSE_NO_AUTO_UPDATE=1 to stay on a tested version.",
+        "Sessions run with --no-session-log leave no log and are not captured.",
+        "Resin catalog changes reach muse at the next session start.",
+        "Context compaction is not decoded: no muse 1.4.0 compaction record was captured."
+      ],
+      probeInstallation: ({ home, env }) => probeMuseInstallation({ home, env }),
+      mcpConfig: {
+        resolvePath: resolveMuseSettingsPath,
+        uninstallPaths: (home, env) => [resolveMuseSettingsPath(home, env)],
+        format: "json",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcp_servers"],
+        transports: ["stdio"],
+        planRegistration: ({ targetPath, command, args, gatewayUrl, fsBridge }) => planMuseMcpConfig({ targetPath, command, args, gatewayUrl, fsBridge })
+      },
+      guidance: {
+        resolvePath: resolveMuseUserRulesPath,
+        markers: MUSE_GUIDANCE_MARKERS,
+        body: MUSE_RESIN_GUIDANCE.trimEnd()
+      }
+    };
+  }
+});
+
+// adapters/omp/dist/session-exit.js
+var init_session_exit = __esm({
+  "adapters/omp/dist/session-exit.js"() {
+    "use strict";
   }
 });
 
 // adapters/omp/dist/discovery.js
-import { execFile as execFile3 } from "node:child_process";
-import { promisify as promisify3 } from "node:util";
-var execFileAsync3, ACTIVE_ONLY_TERMINAL_GRACE_MS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema;
-var init_discovery3 = __esm({
+import { execFile as execFile4 } from "node:child_process";
+import fs6 from "node:fs";
+import * as fsp2 from "node:fs/promises";
+import os5 from "node:os";
+import path16 from "node:path";
+import { promisify as promisify4 } from "node:util";
+function resolveOmpHome(options) {
+  const env = options?.env ?? process.env;
+  if (options?.customHome) {
+    return path16.resolve(options.customHome);
+  }
+  if (options?.ompHome) {
+    return path16.resolve(options.ompHome);
+  }
+  if (env.OMP_HOME) {
+    return path16.resolve(env.OMP_HOME);
+  }
+  if (env.RESIN_OMP_HOME) {
+    return path16.resolve(env.RESIN_OMP_HOME);
+  }
+  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os5.homedir();
+  return path16.resolve(userHome, ".omp");
+}
+async function findOmpExecutable(options) {
+  const env = options?.env ?? process.env;
+  if (options?.customExecutablePath) {
+    const customPath = path16.resolve(options.customExecutablePath);
+    try {
+      await fsp2.access(customPath, fs6.constants.X_OK);
+      return customPath;
+    } catch {
+      try {
+        const stat7 = await fsp2.stat(customPath);
+        if (stat7.isFile()) {
+          return customPath;
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  if (env.OMP_BIN) {
+    const binPath = path16.resolve(env.OMP_BIN);
+    try {
+      const stat7 = await fsp2.stat(binPath);
+      if (stat7.isFile()) {
+        return binPath;
+      }
+    } catch {
+    }
+  }
+  const ompHome = resolveOmpHome({ env, homeDir: options?.homeDir });
+  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os5.homedir();
+  const isWindows = process.platform === "win32";
+  const binaryNames = isWindows ? ["omp.exe", "omp.cmd", "omp.bat", "omp"] : ["omp"];
+  const searchDirs = [];
+  if (options?.searchPaths && options.searchPaths.length > 0) {
+    searchDirs.push(...options.searchPaths);
+  }
+  if (env.PATH) {
+    const pathDirs = env.PATH.split(path16.delimiter).filter(Boolean);
+    searchDirs.push(...pathDirs);
+  }
+  searchDirs.push(path16.join(ompHome, "bin"), path16.join(ompHome, "dist", "bin"), path16.join(userHome, ".local", "bin"), path16.join(userHome, ".cargo", "bin"), path16.join(userHome, ".npm-global", "bin"));
+  if (!options?.homeDir && !options?.searchPaths?.length) {
+    searchDirs.push("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin");
+  }
+  for (const dir of searchDirs) {
+    for (const binName of binaryNames) {
+      const candidate = path16.join(dir, binName);
+      try {
+        const stat7 = await fsp2.stat(candidate);
+        if (stat7.isFile()) {
+          return path16.resolve(candidate);
+        }
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+function parseOmpSemver(value) {
+  const match = value.trim().match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  return match?.[1] ?? null;
+}
+async function detectOmpVersion(executablePath, options) {
+  const timeoutMs = options?.timeoutMs ?? 3e3;
+  try {
+    const { stdout } = await execFileAsync4(executablePath, ["--version"], {
+      timeout: timeoutMs
+    });
+    const detected = parseOmpSemver(stdout);
+    if (detected) {
+      return detected;
+    }
+  } catch {
+  }
+  let currentDir = path16.dirname(executablePath);
+  for (let i = 0; i < 3; i++) {
+    const pkgJsonPath = path16.join(currentDir, "package.json");
+    try {
+      const content = await fsp2.readFile(pkgJsonPath, "utf8");
+      const parsed = JSON.parse(content);
+      if (parsed.version && String(parsed.version) === parsed.version) {
+        const detected = parseOmpSemver(parsed.version);
+        if (detected)
+          return detected;
+      }
+    } catch {
+    }
+    currentDir = path16.dirname(currentDir);
+  }
+  return null;
+}
+async function probeOmpInstallation(options) {
+  const ompHome = resolveOmpHome(options);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  let ompHomeExists = false;
+  try {
+    const stat7 = await fsp2.stat(ompHome);
+    ompHomeExists = stat7.isDirectory();
+  } catch {
+    ompHomeExists = false;
+  }
+  const execPath = await findOmpExecutable(options);
+  if (options?.customExecutablePath && !execPath) {
+    return {
+      harnessId: "omp",
+      displayName: "Oh My Pi",
+      version: "0.0.0",
+      executablePath: options.customExecutablePath,
+      configPath: path16.join(ompHome, "agent", "mcp.json"),
+      homePath: ompHome,
+      isInstalled: false,
+      status: "missing_executable",
+      detectedAt: now,
+      metadata: {
+        error: `Specified OMP executable was not found at "${options.customExecutablePath}"`
+      }
+    };
+  }
+  if (!execPath && !ompHomeExists && !options?.customConfigPath) {
+    return null;
+  }
+  const globalConfigPath = options?.customConfigPath ? path16.resolve(options.customConfigPath) : path16.join(ompHome, "agent", "mcp.json");
+  let status = "missing_executable";
+  let version = "0.0.0";
+  let isInstalled = false;
+  if (execPath) {
+    const detectedVersion = await detectOmpVersion(execPath);
+    if (detectedVersion) {
+      version = detectedVersion;
+      status = "ready";
+      isInstalled = true;
+    } else {
+      status = "corrupt";
+    }
+  }
+  if (options?.checkPermissions && execPath) {
+    try {
+      await fsp2.access(execPath, fs6.constants.R_OK | fs6.constants.X_OK);
+    } catch {
+      status = "corrupt";
+      isInstalled = false;
+    }
+  }
+  return {
+    harnessId: "omp",
+    displayName: "Oh My Pi",
+    version,
+    executablePath: execPath ?? void 0,
+    configPath: globalConfigPath,
+    homePath: ompHome,
+    isInstalled,
+    status,
+    detectedAt: now,
+    metadata: {
+      streaming: true,
+      subagents: true,
+      mcp: true,
+      jsonlSessions: true,
+      compaction: true,
+      contextNudge: true
+    }
+  };
+}
+var execFileAsync4, ACTIVE_ONLY_TERMINAL_GRACE_MS, OMP_TESTED_VERSIONS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema;
+var init_discovery7 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
     init_zod();
-    init_decoder4();
-    execFileAsync3 = promisify3(execFile3);
+    init_session_exit();
+    execFileAsync4 = promisify4(execFile4);
     ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 6e4;
+    OMP_TESTED_VERSIONS = ["18.3.2"];
     OmpWorkspaceEntrySchema = external_exports.union([
       external_exports.string().transform((entryPath) => {
         const metadata = {};
@@ -5859,80 +7482,1053 @@ var init_discovery3 = __esm({
 });
 
 // adapters/omp/dist/config-planner.js
-import path2 from "node:path";
-var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH;
-var init_config_planner3 = __esm({
+import path17 from "node:path";
+function resolveOmpConfigPath(workspace, options) {
+  if (options?.customConfigPath) {
+    return path17.resolve(options.customConfigPath);
+  }
+  if (workspace?.mcpConfigPath) {
+    return path17.resolve(workspace.mcpConfigPath);
+  }
+  if (workspace?.rootPath) {
+    return path17.resolve(workspace.rootPath, ".omp", "agent", "mcp.json");
+  }
+  if (workspace?.configPath) {
+    return path17.resolve(workspace.configPath);
+  }
+  const ompHome = resolveOmpHome({ customHome: options?.ompHome });
+  return path17.resolve(ompHome, "agent", "mcp.json");
+}
+async function planOmpMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? new NodeConfigFsBridge();
+  const targetPath = resolveOmpConfigPath(options.workspace, {
+    customConfigPath: options.customConfigPath,
+    ompHome: options.ompHome
+  });
+  const serverName = options.serverName ?? DEFAULT_GATEWAY_SERVER_NAME2;
+  const currentContent = await fsBridge.readFile(targetPath);
+  let currentConfig = {};
+  if (currentContent && currentContent.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(currentContent);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        currentConfig = parsed;
+      }
+    } catch {
+      currentConfig = {};
+    }
+  }
+  const existingServers = currentConfig.mcpServers && currentConfig.mcpServers instanceof Object && !Array.isArray(currentConfig.mcpServers) ? { ...currentConfig.mcpServers } : {};
+  const explicitType = options.serverType ?? options.type;
+  let serverEntry;
+  if (options.command !== void 0) {
+    serverEntry = {
+      command: options.command,
+      args: options.args ?? []
+    };
+    if (explicitType !== void 0) {
+      serverEntry.type = explicitType;
+    }
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+  } else if (options.url !== void 0) {
+    serverEntry = {
+      type: explicitType ?? "sse",
+      url: options.url
+    };
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+  } else {
+    serverEntry = {
+      command: CANONICAL_RESIN_MCP_COMMAND,
+      args: options.args !== void 0 ? options.args : [...CANONICAL_RESIN_MCP_ARGS]
+    };
+    if (explicitType !== void 0) {
+      serverEntry.type = explicitType;
+    }
+    if (options.env !== void 0) {
+      serverEntry.env = options.env;
+    }
+  }
+  const updatedServers = migrateJsonMcpServers(existingServers, serverEntry, options.gatewayUrl ?? options.url, serverName);
+  const updatedConfig = {
+    ...currentConfig,
+    mcpServers: updatedServers
+  };
+  const plannedContent = `${JSON.stringify(updatedConfig, null, 2)}
+`;
+  return planConfigMutation({
+    harnessId: "omp",
+    targetPath,
+    currentContent,
+    plannedContent,
+    description: `Register Resin MCP server "${serverName}" in OMP configuration`,
+    metadata: {
+      changesSummary: `Add/update mcpServers.${serverName}`
+    }
+  });
+}
+var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH, DEFAULT_GATEWAY_SERVER_NAME2;
+var init_config_planner7 = __esm({
   "adapters/omp/dist/config-planner.js"() {
     "use strict";
     init_dist();
-    init_discovery3();
-    DEFAULT_OMP_CONFIG_FILENAME = path2.join("agent", "mcp.json");
-    DEFAULT_OMP_MCP_CONFIG_PATH = path2.join("agent", "mcp.json");
+    init_discovery7();
+    DEFAULT_OMP_CONFIG_FILENAME = path17.join("agent", "mcp.json");
+    DEFAULT_OMP_MCP_CONFIG_PATH = path17.join("agent", "mcp.json");
+    DEFAULT_GATEWAY_SERVER_NAME2 = CANONICAL_RESIN_MCP_SERVER_KEY;
   }
 });
 
 // adapters/omp/dist/instructions.js
-import path3 from "node:path";
-var DEFAULT_APPEND_SYSTEM_FILENAME;
-var init_instructions = __esm({
+import path18 from "node:path";
+function resolveOmpGuidancePath(home, env) {
+  return path18.join(resolveOmpConfigHome(home, env), "agent", "AGENTS.md");
+}
+function resolveOmpConfigHome(home, env) {
+  const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find((candidate) => typeof candidate === "string" && candidate.trim().length > 0);
+  return configuredHome ? path18.resolve(configuredHome) : path18.join(home, ".omp");
+}
+function renderOmpInvocationSnippet(toolName, serverName) {
+  const server = serverName.replace(/-/g, "_");
+  const path33 = `xd://mcp__${server}_${toolName}`;
+  return [
+    `- **Invoke**: write the JSON arguments to \`${path33}\` (e.g. \`write\` \`{"path": "${path33}", "content": "{}"}\` when the tool takes no inputs).`,
+    `- **Docs**: \`read\` \`${path33}\` returns the tool's documentation.`
+  ].join("\n");
+}
+function renderOmpCatalogInstructionsBody(options) {
+  const serverName = options.serverName ?? "resin";
+  const lines = [
+    "",
+    options.markdown.trim(),
+    "",
+    "These tools are exposed over MCP. Invoke them through the `xd://` tool-device surface rather than re-running the underlying shell commands manually."
+  ];
+  for (const toolName of options.toolNames ?? []) {
+    lines.push("", `#### Invocation: \`${toolName}\``);
+    lines.push(renderOmpInvocationSnippet(toolName, serverName));
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+async function applyOmpCatalogInstructions(options) {
+  const targetPath = options.appendSystemPath ?? path18.join(resolveOmpHome({ customHome: options.ompHome }), DEFAULT_APPEND_SYSTEM_FILENAME);
+  const markdown = options.markdown?.trim();
+  const body = markdown ? renderOmpCatalogInstructionsBody({
+    markdown,
+    toolNames: options.toolNames,
+    serverName: options.serverName
+  }) : null;
+  return applyManagedBlock(defaultFsBridge, targetPath, OMP_CATALOG_MARKERS, body);
+}
+var DEFAULT_APPEND_SYSTEM_FILENAME, OMP_GUIDANCE_MARKERS, OMP_RESIN_GUIDANCE, OMP_CATALOG_MARKERS;
+var init_instructions4 = __esm({
   "adapters/omp/dist/instructions.js"() {
     "use strict";
-    init_discovery3();
-    DEFAULT_APPEND_SYSTEM_FILENAME = path3.join("agent", "APPEND_SYSTEM.md");
+    init_dist();
+    init_discovery7();
+    DEFAULT_APPEND_SYSTEM_FILENAME = path18.join("agent", "APPEND_SYSTEM.md");
+    OMP_GUIDANCE_MARKERS = {
+      start: "<!-- resin:omp-guidance:start -->",
+      end: "<!-- resin:omp-guidance:end -->"
+    };
+    OMP_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are MCP tools mounted as \`xd://mcp__resin_<name>\` devices; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, \`read\` the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`) to see their commands and inputs.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call one by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`); when several apply, call them together. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
+    OMP_CATALOG_MARKERS = {
+      start: "<!-- resin:catalog:start -->",
+      end: "<!-- resin:catalog:end -->"
+    };
   }
 });
 
-// adapters/omp/dist/refresh.js
-var init_refresh4 = __esm({
-  "adapters/omp/dist/refresh.js"() {
+// adapters/omp/dist/install.js
+import path19 from "node:path";
+var ompInstallHarness;
+var init_install7 = __esm({
+  "adapters/omp/dist/install.js"() {
+    "use strict";
+    init_config_planner7();
+    init_discovery7();
+    init_instructions4();
+    ompInstallHarness = {
+      id: "omp",
+      displayName: "Oh My Pi (OMP)",
+      shortName: "Oh My Pi",
+      adapterPackage: "@resin/adapter-omp",
+      testedVersions: OMP_TESTED_VERSIONS,
+      knownLimits: [
+        "Subagent sessions are learned as their own sessions; a workflow split between a parent and its subagents is not learned as one tool.",
+        "Built-in tool replay runs the OMP SDK Resin pins (18.3.2) under Bun; a built-in that SDK does not export fails with an explicit error."
+      ],
+      probeInstallation: ({ targetPath, home, env }) => probeOmpInstallation({ customConfigPath: targetPath, env, homeDir: home }),
+      mcpConfig: {
+        resolvePath: (home, env) => path19.join(resolveOmpConfigHome(home, env), "agent", "mcp.json"),
+        uninstallPaths: (home, env) => {
+          const activeHome = resolveOmpConfigHome(home, env);
+          return [
+            path19.join(activeHome, "agent", "mcp.json"),
+            path19.join(activeHome, "config.json"),
+            path19.join(home, ".omp", "agent", "mcp.json"),
+            path19.join(home, ".omp", "config.json")
+          ];
+        },
+        format: "json",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcpServers"],
+        transports: ["stdio", "sse", "websocket", "http"],
+        planRegistration: ({ targetPath, command, args, fsBridge }) => planOmpMcpConfig({ customConfigPath: targetPath, command, args: [...args], fsBridge })
+      },
+      guidance: {
+        resolvePath: resolveOmpGuidancePath,
+        markers: OMP_GUIDANCE_MARKERS,
+        body: OMP_RESIN_GUIDANCE
+      },
+      installExtensions: [
+        {
+          // The gateway writes the learned-tool catalog into OMP's appended system prompt as the
+          // catalog changes; install has nothing to write, and uninstall removes the block.
+          name: "learned-tool catalog",
+          install: async () => [],
+          uninstall: async ({ home, env, dryRun }) => dryRun ? [] : [await applyOmpCatalogInstructions({ ompHome: resolveOmpConfigHome(home, env) })],
+          verify: async () => true
+        }
+      ]
+    };
+  }
+});
+
+// adapters/opencode/dist/paths.js
+import * as os6 from "node:os";
+import * as path20 from "node:path";
+function xdg(home, env, key, fallback) {
+  const value = env[key]?.trim();
+  return value && path20.isAbsolute(value) ? value : path20.join(home, fallback);
+}
+function resolveOpencodeDataDir(home = os6.homedir(), env = process.env) {
+  return path20.join(xdg(home, env, "XDG_DATA_HOME", path20.join(".local", "share")), "opencode");
+}
+function resolveOpencodeConfigDir(home = os6.homedir(), env = process.env) {
+  return path20.join(xdg(home, env, "XDG_CONFIG_HOME", ".config"), "opencode");
+}
+function resolveOpencodeDbPath(home = os6.homedir(), env = process.env) {
+  const dataDir = resolveOpencodeDataDir(home, env);
+  const override = env.OPENCODE_DB?.trim();
+  if (override && override !== ":memory:") {
+    return path20.isAbsolute(override) ? override : path20.join(dataDir, override);
+  }
+  return path20.join(dataDir, "opencode.db");
+}
+function resolveOpencodeLegacyStorageDir(home = os6.homedir(), env = process.env) {
+  return path20.join(resolveOpencodeDataDir(home, env), "storage");
+}
+function resolveOpencodeMcpConfigPath(home = os6.homedir(), env = process.env) {
+  return path20.join(resolveOpencodeConfigDir(home, env), "opencode.json");
+}
+function resolveOpencodeGuidancePath(home = os6.homedir(), env = process.env) {
+  return path20.join(resolveOpencodeConfigDir(home, env), "AGENTS.md");
+}
+var OPENCODE_GLOBAL_CONFIG_FILES;
+var init_paths3 = __esm({
+  "adapters/opencode/dist/paths.js"() {
+    "use strict";
+    OPENCODE_GLOBAL_CONFIG_FILES = ["config.json", "opencode.json", "opencode.jsonc"];
+  }
+});
+
+// adapters/opencode/dist/config-planner.js
+import * as path21 from "node:path";
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function parseConfig(content, filePath) {
+  if (content === null || content.trim().length === 0)
+    return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (cause) {
+    throw new HarnessError("INTERNAL_ERROR", `Cannot parse OpenCode config ${filePath} as JSON`, {
+      harnessId: "opencode",
+      cause,
+      details: { targetPath: filePath }
+    });
+  }
+  if (!isObject(parsed)) {
+    throw new HarnessError("INTERNAL_ERROR", `OpenCode config ${filePath} is not a JSON object`, {
+      harnessId: "opencode",
+      details: { targetPath: filePath }
+    });
+  }
+  return parsed;
+}
+function isResinOpencodeEntry(entry) {
+  if (!isObject(entry))
+    return false;
+  const argv = Array.isArray(entry.command) ? entry.command.map(String) : [];
+  return isRecognizedResinMcpEntry({
+    command: argv[0],
+    args: argv.slice(1),
+    url: typeof entry.url === "string" ? entry.url : void 0
+  });
+}
+async function planOpencodeMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const serverKey = options.serverKey ?? CANONICAL_RESIN_MCP_SERVER_KEY;
+  const current = await fsBridge.readFile(options.targetPath);
+  const config = parseConfig(current, options.targetPath);
+  const mcp = isObject(config.mcp) ? { ...config.mcp } : {};
+  for (const alias of LEGACY_RESIN_MCP_SERVER_ALIASES) {
+    if (alias !== serverKey && isResinOpencodeEntry(mcp[alias]))
+      delete mcp[alias];
+  }
+  const entry = options.url ? { type: "remote", url: options.url, enabled: true } : {
+    type: "local",
+    command: [
+      options.command ?? CANONICAL_RESIN_MCP_COMMAND,
+      ...options.args ?? CANONICAL_RESIN_MCP_ARGS
+    ],
+    enabled: true
+  };
+  const existing = mcp[serverKey];
+  mcp[serverKey] = isObject(existing) && existing.type === entry.type ? { ...existing, ...entry } : entry;
+  const next = current === null ? { $schema: OPENCODE_CONFIG_SCHEMA_URL } : {};
+  Object.assign(next, config, { mcp });
+  const plannedContent = `${JSON.stringify(next, null, 2)}
+`;
+  return planConfigMutation({
+    harnessId: "opencode",
+    targetPath: options.targetPath,
+    currentContent: current,
+    plannedContent: current !== null && plannedContent === current ? current : plannedContent,
+    description: `Register Resin MCP server "${serverKey}" in OpenCode config`,
+    metadata: { serverKey, transport: entry.type }
+  });
+}
+async function verifyOpencodeMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  let config;
+  try {
+    config = parseConfig(await fsBridge.readFile(options.targetPath), options.targetPath);
+  } catch {
+    return false;
+  }
+  const entry = isObject(config.mcp) ? config.mcp[options.serverKey ?? CANONICAL_RESIN_MCP_SERVER_KEY] : void 0;
+  if (!isObject(entry) || entry.enabled === false || entry.type !== "local")
+    return false;
+  const argv = Array.isArray(entry.command) ? entry.command : [];
+  if (argv.length !== 1 + CANONICAL_RESIN_MCP_ARGS.length)
+    return false;
+  if (!CANONICAL_RESIN_MCP_ARGS.every((arg, index) => argv[index + 1] === arg))
+    return false;
+  return options.command === void 0 ? isResinOpencodeEntry(entry) : argv[0] === options.command;
+}
+function opencodeUninstallPaths(home, env) {
+  const dir = resolveOpencodeConfigDir(home, env);
+  return OPENCODE_GLOBAL_CONFIG_FILES.map((name) => path21.join(dir, name));
+}
+async function removeOpencodeMcpConfig(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const keys = [
+    options.serverKey ?? CANONICAL_RESIN_MCP_SERVER_KEY,
+    ...LEGACY_RESIN_MCP_SERVER_ALIASES
+  ];
+  let changed = false;
+  for (const filePath of opencodeUninstallPaths(options.home, options.env)) {
+    const current = await fsBridge.readFile(filePath);
+    if (current === null)
+      continue;
+    let config;
+    try {
+      config = parseConfig(current, filePath);
+    } catch {
+      continue;
+    }
+    if (!isObject(config.mcp))
+      continue;
+    const mcp = { ...config.mcp };
+    let fileChanged = false;
+    for (const key of keys) {
+      if (isResinOpencodeEntry(mcp[key])) {
+        delete mcp[key];
+        fileChanged = true;
+      }
+    }
+    if (!fileChanged)
+      continue;
+    changed = true;
+    if (options.dryRun)
+      continue;
+    const next = { ...config, mcp };
+    if (Object.keys(mcp).length === 0)
+      delete next.mcp;
+    await fsBridge.writeFile(filePath, `${JSON.stringify(next, null, 2)}
+`);
+  }
+  return changed;
+}
+var OPENCODE_CONFIG_SCHEMA_URL;
+var init_config_planner8 = __esm({
+  "adapters/opencode/dist/config-planner.js"() {
     "use strict";
     init_dist();
-    init_instructions();
+    init_paths3();
+    OPENCODE_CONFIG_SCHEMA_URL = "https://opencode.ai/config.json";
   }
 });
 
-// adapters/omp/dist/source.js
-var MAX_OMP_PROGRAM_ARTIFACT_BYTES, FORK_HEADER_SCAN_BYTES;
-var init_source4 = __esm({
-  "adapters/omp/dist/source.js"() {
+// adapters/opencode/dist/discovery.js
+import * as fs7 from "node:fs";
+import * as path22 from "node:path";
+function parseOpencodeVersion(output) {
+  return output.match(/\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/)?.[1] ?? null;
+}
+function isExecutableFile2(file) {
+  try {
+    if (!fs7.statSync(file).isFile())
+      return false;
+    fs7.accessSync(file, fs7.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function findOpencodeExecutable(executable, env) {
+  const candidates = executable && executable.includes(path22.sep) ? [executable] : (env.PATH ?? "").split(path22.delimiter).filter(Boolean).map((dir) => path22.join(dir, executable ?? "opencode"));
+  return candidates.find(isExecutableFile2) ?? null;
+}
+function readOpencodeVersion(executablePath) {
+  let dir;
+  try {
+    dir = path22.dirname(fs7.realpathSync(executablePath));
+  } catch {
+    dir = path22.dirname(executablePath);
+  }
+  for (let depth = 0; depth < 6; depth++) {
+    const pkg = readJsonObject(path22.join(dir, "package.json"));
+    if (pkg?.name === OPENCODE_PACKAGE_NAME && typeof pkg.version === "string") {
+      return parseOpencodeVersion(pkg.version);
+    }
+    const parent = path22.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return null;
+}
+async function probeOpencodeInstallation(options) {
+  const executable = findOpencodeExecutable(options.executablePath, options.env);
+  const executableFound = executable !== null;
+  const version = executable ? readOpencodeVersion(executable) : null;
+  const dbPath = resolveOpencodeDbPath(options.home, options.env);
+  const legacyDir = resolveOpencodeLegacyStorageDir(options.home, options.env);
+  const configDir = resolveOpencodeConfigDir(options.home, options.env);
+  const hasState = fs7.existsSync(dbPath) || fs7.existsSync(legacyDir) || fs7.existsSync(configDir);
+  if (!executableFound && !hasState)
+    return null;
+  const resolvedVersion = version ?? UNKNOWN_HARNESS_VERSION;
+  return {
+    harnessId: "opencode",
+    displayName: "OpenCode",
+    version: resolvedVersion,
+    executablePath: executable ?? void 0,
+    configPath: options.configPath ?? resolveOpencodeMcpConfigPath(options.home, options.env),
+    homePath: path22.dirname(dbPath),
+    isInstalled: executableFound,
+    status: executableFound ? "ready" : "missing_executable",
+    detectedAt: nowIso(),
+    metadata: {
+      dbPath,
+      store: fs7.existsSync(dbPath) ? "sqlite" : fs7.existsSync(legacyDir) ? "legacy-json" : "none",
+      versionClassification: classifyHarnessVersion(resolvedVersion, OPENCODE_TESTED_VERSIONS)
+    }
+  };
+}
+function readJsonObject(file) {
+  try {
+    const value = JSON.parse(fs7.readFileSync(file, "utf8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+var OPENCODE_TESTED_VERSIONS, OPENCODE_PACKAGE_NAME;
+var init_discovery8 = __esm({
+  "adapters/opencode/dist/discovery.js"() {
     "use strict";
-    MAX_OMP_PROGRAM_ARTIFACT_BYTES = 1 * 1024 * 1024;
-    FORK_HEADER_SCAN_BYTES = 64 * 1024;
+    init_common();
+    init_dist();
+    init_paths3();
+    OPENCODE_TESTED_VERSIONS = ["1.18.32", "1.1.65"];
+    OPENCODE_PACKAGE_NAME = "opencode-ai";
   }
 });
 
-// adapters/omp/dist/adapter.js
-var init_adapter4 = __esm({
-  "adapters/omp/dist/adapter.js"() {
+// adapters/opencode/dist/instructions.js
+var OPENCODE_GUIDANCE_MARKERS, OPENCODE_RESIN_GUIDANCE;
+var init_instructions5 = __esm({
+  "adapters/opencode/dist/instructions.js"() {
+    "use strict";
+    OPENCODE_GUIDANCE_MARKERS = {
+      start: "<!-- resin:opencode-guidance:start -->",
+      end: "<!-- resin:opencode-guidance:end -->"
+    };
+    OPENCODE_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are MCP tools named \`resin_<name>\` (besides Resin's own \`resin_search_tools\`, \`resin_get_tool_schema\`, \`resin_invoke_tool\` and \`resin_manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, go through the \`resin_\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
+`;
+  }
+});
+
+// adapters/opencode/dist/install.js
+var opencodeInstallHarness;
+var init_install8 = __esm({
+  "adapters/opencode/dist/install.js"() {
+    "use strict";
+    init_config_planner8();
+    init_discovery8();
+    init_instructions5();
+    init_paths3();
+    opencodeInstallHarness = {
+      id: "opencode",
+      displayName: "OpenCode",
+      shortName: "OpenCode",
+      adapterPackage: "@resin/adapter-opencode",
+      testedVersions: OPENCODE_TESTED_VERSIONS,
+      knownLimits: [
+        "MCP tool list changes are picked up by the next OpenCode session.",
+        "Only the default release-channel database (opencode.db, or OPENCODE_DB) is observed."
+      ],
+      probeInstallation: ({ targetPath, home, env }) => probeOpencodeInstallation({ home, env, configPath: targetPath }),
+      mcpConfig: {
+        resolvePath: resolveOpencodeMcpConfigPath,
+        uninstallPaths: opencodeUninstallPaths,
+        format: "json",
+        serverKey: "resin",
+        jsonContainerKeys: ["mcp"],
+        transports: ["stdio", "http"],
+        planRegistration: ({ targetPath, command, args, fsBridge }) => planOpencodeMcpConfig({ targetPath, command, args, fsBridge }),
+        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyOpencodeMcpConfig({ targetPath, command, fsBridge }),
+        removeRegistration: ({ home, env, fsBridge, dryRun }) => removeOpencodeMcpConfig({ home, env, fsBridge, dryRun })
+      },
+      guidance: {
+        resolvePath: resolveOpencodeGuidancePath,
+        markers: OPENCODE_GUIDANCE_MARKERS,
+        body: OPENCODE_RESIN_GUIDANCE.trimEnd()
+      }
+    };
+  }
+});
+
+// adapters/pi/dist/extension.js
+function renderPiResinExtension(server) {
+  const config = JSON.stringify({ name: server.name, command: server.command, args: [...server.args], env: server.env ?? {} }, null, 2);
+  return `${PI_RESIN_EXTENSION_MARKER}
+// Generated by Resin. Do not edit: \`resin init\` rewrites this file and \`resin uninstall\` deletes it.
+// Pi has no MCP client, so this extension connects to Resin's MCP gateway over stdio and exposes
+// its tools to the model as Pi tools named mcp__<server>__<tool>.
+import { spawn } from "node:child_process";
+
+const SERVER = ${config};
+const HIDDEN_TOOLS = ${JSON.stringify(PI_BRIDGE_HIDDEN_TOOLS)};
+const CONNECT_TIMEOUT_MS = 20000;
+const PROTOCOL_VERSION = "2025-06-18";
+
+function sanitize(value) {
+  return String(value).replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+function piToolName(toolName) {
+  return ("${PI_MCP_TOOL_PREFIX}" + sanitize(SERVER.name) + "__" + sanitize(toolName)).slice(0, 64);
+}
+
+function createClient(cwd, onToolsChanged) {
+  const child = spawn(SERVER.command, SERVER.args, {
+    cwd,
+    env: { ...process.env, ...SERVER.env },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const pending = new Map();
+  let nextId = 1;
+  let buffer = "";
+  let closed = false;
+
+  const failAll = (error) => {
+    closed = true;
+    for (const entry of pending.values()) entry.reject(error);
+    pending.clear();
+  };
+  child.on("error", (error) => failAll(error));
+  child.on("exit", (code, signal) => failAll(new Error(SERVER.name + " MCP server exited (" + (signal || code) + ")")));
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let newline = buffer.indexOf("\\n");
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\\n");
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (message.id !== undefined && pending.has(message.id) && message.method === undefined) {
+        const entry = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) entry.reject(new Error(message.error.message || "MCP error " + message.error.code));
+        else entry.resolve(message.result);
+      } else if (message.method === "notifications/tools/list_changed") {
+        onToolsChanged();
+      } else if (message.method !== undefined && message.id !== undefined) {
+        send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } });
+      }
+    }
+  });
+
+  function send(message) {
+    if (closed) return;
+    child.stdin.write(JSON.stringify(message) + "\\n");
+  }
+
+  function request(method, params, signal) {
+    if (closed) return Promise.reject(new Error(SERVER.name + " MCP server is not running"));
+    const id = nextId++;
+    const { promise, resolve, reject } = Promise.withResolvers();
+    const onAbort = () => {
+      pending.delete(id);
+      send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "aborted" } });
+      reject(new Error("Aborted"));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return promise;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    pending.set(id, {
+      resolve: (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      reject: (error) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    });
+    send({ jsonrpc: "2.0", id, method, params });
+    return promise;
+  }
+
+  return {
+    request,
+    notify: (method, params) => send({ jsonrpc: "2.0", method, params }),
+    close() {
+      if (closed) return;
+      closed = true;
+      child.stdin.end();
+      child.kill();
+    },
+  };
+}
+
+function toPiContent(result) {
+  const content = [];
+  for (const part of result?.content ?? []) {
+    if (part.type === "text") content.push({ type: "text", text: part.text });
+    else if (part.type === "image") content.push({ type: "image", data: part.data, mimeType: part.mimeType });
+    else content.push({ type: "text", text: JSON.stringify(part) });
+  }
+  if (content.length === 0 && result?.structuredContent !== undefined) {
+    content.push({ type: "text", text: JSON.stringify(result.structuredContent) });
+  }
+  return content;
+}
+
+function withTimeout(promise, ms, label) {
+  const timeout = Promise.withResolvers();
+  const timer = setTimeout(() => timeout.reject(new Error(label + " timed out after " + ms + "ms")), ms);
+  return Promise.race([promise, timeout.promise]).finally(() => clearTimeout(timer));
+}
+
+export default function resinMcpBridge(pi) {
+  let client = null;
+  const registered = new Map();
+
+  async function listTools() {
+    const tools = [];
+    let cursor;
+    do {
+      const page = await client.request("tools/list", cursor ? { cursor } : {});
+      tools.push(...(page?.tools ?? []));
+      cursor = page?.nextCursor;
+    } while (cursor);
+    return tools;
+  }
+
+  function registerMcpTool(tool) {
+    const name = piToolName(tool.name);
+    pi.registerTool({
+      name,
+      label: tool.title || tool.name,
+      description: tool.description || tool.name,
+      promptSnippet: (tool.description || tool.name).split("\\n")[0],
+      parameters: tool.inputSchema || { type: "object", properties: {} },
+      async execute(_toolCallId, params, signal) {
+        if (!client) throw new Error(SERVER.name + " MCP server is not connected");
+        const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, signal);
+        const content = toPiContent(result);
+        if (result?.isError) {
+          throw new Error(content.map((part) => (part.type === "text" ? part.text : "")).join("\\n") || "MCP tool error");
+        }
+        return { content, details: { mcpServer: SERVER.name, mcpTool: tool.name, structuredContent: result?.structuredContent } };
+      },
+    });
+    registered.set(name, tool.name);
+    return name;
+  }
+
+  async function syncTools() {
+    const tools = await listTools();
+    const current = new Set();
+    const added = [];
+    for (const tool of tools) {
+      if (HIDDEN_TOOLS.includes(tool.name)) continue;
+      const name = piToolName(tool.name);
+      current.add(name);
+      if (!registered.has(name)) added.push(name);
+      registerMcpTool(tool);
+    }
+    const removed = [...registered.keys()].filter((name) => !current.has(name));
+    for (const name of removed) registered.delete(name);
+    if (added.length > 0 || removed.length > 0) {
+      const active = new Set(pi.getActiveTools());
+      for (const name of added) active.add(name);
+      for (const name of removed) active.delete(name);
+      pi.setActiveTools([...active]);
+    }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    if (client) return;
+    try {
+      client = createClient(ctx.cwd, () => {
+        syncTools().catch((error) => ctx.ui.notify("Resin tools refresh failed: " + error.message, "warning"));
+      });
+      await withTimeout(
+        client.request("initialize", {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "resin-pi-bridge", version: "1" },
+        }),
+        CONNECT_TIMEOUT_MS,
+        SERVER.name + " MCP initialize",
+      );
+      client.notify("notifications/initialized", {});
+      await withTimeout(syncTools(), CONNECT_TIMEOUT_MS, SERVER.name + " MCP tools/list");
+    } catch (error) {
+      client?.close();
+      client = null;
+      ctx.ui.notify("Resin MCP bridge unavailable: " + error.message, "warning");
+    }
+  });
+
+  pi.on("session_shutdown", () => {
+    client?.close();
+    client = null;
+  });
+}
+`;
+}
+var PI_RESIN_EXTENSION_MARKER, PI_RESIN_EXTENSION_FILE_NAME, PI_MCP_TOOL_PREFIX, PI_BRIDGE_HIDDEN_TOOLS;
+var init_extension = __esm({
+  "adapters/pi/dist/extension.js"() {
+    "use strict";
+    PI_RESIN_EXTENSION_MARKER = "// resin-managed: pi-mcp-bridge";
+    PI_RESIN_EXTENSION_FILE_NAME = "resin.ts";
+    PI_MCP_TOOL_PREFIX = "mcp__";
+    PI_BRIDGE_HIDDEN_TOOLS = [
+      "search_tools",
+      "get_tool_schema",
+      "invoke_tool",
+      "manage_tools"
+    ];
+  }
+});
+
+// adapters/pi/dist/paths.js
+import path23 from "node:path";
+function expandHome(value, home) {
+  if (value === "~")
+    return home;
+  if (value.startsWith("~/"))
+    return path23.join(home, value.slice(2));
+  return value;
+}
+function nonEmpty(value) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : void 0;
+}
+function resolvePiAgentDir(home, env) {
+  const configured = nonEmpty(env[PI_AGENT_DIR_ENV]);
+  return configured ? path23.resolve(expandHome(configured, home)) : path23.join(home, ".pi", "agent");
+}
+function resolvePiExtensionPath(home, env) {
+  return path23.join(resolvePiAgentDir(home, env), "extensions", PI_RESIN_EXTENSION_FILE_NAME);
+}
+var PI_HARNESS_ID, PI_DISPLAY_NAME, PI_AGENT_DIR_ENV;
+var init_paths4 = __esm({
+  "adapters/pi/dist/paths.js"() {
+    "use strict";
+    init_extension();
+    PI_HARNESS_ID = "pi";
+    PI_DISPLAY_NAME = "Pi";
+    PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
+  }
+});
+
+// adapters/pi/dist/discovery.js
+import * as fsp3 from "node:fs/promises";
+import path24 from "node:path";
+async function findOnPath(name, env) {
+  for (const dir of (env.PATH ?? "").split(path24.delimiter)) {
+    if (!dir)
+      continue;
+    const candidate = path24.join(dir, name);
+    try {
+      await fsp3.access(candidate, 1);
+      return candidate;
+    } catch {
+    }
+  }
+  return void 0;
+}
+async function readPiVersion(executablePath) {
+  let dir = path24.dirname(await fsp3.realpath(executablePath).catch(() => executablePath));
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const pkg = JSON.parse(await fsp3.readFile(path24.join(dir, "package.json"), "utf8"));
+      if (pkg && typeof pkg === "object" && "name" in pkg && typeof pkg.name === "string" && PI_PACKAGE_NAMES.has(pkg.name) && "version" in pkg && typeof pkg.version === "string") {
+        return pkg.version;
+      }
+    } catch {
+    }
+    const parent = path24.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return void 0;
+}
+async function probePiInstallation(options) {
+  const detectedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const executablePath = options.executablePath ?? await findOnPath("pi", options.env);
+  if (!executablePath)
+    return null;
+  const version = await readPiVersion(executablePath);
+  return {
+    harnessId: PI_HARNESS_ID,
+    displayName: PI_DISPLAY_NAME,
+    version: version ?? UNKNOWN_HARNESS_VERSION,
+    executablePath,
+    configPath: options.configPath,
+    homePath: options.homePath,
+    isInstalled: true,
+    status: version ? "ready" : "unknown",
+    detectedAt,
+    metadata: {}
+  };
+}
+var PI_TESTED_VERSIONS, HEADER_SCAN_BYTES, PI_PACKAGE_NAMES;
+var init_discovery9 = __esm({
+  "adapters/pi/dist/discovery.js"() {
     "use strict";
     init_dist();
-    init_config_planner3();
-    init_discovery3();
-    init_refresh4();
-    init_source4();
+    init_paths4();
+    PI_TESTED_VERSIONS = ["0.87.1"];
+    HEADER_SCAN_BYTES = 64 * 1024;
+    PI_PACKAGE_NAMES = /* @__PURE__ */ new Set([
+      "@earendil-works/pi-coding-agent",
+      "@mariozechner/pi-coding-agent"
+    ]);
   }
 });
 
-// adapters/omp/dist/native-tool-invoker.js
-var init_native_tool_invoker = __esm({
-  "adapters/omp/dist/native-tool-invoker.js"() {
+// adapters/pi/dist/registration.js
+import { existsSync as existsSync2 } from "node:fs";
+import path25 from "node:path";
+async function planPiRegistration(options) {
+  const currentContent = await options.fsBridge.readFile(options.targetPath);
+  if (currentContent !== null && !currentContent.startsWith(PI_RESIN_EXTENSION_MARKER)) {
+    throw new Error(`${options.targetPath} exists and was not written by Resin; move it aside so Resin can install its Pi extension there.`);
+  }
+  const server = {
+    name: PI_RESIN_SERVER_NAME,
+    command: options.command,
+    args: options.args
+  };
+  return planConfigMutation({
+    harnessId: PI_HARNESS_ID,
+    targetPath: options.targetPath,
+    currentContent,
+    plannedContent: renderPiResinExtension(server),
+    description: "Install the Resin MCP bridge extension for Pi",
+    // An owned file needs no backup: the previous content is Resin's own rendering.
+    backupPath: `${options.targetPath}.resin-backup`
+  });
+}
+async function verifyPiRegistration(options) {
+  const content = await options.fsBridge.readFile(options.targetPath);
+  return content !== null && content === renderPiResinExtension({
+    name: PI_RESIN_SERVER_NAME,
+    command: options.command,
+    args: ["mcp"]
+  });
+}
+async function removePiRegistration(options) {
+  let changed = false;
+  for (const filePath of new Set(options.paths)) {
+    const content = await options.fsBridge.readFile(filePath);
+    if (content === null || !content.startsWith(PI_RESIN_EXTENSION_MARKER))
+      continue;
+    changed = true;
+    if (options.dryRun)
+      continue;
+    await options.fsBridge.unlink(filePath);
+    await options.fsBridge.unlink(`${filePath}.resin-backup`);
+  }
+  return changed;
+}
+function resolvePiGuidancePath(home, env) {
+  const agentDir = resolvePiAgentDir(home, env);
+  const existing = PI_CONTEXT_FILE_NAMES.map((name) => path25.join(agentDir, name)).find((file) => existsSync2(file));
+  return existing ?? path25.join(agentDir, "AGENTS.md");
+}
+var PI_RESIN_SERVER_NAME, PI_GUIDANCE_MARKERS, PI_RESIN_GUIDANCE, PI_CONTEXT_FILE_NAMES;
+var init_registration = __esm({
+  "adapters/pi/dist/registration.js"() {
     "use strict";
+    init_dist();
+    init_extension();
+    init_paths4();
+    PI_RESIN_SERVER_NAME = "resin";
+    PI_GUIDANCE_MARKERS = {
+      start: "<!-- resin:pi-guidance:start -->",
+      end: "<!-- resin:pi-guidance:end -->"
+    };
+    PI_RESIN_GUIDANCE = `# Resin learned tools
+
+Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\` in your tool list; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
+    PI_CONTEXT_FILE_NAMES = [
+      "AGENTS.override.md",
+      "AGENTS.md",
+      "AGENTS.MD",
+      "CLAUDE.md",
+      "CLAUDE.MD"
+    ];
   }
 });
 
-// adapters/omp/dist/index.js
-var init_dist4 = __esm({
-  "adapters/omp/dist/index.js"() {
+// adapters/pi/dist/install.js
+import path26 from "node:path";
+var piInstallHarness;
+var init_install9 = __esm({
+  "adapters/pi/dist/install.js"() {
     "use strict";
-    init_adapter4();
-    init_config_planner3();
-    init_decoder4();
-    init_device_surface();
-    init_discovery3();
-    init_instructions();
-    init_refresh4();
-    init_native_tool_invoker();
-    init_source4();
+    init_discovery9();
+    init_extension();
+    init_paths4();
+    init_registration();
+    piInstallHarness = {
+      id: "pi",
+      displayName: PI_DISPLAY_NAME,
+      shortName: PI_DISPLAY_NAME,
+      adapterPackage: "@resin/adapter-pi",
+      testedVersions: PI_TESTED_VERSIONS,
+      knownLimits: [
+        "Pi has no MCP client: Resin installs a Pi extension (<agent-dir>/extensions/resin.ts) that bridges `resin mcp`; runs with --no-extensions or -ne do not load it.",
+        "Runs with --no-session write no transcript and cannot be captured.",
+        "Sessions stored with --session-dir are only discovered when that directory is also set via PI_CODING_AGENT_SESSION_DIR or the sessionDir setting.",
+        "Pi has no built-in subagents; nothing below the session is captured."
+      ],
+      probeInstallation: ({ targetPath, home, env }) => probePiInstallation({ env, configPath: targetPath, homePath: resolvePiAgentDir(home, env) }),
+      mcpConfig: {
+        resolvePath: resolvePiExtensionPath,
+        uninstallPaths: (home, env) => [
+          resolvePiExtensionPath(home, env),
+          path26.join(home, ".pi", "agent", "extensions", PI_RESIN_EXTENSION_FILE_NAME)
+        ],
+        format: "owned-file",
+        serverKey: "resin",
+        jsonContainerKeys: [],
+        transports: ["stdio"],
+        planRegistration: ({ targetPath, command, args, fsBridge }) => planPiRegistration({ targetPath, command, args, fsBridge }),
+        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyPiRegistration({ targetPath, command, fsBridge }),
+        removeRegistration: ({ home, env, fsBridge, dryRun }) => removePiRegistration({
+          paths: piInstallHarness.mcpConfig.uninstallPaths(home, env),
+          fsBridge,
+          dryRun
+        })
+      },
+      guidance: {
+        resolvePath: resolvePiGuidancePath,
+        markers: PI_GUIDANCE_MARKERS,
+        body: PI_RESIN_GUIDANCE
+      }
+    };
+  }
+});
+
+// apps/cli/src/harness-registry.ts
+function findHarnessDefinition(id) {
+  return HARNESS_DEFINITIONS.find((definition) => definition.id === id);
+}
+function isSupportedHarnessId(value) {
+  return typeof value === "string" && findHarnessDefinition(value) !== void 0;
+}
+var HARNESS_DEFINITIONS, SUPPORTED_HARNESS_IDS;
+var init_harness_registry = __esm({
+  "apps/cli/src/harness-registry.ts"() {
+    "use strict";
+    init_install();
+    init_install2();
+    init_install3();
+    init_install4();
+    init_install5();
+    init_install6();
+    init_install7();
+    init_install8();
+    init_install9();
+    HARNESS_DEFINITIONS = [
+      claudeCodeInstallHarness,
+      codexInstallHarness,
+      ompInstallHarness,
+      piInstallHarness,
+      cursorInstallHarness,
+      grokBuildInstallHarness,
+      museCodeInstallHarness,
+      opencodeInstallHarness,
+      copilotInstallHarness
+    ];
+    SUPPORTED_HARNESS_IDS = HARNESS_DEFINITIONS.map(
+      (definition) => definition.id
+    );
   }
 });
 
@@ -6000,7 +8596,7 @@ var init_stringify = __esm({
 });
 
 // node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js
-var init_dist5 = __esm({
+var init_dist2 = __esm({
   "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js"() {
     init_parse();
     init_stringify();
@@ -6009,33 +8605,21 @@ var init_dist5 = __esm({
   }
 });
 
-// apps/cli/src/installer/codex-instructions.ts
-var init_codex_instructions = __esm({
-  "apps/cli/src/installer/codex-instructions.ts"() {
-    "use strict";
-  }
-});
-
 // apps/cli/src/installer/harness-config.ts
-var SUPPORTED_HARNESS_IDS;
 var init_harness_config = __esm({
   "apps/cli/src/installer/harness-config.ts"() {
     "use strict";
-    init_dist2();
-    init_dist3();
-    init_dist4();
     init_dist();
-    init_dist5();
-    init_codex_instructions();
-    SUPPORTED_HARNESS_IDS = ["claude-code", "codex-cli", "omp"];
+    init_dist2();
+    init_harness_registry();
   }
 });
 
 // apps/cli/src/installer/harness-reconciler.ts
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import fs2 from "node:fs/promises";
-import path4 from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { constants as fsConstants2 } from "node:fs";
+import fs8 from "node:fs/promises";
+import path27 from "node:path";
 function isAlreadyExistsError(cause) {
   return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === "EEXIST";
 }
@@ -6051,7 +8635,7 @@ var init_harness_reconciler = __esm({
     "use strict";
     init_dist();
     init_zod();
-    init_codex_instructions();
+    init_harness_registry();
     init_harness_config();
     HarnessJsonValueSchema = external_exports.lazy(
       () => external_exports.union([
@@ -6083,7 +8667,7 @@ var init_harness_reconciler = __esm({
     RECONCILIATION_LOCK_WAIT_MS = 2e3;
     RECONCILIATION_LOCK_RETRY_MS = 25;
     LOCK_CLAIM_SUFFIX = ".claim";
-    PROCESS_FALLBACK_INCARNATION = randomUUID();
+    PROCESS_FALLBACK_INCARNATION = randomUUID2();
     ReconciliationLockClaimSchema = external_exports.object({
       format: external_exports.literal(RECONCILIATION_LOCK_FORMAT),
       token: external_exports.string().uuid(),
@@ -6100,7 +8684,7 @@ var init_harness_reconciler = __esm({
       activeLocks = /* @__PURE__ */ new Map();
       async readFile(filePath) {
         try {
-          return await fs2.readFile(filePath, "utf8");
+          return await fs8.readFile(filePath, "utf8");
         } catch (error) {
           if (isMissingFileError(error)) {
             return null;
@@ -6110,23 +8694,23 @@ var init_harness_reconciler = __esm({
       }
       async writeFile(filePath, content) {
         const targetPath = await this.resolveAtomicWriteTarget(filePath);
-        const directoryPath = path4.dirname(targetPath);
-        await fs2.mkdir(directoryPath, { recursive: true, mode: 448 });
+        const directoryPath = path27.dirname(targetPath);
+        await fs8.mkdir(directoryPath, { recursive: true, mode: 448 });
         let targetMode = 384;
         try {
-          targetMode = (await fs2.stat(targetPath)).mode & 511;
+          targetMode = (await fs8.stat(targetPath)).mode & 511;
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
           }
         }
-        const temporaryPath = path4.join(
+        const temporaryPath = path27.join(
           directoryPath,
-          `.${path4.basename(targetPath)}.resin-${randomUUID()}.tmp`
+          `.${path27.basename(targetPath)}.resin-${randomUUID2()}.tmp`
         );
         let replaced = false;
         try {
-          const handle = await fs2.open(temporaryPath, "wx", targetMode);
+          const handle = await fs8.open(temporaryPath, "wx", targetMode);
           try {
             await handle.writeFile(content, "utf8");
             await handle.sync();
@@ -6134,20 +8718,20 @@ var init_harness_reconciler = __esm({
           } finally {
             await handle.close();
           }
-          await fs2.rename(temporaryPath, targetPath);
+          await fs8.rename(temporaryPath, targetPath);
           replaced = true;
         } finally {
           if (!replaced) {
-            await fs2.unlink(temporaryPath).catch(() => void 0);
+            await fs8.unlink(temporaryPath).catch(() => void 0);
           }
         }
       }
       async writeFileExclusive(filePath, content) {
-        await fs2.mkdir(path4.dirname(filePath), { recursive: true, mode: 448 });
+        await fs8.mkdir(path27.dirname(filePath), { recursive: true, mode: 448 });
         let handle;
         let created = false;
         try {
-          handle = await fs2.open(filePath, "wx", 384);
+          handle = await fs8.open(filePath, "wx", 384);
           created = true;
           await handle.writeFile(content, "utf8");
           await handle.sync();
@@ -6158,7 +8742,7 @@ var init_harness_reconciler = __esm({
             return false;
           }
           if (created) {
-            await fs2.unlink(filePath).catch(() => void 0);
+            await fs8.unlink(filePath).catch(() => void 0);
           }
           throw error;
         } finally {
@@ -6167,10 +8751,10 @@ var init_harness_reconciler = __esm({
       }
       async compareAndSwapFile(filePath, expectedContent, content) {
         const target = await this.resolveTransactionTarget(filePath);
-        const activeLock = this.activeLocks.get(path4.resolve(filePath));
+        const activeLock = this.activeLocks.get(path27.resolve(filePath));
         if (expectedContent === null) {
           try {
-            await fs2.lstat(target.effectivePath);
+            await fs8.lstat(target.effectivePath);
             return false;
           } catch (error) {
             if (!isMissingFileError(error)) {
@@ -6221,11 +8805,11 @@ var init_harness_reconciler = __esm({
           await this.verifyHardLinkSupport(transaction);
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
-          const finalVersion = await fs2.lstat(target.effectivePath, { bigint: true });
+          const finalVersion = await fs8.lstat(target.effectivePath, { bigint: true });
           if (!finalVersion.isFile() || finalVersion.dev !== original.device || finalVersion.ino !== original.inode) {
             throw new Error(`Configuration identity changed immediately before writing ${filePath}`);
           }
-          await fs2.rename(target.effectivePath, transaction.capturedPath);
+          await fs8.rename(target.effectivePath, transaction.capturedPath);
           captured = true;
           const capturedSnapshot = await this.readStableFile(transaction.capturedPath);
           if (capturedSnapshot.device !== original.device || capturedSnapshot.inode !== original.inode || capturedSnapshot.content !== expectedContent) {
@@ -6269,7 +8853,7 @@ var init_harness_reconciler = __esm({
       }
       async unlinkIfUnchanged(filePath, expectedContent) {
         const target = await this.resolveTransactionTarget(filePath);
-        const activeLock = this.activeLocks.get(path4.resolve(filePath));
+        const activeLock = this.activeLocks.get(path27.resolve(filePath));
         let original;
         try {
           original = await this.readStableFile(target.effectivePath);
@@ -6288,11 +8872,11 @@ var init_harness_reconciler = __esm({
           await this.verifyHardLinkSupport(transaction);
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
-          const finalVersion = await fs2.lstat(target.effectivePath, { bigint: true });
+          const finalVersion = await fs8.lstat(target.effectivePath, { bigint: true });
           if (!finalVersion.isFile() || finalVersion.dev !== original.device || finalVersion.ino !== original.inode) {
             throw new Error(`Configuration identity changed immediately before removing ${filePath}`);
           }
-          await fs2.rename(target.effectivePath, transaction.capturedPath);
+          await fs8.rename(target.effectivePath, transaction.capturedPath);
           captured = true;
           const capturedSnapshot = await this.readStableFile(transaction.capturedPath);
           if (capturedSnapshot.device !== original.device || capturedSnapshot.inode !== original.inode || capturedSnapshot.content !== expectedContent) {
@@ -6301,7 +8885,7 @@ var init_harness_reconciler = __esm({
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
           try {
-            await fs2.lstat(target.effectivePath);
+            await fs8.lstat(target.effectivePath);
             throw new Error(
               `A concurrent writer recreated ${filePath} at Resin's final removal boundary`
             );
@@ -6326,13 +8910,13 @@ var init_harness_reconciler = __esm({
         }
       }
       async withFileLock(filePath, action) {
-        const requestedPath = path4.resolve(filePath);
+        const requestedPath = path27.resolve(filePath);
         const canonicalTarget = await this.resolveLockTarget(filePath);
-        const lockPath = path4.join(
-          path4.dirname(canonicalTarget),
-          `.${path4.basename(canonicalTarget)}.resin-reconcile.lock`
+        const lockPath = path27.join(
+          path27.dirname(canonicalTarget),
+          `.${path27.basename(canonicalTarget)}.resin-reconcile.lock`
         );
-        await fs2.mkdir(path4.dirname(lockPath), { recursive: true, mode: 448 });
+        await fs8.mkdir(path27.dirname(lockPath), { recursive: true, mode: 448 });
         const deadline = process.hrtime.bigint() + BigInt(RECONCILIATION_LOCK_WAIT_MS) * 1000000n;
         await this.waitForLockDirectory(lockPath, canonicalTarget, deadline);
         const claim = await this.createLockClaim(lockPath, canonicalTarget);
@@ -6340,7 +8924,7 @@ var init_harness_reconciler = __esm({
           requestedPath,
           canonicalTarget,
           lockPath,
-          claimPath: path4.join(lockPath, `${claim.token}${LOCK_CLAIM_SUFFIX}`),
+          claimPath: path27.join(lockPath, `${claim.token}${LOCK_CLAIM_SUFFIX}`),
           claim,
           refreshTail: Promise.resolve(),
           releaseStarted: false
@@ -6368,7 +8952,7 @@ var init_harness_reconciler = __esm({
           await activeLock.refreshTail;
           try {
             await this.removeOwnedClaim(activeLock);
-            await fs2.rmdir(lockPath).catch((error) => {
+            await fs8.rmdir(lockPath).catch((error) => {
               const code = "code" in error ? error.code : void 0;
               if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
                 throw error;
@@ -6394,7 +8978,7 @@ var init_harness_reconciler = __esm({
       }
       async exists(filePath) {
         try {
-          await fs2.access(filePath);
+          await fs8.access(filePath);
           return true;
         } catch (error) {
           if (isMissingFileError(error)) {
@@ -6404,21 +8988,21 @@ var init_harness_reconciler = __esm({
         }
       }
       async mkdirp(directoryPath) {
-        await fs2.mkdir(directoryPath, { recursive: true, mode: 448 });
+        await fs8.mkdir(directoryPath, { recursive: true, mode: 448 });
       }
       async copyFile(sourcePath, destinationPath) {
-        await fs2.mkdir(path4.dirname(destinationPath), { recursive: true, mode: 448 });
+        await fs8.mkdir(path27.dirname(destinationPath), { recursive: true, mode: 448 });
         try {
-          await fs2.copyFile(sourcePath, destinationPath);
-          await fs2.chmod(destinationPath, 384);
+          await fs8.copyFile(sourcePath, destinationPath);
+          await fs8.chmod(destinationPath, 384);
         } catch (error) {
-          await fs2.unlink(destinationPath).catch(() => void 0);
+          await fs8.unlink(destinationPath).catch(() => void 0);
           throw error;
         }
       }
       async unlink(filePath) {
         try {
-          await fs2.unlink(filePath);
+          await fs8.unlink(filePath);
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
@@ -6427,8 +9011,8 @@ var init_harness_reconciler = __esm({
       }
       async listFiles(directoryPath) {
         try {
-          const entries = await fs2.readdir(directoryPath);
-          return entries.map((entry) => path4.join(directoryPath, entry));
+          const entries = await fs8.readdir(directoryPath);
+          return entries.map((entry) => path27.join(directoryPath, entry));
         } catch (error) {
           if (isMissingFileError(error)) {
             return [];
@@ -6437,23 +9021,23 @@ var init_harness_reconciler = __esm({
         }
       }
       async linkTransactionFile(sourcePath, destinationPath) {
-        await fs2.link(sourcePath, destinationPath);
+        await fs8.link(sourcePath, destinationPath);
       }
       async prepareTransaction(targetPath, plannedContent, mode) {
-        const parentPath = path4.dirname(targetPath);
-        await fs2.mkdir(parentPath, { recursive: true, mode: 448 });
-        const directoryPath = path4.join(
+        const parentPath = path27.dirname(targetPath);
+        await fs8.mkdir(parentPath, { recursive: true, mode: 448 });
+        const directoryPath = path27.join(
           parentPath,
-          `.${path4.basename(targetPath)}.resin-transaction-${randomUUID()}`
+          `.${path27.basename(targetPath)}.resin-transaction-${randomUUID2()}`
         );
-        await fs2.mkdir(directoryPath, { mode: 448 });
+        await fs8.mkdir(directoryPath, { mode: 448 });
         const transaction = {
           directoryPath,
-          plannedPath: path4.join(directoryPath, "planned"),
-          capturedPath: path4.join(directoryPath, "captured"),
-          probePath: path4.join(directoryPath, "link-probe")
+          plannedPath: path27.join(directoryPath, "planned"),
+          capturedPath: path27.join(directoryPath, "captured"),
+          probePath: path27.join(directoryPath, "link-probe")
         };
-        const handle = await fs2.open(transaction.plannedPath, "wx", mode);
+        const handle = await fs8.open(transaction.plannedPath, "wx", mode);
         try {
           await handle.writeFile(plannedContent, "utf8");
           await handle.sync();
@@ -6466,7 +9050,7 @@ var init_harness_reconciler = __esm({
       async verifyHardLinkSupport(transaction) {
         try {
           await this.linkTransactionFile(transaction.plannedPath, transaction.probePath);
-          await fs2.unlink(transaction.probePath);
+          await fs8.unlink(transaction.probePath);
         } catch (error) {
           throw new Error(`Atomic filesystem compare-and-swap is unavailable: ${describeError(error)}`);
         }
@@ -6477,13 +9061,13 @@ var init_harness_reconciler = __esm({
           transaction.plannedPath,
           transaction.capturedPath
         ]) {
-          await fs2.unlink(ownedPath).catch((error) => {
+          await fs8.unlink(ownedPath).catch((error) => {
             if (!isMissingFileError(error)) {
               throw error;
             }
           });
         }
-        await fs2.rmdir(transaction.directoryPath);
+        await fs8.rmdir(transaction.directoryPath);
       }
       async restoreCapturedIfTargetMissing(transaction, targetPath) {
         try {
@@ -6500,7 +9084,7 @@ var init_harness_reconciler = __esm({
         );
       }
       async readStableFile(filePath) {
-        const handle = await fs2.open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+        const handle = await fs8.open(filePath, fsConstants2.O_RDONLY | (fsConstants2.O_NOFOLLOW ?? 0));
         try {
           const before = await handle.stat({ bigint: true });
           if (!before.isFile()) {
@@ -6526,15 +9110,15 @@ var init_harness_reconciler = __esm({
         }
       }
       async resolveTransactionTarget(filePath) {
-        const requestedPath = path4.resolve(filePath);
+        const requestedPath = path27.resolve(filePath);
         try {
-          const entry = await fs2.lstat(requestedPath, { bigint: true });
+          const entry = await fs8.lstat(requestedPath, { bigint: true });
           if (!entry.isSymbolicLink()) {
             return { requestedPath, effectivePath: requestedPath };
           }
           let effectivePath;
           try {
-            effectivePath = await fs2.realpath(requestedPath);
+            effectivePath = await fs8.realpath(requestedPath);
           } catch (error) {
             if (isMissingFileError(error)) {
               throw new Error(`Refusing to reconcile broken symbolic link ${filePath}`);
@@ -6547,7 +9131,7 @@ var init_harness_reconciler = __esm({
             symbolicLink: {
               device: entry.dev,
               inode: entry.ino,
-              linkTarget: await fs2.readlink(requestedPath)
+              linkTarget: await fs8.readlink(requestedPath)
             }
           };
         } catch (error) {
@@ -6561,22 +9145,22 @@ var init_harness_reconciler = __esm({
         if (target.symbolicLink === void 0) {
           return;
         }
-        const entry = await fs2.lstat(target.requestedPath, { bigint: true });
-        if (!entry.isSymbolicLink() || entry.dev !== target.symbolicLink.device || entry.ino !== target.symbolicLink.inode || await fs2.readlink(target.requestedPath) !== target.symbolicLink.linkTarget) {
+        const entry = await fs8.lstat(target.requestedPath, { bigint: true });
+        if (!entry.isSymbolicLink() || entry.dev !== target.symbolicLink.device || entry.ino !== target.symbolicLink.inode || await fs8.readlink(target.requestedPath) !== target.symbolicLink.linkTarget) {
           throw new Error(`Symbolic link changed while reconciling ${target.requestedPath}`);
         }
       }
       async waitForLockDirectory(lockPath, canonicalTarget, deadline) {
         while (true) {
           try {
-            await fs2.mkdir(lockPath, { mode: 448 });
+            await fs8.mkdir(lockPath, { mode: 448 });
             return;
           } catch (error) {
             if (!isAlreadyExistsError(error)) {
               throw error;
             }
           }
-          const entry = await fs2.lstat(lockPath);
+          const entry = await fs8.lstat(lockPath);
           if (entry.isSymbolicLink()) {
             throw new Error(`Refusing symbolic-link reconciliation lock ${lockPath}`);
           }
@@ -6607,8 +9191,8 @@ var init_harness_reconciler = __esm({
         }
       }
       async fenceLegacyLock(lockPath, expected) {
-        const retiredPath = `${lockPath}.stale-${randomUUID()}`;
-        await fs2.rename(lockPath, retiredPath);
+        const retiredPath = `${lockPath}.stale-${randomUUID2()}`;
+        await fs8.rename(lockPath, retiredPath);
         const captured = await this.readStableFile(retiredPath);
         if (captured.device !== expected.device || captured.inode !== expected.inode) {
           await this.linkTransactionFile(retiredPath, lockPath).catch(() => void 0);
@@ -6616,10 +9200,10 @@ var init_harness_reconciler = __esm({
             `Reconciliation lock changed while fencing it; preserved replacement at ${retiredPath}`
           );
         }
-        await fs2.unlink(retiredPath);
+        await fs8.unlink(retiredPath);
       }
       async createLockClaim(lockPath, canonicalTarget) {
-        const token = randomUUID();
+        const token = randomUUID2();
         const createdMonotonicNs = process.hrtime.bigint();
         const claim = {
           format: RECONCILIATION_LOCK_FORMAT,
@@ -6633,16 +9217,16 @@ var init_harness_reconciler = __esm({
           leaseExpiresAt: Date.now() + RECONCILIATION_LOCK_LEASE_MS,
           leaseExpiresMonotonicNs: (createdMonotonicNs + BigInt(RECONCILIATION_LOCK_LEASE_MS) * 1000000n).toString()
         };
-        const claimPath = path4.join(lockPath, `${token}${LOCK_CLAIM_SUFFIX}`);
+        const claimPath = path27.join(lockPath, `${token}${LOCK_CLAIM_SUFFIX}`);
         await this.publishClaimFile(claimPath, claim);
         return claim;
       }
       async publishClaimFile(claimPath, claim) {
-        const temporaryPath = path4.join(
-          path4.dirname(claimPath),
-          `.${path4.basename(claimPath)}.${randomUUID()}.tmp`
+        const temporaryPath = path27.join(
+          path27.dirname(claimPath),
+          `.${path27.basename(claimPath)}.${randomUUID2()}.tmp`
         );
-        const handle = await fs2.open(temporaryPath, "wx", 384);
+        const handle = await fs8.open(temporaryPath, "wx", 384);
         try {
           await handle.writeFile(JSON.stringify(claim), "utf8");
           await handle.sync();
@@ -6653,7 +9237,7 @@ var init_harness_reconciler = __esm({
         try {
           await this.linkTransactionFile(temporaryPath, claimPath);
         } finally {
-          await fs2.unlink(temporaryPath).catch(() => void 0);
+          await fs8.unlink(temporaryPath).catch(() => void 0);
         }
       }
       async waitUntilClaimIsElected(activeLock, deadline) {
@@ -6671,18 +9255,18 @@ var init_harness_reconciler = __esm({
         }
       }
       async scanLockClaims(lockPath, canonicalTarget) {
-        const directory = await fs2.lstat(lockPath);
+        const directory = await fs8.lstat(lockPath);
         if (!directory.isDirectory() || directory.isSymbolicLink()) {
           throw new Error(`Reconciliation lock directory was replaced: ${lockPath}`);
         }
         this.assertPrivateLockEntry(lockPath, directory.mode, directory.uid);
         const activeClaims = [];
         let blocked = false;
-        for (const entryName of await fs2.readdir(lockPath)) {
+        for (const entryName of await fs8.readdir(lockPath)) {
           if (!entryName.endsWith(LOCK_CLAIM_SUFFIX)) {
             continue;
           }
-          const claimPath = path4.join(lockPath, entryName);
+          const claimPath = path27.join(lockPath, entryName);
           let snapshot;
           try {
             snapshot = await this.readStableFile(claimPath);
@@ -6725,9 +9309,9 @@ var init_harness_reconciler = __esm({
         return { winner: activeClaims[0] ?? null, blocked };
       }
       async retireStaleClaim(claimPath, expected, expectedToken) {
-        const retiredPath = `${claimPath}.retired-${randomUUID()}`;
+        const retiredPath = `${claimPath}.retired-${randomUUID2()}`;
         try {
-          await fs2.rename(claimPath, retiredPath);
+          await fs8.rename(claimPath, retiredPath);
         } catch (error) {
           if (isMissingFileError(error)) {
             return;
@@ -6747,7 +9331,7 @@ var init_harness_reconciler = __esm({
             `Reconciliation lock claim changed while fencing it; preserved at ${retiredPath}`
           );
         }
-        await fs2.unlink(retiredPath);
+        await fs8.unlink(retiredPath);
       }
       async isLockClaimActive(claim) {
         if (!this.isProcessAlive(claim.pid)) {
@@ -6771,12 +9355,12 @@ var init_harness_reconciler = __esm({
       }
       async readProcessStartIdentity(pid) {
         try {
-          const stat = await fs2.readFile(`/proc/${pid}/stat`, "utf8");
-          const closingParenthesis = stat.lastIndexOf(")");
+          const stat7 = await fs8.readFile(`/proc/${pid}/stat`, "utf8");
+          const closingParenthesis = stat7.lastIndexOf(")");
           if (closingParenthesis < 0) {
             return null;
           }
-          const fields = stat.slice(closingParenthesis + 2).trim().split(/\s+/);
+          const fields = stat7.slice(closingParenthesis + 2).trim().split(/\s+/);
           const startTime = fields[19];
           return startTime === void 0 ? null : `proc:${startTime}`;
         } catch {
@@ -6815,8 +9399,8 @@ var init_harness_reconciler = __esm({
           leaseExpiresAt: Date.now() + RECONCILIATION_LOCK_LEASE_MS,
           leaseExpiresMonotonicNs: (now + BigInt(RECONCILIATION_LOCK_LEASE_MS) * 1000000n).toString()
         };
-        const temporaryPath = `${activeLock.claimPath}.refresh-${randomUUID()}`;
-        const handle = await fs2.open(temporaryPath, "wx", 384);
+        const temporaryPath = `${activeLock.claimPath}.refresh-${randomUUID2()}`;
+        const handle = await fs8.open(temporaryPath, "wx", 384);
         try {
           await handle.writeFile(JSON.stringify(refreshed), "utf8");
           await handle.sync();
@@ -6825,10 +9409,10 @@ var init_harness_reconciler = __esm({
           await handle.close();
         }
         if (activeLock.releaseStarted) {
-          await fs2.unlink(temporaryPath);
+          await fs8.unlink(temporaryPath);
           return;
         }
-        await fs2.rename(temporaryPath, activeLock.claimPath);
+        await fs8.rename(temporaryPath, activeLock.claimPath);
         activeLock.claim = refreshed;
       }
       async assertActiveLock(activeLock) {
@@ -6870,18 +9454,18 @@ var init_harness_reconciler = __esm({
         }
       }
       async waitForRetry() {
-        await new Promise((resolve) => {
-          setTimeout(resolve, RECONCILIATION_LOCK_RETRY_MS);
+        await new Promise((resolve6) => {
+          setTimeout(resolve6, RECONCILIATION_LOCK_RETRY_MS);
         });
       }
       async resolveAtomicWriteTarget(filePath) {
         try {
-          const entry = await fs2.lstat(filePath);
+          const entry = await fs8.lstat(filePath);
           if (!entry.isSymbolicLink()) {
             return filePath;
           }
           try {
-            return await fs2.realpath(filePath);
+            return await fs8.realpath(filePath);
           } catch (error) {
             if (isMissingFileError(error)) {
               throw new Error(`Refusing to replace broken symbolic link ${filePath}`);
@@ -6897,13 +9481,13 @@ var init_harness_reconciler = __esm({
       }
       async resolveLockTarget(filePath) {
         try {
-          return await fs2.realpath(filePath);
+          return await fs8.realpath(filePath);
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
           }
           try {
-            const entry = await fs2.lstat(filePath);
+            const entry = await fs8.lstat(filePath);
             if (entry.isSymbolicLink()) {
               throw new Error(`Refusing to reconcile broken symbolic link ${filePath}`);
             }
@@ -6912,8 +9496,8 @@ var init_harness_reconciler = __esm({
               throw lstatError;
             }
           }
-          const canonicalDirectory = await fs2.realpath(path4.dirname(filePath)).catch(() => path4.resolve(path4.dirname(filePath)));
-          return path4.join(canonicalDirectory, path4.basename(filePath));
+          const canonicalDirectory = await fs8.realpath(path27.dirname(filePath)).catch(() => path27.resolve(path27.dirname(filePath)));
+          return path27.join(canonicalDirectory, path27.basename(filePath));
         }
       }
     };
@@ -6924,13 +9508,14 @@ var init_harness_reconciler = __esm({
 // apps/cli/src/installer/bootstrap-entry.ts
 init_dist();
 import child_process from "node:child_process";
-import os5 from "node:os";
-import path9 from "node:path";
+import os11 from "node:os";
+import path32 from "node:path";
 import process5 from "node:process";
 import { pathToFileURL } from "node:url";
 
 // apps/cli/src/platform/platform.ts
-import os from "node:os";
+init_harness_registry();
+import os7 from "node:os";
 import process2 from "node:process";
 var REQUIRED_QUALIFICATION_LANES = [
   "linux-x64",
@@ -7047,41 +9632,21 @@ var V1_SUPPORT_MATRIX = Object.freeze({
   ]),
   qualificationLanes: REQUIRED_QUALIFICATION_LANES,
   runtimeLanes: ALL_QUALIFICATION_LANES,
-  harnesses: Object.freeze({
-    "claude-code": Object.freeze({
-      id: "claude-code",
-      name: "Claude Code",
-      adapterPackage: "@resin/adapter-claude-code",
-      supportedVersions: Object.freeze([">=0.1.0", ">=0.2.0", ">=1.0.0"]),
-      qualifiedVersions: Object.freeze(["0.2.14", "1.0.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["sse", "stdio"]),
-      probeModule: "adapters/claude-code/dist/index.js",
-      probeFunction: "probeClaudeInstallation"
-    }),
-    "codex-cli": Object.freeze({
-      id: "codex-cli",
-      name: "Codex CLI",
-      adapterPackage: "@resin/adapter-codex",
-      supportedVersions: Object.freeze([">=0.45.0"]),
-      qualifiedVersions: Object.freeze(["0.45.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["stdio", "sse"]),
-      probeModule: "adapters/codex-cli/dist/index.js",
-      probeFunction: "probeCodexInstallation"
-    }),
-    omp: Object.freeze({
-      id: "omp",
-      name: "Oh My Pi",
-      adapterPackage: "@resin/adapter-omp",
-      supportedVersions: Object.freeze([">=0.1.0"]),
-      qualifiedVersions: Object.freeze(["0.12.5", "1.0.0"]),
-      protocol: "mcp",
-      transports: Object.freeze(["stdio", "sse", "websocket", "http"]),
-      probeModule: "adapters/omp/dist/index.js",
-      probeFunction: "probeOmpInstallation"
-    })
-  }),
+  harnesses: Object.freeze(
+    Object.fromEntries(
+      HARNESS_DEFINITIONS.map((definition) => [
+        definition.id,
+        Object.freeze({
+          id: definition.id,
+          name: definition.shortName,
+          adapterPackage: definition.adapterPackage,
+          testedVersions: Object.freeze([...definition.testedVersions]),
+          protocol: "mcp",
+          transports: Object.freeze([...definition.mcpConfig.transports])
+        })
+      ])
+    )
+  ),
   environmentAssumptions: Object.freeze({
     shells: Object.freeze({
       supported: Object.freeze(["bash", "zsh", "sh"]),
@@ -7147,7 +9712,7 @@ function isWslEnvironment(env = process2.env, release) {
   if (env.WSL_DISTRO_NAME || env.IS_WSL || env.WSLENV || env.WSL_INTEROP) {
     return true;
   }
-  const kernelRelease = (release ?? (process2.platform === "linux" ? os.release() : "")).toLowerCase();
+  const kernelRelease = (release ?? (process2.platform === "linux" ? os7.release() : "")).toLowerCase();
   if (kernelRelease.includes("microsoft") || kernelRelease.includes("wsl")) {
     return true;
   }
@@ -7177,7 +9742,7 @@ function getQualificationLane(info) {
   }
   return "linux-x64";
 }
-function detectPlatform(options = {}) {
+function detectPlatform2(options = {}) {
   const targetPlatform = options.platform ?? process2.platform;
   const arch = options.arch ?? process2.arch;
   const env = options.env ?? process2.env;
@@ -7264,24 +9829,25 @@ var PRODUCTION_RELEASE_TRUST_RECORD = Object.freeze({
 });
 
 // apps/cli/src/service/manager.ts
-import { execFile as execFile4, spawn } from "node:child_process";
+import { execFile as execFile5, spawn } from "node:child_process";
 import fsSync from "node:fs";
-import os2 from "node:os";
-import path5 from "node:path";
+import os8 from "node:os";
+import path28 from "node:path";
 import process3 from "node:process";
 init_dist();
 import { fileURLToPath } from "node:url";
-import { promisify as promisify4 } from "node:util";
+import { promisify as promisify5 } from "node:util";
 
 // apps/cli/src/installer/harness-health.ts
 init_dist();
 init_zod();
+init_harness_registry();
 init_harness_config();
 init_harness_reconciler();
 var HARNESS_HEALTH_CHECK_INTERVAL_MS = 60 * 60 * 1e3;
 var HARNESS_HEALTH_STATE_FORMAT = "resin-harness-health/v1";
 var HARNESS_HEALTH_SETTINGS_FORMAT = "resin-harness-health-settings/v1";
-var HarnessIdSchema = external_exports.enum(SUPPORTED_HARNESS_IDS);
+var HarnessIdSchema = external_exports.custom(isSupportedHarnessId);
 var HarnessRegistrationStatusSchema = external_exports.enum([
   "registered",
   "unregistered",
@@ -7335,11 +9901,7 @@ var HarnessHealthSnapshotSchema = external_exports.object({
   settingsDiagnostic: HarnessHealthSettingsDiagnosticSchema.optional(),
   success: external_exports.boolean(),
   hasDrift: external_exports.boolean(),
-  configFiles: external_exports.object({
-    "claude-code": HarnessConfigHealthCacheSchema,
-    "codex-cli": HarnessConfigHealthCacheSchema,
-    omp: HarnessConfigHealthCacheSchema
-  }).strict(),
+  configFiles: external_exports.record(external_exports.string(), HarnessConfigHealthCacheSchema),
   harnesses: external_exports.array(HarnessHealthHarnessSnapshotSchema),
   lastFailure: external_exports.object({
     code: external_exports.literal("check_failed"),
@@ -7350,6 +9912,10 @@ var HarnessHealthSettingsSchema = external_exports.object({
   format: external_exports.literal(HARNESS_HEALTH_SETTINGS_FORMAT),
   autoRepair: external_exports.boolean()
 }).strict();
+var ABSENT_CONFIG_FILE = { present: false, mtimeMs: null };
+var EMPTY_CONFIG_CACHE = Object.fromEntries(
+  SUPPORTED_HARNESS_IDS.map((harnessId) => [harnessId, ABSENT_CONFIG_FILE])
+);
 
 // apps/cli/src/service/recovery-state.ts
 init_zod();
@@ -7385,13 +9951,13 @@ var PersistedRecoveryStateSchema = external_exports.object({
 var MAX_PERSISTED_CRASH_TIMESTAMPS = MAX_CRASHES_IN_WINDOW + 1;
 
 // apps/cli/src/service/manager.ts
-var execFileAsync4 = promisify4(execFile4);
+var execFileAsync5 = promisify5(execFile5);
 var SERVICE_SUPERVISOR_COMMAND = "__service-supervisor";
 var SERVICE_SUPERVISOR_ENTRY_PATH = fileURLToPath(new URL("../index.js", import.meta.url));
 var defaultServiceCommandRunner = {
   async run(cmd, args) {
     try {
-      const { stdout, stderr } = await execFileAsync4(cmd, args, {
+      const { stdout, stderr } = await execFileAsync5(cmd, args, {
         encoding: "utf8",
         timeout: 1e4
       });
@@ -7424,12 +9990,12 @@ function resolveSupervisorEntryPath(resinHome, explicitPath) {
   if (explicitPath && explicitPath.trim().length > 0) {
     return explicitPath;
   }
-  const currentEntry = path5.join(resinHome, "current", "apps", "cli", "dist", "index.js");
-  const currentLink = path5.join(resinHome, "current");
-  const versionsDir = path5.join(resinHome, "versions");
-  const normalizedDefault = path5.resolve(SERVICE_SUPERVISOR_ENTRY_PATH);
-  const normalizedVersions = path5.resolve(versionsDir);
-  if (normalizedDefault.startsWith(normalizedVersions + path5.sep) || normalizedDefault.includes(`${path5.sep}versions${path5.sep}`)) {
+  const currentEntry = path28.join(resinHome, "current", "apps", "cli", "dist", "index.js");
+  const currentLink = path28.join(resinHome, "current");
+  const versionsDir = path28.join(resinHome, "versions");
+  const normalizedDefault = path28.resolve(SERVICE_SUPERVISOR_ENTRY_PATH);
+  const normalizedVersions = path28.resolve(versionsDir);
+  if (normalizedDefault.startsWith(normalizedVersions + path28.sep) || normalizedDefault.includes(`${path28.sep}versions${path28.sep}`)) {
     return currentEntry;
   }
   try {
@@ -7482,9 +10048,9 @@ var SystemdUserServiceManager = class {
   runner;
   defaultEnv;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os2.homedir();
-    this.resinHome = options.resinHome ?? path5.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path5.join(this.resinHome, "bin", "resin-daemon");
+    this.homeDir = options.homeDir ?? os8.homedir();
+    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process3.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -7492,14 +10058,14 @@ var SystemdUserServiceManager = class {
     this.defaultEnv = options.env ?? {};
   }
   ensureLoginHomeForCommands() {
-    if (this.runner === defaultServiceCommandRunner && path5.resolve(this.homeDir) !== path5.resolve(os2.homedir())) {
+    if (this.runner === defaultServiceCommandRunner && path28.resolve(this.homeDir) !== path28.resolve(os8.homedir())) {
       throw new Error(
         `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`
       );
     }
   }
   getUnitPath() {
-    return path5.join(this.homeDir, ".config", "systemd", "user", this.serviceName);
+    return path28.join(this.homeDir, ".config", "systemd", "user", this.serviceName);
   }
   getUnitDefinition(options = {}) {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
@@ -7508,8 +10074,8 @@ var SystemdUserServiceManager = class {
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
     const servicePath = Array.from(
-      /* @__PURE__ */ new Set([path5.dirname(nodePath), ...inheritedPath.split(path5.delimiter)])
-    ).join(path5.delimiter);
+      /* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])
+    ).join(path28.delimiter);
     const envVars = {
       PATH: servicePath,
       ...this.defaultEnv,
@@ -7556,7 +10122,7 @@ WantedBy=default.target
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
-      await this.fsBridge.mkdirp(path5.dirname(unitPath));
+      await this.fsBridge.mkdirp(path28.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
       await this.runner.run("systemctl", ["--user", "daemon-reload"]);
       const enableResult = await this.runner.run("systemctl", [
@@ -7738,9 +10304,9 @@ var LaunchdUserServiceManager = class {
   runner;
   defaultEnv;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os2.homedir();
-    this.resinHome = options.resinHome ?? path5.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path5.join(this.resinHome, "bin", "resin-daemon");
+    this.homeDir = options.homeDir ?? os8.homedir();
+    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process3.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -7748,19 +10314,19 @@ var LaunchdUserServiceManager = class {
     this.defaultEnv = options.env ?? {};
   }
   ensureLoginHomeForCommands() {
-    if (this.runner === defaultServiceCommandRunner && path5.resolve(this.homeDir) !== path5.resolve(os2.homedir())) {
+    if (this.runner === defaultServiceCommandRunner && path28.resolve(this.homeDir) !== path28.resolve(os8.homedir())) {
       throw new Error(
         `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`
       );
     }
   }
   getUnitPath() {
-    return path5.join(this.homeDir, "Library", "LaunchAgents", `${this.serviceName}.plist`);
+    return path28.join(this.homeDir, "Library", "LaunchAgents", `${this.serviceName}.plist`);
   }
   getUnitDefinition(options = {}) {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
-    const logDir = path5.join(resinHome, "logs");
+    const logDir = path28.join(resinHome, "logs");
     const envVars = { ...this.defaultEnv, ...options.env ?? {} };
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
@@ -7799,9 +10365,9 @@ ${argsXml}
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>${this.escapeXml(path5.join(logDir, "daemon.stdout.log"))}</string>
+    <string>${this.escapeXml(path28.join(logDir, "daemon.stdout.log"))}</string>
     <key>StandardErrorPath</key>
-    <string>${this.escapeXml(path5.join(logDir, "daemon.stderr.log"))}</string>
+    <string>${this.escapeXml(path28.join(logDir, "daemon.stderr.log"))}</string>
     <key>EnvironmentVariables</key>
     <dict>
 ${envXml}
@@ -7822,7 +10388,7 @@ ${envXml}
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
-      await this.fsBridge.mkdirp(path5.dirname(unitPath));
+      await this.fsBridge.mkdirp(path28.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
       let started = false;
       if (autoStart) {
@@ -7973,9 +10539,9 @@ var WslUserServiceManager = class {
   defaultEnv;
   systemdAvailableCache;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os2.homedir();
-    this.resinHome = options.resinHome ?? path5.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path5.join(this.resinHome, "bin", "resin-daemon");
+    this.homeDir = options.homeDir ?? os8.homedir();
+    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process3.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -7997,13 +10563,13 @@ var WslUserServiceManager = class {
     }
   }
   getUnitPath() {
-    return this.systemdAvailableCache === true ? this.systemdDelegate.getUnitPath() : path5.join(this.resinHome, "services", "wsl-service.json");
+    return this.systemdAvailableCache === true ? this.systemdDelegate.getUnitPath() : path28.join(this.resinHome, "services", "wsl-service.json");
   }
   getFallbackScriptPath() {
-    return path5.join(this.resinHome, "bin", "resin-service.sh");
+    return path28.join(this.resinHome, "bin", "resin-service.sh");
   }
   getPidPath() {
-    return path5.join(this.resinHome, "run", "daemon.pid");
+    return path28.join(this.resinHome, "run", "daemon.pid");
   }
   getUnitDefinition(options = {}) {
     if (this.systemdAvailableCache === true) {
@@ -8013,8 +10579,8 @@ var WslUserServiceManager = class {
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
-    const logDir = path5.join(resinHome, "logs");
-    const runDir = path5.join(resinHome, "run");
+    const logDir = path28.join(resinHome, "logs");
+    const runDir = path28.join(resinHome, "run");
     const envLines = Object.entries({
       ...this.defaultEnv,
       ...options.env ?? {}
@@ -8031,8 +10597,8 @@ export RESIN_HOME=${quoteShellArgument(resinHome)}
 export NODE_ENV=production
 ${envLines.join("\n")}
 mkdir -p ${quoteShellArgument(logDir)} ${quoteShellArgument(runDir)}
-nohup ${execCmd} >> ${quoteShellArgument(path5.join(logDir, "daemon.stdout.log"))} 2>> ${quoteShellArgument(path5.join(logDir, "daemon.stderr.log"))} &
-echo $! > ${quoteShellArgument(path5.join(runDir, "daemon.pid"))}
+nohup ${execCmd} >> ${quoteShellArgument(path28.join(logDir, "daemon.stdout.log"))} 2>> ${quoteShellArgument(path28.join(logDir, "daemon.stderr.log"))} &
+echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
 `;
   }
   async isInstalled() {
@@ -8051,8 +10617,8 @@ echo $! > ${quoteShellArgument(path5.join(runDir, "daemon.pid"))}
     const scriptContent = this.getUnitDefinition(options);
     const unitPath = this.getUnitPath();
     try {
-      await this.fsBridge.mkdirp(path5.dirname(scriptPath));
-      await this.fsBridge.mkdirp(path5.dirname(unitPath));
+      await this.fsBridge.mkdirp(path28.dirname(scriptPath));
+      await this.fsBridge.mkdirp(path28.dirname(unitPath));
       await this.fsBridge.writeFile(scriptPath, scriptContent);
       await this.fsBridge.writeFile(
         unitPath,
@@ -8299,7 +10865,7 @@ function createUserServiceManager(options = {}) {
     }
     return new SystemdUserServiceManager(options);
   }
-  const detected = detectPlatform({
+  const detected = detectPlatform2({
     platform: process3.platform,
     env: process3.env
   });
@@ -8313,17 +10879,14 @@ function createUserServiceManager(options = {}) {
 }
 
 // apps/cli/src/service/verification.ts
-init_dist2();
-init_dist3();
-init_dist4();
+import os10 from "node:os";
+import path30 from "node:path";
 init_zod();
 init_dist();
-import os4 from "node:os";
-import path7 from "node:path";
 
 // apps/observer/dist/paths.js
-import os3 from "node:os";
-import path6 from "node:path";
+import os9 from "node:os";
+import path29 from "node:path";
 function normalizeCandidate(value) {
   if (typeof value !== "string") {
     return void 0;
@@ -8334,25 +10897,25 @@ function normalizeCandidate(value) {
 function resolvePaths(options = {}) {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
-  const userHome = normalizeCandidate(options.home) ?? normalizeCandidate(env.HOME) ?? normalizeCandidate(env.USERPROFILE) ?? os3.homedir();
+  const userHome = normalizeCandidate(options.home) ?? normalizeCandidate(env.HOME) ?? normalizeCandidate(env.USERPROFILE) ?? os9.homedir();
   const explicitHome = normalizeCandidate(options.resinHome) ?? normalizeCandidate(env.RESIN_HOME);
-  const baseHomeDir = path6.resolve(explicitHome ?? path6.join(userHome, ".resin"));
-  const baseConfigDir = path6.join(baseHomeDir, "config");
-  const baseDataDir = path6.join(baseHomeDir, "data");
-  const baseStateDir = path6.join(baseHomeDir, "state");
-  const baseLogDir = path6.join(baseHomeDir, "logs");
-  const defaultSocketPath = platform === "win32" ? "\\\\.\\pipe\\resin-daemon" : path6.join(baseStateDir, "daemon.sock");
-  const configDir = path6.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
-  const dataDir = path6.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
-  const stateDir = path6.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
-  const logDir = path6.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
+  const baseHomeDir = path29.resolve(explicitHome ?? path29.join(userHome, ".resin"));
+  const baseConfigDir = path29.join(baseHomeDir, "config");
+  const baseDataDir = path29.join(baseHomeDir, "data");
+  const baseStateDir = path29.join(baseHomeDir, "state");
+  const baseLogDir = path29.join(baseHomeDir, "logs");
+  const defaultSocketPath = platform === "win32" ? "\\\\.\\pipe\\resin-daemon" : path29.join(baseStateDir, "daemon.sock");
+  const configDir = path29.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
+  const dataDir = path29.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
+  const stateDir = path29.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
+  const logDir = path29.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
   let socketPath = options.socketPath ?? env.RESIN_SOCKET_PATH ?? defaultSocketPath;
   if (platform !== "win32" || !socketPath.startsWith("\\\\.\\pipe\\")) {
-    socketPath = path6.resolve(socketPath);
+    socketPath = path29.resolve(socketPath);
   }
-  const lockFilePath = path6.resolve(options.lockFilePath ?? env.RESIN_LOCK_FILE ?? path6.join(stateDir, "daemon.lock"));
-  const pidFilePath = path6.resolve(options.pidFilePath ?? env.RESIN_PID_FILE ?? path6.join(stateDir, "daemon.pid"));
-  const configFile = path6.resolve(options.configFile ?? env.RESIN_CONFIG_FILE ?? path6.join(configDir, "config.json"));
+  const lockFilePath = path29.resolve(options.lockFilePath ?? env.RESIN_LOCK_FILE ?? path29.join(stateDir, "daemon.lock"));
+  const pidFilePath = path29.resolve(options.pidFilePath ?? env.RESIN_PID_FILE ?? path29.join(stateDir, "daemon.pid"));
+  const configFile = path29.resolve(options.configFile ?? env.RESIN_CONFIG_FILE ?? path29.join(configDir, "config.json"));
   return {
     homeDir: baseHomeDir,
     configDir,
@@ -8693,13 +11256,750 @@ var AccountProfileResponseSchema = external_exports.object({
   membershipType: MembershipTypeSchema
 });
 
-// packages/protocol/dist/http.js
-init_capabilities();
+// packages/contracts/dist/capabilities.js
+init_zod();
 init_common();
-init_deployments();
-init_events();
-init_records();
-init_tools();
+var FsCapabilitySchema = external_exports.object({
+  readPaths: external_exports.array(external_exports.string()).default([]),
+  writePaths: external_exports.array(external_exports.string()).default([]),
+  allowWorkspaceRoot: external_exports.boolean().default(true),
+  allowTemp: external_exports.boolean().default(true),
+  denyPaths: external_exports.array(external_exports.string()).default([]),
+  maxFileSizeBytes: external_exports.number().int().positive().default(10485760)
+  // 10MB
+});
+var NetCapabilitySchema = external_exports.object({
+  allowOutbound: external_exports.boolean().default(false),
+  allowedDomains: external_exports.array(external_exports.string()).default([]),
+  allowedHosts: external_exports.array(external_exports.string()).default([]),
+  allowedPorts: external_exports.array(external_exports.number().int().min(1).max(65535)).default([]),
+  allowedProtocols: external_exports.array(external_exports.enum(["http", "https", "ws", "wss"])).default(["https"]),
+  allowLocalhost: external_exports.boolean().default(false),
+  denyPrivateRanges: external_exports.boolean().default(true)
+});
+var CommandCapabilitySchema = external_exports.object({
+  allowShellExecution: external_exports.boolean().default(false),
+  allowedCommands: external_exports.array(external_exports.string()).default([]),
+  allowedBinaries: external_exports.array(external_exports.string()).default([]),
+  forbiddenPatterns: external_exports.array(external_exports.string()).default([]),
+  allowEnvPassthrough: external_exports.array(external_exports.string()).default([])
+});
+var SecretCapabilitySchema = external_exports.object({
+  allowedSecretNames: external_exports.array(external_exports.string()).default([]),
+  allowedPrefixes: external_exports.array(external_exports.string()).default([]),
+  denyDirectRead: external_exports.boolean().default(true),
+  injectAsEnv: external_exports.boolean().default(true)
+});
+var CapabilityLimitsSchema = external_exports.object({
+  maxConcurrentExecutions: external_exports.number().int().positive().default(4),
+  maxCpuUsagePercent: external_exports.number().int().min(1).max(100).default(100),
+  maxMemoryMb: external_exports.number().int().positive().default(128),
+  maxExecutionTimeMs: external_exports.number().int().positive().default(3e4),
+  maxOutputSizeBytes: external_exports.number().int().positive().default(1048576)
+  // 1MB
+});
+var CapabilityManifestSchema = external_exports.object({
+  manifestId: IdentifierSchema.optional(),
+  fs: FsCapabilitySchema.default({}),
+  net: NetCapabilitySchema.default({}),
+  command: CommandCapabilitySchema.default({}),
+  secrets: SecretCapabilitySchema.default({}),
+  limits: CapabilityLimitsSchema.default({})
+});
+var CapabilityGrantSchema = external_exports.object({
+  grantId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  grantedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema.optional(),
+  grantType: external_exports.enum(["implicit", "explicit", "policy"]),
+  capabilities: CapabilityManifestSchema,
+  actor: external_exports.object({
+    type: external_exports.enum(["user", "admin", "policy_engine", "default"]),
+    id: external_exports.string()
+  }),
+  reason: external_exports.string().optional()
+});
+var CapabilityEnvelopeSchema = external_exports.object({
+  envelopeId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  fs: FsCapabilitySchema.default({}),
+  net: NetCapabilitySchema.default({}),
+  command: CommandCapabilitySchema.default({}),
+  secrets: SecretCapabilitySchema.default({}),
+  limits: CapabilityLimitsSchema.default({}),
+  isFrozen: external_exports.boolean().default(false),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+
+// packages/protocol/dist/http.js
+init_common();
+
+// packages/contracts/dist/deployments.js
+init_zod();
+init_common();
+var DeploymentStateSchema = external_exports.enum([
+  "drafted",
+  "validating",
+  "rejected",
+  "replaying",
+  "eligible",
+  "canary",
+  "promoted",
+  "suspended",
+  "rolling_back",
+  "rolled_back",
+  "retired"
+]);
+var DeploymentTransitionReasonSchema = external_exports.enum([
+  "initial_draft",
+  "validation_started",
+  "validation_passed",
+  "validation_failed",
+  "replay_started",
+  "replay_passed",
+  "replay_failed",
+  "marked_eligible",
+  "canary_started",
+  "canary_passed",
+  "canary_failed",
+  "manual_promotion",
+  "auto_promotion",
+  "manual_suspension",
+  "health_check_failed",
+  "manual_rollback",
+  "automated_rollback",
+  "rollback_completed",
+  "retired_by_superseded",
+  "manual_retirement"
+]);
+var DeploymentTransitionSchema = external_exports.object({
+  fromState: DeploymentStateSchema,
+  toState: DeploymentStateSchema,
+  timestamp: ISOTimestampSchema,
+  reason: DeploymentTransitionReasonSchema,
+  actor: external_exports.object({
+    type: external_exports.enum(["daemon", "user", "policy_engine", "gateway", "system"]),
+    id: external_exports.string().min(1)
+  }),
+  message: external_exports.string().optional(),
+  metadata: external_exports.record(external_exports.unknown()).default({})
+});
+var AutoRollbackThresholdsSchema = external_exports.object({
+  maxErrorRate: external_exports.number().min(0).max(1).default(0.05),
+  maxLatencyP95Ms: external_exports.number().positive().default(5e3),
+  maxSchemaMismatchRate: external_exports.number().min(0).max(1).default(0.01),
+  consecutiveFailureThreshold: external_exports.number().int().positive().default(3)
+});
+var CanaryConfigSchema = external_exports.object({
+  strategy: external_exports.enum(["shadow", "traffic_split", "developer_opt_in"]).default("shadow"),
+  trafficPercentage: external_exports.number().min(0).max(100).default(0),
+  durationMinutes: external_exports.number().int().positive().default(30),
+  maxShadowWorkers: external_exports.number().int().min(1).max(8).default(2),
+  autoRollbackThresholds: AutoRollbackThresholdsSchema.default({})
+});
+var DeploymentRecordSchema = external_exports.object({
+  deploymentId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  state: DeploymentStateSchema,
+  canaryConfig: CanaryConfigSchema.optional(),
+  history: external_exports.array(DeploymentTransitionSchema).default([]),
+  activeTrafficPercentage: external_exports.number().min(0).max(100).default(0),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+
+// packages/contracts/dist/events.js
+init_zod();
+init_common();
+var ProviderUsageAvailabilitySchema = external_exports.enum(["complete", "partial", "unavailable"]);
+var ProviderReportedUsageSchema = external_exports.object({
+  provider: external_exports.string().min(1),
+  model: external_exports.string().min(1).optional().nullable(),
+  accountingVersion: external_exports.string().min(1),
+  availability: ProviderUsageAvailabilitySchema,
+  inputTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  outputTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  reasoningTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  cachedInputTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  totalTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  costMicroUsd: external_exports.number().int().nonnegative().optional().nullable(),
+  // Omission supports legacy records; unpriced means no usable monetary value, not free.
+  costProvenance: external_exports.enum(["source_reported", "harness_estimate", "unpriced"]).optional(),
+  durationMs: external_exports.number().int().nonnegative().optional().nullable()
+}).strict().superRefine((val, ctx) => {
+  if (val.availability === "complete") {
+    if (val.totalTokens === void 0 || val.totalTokens === null) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        message: "Complete provider usage requires totalTokens to be present",
+        path: ["totalTokens"]
+      });
+    }
+  } else if (val.availability === "unavailable") {
+    const metricFields = [
+      "inputTokens",
+      "outputTokens",
+      "reasoningTokens",
+      "cachedInputTokens",
+      "totalTokens",
+      "costMicroUsd",
+      "durationMs"
+    ];
+    for (const field of metricFields) {
+      if (val[field] !== void 0 && val[field] !== null) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: `Unavailable provider usage cannot specify ${field}`,
+          path: [field]
+        });
+      }
+    }
+  }
+});
+var BaseEventFields = {
+  eventId: IdentifierSchema,
+  schemaVersion: SchemaVersionSchema,
+  sessionId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  causalRef: CausalRefSchema,
+  redaction: RedactionMetaSchema,
+  metadata: external_exports.record(external_exports.unknown()).optional(),
+  providerUsage: ProviderReportedUsageSchema.optional()
+};
+var MessageContentPartSchema = external_exports.object({
+  type: external_exports.enum(["text", "image", "resource", "json"]),
+  text: external_exports.string().optional(),
+  data: external_exports.string().optional(),
+  mimeType: external_exports.string().optional(),
+  metadata: external_exports.record(external_exports.unknown()).optional()
+});
+var NormalizedMessageEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("message"),
+  role: external_exports.enum(["user", "assistant", "system", "tool"]),
+  content: external_exports.string(),
+  contentParts: external_exports.array(MessageContentPartSchema).optional(),
+  model: external_exports.string().optional()
+});
+var NormalizedModelReasoningEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("model_reasoning"),
+  reasoningContent: external_exports.string(),
+  signature: external_exports.string().optional(),
+  tokenCount: external_exports.number().int().nonnegative().optional(),
+  model: external_exports.string().optional(),
+  durationMs: external_exports.number().nonnegative().optional()
+});
+var DiscoveredToolEntrySchema = external_exports.object({
+  name: external_exports.string().min(1),
+  description: external_exports.string().optional(),
+  inputSchema: external_exports.record(external_exports.unknown()).optional(),
+  /**
+   * The protocol connection the callable was reached over, when the harness reports one — the
+   * same identity `NormalizedToolCallEvent.connection` carries on a call. Absent means the
+   * connection is unknown; it is never guessed from the name.
+   */
+  provider: external_exports.string().optional()
+});
+var NormalizedToolDiscoveryEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("tool_discovery"),
+  tools: external_exports.array(DiscoveredToolEntrySchema),
+  provider: external_exports.string().optional(),
+  source: external_exports.enum(["mcp", "builtin", "dynamic", "harness"]).default("mcp")
+});
+var NormalizedToolCallEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("tool_call"),
+  callId: IdentifierSchema,
+  toolName: external_exports.string().min(1),
+  /**
+   * The protocol connection this callable was reached over, when the recording established one
+   * (for example the MCP server behind a harness device-surface path). Absent means the
+   * connection is unknown: it is never defaulted to the harness or derived from the tool name.
+   */
+  connection: external_exports.string().min(1).optional(),
+  parameters: external_exports.record(external_exports.unknown()),
+  candidateRef: IdentifierSchema.optional(),
+  isShadow: external_exports.boolean().default(false)
+});
+var NormalizedToolResultEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("tool_result"),
+  callId: IdentifierSchema,
+  toolName: external_exports.string().min(1),
+  result: external_exports.unknown(),
+  isError: external_exports.boolean(),
+  executionDurationMs: external_exports.number().nonnegative(),
+  outputSizeBytes: external_exports.number().int().nonnegative().optional(),
+  isShadow: external_exports.boolean().default(false)
+});
+var NormalizedCommandExecEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("command_exec"),
+  command: external_exports.string(),
+  args: external_exports.array(external_exports.string()).default([]),
+  cwd: external_exports.string().optional(),
+  exitCode: external_exports.number().int(),
+  stdout: external_exports.string().optional(),
+  stderr: external_exports.string().optional(),
+  durationMs: external_exports.number().nonnegative()
+});
+var FileDiffStatsSchema = external_exports.object({
+  linesAdded: external_exports.number().int().nonnegative(),
+  linesRemoved: external_exports.number().int().nonnegative()
+});
+var NormalizedFileEditEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("file_edit"),
+  filePath: external_exports.string().min(1),
+  operation: external_exports.enum(["create", "update", "delete", "patch"]),
+  patch: external_exports.string().optional(),
+  beforeHash: Sha256DigestSchema.optional(),
+  afterHash: Sha256DigestSchema.optional(),
+  diffStats: FileDiffStatsSchema.optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional()
+});
+var NormalizedErrorEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("error"),
+  errorType: external_exports.string().min(1),
+  message: external_exports.string(),
+  stack: external_exports.string().optional(),
+  recoverable: external_exports.boolean(),
+  details: external_exports.record(external_exports.unknown()).optional()
+});
+var NormalizedCompactionEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("compaction"),
+  triggerReason: external_exports.enum(["context_limit", "manual", "scheduled", "turn_threshold"]),
+  tokensBefore: external_exports.number().int().nonnegative(),
+  tokensAfter: external_exports.number().int().nonnegative(),
+  preservedContextSummary: external_exports.string().optional()
+});
+var NormalizedBranchForkEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("branch_fork"),
+  sourceSessionId: IdentifierSchema,
+  branchPointEventId: IdentifierSchema,
+  forkReason: external_exports.string().optional(),
+  branchName: external_exports.string().optional()
+});
+var NormalizedSubagentLifecycleEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("subagent_lifecycle"),
+  subagentId: IdentifierSchema,
+  lifecycleType: external_exports.enum(["spawn", "start", "pause", "resume", "terminate", "settle"]),
+  parentId: IdentifierSchema.optional(),
+  role: external_exports.string().optional(),
+  reason: external_exports.string().optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional()
+});
+var NormalizedSessionLifecycleEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("session_lifecycle"),
+  lifecycleType: external_exports.enum(["start", "pause", "resume", "end", "crash"]),
+  exitReason: external_exports.string().optional(),
+  harnessName: external_exports.string().optional(),
+  workspaceId: IdentifierSchema.optional()
+});
+var NormalizedUnknownPassthroughEventSchema = external_exports.object({
+  ...BaseEventFields,
+  type: external_exports.literal("unknown_passthrough"),
+  rawEventType: external_exports.string().min(1),
+  rawPayload: external_exports.record(external_exports.unknown())
+});
+var NormalizedSessionEventSchema = external_exports.discriminatedUnion("type", [
+  NormalizedMessageEventSchema,
+  NormalizedModelReasoningEventSchema,
+  NormalizedToolDiscoveryEventSchema,
+  NormalizedToolCallEventSchema,
+  NormalizedToolResultEventSchema,
+  NormalizedCommandExecEventSchema,
+  NormalizedFileEditEventSchema,
+  NormalizedErrorEventSchema,
+  NormalizedCompactionEventSchema,
+  NormalizedBranchForkEventSchema,
+  NormalizedSubagentLifecycleEventSchema,
+  NormalizedSessionLifecycleEventSchema,
+  NormalizedUnknownPassthroughEventSchema
+]);
+
+// packages/contracts/dist/records.js
+init_zod();
+init_common();
+
+// packages/contracts/dist/tools.js
+init_zod();
+init_common();
+var ToolScopeSchema = external_exports.enum(["workspace", "user", "global", "session"]);
+var ToolParameterSchema = external_exports.object({
+  type: external_exports.literal("object").default("object"),
+  properties: external_exports.record(external_exports.record(external_exports.unknown())).default({}),
+  required: external_exports.array(external_exports.string()).default([]),
+  additionalProperties: external_exports.boolean().default(false),
+  description: external_exports.string().optional()
+});
+var ToolOutputSchema = external_exports.object({
+  type: external_exports.string().default("object"),
+  properties: external_exports.record(external_exports.record(external_exports.unknown())).optional(),
+  description: external_exports.string().optional(),
+  schema: external_exports.record(external_exports.unknown()).optional()
+});
+var ToolRuntimeRequirementSchema = external_exports.object({
+  runtime: external_exports.enum(["deno", "node", "python", "wasm", "shell", "builtin", "recorded-workflow"]),
+  minRuntimeVersion: external_exports.string().optional(),
+  memoryLimitMb: external_exports.number().int().positive().default(128),
+  timeoutMs: external_exports.number().int().positive().default(3e4),
+  cpuLimitPercent: external_exports.number().int().min(1).max(100).default(100),
+  maxOutputSizeBytes: external_exports.number().int().positive().default(1048576)
+  // 1MB
+});
+var ToolLimitConfigSchema = external_exports.object({
+  timeoutMs: external_exports.number().int().positive().default(3e4),
+  maxOutputBytes: external_exports.number().int().positive().default(1048576),
+  maxMemoryBytes: external_exports.number().int().positive().default(134217728),
+  // 128MB
+  maxConcurrentInvocations: external_exports.number().int().positive().default(4)
+});
+var ToolManifestSchema = external_exports.object({
+  id: IdentifierSchema,
+  name: external_exports.string().min(1).max(128),
+  version: SchemaVersionSchema,
+  description: external_exports.string().min(1).max(4096),
+  parameters: ToolParameterSchema,
+  outputSchema: ToolOutputSchema.optional(),
+  runtime: ToolRuntimeRequirementSchema,
+  capabilities: CapabilityManifestSchema,
+  limits: ToolLimitConfigSchema.default({}),
+  scope: ToolScopeSchema.default("workspace"),
+  digest: Sha256DigestSchema,
+  metadata: external_exports.record(external_exports.unknown()).default({}),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+
+// packages/contracts/dist/versions.js
+init_zod();
+init_common();
+var BundleReferenceSchema = external_exports.object({
+  uri: external_exports.string().min(1),
+  hash: Sha256DigestSchema,
+  sizeBytes: external_exports.number().int().nonnegative(),
+  format: external_exports.enum(["js_bundle", "zip", "tar_gz", "embedded", "wasm"])
+});
+var ToolArtifactSchema = external_exports.object({
+  artifactDigest: Sha256DigestSchema,
+  bundleReference: BundleReferenceSchema,
+  entrypoint: external_exports.string().min(1),
+  sourceCode: external_exports.string().optional(),
+  sourceMap: external_exports.string().optional(),
+  checksums: external_exports.record(external_exports.string()).default({})
+});
+var ProvenanceBaseSchema = external_exports.object({
+  sourceCandidateId: IdentifierSchema.optional(),
+  synthesizedAt: ISOTimestampSchema,
+  gitCommitSha: external_exports.string().optional(),
+  deterministicBuildHash: Sha256DigestSchema,
+  environment: external_exports.record(external_exports.string()).default({})
+});
+var ProvenanceMetadataSchema = external_exports.union([
+  ProvenanceBaseSchema.extend({
+    authoring: external_exports.object({ kind: external_exports.literal("model") }).optional(),
+    synthesizerModel: external_exports.string().min(1),
+    promptHash: Sha256DigestSchema.optional()
+  }),
+  ProvenanceBaseSchema.extend({
+    authoring: external_exports.object({
+      kind: external_exports.literal("compiler"),
+      compilerId: external_exports.string().min(1),
+      compilerVersion: external_exports.string().min(1),
+      inputDigest: Sha256DigestSchema
+    }).strict(),
+    synthesizerModel: external_exports.never().optional(),
+    promptHash: external_exports.never().optional()
+  })
+]);
+var SignatureMetadataSchema = external_exports.object({
+  signature: external_exports.string().min(1),
+  keyId: external_exports.string().min(1),
+  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
+  signedAt: ISOTimestampSchema,
+  certificateChain: external_exports.array(external_exports.string()).optional()
+});
+var ToolVersionStatusSchema = external_exports.enum(["draft", "active", "deprecated", "revoked"]);
+var ToolVersionSchema = external_exports.object({
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  manifest: ToolManifestSchema,
+  artifact: ToolArtifactSchema,
+  provenance: ProvenanceMetadataSchema,
+  signature: SignatureMetadataSchema.optional(),
+  status: ToolVersionStatusSchema.default("draft"),
+  supersededBy: SchemaVersionSchema.nullable().optional(),
+  createdAt: ISOTimestampSchema,
+  createdBy: external_exports.string().min(1)
+});
+
+// packages/contracts/dist/records.js
+var WorkspaceRecordSchema = external_exports.object({
+  workspaceId: IdentifierSchema,
+  rootPath: external_exports.string().min(1),
+  name: external_exports.string().min(1),
+  config: external_exports.record(external_exports.unknown()).default({}),
+  capabilityEnvelope: CapabilityEnvelopeSchema,
+  activeTools: external_exports.record(SchemaVersionSchema).default({}),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+});
+var DeviceRecordSchema = external_exports.object({
+  deviceId: IdentifierSchema,
+  hostname: external_exports.string().min(1),
+  platform: external_exports.enum(["darwin", "linux", "win32", "other"]),
+  arch: external_exports.enum(["arm64", "x64", "arm", "ia32", "other"]),
+  osVersion: external_exports.string(),
+  cpuCores: external_exports.number().int().positive(),
+  totalMemoryMb: external_exports.number().int().positive(),
+  daemonVersion: SchemaVersionSchema,
+  registeredAt: ISOTimestampSchema,
+  lastSeenAt: ISOTimestampSchema
+});
+var InstallationRecordSchema = external_exports.object({
+  installationId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  deploymentId: IdentifierSchema,
+  installedAt: ISOTimestampSchema,
+  state: external_exports.enum(["active", "inactive", "broken", "uninstalled"]),
+  configOverrides: external_exports.record(external_exports.unknown()).default({})
+});
+var CatalogToolSummarySchema = external_exports.object({
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  manifestDigest: Sha256DigestSchema,
+  scope: ToolScopeSchema,
+  status: external_exports.enum(["active", "draft", "deprecated", "revoked"])
+});
+var CatalogSnapshotSchema = external_exports.object({
+  snapshotId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  tools: external_exports.record(CatalogToolSummarySchema).default({}),
+  digest: Sha256DigestSchema
+});
+var InvocationResourceUsageSchema = external_exports.object({
+  cpuTimeMs: external_exports.number().nonnegative(),
+  memoryBytes: external_exports.number().int().nonnegative(),
+  shadowRun: external_exports.boolean().default(false)
+});
+var InvocationErrorDetailsSchema = external_exports.object({
+  errorType: external_exports.string().min(1),
+  message: external_exports.string(),
+  stack: external_exports.string().optional()
+});
+var TOOL_IO_UTF8_METHOD = "tool_io_utf8_v1";
+var InvocationUsageEstimateSchema = external_exports.object({
+  method: external_exports.literal(TOOL_IO_UTF8_METHOD),
+  inputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  outputTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  discoveryTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  totalTokens: external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+}).refine((val) => val.totalTokens === val.inputTokens + val.outputTokens + val.discoveryTokens, {
+  message: "totalTokens must equal sum of inputTokens, outputTokens, and discoveryTokens"
+});
+var InvocationRecordSchema = external_exports.object({
+  invocationId: IdentifierSchema,
+  sessionId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  toolVersion: SchemaVersionSchema,
+  startedAt: ISOTimestampSchema,
+  completedAt: ISOTimestampSchema,
+  durationMs: external_exports.number().nonnegative(),
+  status: external_exports.enum(["success", "error", "timeout", "rejected_capability"]),
+  inputDigest: Sha256DigestSchema,
+  outputDigest: Sha256DigestSchema.optional(),
+  errorDetails: InvocationErrorDetailsSchema.optional(),
+  resourceUsage: InvocationResourceUsageSchema.optional(),
+  usageEstimate: InvocationUsageEstimateSchema.optional()
+});
+var AuditActorSchema = external_exports.object({
+  type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),
+  id: external_exports.string().min(1)
+});
+var AuditRecordSchema = external_exports.object({
+  auditId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  eventType: external_exports.string().min(1),
+  actor: AuditActorSchema,
+  workspaceId: IdentifierSchema.optional(),
+  resourceType: external_exports.enum([
+    "tool",
+    "deployment",
+    "candidate",
+    "workspace",
+    "capability",
+    "session",
+    "device",
+    "config"
+  ]),
+  resourceId: external_exports.string().min(1),
+  action: external_exports.string().min(1),
+  status: external_exports.enum(["success", "failure", "denied"]),
+  details: external_exports.record(external_exports.unknown()).default({}),
+  clientIp: external_exports.string().optional()
+});
+var TelemetryRecordSchema = external_exports.object({
+  telemetryId: IdentifierSchema,
+  timestamp: ISOTimestampSchema,
+  deviceId: IdentifierSchema,
+  workspaceId: IdentifierSchema.optional(),
+  metricName: external_exports.string().min(1),
+  metricType: external_exports.enum(["counter", "gauge", "histogram"]),
+  value: external_exports.number(),
+  tags: external_exports.record(external_exports.string()).default({})
+});
+var SyncCursorSchema = external_exports.object({
+  cursorId: IdentifierSchema,
+  deviceId: IdentifierSchema,
+  workspaceId: IdentifierSchema.optional(),
+  entityType: external_exports.string().min(1),
+  lastSyncedSequence: external_exports.number().int().nonnegative(),
+  lastSyncedTimestamp: ISOTimestampSchema,
+  syncToken: external_exports.string().min(1)
+});
+var DeadLetterRecordSchema = external_exports.object({
+  deadLetterId: IdentifierSchema,
+  originalEventType: external_exports.string().min(1),
+  payload: external_exports.record(external_exports.unknown()),
+  errorReason: external_exports.string().min(1),
+  failedAt: ISOTimestampSchema,
+  retryCount: external_exports.number().int().nonnegative().default(0),
+  nextRetryAt: ISOTimestampSchema.optional(),
+  status: external_exports.enum(["pending", "exhausted", "resolved", "discarded"]).default("pending")
+});
+var VerificationDigestsSchema = external_exports.object({
+  sourceDigest: Sha256DigestSchema,
+  manifestDigest: Sha256DigestSchema,
+  testsDigest: Sha256DigestSchema,
+  sdkDigest: Sha256DigestSchema,
+  runtimeDigest: Sha256DigestSchema,
+  policyDigest: Sha256DigestSchema,
+  denoDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  compositeEvidenceDigest: Sha256DigestSchema
+});
+var VerificationChecksSchema = external_exports.object({
+  compilationAndTypeCheck: external_exports.boolean(),
+  staticAnalysis: external_exports.boolean(),
+  schemaValidation: external_exports.boolean(),
+  unitTests: external_exports.boolean(),
+  securityProbes: external_exports.boolean(),
+  deterministicPackaging: external_exports.boolean()
+});
+var ProbeResultEntrySchema = external_exports.object({
+  probeId: external_exports.string().min(1),
+  name: external_exports.string().min(1),
+  passed: external_exports.boolean(),
+  details: external_exports.string().optional()
+});
+var VerificationEvidenceRecordSchema = external_exports.object({
+  evidenceId: IdentifierSchema,
+  toolId: IdentifierSchema,
+  version: SchemaVersionSchema,
+  status: external_exports.enum(["passed", "failed"]),
+  verifiedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  digests: VerificationDigestsSchema,
+  checks: VerificationChecksSchema,
+  probeResults: external_exports.array(ProbeResultEntrySchema).default([]),
+  metadata: external_exports.record(external_exports.unknown()).optional(),
+  signature: SignatureMetadataSchema.optional()
+});
+var RecordVisibilitySchema = external_exports.enum(["personal", "workspace"]);
+var PersonalOwnershipRecordSchema = external_exports.object({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceOwnershipRecordSchema = external_exports.object({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var RecordOwnershipSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalOwnershipRecordSchema,
+  WorkspaceOwnershipRecordSchema
+]);
+var SessionRecordBaseSchema = external_exports.object({
+  id: IdentifierSchema,
+  accountId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  harnessType: external_exports.string().min(1).default("default"),
+  status: external_exports.enum(["active", "idle", "completed", "failed", "archived", "terminated"]).default("active"),
+  fidelity: external_exports.enum(["full", "compact", "summary", "lossless"]).default("full"),
+  startedAt: ISOTimestampSchema,
+  endedAt: ISOTimestampSchema.nullable().optional(),
+  cursor: external_exports.string().nullable().optional(),
+  eventCount: external_exports.number().int().nonnegative().default(0),
+  summaryByKind: external_exports.record(external_exports.number().int().nonnegative()).default({}),
+  metadata: external_exports.record(external_exports.unknown()).default({}),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema
+});
+var PersonalSessionRecordSchema = SessionRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceSessionRecordSchema = SessionRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var SessionRecordSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalSessionRecordSchema,
+  WorkspaceSessionRecordSchema
+]);
+var EvidenceSetRecordBaseSchema = external_exports.object({
+  id: IdentifierSchema,
+  accountId: IdentifierSchema,
+  workspaceId: IdentifierSchema,
+  sessionId: IdentifierSchema.nullable().optional(),
+  name: external_exports.string().min(1),
+  description: external_exports.string().default(""),
+  revision: external_exports.number().int().positive().default(1),
+  rootDigest: Sha256DigestSchema,
+  memberCount: external_exports.number().int().nonnegative().default(0),
+  metadata: external_exports.record(external_exports.unknown()).default({}),
+  createdAt: ISOTimestampSchema
+});
+var PersonalEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]),
+  visibility: external_exports.literal("personal")
+});
+var WorkspaceEvidenceSetRecordSchema = EvidenceSetRecordBaseSchema.extend({
+  ownerUserId: external_exports.union([UUIDSchema, IdentifierSchema]).nullable().optional(),
+  visibility: external_exports.literal("workspace")
+});
+var EvidenceSetRecordSchema = external_exports.discriminatedUnion("visibility", [
+  PersonalEvidenceSetRecordSchema,
+  WorkspaceEvidenceSetRecordSchema
+]);
+
+// packages/protocol/dist/http.js
 init_zod();
 var InstallationRegisterRequestSchema = external_exports.object({
   installationId: IdentifierSchema,
@@ -8856,7 +12156,6 @@ var HealthNegotiateResponseSchema = external_exports.object({
 
 // packages/protocol/dist/stream.js
 init_common();
-init_tools();
 init_zod();
 var StreamClientHeartbeatSchema = external_exports.object({
   type: external_exports.literal("client.heartbeat"),
@@ -8965,7 +12264,171 @@ var StreamMessageSchema = external_exports.object({
 
 // packages/protocol/dist/projects.js
 init_common();
-init_v1();
+
+// packages/contracts/dist/v1.js
+init_zod();
+init_common();
+var V1_SCHEMA_VERSION = "1.0.0";
+var V1_SCHEMA_KINDS = {
+  OWNER_AUTHORIZATION: "owner_authorization",
+  PROJECT_METADATA: "project_metadata",
+  TOOL_LOCK: "tool_lock",
+  ACTIVATION_CERTIFICATE: "activation_certificate",
+  REVOCATION_METADATA: "revocation_metadata",
+  SAVINGS_EVIDENCE: "savings_evidence"
+};
+var V1Sha256DigestSchema = external_exports.string().regex(/^(sha256:)?[a-f0-9]{64}$/i, "Invalid SHA-256 digest format (expected 64 hex characters with optional sha256: prefix)").transform((val) => normalizeSha256(val, false));
+var V1ExactSemVerSchema = external_exports.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/, "Invalid semantic version string").refine((val) => !/[*^~><=]/.test(val), {
+  message: "Version ranges and wildcards (^, ~, *, >, <) are prohibited in exact pinned versions"
+});
+var V1OwnerTypeSchema = external_exports.enum(["user", "workspace", "account", "organization"]);
+var V1RoleSchema = external_exports.enum(["owner", "admin", "member", "viewer"]);
+var V1OwnerReferenceSchema = external_exports.object({
+  ownerType: V1OwnerTypeSchema,
+  ownerId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1PersonalScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("personal"),
+  userId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1WorkspaceScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("workspace"),
+  workspaceId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1AccountScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("account"),
+  accountId: UUIDSchema
+}).strict();
+var V1OrganizationScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("organization"),
+  organizationId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1AuthorizationScopeSchema = external_exports.discriminatedUnion("scopeType", [
+  V1PersonalScopeSchema,
+  V1WorkspaceScopeSchema,
+  V1AccountScopeSchema,
+  V1OrganizationScopeSchema
+]);
+var V1SubjectTypeSchema = external_exports.enum(["user", "service_account", "device", "mcp_client"]);
+var V1OwnerAuthorizationSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.OWNER_AUTHORIZATION),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  authorizationId: UUIDSchema,
+  subjectId: UUIDSchema,
+  subjectType: V1SubjectTypeSchema,
+  owner: V1OwnerReferenceSchema,
+  scope: V1AuthorizationScopeSchema,
+  roles: external_exports.array(V1RoleSchema).min(1),
+  permissions: external_exports.array(external_exports.string().min(1)),
+  issuedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema.optional()
+}).strict();
+var V1ProjectSettingsSchema = external_exports.object({
+  defaultRuntimeVersion: V1ExactSemVerSchema.optional(),
+  environment: external_exports.string().min(1).max(64).optional(),
+  tags: external_exports.array(external_exports.string().min(1).max(64)).optional()
+}).strict();
+var V1ProjectMetadataSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.PROJECT_METADATA),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  projectId: UUIDSchema,
+  name: external_exports.string().min(1).max(128),
+  settings: V1ProjectSettingsSchema.optional(),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+}).strict();
+var V1LockSignatureIdentitySchema = external_exports.object({
+  keyId: external_exports.string().min(1),
+  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
+  signer: external_exports.string().min(1).optional()
+}).strict();
+var V1LockedToolEntrySchema = external_exports.object({
+  toolId: UUIDSchema,
+  name: IdentifierSchema,
+  version: V1ExactSemVerSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  envelopeDigest: Sha256DigestSchema.optional(),
+  signatureIdentity: V1LockSignatureIdentitySchema.optional(),
+  status: external_exports.enum(["active", "pinned", "disabled"]).default("active")
+}).strict();
+var V1ToolLockSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.TOOL_LOCK),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  projectId: UUIDSchema,
+  updatedAt: ISOTimestampSchema,
+  tools: external_exports.record(IdentifierSchema, V1LockedToolEntrySchema)
+}).strict();
+var V1CertificateSubjectSchema = external_exports.object({
+  userId: UUIDSchema,
+  accountId: UUIDSchema,
+  deviceId: UUIDSchema.optional()
+}).strict();
+var V1ActivationCertificateSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  certificateId: UUIDSchema,
+  subject: V1CertificateSubjectSchema,
+  projectId: UUIDSchema,
+  toolId: UUIDSchema,
+  toolName: IdentifierSchema,
+  version: V1ExactSemVerSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  capabilityEnvelopeDigest: Sha256DigestSchema,
+  qualificationEvidenceDigest: Sha256DigestSchema,
+  counter: external_exports.number().int().nonnegative(),
+  nonce: external_exports.string().min(8),
+  issuedAt: ISOTimestampSchema,
+  notBefore: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  status: external_exports.enum(["active", "suspended", "revoked"]).default("active"),
+  signature: SignatureMetadataSchema
+}).strict().refine((data) => {
+  const issued = new Date(data.issuedAt).getTime();
+  const notBefore = new Date(data.notBefore).getTime();
+  const expires = new Date(data.expiresAt).getTime();
+  return !Number.isNaN(issued) && !Number.isNaN(notBefore) && !Number.isNaN(expires) && notBefore <= expires && issued <= expires;
+}, {
+  message: "Certificate validity window invalid: issuedAt and notBefore must be before or equal to expiresAt"
+});
+var V1RevokedToolEntrySchema = external_exports.object({
+  toolId: UUIDSchema,
+  version: V1ExactSemVerSchema.optional(),
+  revokedAt: ISOTimestampSchema,
+  reason: external_exports.string().min(1)
+}).strict();
+var V1RevokedCertificateEntrySchema = external_exports.object({
+  certificateId: UUIDSchema,
+  revokedAt: ISOTimestampSchema,
+  reason: external_exports.string().min(1)
+}).strict();
+var V1RevocationMetadataSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.REVOCATION_METADATA),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  revocationListId: UUIDSchema,
+  authorityId: external_exports.string().min(1),
+  accountId: UUIDSchema,
+  sequenceNumber: external_exports.number().int().nonnegative(),
+  issuedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  revokedTools: external_exports.array(V1RevokedToolEntrySchema).default([]),
+  revokedCertificates: external_exports.array(V1RevokedCertificateEntrySchema).default([]),
+  revokedKeys: external_exports.array(external_exports.string().min(1)).default([]),
+  signature: SignatureMetadataSchema
+}).strict().refine((data) => {
+  const issued = new Date(data.issuedAt).getTime();
+  const expires = new Date(data.expiresAt).getTime();
+  return !Number.isNaN(issued) && !Number.isNaN(expires) && issued <= expires;
+}, {
+  message: "Revocation metadata timestamps invalid: issuedAt must be before or equal to expiresAt"
+});
+
+// packages/protocol/dist/projects.js
 init_zod();
 var ProjectVisibilitySchema = external_exports.enum(["personal", "workspace"]);
 var ProjectRegistrationOutcomeSchema = external_exports.enum([
@@ -8984,9 +12447,7 @@ var ProjectRegistrationResponseSchema = external_exports.object({
 }).strict();
 
 // packages/protocol/dist/console.js
-init_capabilities();
 init_common();
-init_v1();
 init_zod();
 var ZodIssuePathSegmentSchema = external_exports.union([external_exports.string(), external_exports.number()]);
 var ZodIssueDetailPrimitiveSchema = external_exports.union([
@@ -9299,7 +12760,6 @@ var ControlPlaneConfigurationStateSchema = external_exports.object({
   logLevel: external_exports.enum(["debug", "info", "warn", "error", "silent"]).optional(),
   heartbeatIntervalMs: external_exports.number().int().min(1e3).max(3e5).optional()
 }).strict();
-var ControlPlaneHarnessIdSchema = external_exports.enum(["claude-code", "codex-cli", "omp"]);
 var ControlPlaneHarnessStateSchema = external_exports.object({
   enabled: external_exports.boolean(),
   autoRepair: external_exports.boolean().optional()
@@ -9328,7 +12788,10 @@ var ControlPlaneRecoveryStateSchema = external_exports.object({
 var ControlPlaneDesiredStateSchema = external_exports.object({
   privacy: ControlPlanePrivacyStateSchema.optional(),
   configuration: ControlPlaneConfigurationStateSchema.optional(),
-  harnesses: external_exports.record(ControlPlaneHarnessIdSchema, ControlPlaneHarnessStateSchema).optional(),
+  // Keyed by any identifier, not only `ControlPlaneHarnessIdSchema`: a peer on a newer revision
+  // may know harnesses this one does not, and one unknown key must not reject the whole state.
+  // Devices apply only the harnesses they support.
+  harnesses: external_exports.record(IdentifierSchema, ControlPlaneHarnessStateSchema).optional(),
   tools: external_exports.record(IdentifierSchema, ControlPlaneToolStateSchema).optional(),
   updates: ControlPlaneUpdateStateSchema.optional(),
   recovery: ControlPlaneRecoveryStateSchema.optional()
@@ -9516,12 +12979,12 @@ var IpcClient = class {
     if (!targetSocket) {
       throw new Error("No socketPath or transport provided to IpcClient");
     }
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve6, reject) => {
       const socket = net.createConnection(targetSocket, () => {
         this.socket = socket;
         this.isConnected = true;
         this.setupSocketListeners(socket);
-        resolve();
+        resolve6();
       });
       socket.once("error", (err) => {
         reject(new Error(`Failed to connect to daemon socket at ${this.socketPath}: ${err.message}`));
@@ -9608,7 +13071,7 @@ var IpcClient = class {
     };
     const encoded = encodeFrame(request);
     const timeout = timeoutMs ?? this.defaultTimeoutMs;
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve6, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
         const error = Object.assign(new Error(`IPC request '${method}' (${id}) timed out after ${timeout}ms`), {
@@ -9620,7 +13083,7 @@ var IpcClient = class {
         timer.unref();
       this.pendingRequests.set(id, {
         // SAFETY: Resolves caller promise with received result of type TResult.
-        resolve: (val) => resolve(val),
+        resolve: (val) => resolve6(val),
         reject: (err) => reject(err),
         timer
       });
@@ -9677,16 +13140,19 @@ var IpcClient = class {
     }
     const activeSocket = this.socket;
     if (activeSocket) {
-      await new Promise((resolve) => {
+      await new Promise((resolve6) => {
         activeSocket.end(() => {
           activeSocket.destroy();
-          resolve();
+          resolve6();
         });
       });
       this.socket = null;
     }
   }
 };
+
+// apps/cli/src/service/verification.ts
+init_harness_registry();
 
 // apps/cli/src/service/auth-bootstrap.ts
 var DEFAULT_DEVICE_AUTH_SCOPES = Object.freeze([
@@ -9716,8 +13182,8 @@ var VerificationDetailValueSchema = external_exports.lazy(
   ])
 );
 var verifyDaemonReadiness = async (options) => {
-  const homeDir = options.homeDir ?? os4.homedir();
-  const resinHome = options.resinHome ?? path7.join(homeDir, ".resin");
+  const homeDir = options.homeDir ?? os10.homedir();
+  const resinHome = options.resinHome ?? path30.join(homeDir, ".resin");
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const daemonPaths = resolvePaths({ home: homeDir, resinHome });
   const socketPath = daemonPaths.socketPath;
@@ -9804,7 +13270,7 @@ var verifyDaemonReadiness = async (options) => {
     const remainingMs = deadline - Date.now();
     if (remainingMs > 0) {
       await new Promise(
-        (resolve) => setTimeout(resolve, Math.min(retryIntervalMs, remainingMs))
+        (resolve6) => setTimeout(resolve6, Math.min(retryIntervalMs, remainingMs))
       );
     }
   } while (Date.now() < deadline);
@@ -9823,9 +13289,9 @@ var verifyDaemonReadiness = async (options) => {
 // apps/cli/src/installer/asset-downloader.ts
 init_dist();
 import crypto3 from "node:crypto";
-import fs3 from "node:fs";
+import fs9 from "node:fs";
 import fsPromises from "node:fs/promises";
-import path8 from "node:path";
+import path31 from "node:path";
 import process4 from "node:process";
 import zlib from "node:zlib";
 function sha256Hex(buf) {
@@ -9852,10 +13318,10 @@ function normalizeReleaseVersion(version) {
   return cleanVersion;
 }
 function assertDirectChildPath(parentDir, candidatePath, description) {
-  const parentRoot = path8.resolve(parentDir);
-  const candidateRoot = path8.resolve(candidatePath);
-  const relativePath = path8.relative(parentRoot, candidateRoot);
-  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path8.sep}`) || path8.isAbsolute(relativePath) || path8.dirname(candidateRoot) !== parentRoot) {
+  const parentRoot = path31.resolve(parentDir);
+  const candidateRoot = path31.resolve(candidatePath);
+  const relativePath = path31.relative(parentRoot, candidateRoot);
+  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(relativePath) || path31.dirname(candidateRoot) !== parentRoot) {
     throw new Error(
       `Security violation: ${description} must be a direct child of '${parentRoot}': '${candidatePath}'.`
     );
@@ -9863,12 +13329,12 @@ function assertDirectChildPath(parentDir, candidatePath, description) {
   return candidateRoot;
 }
 function resolveVersionChildPath(versionsDir, childName, description) {
-  if (childName.length === 0 || childName === "." || childName === ".." || path8.basename(childName) !== childName || childName.includes("/") || childName.includes("\\") || childName.includes("\0")) {
+  if (childName.length === 0 || childName === "." || childName === ".." || path31.basename(childName) !== childName || childName.includes("/") || childName.includes("\\") || childName.includes("\0")) {
     throw new Error(
       `Security violation: ${description} must use one safe direct-child segment: '${childName}'.`
     );
   }
-  return assertDirectChildPath(versionsDir, path8.resolve(versionsDir, childName), description);
+  return assertDirectChildPath(versionsDir, path31.resolve(versionsDir, childName), description);
 }
 function lstatIfExists(filePath, fsSync2) {
   try {
@@ -10013,7 +13479,7 @@ function parseTarEntries(tarData) {
         `Security violation: unsupported or dangerous entry type '${typeFlag}' in tar archive: '${fullName}'.`
       );
     }
-    const isDirectory = typeFlag === "5" || directoryHint;
+    const isDirectory2 = typeFlag === "5" || directoryHint;
     const dataOffset = offset + TAR_BLOCK_SIZE;
     const remainingData = tarData.length - dataOffset;
     if (fileSize > remainingData) {
@@ -10032,7 +13498,7 @@ function parseTarEntries(tarData) {
     }
     entries.push({
       relativePath,
-      isDirectory,
+      isDirectory: isDirectory2,
       fileSize,
       dataOffset,
       sanitizedArchiveMode,
@@ -10069,9 +13535,9 @@ function parseTarEntries(tarData) {
   return entries;
 }
 function resolveContainedArchivePath(root, relativePath) {
-  const candidatePath = path8.resolve(root, ...relativePath.split("/"));
-  const nativeRelativePath = path8.relative(root, candidatePath);
-  if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path8.sep}`) || path8.isAbsolute(nativeRelativePath)) {
+  const candidatePath = path31.resolve(root, ...relativePath.split("/"));
+  const nativeRelativePath = path31.relative(root, candidatePath);
+  if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(nativeRelativePath)) {
     throw new Error(
       `Security violation: archive member resolves outside the extraction root: '${relativePath}'.`
     );
@@ -10102,7 +13568,7 @@ function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes
   let portablePath = "";
   for (const segment of relativeDirectory.split("/")) {
     portablePath = portablePath ? `${portablePath}/${segment}` : segment;
-    currentPath = path8.join(currentPath, segment);
+    currentPath = path31.join(currentPath, segment);
     let stats = lstatIfExists(currentPath, fsSync2);
     if (!stats) {
       const desiredMode2 = process4.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
@@ -10151,15 +13617,15 @@ function writeExclusiveRegularFile(targetPath, fileData, mode, fsSync2) {
     fsSync2.closeSync(descriptor);
   }
 }
-function extractTarArchive(tarData, destinationDir, fsSync2 = fs3) {
+function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
   const entries = parseTarEntries(tarData);
-  const root = path8.resolve(destinationDir);
+  const root = path31.resolve(destinationDir);
   let rootStats = lstatIfExists(root, fsSync2);
   if (!rootStats) {
-    const parentStats = fsSync2.lstatSync(path8.dirname(root));
+    const parentStats = fsSync2.lstatSync(path31.dirname(root));
     if (parentStats.isSymbolicLink() || !parentStats.isDirectory()) {
       throw new Error(
-        `Security violation: archive extraction parent must be a real directory: '${path8.dirname(root)}'.`
+        `Security violation: archive extraction parent must be a real directory: '${path31.dirname(root)}'.`
       );
     }
     fsSync2.mkdirSync(root, { recursive: false, mode: 448 });
@@ -10208,7 +13674,7 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs3) {
       explicitDirectoryModes,
       fsSync2
     );
-    if (path8.dirname(targetPath) !== parentPath) {
+    if (path31.dirname(targetPath) !== parentPath) {
       throw new Error(
         `Security violation: archive file parent escaped the extraction root: '${entry.relativePath}'.`
       );
@@ -10222,7 +13688,7 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs3) {
   setSafeDirectoryMode(root, RELEASE_DIRECTORY_MODE, fsSync2);
   return { extractedFiles, extractedDirs, executableFiles };
 }
-function extractTarGzBuffer(tarGzBuffer, destinationDir, fsSync2 = fs3) {
+function extractTarGzBuffer(tarGzBuffer, destinationDir, fsSync2 = fs9) {
   const decompressedTar = zlib.gunzipSync(tarGzBuffer);
   return extractTarArchive(decompressedTar, destinationDir, fsSync2);
 }
@@ -10234,8 +13700,8 @@ async function downloadAndVerifyAsset(options) {
   await fsBridge.mkdirp(downloadDir);
   await fsPromises.chmod(downloadDir, 493).catch(() => {
   });
-  const destinationPath = path8.join(downloadDir, asset.filename);
-  const tempPath = path8.join(downloadDir, `${asset.filename}.download.tmp`);
+  const destinationPath = path31.join(downloadDir, asset.filename);
+  const tempPath = path31.join(downloadDir, `${asset.filename}.download.tmp`);
   let fileBuffer;
   if (options.sourceBuffer) {
     fileBuffer = options.sourceBuffer;
@@ -10304,8 +13770,8 @@ function extractSingleFileZip(zipBuffer, expectedBasename) {
     const commentLength = zipBuffer.readUInt16LE(central + 32);
     const localOffset = zipBuffer.readUInt32LE(central + 42);
     const fileName = zipBuffer.subarray(central + 46, central + 46 + nameLength).toString("utf8").replace(/\\/g, "/");
-    const basename = path8.posix.basename(fileName);
-    if (basename === expectedBasename) {
+    const basename5 = path31.posix.basename(fileName);
+    if (basename5 === expectedBasename) {
       if (zipBuffer.readUInt32LE(localOffset) !== 67324752) {
         throw new Error("Deno runtime ZIP contains an invalid local file header.");
       }
@@ -10323,8 +13789,8 @@ function extractSingleFileZip(zipBuffer, expectedBasename) {
   }
   throw new Error(`Executable '${expectedBasename}' was not found in runtime archive.`);
 }
-function scanDirectoryTree(baseDir, fsSync2 = fs3) {
-  const root = path8.resolve(baseDir);
+function scanDirectoryTree(baseDir, fsSync2 = fs9) {
+  const root = path31.resolve(baseDir);
   const entries = [];
   const symlinks = [];
   const nonRegularNonDirs = [];
@@ -10332,14 +13798,14 @@ function scanDirectoryTree(baseDir, fsSync2 = fs3) {
     if (!fsSync2.existsSync(currentDir)) return;
     const directoryEntries = fsSync2.readdirSync(currentDir, { withFileTypes: true });
     for (const directoryEntry of directoryEntries) {
-      const fullPath = path8.join(currentDir, directoryEntry.name);
-      const nativeRelativePath = path8.relative(root, fullPath);
-      if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path8.sep}`) || path8.isAbsolute(nativeRelativePath)) {
+      const fullPath = path31.join(currentDir, directoryEntry.name);
+      const nativeRelativePath = path31.relative(root, fullPath);
+      if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(nativeRelativePath)) {
         throw new Error(
           `Security violation: scanned release entry escaped its root: '${fullPath}'.`
         );
       }
-      const relativePath = nativeRelativePath.split(path8.sep).join("/");
+      const relativePath = nativeRelativePath.split(path31.sep).join("/");
       if (relativePath.includes("\\") || relativePath.split("/").some((segment) => segment === "..")) {
         throw new Error(
           `Security violation: scanned release entry contains a non-portable path: '${nativeRelativePath}'.`
@@ -10366,16 +13832,16 @@ function scanDirectoryTree(baseDir, fsSync2 = fs3) {
   return { entries, symlinks, nonRegularNonDirs };
 }
 function normalizeReleaseTreeModes(baseDir, executablePaths) {
-  const root = path8.resolve(baseDir);
+  const root = path31.resolve(baseDir);
   const executableRelativePaths = /* @__PURE__ */ new Set();
   for (const executablePath of executablePaths) {
-    const relativePath = path8.relative(root, path8.resolve(executablePath));
-    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path8.sep}`) || path8.isAbsolute(relativePath)) {
+    const relativePath = path31.relative(root, path31.resolve(executablePath));
+    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(relativePath)) {
       throw new Error(
         `Security violation: executable permission policy points outside the release tree: '${executablePath}'.`
       );
     }
-    const portableRelativePath = relativePath.split(path8.sep).join("/");
+    const portableRelativePath = relativePath.split(path31.sep).join("/");
     if (portableRelativePath.includes("\\")) {
       throw new Error(
         `Security violation: executable permission policy contains a non-portable path: '${executablePath}'.`
@@ -10383,7 +13849,7 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
     }
     executableRelativePaths.add(portableRelativePath);
   }
-  const rootStats = fs3.lstatSync(root);
+  const rootStats = fs9.lstatSync(root);
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error(
       `Security violation: release staging root must be a real directory: '${baseDir}'.`
@@ -10402,10 +13868,10 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
   }
   if (process4.platform === "win32") return executableRelativePaths;
   if ((rootStats.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
-    fs3.chmodSync(root, RELEASE_DIRECTORY_MODE);
+    fs9.chmodSync(root, RELEASE_DIRECTORY_MODE);
   }
   for (const entry of scan.entries) {
-    const stats = fs3.lstatSync(entry.fullPath);
+    const stats = fs9.lstatSync(entry.fullPath);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new Error(
         `Security violation: release entry changed type during mode normalization at '${entry.relativePath}'.`
@@ -10413,13 +13879,13 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
     }
     const expectedMode = stats.isDirectory() ? RELEASE_DIRECTORY_MODE : executableRelativePaths.has(entry.relativePath) ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
     if ((stats.mode & RELEASE_MODE_MASK) !== expectedMode) {
-      fs3.chmodSync(entry.fullPath, expectedMode);
+      fs9.chmodSync(entry.fullPath, expectedMode);
     }
   }
   return executableRelativePaths;
 }
 function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expectedTarSha256, expectedExecutableFiles, expectedProvenance, expectedDenoRuntime) {
-  const targetRootStat = fs3.lstatSync(targetDir);
+  const targetRootStat = fs9.lstatSync(targetDir);
   if (targetRootStat.isSymbolicLink() || !targetRootStat.isDirectory()) {
     throw new Error(
       `Security violation: installed version root must be a real directory: '${targetDir}'.`
@@ -10475,8 +13941,8 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
     }
     const targetPath = targetEntry.fullPath;
     const stagingPath = stagingEntry.fullPath;
-    const targetStat = fs3.lstatSync(targetPath);
-    const stagingStat = fs3.lstatSync(stagingPath);
+    const targetStat = fs9.lstatSync(targetPath);
+    const stagingStat = fs9.lstatSync(stagingPath);
     if (stagingStat.isDirectory()) {
       if (!targetStat.isDirectory()) {
         throw new Error(
@@ -10507,7 +13973,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
     if (relPath === "version.json") {
       let parsedTarget;
       try {
-        parsedTarget = JSON.parse(fs3.readFileSync(targetPath, "utf8"));
+        parsedTarget = JSON.parse(fs9.readFileSync(targetPath, "utf8"));
       } catch (parseErr) {
         throw new Error(
           `Integrity violation: installed version.json metadata is corrupted or invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`
@@ -10556,8 +14022,8 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
         `Integrity violation: file size mismatch at '${relPath}': expected ${stagingStat.size} bytes, got ${targetStat.size} bytes.`
       );
     }
-    const targetBytes = fs3.readFileSync(targetPath);
-    const stagingBytes = fs3.readFileSync(stagingPath);
+    const targetBytes = fs9.readFileSync(targetPath);
+    const stagingBytes = fs9.readFileSync(stagingPath);
     if (Buffer.compare(targetBytes, stagingBytes) !== 0) {
       throw new Error(
         `Integrity violation: byte-for-byte content mismatch at '${relPath}'. Installed file does not match verified release payload.`
@@ -10571,7 +14037,7 @@ async function installReleaseVersion(options) {
   const log = options.logger ?? (() => {
   });
   const cleanVersion = normalizeReleaseVersion(version);
-  const versionsDir = path8.resolve(resinHome, "versions");
+  const versionsDir = path31.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanVersion}`,
@@ -10610,20 +14076,20 @@ async function installReleaseVersion(options) {
     let { extractedFiles, executableFiles } = extractTarGzBuffer(tarGzBuffer, stagingDir);
     const stagingEntries = await fsPromises.readdir(stagingDir, { withFileTypes: true });
     if (stagingEntries.length === 1 && stagingEntries[0].name === "resin" && stagingEntries[0].isDirectory()) {
-      const packagedRoot = path8.join(stagingDir, "resin");
+      const packagedRoot = path31.join(stagingDir, "resin");
       for (const entry of await fsPromises.readdir(packagedRoot)) {
-        await fsPromises.rename(path8.join(packagedRoot, entry), path8.join(stagingDir, entry));
+        await fsPromises.rename(path31.join(packagedRoot, entry), path31.join(stagingDir, entry));
       }
       await fsPromises.rmdir(packagedRoot);
       extractedFiles = extractedFiles.map(
-        (filePath) => path8.join(stagingDir, path8.relative(packagedRoot, filePath))
+        (filePath) => path31.join(stagingDir, path31.relative(packagedRoot, filePath))
       );
       executableFiles = executableFiles.map(
-        (filePath) => path8.join(stagingDir, path8.relative(packagedRoot, filePath))
+        (filePath) => path31.join(stagingDir, path31.relative(packagedRoot, filePath))
       );
     }
     const trustedExecutablePaths = new Set(
-      executableFiles.map((filePath) => path8.resolve(filePath))
+      executableFiles.map((filePath) => path31.resolve(filePath))
     );
     if (options.denoRuntime) {
       const runtimeBuffer = Buffer.isBuffer(options.denoRuntime.archivePathOrBuffer) ? options.denoRuntime.archivePathOrBuffer : await fsPromises.readFile(options.denoRuntime.archivePathOrBuffer);
@@ -10633,29 +14099,29 @@ async function installReleaseVersion(options) {
           `Deno runtime digest mismatch: expected ${options.denoRuntime.sha256}, got ${runtimeDigest}`
         );
       }
-      const denoDir = path8.join(stagingDir, "deno");
+      const denoDir = path31.join(stagingDir, "deno");
       await fsBridge.mkdirp(denoDir);
       await fsPromises.chmod(denoDir, 493).catch(() => {
       });
       const denoExecutableName = process4.platform === "win32" ? "deno.exe" : "deno";
       const denoExecutable = extractSingleFileZip(runtimeBuffer, denoExecutableName);
-      const denoTarget = path8.join(denoDir, denoExecutableName);
+      const denoTarget = path31.join(denoDir, denoExecutableName);
       await fsPromises.writeFile(denoTarget, denoExecutable, {
         mode: 493
       });
       await fsPromises.chmod(denoTarget, 493);
       extractedFiles.push(denoTarget);
-      trustedExecutablePaths.add(path8.resolve(denoTarget));
+      trustedExecutablePaths.add(path31.resolve(denoTarget));
     }
-    const stagingBin = path8.join(stagingDir, "bin");
+    const stagingBin = path31.join(stagingDir, "bin");
     await fsBridge.mkdirp(stagingBin);
     await fsPromises.chmod(stagingBin, 493).catch(() => {
     });
-    const expectedCli = path8.join(stagingDir, "bin", "resin");
-    const expectedDaemon = path8.join(stagingDir, "bin", "resin-daemon");
-    trustedExecutablePaths.add(path8.resolve(expectedCli));
-    trustedExecutablePaths.add(path8.resolve(expectedDaemon));
-    if (!fs3.existsSync(expectedCli)) {
+    const expectedCli = path31.join(stagingDir, "bin", "resin");
+    const expectedDaemon = path31.join(stagingDir, "bin", "resin-daemon");
+    trustedExecutablePaths.add(path31.resolve(expectedCli));
+    trustedExecutablePaths.add(path31.resolve(expectedDaemon));
+    if (!fs9.existsSync(expectedCli)) {
       await fsPromises.writeFile(
         expectedCli,
         `#!/usr/bin/env node
@@ -10681,7 +14147,7 @@ if (main instanceof Function) {
       await fsPromises.chmod(expectedCli, 493);
       extractedFiles.push(expectedCli);
     }
-    if (!fs3.existsSync(expectedDaemon)) {
+    if (!fs9.existsSync(expectedDaemon)) {
       await fsPromises.writeFile(
         expectedDaemon,
         `#!/usr/bin/env node
@@ -10695,7 +14161,7 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       extractedFiles.push(expectedDaemon);
       await fsPromises.chmod(expectedDaemon, 493);
     }
-    const versionMetadataPath = path8.join(stagingDir, "version.json");
+    const versionMetadataPath = path31.join(stagingDir, "version.json");
     const versionInfo = {
       version: cleanVersion,
       installedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -10709,9 +14175,9 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
     });
     extractedFiles.push(versionMetadataPath);
     await fsPromises.chmod(versionMetadataPath, 420);
-    trustedExecutablePaths.delete(path8.resolve(versionMetadataPath));
+    trustedExecutablePaths.delete(path31.resolve(versionMetadataPath));
     const expectedExecutableFiles = normalizeReleaseTreeModes(stagingDir, trustedExecutablePaths);
-    const targetStats = lstatIfExists(targetVersionDir, fs3);
+    const targetStats = lstatIfExists(targetVersionDir, fs9);
     const targetExists = targetStats !== null;
     if (targetStats && (targetStats.isSymbolicLink() || !targetStats.isDirectory())) {
       throw new Error(
@@ -10738,7 +14204,7 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       const scanResult = scanDirectoryTree(targetVersionDir);
       const installedFilePaths = scanResult.entries.map((entry) => entry.fullPath).filter((installedPath) => {
         try {
-          return fs3.lstatSync(installedPath).isFile();
+          return fs9.lstatSync(installedPath).isFile();
         } catch {
           return false;
         }
@@ -10748,11 +14214,11 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
         versionDir: targetVersionDir,
         installedFiles: installedFilePaths,
         entryPoints: {
-          daemon: path8.join(targetVersionDir, "bin", "resin-daemon"),
-          cli: path8.join(targetVersionDir, "bin", "resin"),
-          deno: fs3.existsSync(
-            path8.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
-          ) ? path8.join(
+          daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
+          cli: path31.join(targetVersionDir, "bin", "resin"),
+          deno: fs9.existsSync(
+            path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
+          ) ? path31.join(
             targetVersionDir,
             "deno",
             process4.platform === "win32" ? "deno.exe" : "deno"
@@ -10787,11 +14253,11 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       versionDir: targetVersionDir,
       installedFiles: extractedFiles.map((f) => f.replace(stagingDir, targetVersionDir)),
       entryPoints: {
-        daemon: path8.join(targetVersionDir, "bin", "resin-daemon"),
-        cli: path8.join(targetVersionDir, "bin", "resin"),
-        deno: fs3.existsSync(
-          path8.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
-        ) ? path8.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno") : void 0
+        daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
+        cli: path31.join(targetVersionDir, "bin", "resin"),
+        deno: fs9.existsSync(
+          path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
+        ) ? path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno") : void 0
       }
     };
   } catch (error) {
@@ -10808,65 +14274,65 @@ async function switchActiveVersion(options) {
   const log = options.logger ?? (() => {
   });
   const cleanTarget = normalizeReleaseVersion(targetVersion);
-  const versionsDir = path8.resolve(resinHome, "versions");
+  const versionsDir = path31.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanTarget}`,
     "active release version directory"
   );
-  const versionsStats = lstatIfExists(versionsDir, fs3);
+  const versionsStats = lstatIfExists(versionsDir, fs9);
   if (!versionsStats || versionsStats.isSymbolicLink() || !versionsStats.isDirectory()) {
     throw new Error(
       `Security violation: release versions path must be a real directory: '${versionsDir}'.`
     );
   }
-  if (!await fsBridge.exists(targetVersionDir) || !fs3.existsSync(targetVersionDir)) {
+  if (!await fsBridge.exists(targetVersionDir) || !fs9.existsSync(targetVersionDir)) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: directory does not exist at ${targetVersionDir}`
     );
   }
-  const targetStats = fs3.lstatSync(targetVersionDir);
+  const targetStats = fs9.lstatSync(targetVersionDir);
   if (targetStats.isSymbolicLink() || !targetStats.isDirectory()) {
     throw new Error(
       `Security violation: active release target must be a real direct-child directory: '${targetVersionDir}'.`
     );
   }
-  const targetVersionJson = path8.join(targetVersionDir, "version.json");
-  if (!fs3.existsSync(targetVersionJson)) {
+  const targetVersionJson = path31.join(targetVersionDir, "version.json");
+  if (!fs9.existsSync(targetVersionJson)) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: missing version.json metadata at ${targetVersionJson}`
     );
   }
-  const metaStat = fs3.lstatSync(targetVersionJson);
+  const metaStat = fs9.lstatSync(targetVersionJson);
   if (metaStat.isSymbolicLink() || !metaStat.isFile()) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: version.json in target directory must be a regular file`
     );
   }
-  const currentPointer = path8.join(resinHome, "current");
-  const previousPointer = path8.join(resinHome, "previous");
-  const versionStatePath = path8.join(resinHome, "version-state.json");
-  const globalBinDir = path8.join(resinHome, "bin");
+  const currentPointer = path31.join(resinHome, "current");
+  const previousPointer = path31.join(resinHome, "previous");
+  const versionStatePath = path31.join(resinHome, "version-state.json");
+  const globalBinDir = path31.join(resinHome, "bin");
   const priorActiveVersionRaw = getActiveVersion(resinHome);
   const priorActiveVersion = priorActiveVersionRaw === null ? null : normalizeReleaseVersion(priorActiveVersionRaw);
-  const hadCurrentSymlink = fs3.existsSync(currentPointer) && fs3.lstatSync(currentPointer).isSymbolicLink();
-  const priorCurrentTarget = hadCurrentSymlink ? fs3.readlinkSync(currentPointer) : null;
-  const hadCurrentVersionFile = fs3.existsSync(path8.join(resinHome, "current-version"));
-  const priorCurrentVersionContent = hadCurrentVersionFile ? fs3.readFileSync(path8.join(resinHome, "current-version"), "utf8") : null;
-  const hadPreviousSymlink = fs3.existsSync(previousPointer) && fs3.lstatSync(previousPointer).isSymbolicLink();
-  const priorPreviousTarget = hadPreviousSymlink ? fs3.readlinkSync(previousPointer) : null;
-  const hadPreviousVersionFile = fs3.existsSync(path8.join(resinHome, "previous-version"));
-  const priorPreviousVersionContent = hadPreviousVersionFile ? fs3.readFileSync(path8.join(resinHome, "previous-version"), "utf8") : null;
-  const hadVersionState = fs3.existsSync(versionStatePath);
+  const hadCurrentSymlink = fs9.existsSync(currentPointer) && fs9.lstatSync(currentPointer).isSymbolicLink();
+  const priorCurrentTarget = hadCurrentSymlink ? fs9.readlinkSync(currentPointer) : null;
+  const hadCurrentVersionFile = fs9.existsSync(path31.join(resinHome, "current-version"));
+  const priorCurrentVersionContent = hadCurrentVersionFile ? fs9.readFileSync(path31.join(resinHome, "current-version"), "utf8") : null;
+  const hadPreviousSymlink = fs9.existsSync(previousPointer) && fs9.lstatSync(previousPointer).isSymbolicLink();
+  const priorPreviousTarget = hadPreviousSymlink ? fs9.readlinkSync(previousPointer) : null;
+  const hadPreviousVersionFile = fs9.existsSync(path31.join(resinHome, "previous-version"));
+  const priorPreviousVersionContent = hadPreviousVersionFile ? fs9.readFileSync(path31.join(resinHome, "previous-version"), "utf8") : null;
+  const hadVersionState = fs9.existsSync(versionStatePath);
   let priorVersionStateRaw = null;
   if (hadVersionState) {
     try {
-      priorVersionStateRaw = fs3.readFileSync(versionStatePath, "utf8");
+      priorVersionStateRaw = fs9.readFileSync(versionStatePath, "utf8");
     } catch {
     }
   }
-  const hadGlobalBinDir = fs3.existsSync(globalBinDir);
-  const stagingBinDir = path8.join(
+  const hadGlobalBinDir = fs9.existsSync(globalBinDir);
+  const stagingBinDir = path31.join(
     resinHome,
     `.bin.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
   );
@@ -10878,56 +14344,56 @@ async function switchActiveVersion(options) {
         `v${priorActiveVersion}`,
         "previous release version directory"
       );
-      if (fs3.existsSync(prevTargetDir)) {
-        const tmpPrevSymlink = path8.join(
+      if (fs9.existsSync(prevTargetDir)) {
+        const tmpPrevSymlink = path31.join(
           resinHome,
           `.previous.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
         );
         try {
-          if (fs3.existsSync(tmpPrevSymlink)) fs3.unlinkSync(tmpPrevSymlink);
-          fs3.symlinkSync(prevTargetDir, tmpPrevSymlink, "dir");
-          if (fs3.existsSync(previousPointer) && fs3.lstatSync(previousPointer).isDirectory()) {
-            fs3.rmSync(previousPointer, { recursive: true, force: true });
+          if (fs9.existsSync(tmpPrevSymlink)) fs9.unlinkSync(tmpPrevSymlink);
+          fs9.symlinkSync(prevTargetDir, tmpPrevSymlink, "dir");
+          if (fs9.existsSync(previousPointer) && fs9.lstatSync(previousPointer).isDirectory()) {
+            fs9.rmSync(previousPointer, { recursive: true, force: true });
           }
-          fs3.renameSync(tmpPrevSymlink, previousPointer);
+          fs9.renameSync(tmpPrevSymlink, previousPointer);
         } catch {
-          const tmpPrevFile = path8.join(
+          const tmpPrevFile = path31.join(
             resinHome,
             `.previous-version.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
           );
-          fs3.writeFileSync(tmpPrevFile, priorActiveVersion, "utf8");
-          fs3.chmodSync(tmpPrevFile, 420);
-          fs3.renameSync(tmpPrevFile, path8.join(resinHome, "previous-version"));
+          fs9.writeFileSync(tmpPrevFile, priorActiveVersion, "utf8");
+          fs9.chmodSync(tmpPrevFile, 420);
+          fs9.renameSync(tmpPrevFile, path31.join(resinHome, "previous-version"));
         }
       }
     }
-    const tmpSymlink = path8.join(
+    const tmpSymlink = path31.join(
       resinHome,
       `.current.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
     );
     try {
-      if (fs3.existsSync(tmpSymlink)) fs3.unlinkSync(tmpSymlink);
-      fs3.symlinkSync(targetVersionDir, tmpSymlink, "dir");
-      if (fs3.existsSync(currentPointer) && fs3.lstatSync(currentPointer).isDirectory()) {
-        fs3.rmSync(currentPointer, { recursive: true, force: true });
+      if (fs9.existsSync(tmpSymlink)) fs9.unlinkSync(tmpSymlink);
+      fs9.symlinkSync(targetVersionDir, tmpSymlink, "dir");
+      if (fs9.existsSync(currentPointer) && fs9.lstatSync(currentPointer).isDirectory()) {
+        fs9.rmSync(currentPointer, { recursive: true, force: true });
       }
-      fs3.renameSync(tmpSymlink, currentPointer);
+      fs9.renameSync(tmpSymlink, currentPointer);
     } catch {
-      const tmpCurrFile = path8.join(
+      const tmpCurrFile = path31.join(
         resinHome,
         `.current-version.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
       );
-      fs3.writeFileSync(tmpCurrFile, cleanTarget, "utf8");
-      fs3.chmodSync(tmpCurrFile, 420);
-      fs3.renameSync(tmpCurrFile, path8.join(resinHome, "current-version"));
+      fs9.writeFileSync(tmpCurrFile, cleanTarget, "utf8");
+      fs9.chmodSync(tmpCurrFile, 420);
+      fs9.renameSync(tmpCurrFile, path31.join(resinHome, "current-version"));
     }
     await fsBridge.mkdirp(stagingBinDir);
     await fsPromises.chmod(stagingBinDir, 493).catch(() => {
     });
-    const targetBinDir = path8.join(targetVersionDir, "bin");
+    const targetBinDir = path31.join(targetVersionDir, "bin");
     const binNames = /* @__PURE__ */ new Set(["resin", "resin-daemon"]);
-    if (fs3.existsSync(targetBinDir)) {
-      const files = fs3.readdirSync(targetBinDir);
+    if (fs9.existsSync(targetBinDir)) {
+      const files = fs9.readdirSync(targetBinDir);
       for (const f of files) {
         if (f !== "resin-mcp") {
           binNames.add(f);
@@ -10935,25 +14401,25 @@ async function switchActiveVersion(options) {
       }
     }
     for (const binName of binNames) {
-      const binTarget = path8.join(targetVersionDir, "bin", binName);
-      const stagedBinPath = path8.join(stagingBinDir, binName);
-      if (fs3.existsSync(binTarget)) {
+      const binTarget = path31.join(targetVersionDir, "bin", binName);
+      const stagedBinPath = path31.join(stagingBinDir, binName);
+      if (fs9.existsSync(binTarget)) {
         try {
-          fs3.symlinkSync(binTarget, stagedBinPath);
+          fs9.symlinkSync(binTarget, stagedBinPath);
         } catch {
-          fs3.writeFileSync(
+          fs9.writeFileSync(
             stagedBinPath,
             `#!/usr/bin/env node
-import "${path8.resolve(binTarget)}";
+import "${path31.resolve(binTarget)}";
 `,
             { mode: 493 }
           );
-          fs3.chmodSync(stagedBinPath, 493);
+          fs9.chmodSync(stagedBinPath, 493);
         }
       }
     }
     if (hadGlobalBinDir) {
-      backupBinDir = path8.join(
+      backupBinDir = path31.join(
         resinHome,
         `.bin.backup-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
       );
@@ -10962,14 +14428,14 @@ import "${path8.resolve(binTarget)}";
     try {
       await fsPromises.rename(stagingBinDir, globalBinDir);
     } catch (binRenameErr) {
-      if (backupBinDir && fs3.existsSync(backupBinDir)) {
+      if (backupBinDir && fs9.existsSync(backupBinDir)) {
         await fsPromises.rename(backupBinDir, globalBinDir).catch(() => {
         });
         backupBinDir = null;
       }
       throw binRenameErr;
     }
-    const installedList = fs3.existsSync(versionsDir) ? fs3.readdirSync(versionsDir).filter((d) => d.startsWith("v") && !d.startsWith(".")).map((d) => d.replace(/^v/, "")) : [cleanTarget];
+    const installedList = fs9.existsSync(versionsDir) ? fs9.readdirSync(versionsDir).filter((d) => d.startsWith("v") && !d.startsWith(".")).map((d) => d.replace(/^v/, "")) : [cleanTarget];
     let existingProvenance = {};
     if (priorVersionStateRaw) {
       try {
@@ -10982,7 +14448,7 @@ import "${path8.resolve(binTarget)}";
     }
     try {
       const versionMetadata = JSON.parse(
-        fs3.readFileSync(targetVersionJson, "utf8")
+        fs9.readFileSync(targetVersionJson, "utf8")
       );
       if (versionMetadata.provenance) existingProvenance[cleanTarget] = versionMetadata.provenance;
     } catch {
@@ -10994,7 +14460,7 @@ import "${path8.resolve(binTarget)}";
       installedVersions: installedList,
       provenanceByVersion: existingProvenance
     };
-    const tmpStatePath = path8.join(
+    const tmpStatePath = path31.join(
       resinHome,
       `.version-state.json.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
     );
@@ -11007,7 +14473,7 @@ import "${path8.resolve(binTarget)}";
         `Atomic activation failed post-commit check: expected active version v${cleanTarget}, but resolved ${verifiedActive ? `v${verifiedActive}` : "none"}`
       );
     }
-    if (backupBinDir && fs3.existsSync(backupBinDir)) {
+    if (backupBinDir && fs9.existsSync(backupBinDir)) {
       await fsPromises.rm(backupBinDir, { recursive: true, force: true }).catch(() => {
       });
       backupBinDir = null;
@@ -11022,41 +14488,41 @@ import "${path8.resolve(binTarget)}";
       rollbackRetained: Boolean(priorActiveVersion && priorActiveVersion !== cleanTarget)
     };
   } catch (error) {
-    if (fs3.existsSync(stagingBinDir)) {
+    if (fs9.existsSync(stagingBinDir)) {
       await fsPromises.rm(stagingBinDir, { recursive: true, force: true }).catch(() => {
       });
     }
     if (priorActiveVersion !== null) {
-      if (backupBinDir && fs3.existsSync(backupBinDir)) {
-        if (fs3.existsSync(globalBinDir)) {
-          fs3.rmSync(globalBinDir, { recursive: true, force: true });
+      if (backupBinDir && fs9.existsSync(backupBinDir)) {
+        if (fs9.existsSync(globalBinDir)) {
+          fs9.rmSync(globalBinDir, { recursive: true, force: true });
         }
         await fsPromises.rename(backupBinDir, globalBinDir).catch(() => {
         });
         backupBinDir = null;
-      } else if (!hadGlobalBinDir && fs3.existsSync(globalBinDir)) {
-        fs3.rmSync(globalBinDir, { recursive: true, force: true });
+      } else if (!hadGlobalBinDir && fs9.existsSync(globalBinDir)) {
+        fs9.rmSync(globalBinDir, { recursive: true, force: true });
       }
       if (hadCurrentSymlink && priorCurrentTarget) {
         try {
-          const tmpRestoreSymlink = path8.join(
+          const tmpRestoreSymlink = path31.join(
             resinHome,
             `.current.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
           );
-          if (fs3.existsSync(tmpRestoreSymlink)) fs3.unlinkSync(tmpRestoreSymlink);
-          fs3.symlinkSync(priorCurrentTarget, tmpRestoreSymlink, "dir");
-          fs3.renameSync(tmpRestoreSymlink, currentPointer);
+          if (fs9.existsSync(tmpRestoreSymlink)) fs9.unlinkSync(tmpRestoreSymlink);
+          fs9.symlinkSync(priorCurrentTarget, tmpRestoreSymlink, "dir");
+          fs9.renameSync(tmpRestoreSymlink, currentPointer);
         } catch {
-          fs3.writeFileSync(path8.join(resinHome, "current-version"), priorActiveVersion, "utf8");
+          fs9.writeFileSync(path31.join(resinHome, "current-version"), priorActiveVersion, "utf8");
         }
       } else if (hadCurrentVersionFile && priorCurrentVersionContent) {
-        fs3.writeFileSync(
-          path8.join(resinHome, "current-version"),
+        fs9.writeFileSync(
+          path31.join(resinHome, "current-version"),
           priorCurrentVersionContent,
           "utf8"
         );
-        if (fs3.existsSync(currentPointer)) {
-          fs3.rmSync(currentPointer, { recursive: true, force: true });
+        if (fs9.existsSync(currentPointer)) {
+          fs9.rmSync(currentPointer, { recursive: true, force: true });
         }
       } else {
         const prevTargetDir = resolveVersionChildPath(
@@ -11064,49 +14530,49 @@ import "${path8.resolve(binTarget)}";
           `v${priorActiveVersion}`,
           "restored previous release version directory"
         );
-        if (fs3.existsSync(prevTargetDir)) {
+        if (fs9.existsSync(prevTargetDir)) {
           try {
-            const tmpRestoreSymlink = path8.join(
+            const tmpRestoreSymlink = path31.join(
               resinHome,
               `.current.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
             );
-            if (fs3.existsSync(tmpRestoreSymlink)) fs3.unlinkSync(tmpRestoreSymlink);
-            fs3.symlinkSync(prevTargetDir, tmpRestoreSymlink, "dir");
-            fs3.renameSync(tmpRestoreSymlink, currentPointer);
+            if (fs9.existsSync(tmpRestoreSymlink)) fs9.unlinkSync(tmpRestoreSymlink);
+            fs9.symlinkSync(prevTargetDir, tmpRestoreSymlink, "dir");
+            fs9.renameSync(tmpRestoreSymlink, currentPointer);
           } catch {
-            fs3.writeFileSync(path8.join(resinHome, "current-version"), priorActiveVersion, "utf8");
+            fs9.writeFileSync(path31.join(resinHome, "current-version"), priorActiveVersion, "utf8");
           }
         }
       }
       if (hadPreviousSymlink && priorPreviousTarget) {
         try {
-          const tmpRestorePrev = path8.join(
+          const tmpRestorePrev = path31.join(
             resinHome,
             `.previous.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
           );
-          if (fs3.existsSync(tmpRestorePrev)) fs3.unlinkSync(tmpRestorePrev);
-          fs3.symlinkSync(priorPreviousTarget, tmpRestorePrev, "dir");
-          fs3.renameSync(tmpRestorePrev, previousPointer);
+          if (fs9.existsSync(tmpRestorePrev)) fs9.unlinkSync(tmpRestorePrev);
+          fs9.symlinkSync(priorPreviousTarget, tmpRestorePrev, "dir");
+          fs9.renameSync(tmpRestorePrev, previousPointer);
         } catch {
         }
-      } else if (!hadPreviousSymlink && fs3.existsSync(previousPointer)) {
-        fs3.rmSync(previousPointer, { recursive: true, force: true });
+      } else if (!hadPreviousSymlink && fs9.existsSync(previousPointer)) {
+        fs9.rmSync(previousPointer, { recursive: true, force: true });
       }
       if (hadPreviousVersionFile && priorPreviousVersionContent) {
-        fs3.writeFileSync(
-          path8.join(resinHome, "previous-version"),
+        fs9.writeFileSync(
+          path31.join(resinHome, "previous-version"),
           priorPreviousVersionContent,
           "utf8"
         );
-        fs3.chmodSync(path8.join(resinHome, "previous-version"), 420);
-      } else if (!hadPreviousVersionFile && fs3.existsSync(path8.join(resinHome, "previous-version"))) {
-        fs3.rmSync(path8.join(resinHome, "previous-version"), { force: true });
+        fs9.chmodSync(path31.join(resinHome, "previous-version"), 420);
+      } else if (!hadPreviousVersionFile && fs9.existsSync(path31.join(resinHome, "previous-version"))) {
+        fs9.rmSync(path31.join(resinHome, "previous-version"), { force: true });
       }
       if (hadVersionState && priorVersionStateRaw) {
-        fs3.writeFileSync(versionStatePath, priorVersionStateRaw, "utf8");
-        fs3.chmodSync(versionStatePath, 420);
-      } else if (!hadVersionState && fs3.existsSync(versionStatePath)) {
-        fs3.rmSync(versionStatePath, { force: true });
+        fs9.writeFileSync(versionStatePath, priorVersionStateRaw, "utf8");
+        fs9.chmodSync(versionStatePath, 420);
+      } else if (!hadVersionState && fs9.existsSync(versionStatePath)) {
+        fs9.rmSync(versionStatePath, { force: true });
       }
       const restoredActive = getActiveVersion(resinHome);
       if (restoredActive !== priorActiveVersion) {
@@ -11115,32 +14581,32 @@ import "${path8.resolve(binTarget)}";
         );
       }
     } else {
-      if (backupBinDir && fs3.existsSync(backupBinDir)) {
-        fs3.rmSync(backupBinDir, { recursive: true, force: true });
+      if (backupBinDir && fs9.existsSync(backupBinDir)) {
+        fs9.rmSync(backupBinDir, { recursive: true, force: true });
         backupBinDir = null;
       }
-      if (fs3.existsSync(globalBinDir)) {
-        fs3.rmSync(globalBinDir, { recursive: true, force: true });
+      if (fs9.existsSync(globalBinDir)) {
+        fs9.rmSync(globalBinDir, { recursive: true, force: true });
       }
-      if (fs3.existsSync(currentPointer)) {
-        fs3.rmSync(currentPointer, { recursive: true, force: true });
+      if (fs9.existsSync(currentPointer)) {
+        fs9.rmSync(currentPointer, { recursive: true, force: true });
       }
-      if (fs3.existsSync(path8.join(resinHome, "current-version"))) {
-        fs3.rmSync(path8.join(resinHome, "current-version"), { force: true });
+      if (fs9.existsSync(path31.join(resinHome, "current-version"))) {
+        fs9.rmSync(path31.join(resinHome, "current-version"), { force: true });
       }
-      if (fs3.existsSync(previousPointer)) {
-        fs3.rmSync(previousPointer, { recursive: true, force: true });
+      if (fs9.existsSync(previousPointer)) {
+        fs9.rmSync(previousPointer, { recursive: true, force: true });
       }
-      if (fs3.existsSync(path8.join(resinHome, "previous-version"))) {
-        fs3.rmSync(path8.join(resinHome, "previous-version"), { force: true });
+      if (fs9.existsSync(path31.join(resinHome, "previous-version"))) {
+        fs9.rmSync(path31.join(resinHome, "previous-version"), { force: true });
       }
-      if (fs3.existsSync(versionStatePath)) {
-        fs3.rmSync(versionStatePath, { force: true });
+      if (fs9.existsSync(versionStatePath)) {
+        fs9.rmSync(versionStatePath, { force: true });
       }
       const restoredActive = getActiveVersion(resinHome);
       if (restoredActive !== null) {
-        fs3.rmSync(currentPointer, { recursive: true, force: true });
-        fs3.rmSync(path8.join(resinHome, "current-version"), { force: true });
+        fs9.rmSync(currentPointer, { recursive: true, force: true });
+        fs9.rmSync(path31.join(resinHome, "current-version"), { force: true });
       }
     }
     throw error;
@@ -11150,14 +14616,14 @@ async function rollbackActiveVersion(options) {
   const { resinHome } = options;
   const log = options.logger ?? (() => {
   });
-  const versionStatePath = path8.join(resinHome, "version-state.json");
-  const previousPointer = path8.join(resinHome, "previous");
+  const versionStatePath = path31.join(resinHome, "version-state.json");
+  const previousPointer = path31.join(resinHome, "previous");
   let targetRollbackVersion = options.targetVersion;
-  if (!targetRollbackVersion && fs3.existsSync(previousPointer)) {
+  if (!targetRollbackVersion && fs9.existsSync(previousPointer)) {
     try {
-      const stats = fs3.lstatSync(previousPointer);
+      const stats = fs9.lstatSync(previousPointer);
       if (stats.isSymbolicLink()) {
-        const linkTarget = fs3.readlinkSync(previousPointer);
+        const linkTarget = fs9.readlinkSync(previousPointer);
         const match = linkTarget.match(/v([0-9a-zA-Z.-]+)$/);
         if (match && match[1]) {
           targetRollbackVersion = match[1];
@@ -11166,15 +14632,15 @@ async function rollbackActiveVersion(options) {
     } catch {
     }
   }
-  if (!targetRollbackVersion && fs3.existsSync(path8.join(resinHome, "previous-version"))) {
+  if (!targetRollbackVersion && fs9.existsSync(path31.join(resinHome, "previous-version"))) {
     try {
-      targetRollbackVersion = fs3.readFileSync(path8.join(resinHome, "previous-version"), "utf8").trim();
+      targetRollbackVersion = fs9.readFileSync(path31.join(resinHome, "previous-version"), "utf8").trim();
     } catch {
     }
   }
-  if (!targetRollbackVersion && fs3.existsSync(versionStatePath)) {
+  if (!targetRollbackVersion && fs9.existsSync(versionStatePath)) {
     try {
-      const state = JSON.parse(fs3.readFileSync(versionStatePath, "utf8"));
+      const state = JSON.parse(fs9.readFileSync(versionStatePath, "utf8"));
       targetRollbackVersion = state.previousVersion || void 0;
     } catch {
     }
@@ -11183,13 +14649,13 @@ async function rollbackActiveVersion(options) {
     throw new Error("Cannot rollback: no previous known good version found in resin home state.");
   }
   const cleanTarget = normalizeReleaseVersion(targetRollbackVersion);
-  const versionsDir = path8.resolve(resinHome, "versions");
+  const versionsDir = path31.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanTarget}`,
     "rollback release version directory"
   );
-  if (!fs3.existsSync(targetVersionDir)) {
+  if (!fs9.existsSync(targetVersionDir)) {
     throw new Error(
       `Cannot rollback to v${cleanTarget}: target version directory does not exist at ${targetVersionDir}`
     );
@@ -11208,30 +14674,30 @@ async function rollbackActiveVersion(options) {
   };
 }
 function getActiveVersion(resinHome) {
-  const currentPointer = path8.join(resinHome, "current");
-  if (fs3.existsSync(currentPointer)) {
+  const currentPointer = path31.join(resinHome, "current");
+  if (fs9.existsSync(currentPointer)) {
     try {
-      const stats = fs3.lstatSync(currentPointer);
+      const stats = fs9.lstatSync(currentPointer);
       if (stats.isSymbolicLink()) {
-        const target = fs3.readlinkSync(currentPointer);
+        const target = fs9.readlinkSync(currentPointer);
         const match = target.match(/v([0-9a-zA-Z.-]+)$/);
         if (match && match[1]) return match[1];
       }
     } catch {
     }
   }
-  const currentVersionFile = path8.join(resinHome, "current-version");
-  if (fs3.existsSync(currentVersionFile)) {
+  const currentVersionFile = path31.join(resinHome, "current-version");
+  if (fs9.existsSync(currentVersionFile)) {
     try {
-      const val = fs3.readFileSync(currentVersionFile, "utf8").trim().replace(/^v/, "");
+      const val = fs9.readFileSync(currentVersionFile, "utf8").trim().replace(/^v/, "");
       if (val) return val;
     } catch {
     }
   }
-  const versionStatePath = path8.join(resinHome, "version-state.json");
-  if (fs3.existsSync(versionStatePath)) {
+  const versionStatePath = path31.join(resinHome, "version-state.json");
+  if (fs9.existsSync(versionStatePath)) {
     try {
-      const state = JSON.parse(fs3.readFileSync(versionStatePath, "utf8"));
+      const state = JSON.parse(fs9.readFileSync(versionStatePath, "utf8"));
       return state.activeVersion || null;
     } catch {
     }
@@ -11287,7 +14753,7 @@ function verifyEd25519Signature(payload, signatureHex, publicKey) {
     return false;
   }
 }
-function compareSemver2(v1, v2) {
+function compareSemver(v1, v2) {
   const parseSemver = (v) => {
     const clean = v.replace(/^v/, "").trim();
     const [main, prerelease] = clean.split("-");
@@ -11313,7 +14779,7 @@ function compareSemver2(v1, v2) {
   return 0;
 }
 function isVersionAtLeast(version, minVersion) {
-  return compareSemver2(version, minVersion) >= 0;
+  return compareSemver(version, minVersion) >= 0;
 }
 function isVersionRevoked(version, revokedVersions) {
   if (!revokedVersions || !Array.isArray(revokedVersions)) return false;
@@ -11387,7 +14853,7 @@ function verifyChannelMetadata(channelData, options = {}) {
       }
       const currentInstalled = options.currentInstalledVersion || options.currentActiveVersion;
       if (currentInstalled && channelInfo.version) {
-        if (compareSemver2(channelInfo.version, currentInstalled) < 0) {
+        if (compareSemver(channelInfo.version, currentInstalled) < 0) {
           errors.push(
             `Target version '${channelInfo.version}' cannot downgrade currently installed version '${currentInstalled}'.`
           );
@@ -11548,7 +15014,7 @@ function verifyManifest(manifestData, options = {}) {
     errors.push("Manifest missing required 'version'.");
   } else {
     const currentInstalled = options.currentInstalledVersion || options.currentActiveVersion;
-    if (currentInstalled && compareSemver2(manifest.version, currentInstalled) < 0) {
+    if (currentInstalled && compareSemver(manifest.version, currentInstalled) < 0) {
       errors.push(
         `Manifest version '${manifest.version}' cannot downgrade currently installed version '${currentInstalled}'.`
       );
@@ -11730,7 +15196,7 @@ function selectPlatformAsset(manifest, platform) {
 // apps/cli/src/installer/release-client.ts
 import crypto5 from "node:crypto";
 import dns from "node:dns/promises";
-import fs4 from "node:fs/promises";
+import fs10 from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import net2 from "node:net";
@@ -11969,7 +15435,7 @@ function assertTransport(urlString, allowInsecureHttpForTests) {
   throw new Error(`Release metadata and assets must use HTTPS: ${urlString}`);
 }
 async function nodePinnedFetch(currentUrl, pinnedAddress, family, options = {}) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve6, reject) => {
     const isHttps = currentUrl.protocol === "https:";
     const transport = isHttps ? https : http;
     const port = currentUrl.port ? Number(currentUrl.port) : isHttps ? 443 : 80;
@@ -12135,7 +15601,7 @@ async function nodePinnedFetch(currentUrl, pinnedAddress, family, options = {}) 
               headers.set(k, v);
             }
           }
-          resolve({
+          resolve6({
             status: res.statusCode ?? 200,
             statusText: res.statusMessage ?? "OK",
             ok: (res.statusCode ?? 200) >= 200 && (res.statusCode ?? 200) < 300,
@@ -12595,7 +16061,7 @@ async function loadBundledTrustedReleaseKeys(customTrustData) {
   const bundledTrustPath = new URL("../release-trust.json", import.meta.url);
   let rawBytes;
   try {
-    rawBytes = await fs4.readFile(bundledTrustPath);
+    rawBytes = await fs10.readFile(bundledTrustPath);
   } catch (error) {
     throw new Error(
       `Failed to load bundled release trust file at ${bundledTrustPath.pathname}: ${error instanceof Error ? error.message : String(error)}`
@@ -12843,7 +16309,7 @@ async function defaultHealthCheckRunner(cliPath, args = ["version"], options = {
   let totalBytes = 0;
   let settled = false;
   let timer = null;
-  return new Promise((resolve) => {
+  return new Promise((resolve6) => {
     const cleanup = () => {
       if (timer) {
         clearTimeout(timer);
@@ -12854,7 +16320,7 @@ async function defaultHealthCheckRunner(cliPath, args = ["version"], options = {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(result);
+      resolve6(result);
     };
     timer = setTimeout(() => {
       try {
@@ -12930,9 +16396,9 @@ Health check timed out after ${timeoutMs}ms` : `Health check timed out after ${t
 }
 async function isAlreadyInitialized(resinHome, fsBridge = defaultFsBridge) {
   const candidatePaths = [
-    path9.join(resinHome, "state", "device-token.json"),
-    path9.join(resinHome, "state", "install-journal.json"),
-    path9.join(resinHome, "journal.json")
+    path32.join(resinHome, "state", "device-token.json"),
+    path32.join(resinHome, "state", "install-journal.json"),
+    path32.join(resinHome, "journal.json")
   ];
   for (const candidate of candidatePaths) {
     try {
@@ -13009,7 +16475,7 @@ async function defaultOnboardingRunner(cliPath, args = ["init", "--auto-approve"
   let stderr = "";
   let settled = false;
   let timer = null;
-  return new Promise((resolve) => {
+  return new Promise((resolve6) => {
     const cleanup = () => {
       if (timer) {
         clearTimeout(timer);
@@ -13020,7 +16486,7 @@ async function defaultOnboardingRunner(cliPath, args = ["init", "--auto-approve"
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(result);
+      resolve6(result);
     };
     if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
       timer = setTimeout(() => {
@@ -13175,12 +16641,12 @@ async function rollbackBootstrapActivation(options) {
   }
   try {
     for (const candidate of [
-      path9.join(resinHome, "current"),
-      path9.join(resinHome, "current-version"),
-      path9.join(resinHome, "version-state.json"),
-      path9.join(resinHome, "bin", "resin"),
-      path9.join(resinHome, "bin", "resin-daemon"),
-      path9.join(resinHome, "bin", "resin-mcp")
+      path32.join(resinHome, "current"),
+      path32.join(resinHome, "current-version"),
+      path32.join(resinHome, "version-state.json"),
+      path32.join(resinHome, "bin", "resin"),
+      path32.join(resinHome, "bin", "resin-daemon"),
+      path32.join(resinHome, "bin", "resin-mcp")
     ]) {
       if (await fsBridge.exists(candidate)) {
         await fsBridge.unlink(candidate);
@@ -13221,10 +16687,10 @@ async function configureShellPath(options) {
   const env = options.env ?? process5.env;
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const isPosix = options.isPosix ?? process5.platform !== "win32";
-  const resinHome = path9.resolve(options.resinHome);
-  const binDir = path9.join(resinHome, "bin");
-  const homeDir = path9.resolve(
-    options.homeDir ?? (options.resinHome ? path9.basename(options.resinHome) === ".resin" ? path9.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os5.homedir()
+  const resinHome = path32.resolve(options.resinHome);
+  const binDir = path32.join(resinHome, "bin");
+  const homeDir = path32.resolve(
+    options.homeDir ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir()
   );
   if (!isPosix) {
     return {
@@ -13236,20 +16702,20 @@ async function configureShellPath(options) {
     };
   }
   const shellRaw = options.shell ?? env.SHELL ?? "";
-  const shellName = path9.basename(shellRaw).toLowerCase();
+  const shellName = path32.basename(shellRaw).toLowerCase();
   const { candidates, defaultProfile } = resolveCandidateProfiles(shellName);
   let pathLine;
-  const defaultResinHome = path9.join(homeDir, ".resin");
+  const defaultResinHome = path32.join(homeDir, ".resin");
   if (resinHome === defaultResinHome) {
     pathLine = 'export PATH="$HOME/.resin/bin:$PATH"';
-  } else if (resinHome.startsWith(homeDir + path9.sep)) {
-    const rel = path9.relative(homeDir, binDir).split(path9.sep).join("/");
+  } else if (resinHome.startsWith(homeDir + path32.sep)) {
+    const rel = path32.relative(homeDir, binDir).split(path32.sep).join("/");
     pathLine = `export PATH="$HOME/${rel}:$PATH"`;
   } else {
     pathLine = `export PATH="${binDir}:$PATH"`;
   }
   for (const candidate of candidates) {
-    const fullCandidatePath = path9.join(homeDir, candidate);
+    const fullCandidatePath = path32.join(homeDir, candidate);
     try {
       if (await fsBridge.exists(fullCandidatePath)) {
         const content = await fsBridge.readFile(fullCandidatePath);
@@ -13273,7 +16739,7 @@ async function configureShellPath(options) {
   }
   let targetFile;
   for (const candidate of candidates) {
-    const fullCandidatePath = path9.join(homeDir, candidate);
+    const fullCandidatePath = path32.join(homeDir, candidate);
     try {
       if (await fsBridge.exists(fullCandidatePath)) {
         targetFile = candidate;
@@ -13285,7 +16751,7 @@ async function configureShellPath(options) {
   if (!targetFile) {
     targetFile = defaultProfile;
   }
-  const targetFullPath = path9.join(homeDir, targetFile);
+  const targetFullPath = path32.join(homeDir, targetFile);
   const profileName = `~/${targetFile}`;
   const reloadCommand = `source ${profileName}`;
   try {
@@ -13362,7 +16828,7 @@ async function bootstrapInstall(options = {}) {
     const normalizedArch = p.arch === "x86_64" ? "x64" : p.arch === "aarch64" ? "arm64" : p.arch;
     const isWslRequested = Boolean(p.isWsl) || p.os === "wsl";
     const targetPlatform = p.os === "wsl" ? "linux" : p.os === "darwin" || p.os === "linux" || p.os === "win32" ? p.os : "linux";
-    platformInfo = detectPlatform({
+    platformInfo = detectPlatform2({
       platform: targetPlatform,
       arch: normalizedArch,
       env: options.env ? {
@@ -13372,7 +16838,7 @@ async function bootstrapInstall(options = {}) {
       } : process5.env
     });
   } else {
-    platformInfo = detectPlatform();
+    platformInfo = detectPlatform2();
   }
   if (!platformInfo.isSupported) {
     throw new UnsupportedPlatformError(platformInfo.platform, {
@@ -13381,11 +16847,11 @@ async function bootstrapInstall(options = {}) {
       isWsl: platformInfo.isWsl
     });
   }
-  const homeDir = options.customHome ?? (options.resinHome ? path9.basename(options.resinHome) === ".resin" ? path9.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os5.homedir();
-  const resinHome = options.resinHome ?? env.RESIN_HOME ?? path9.join(homeDir, ".resin");
-  const downloadsDir = path9.join(resinHome, "downloads");
+  const homeDir = options.customHome ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir();
+  const resinHome = options.resinHome ?? env.RESIN_HOME ?? path32.join(homeDir, ".resin");
+  const downloadsDir = path32.join(resinHome, "downloads");
   const previousActiveVersion = getActiveVersion(resinHome);
-  const isActualLoginHome = path9.resolve(homeDir) === path9.resolve(os5.homedir()) && path9.resolve(resinHome) === path9.resolve(path9.join(os5.homedir(), ".resin"));
+  const isActualLoginHome = path32.resolve(homeDir) === path32.resolve(os11.homedir()) && path32.resolve(resinHome) === path32.resolve(path32.join(os11.homedir(), ".resin"));
   const hasInjectedServiceSupervisor = Boolean(
     options.userServiceManager || options.serviceRunner || options.serviceCommandRunner
   );
@@ -13503,7 +16969,7 @@ async function bootstrapInstall(options = {}) {
         maxSizeBytes: release.denoAsset.sizeBytes ?? 64 * 1024 * 1024
       });
     }
-    const denoFilename = release.denoAsset.filename || path9.basename(new URL(release.denoAsset.url).pathname);
+    const denoFilename = release.denoAsset.filename || path32.basename(new URL(release.denoAsset.url).pathname);
     const denoAssetObj = {
       filename: denoFilename,
       platform: platformInfo.os,
@@ -13546,7 +17012,7 @@ async function bootstrapInstall(options = {}) {
     logger: isVerbose ? log : void 0
   });
   logVerbose("==> Running health check on active version via public bin path...");
-  const publicBinPath = path9.join(resinHome, "bin", "resin");
+  const publicBinPath = path32.join(resinHome, "bin", "resin");
   const checkPath = await fsBridge.exists(publicBinPath) ? publicBinPath : installResult.entryPoints.cli;
   const healthRunner = options.healthCheckRunner ?? defaultHealthCheckRunner;
   let healthCheck;
@@ -13595,10 +17061,10 @@ async function bootstrapInstall(options = {}) {
       logger: log
     });
     if (pathConfig.updated) {
-      const displayHome = path9.resolve(
-        options.customHome ?? (options.resinHome ? path9.basename(options.resinHome) === ".resin" ? path9.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os5.homedir()
+      const displayHome = path32.resolve(
+        options.customHome ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir()
       );
-      const displayBin = resinHome === path9.join(displayHome, ".resin") ? "~/.resin/bin" : path9.join(resinHome, "bin");
+      const displayBin = resinHome === path32.join(displayHome, ".resin") ? "~/.resin/bin" : path32.join(resinHome, "bin");
       log(`\u2714 Added ${displayBin} to PATH in ${pathConfig.profileName}`);
     } else if (pathConfig.alreadyConfigured && isVerbose) {
       log(`\u2139 PATH is already configured (${pathConfig.profileName || "active environment"})`);
@@ -13620,7 +17086,7 @@ async function bootstrapInstall(options = {}) {
       }
       if (priorUnitContent === null || priorUnitContent.trim() !== targetUnitContent.trim()) {
         logVerbose("==> Updating existing service unit definition for new release...");
-        await fsBridge.mkdirp(path9.dirname(targetUnitPath));
+        await fsBridge.mkdirp(path32.dirname(targetUnitPath));
         await fsBridge.writeFile(targetUnitPath, targetUnitContent);
         unitRewritten = true;
       }
@@ -13785,7 +17251,7 @@ function isMainModule(metaUrl = import.meta.url, argv1) {
   const targetPath = argv1 ?? (process5?.argv ? process5.argv[1] : void 0);
   if (!targetPath) return false;
   try {
-    const resolvedPath = path9.resolve(targetPath);
+    const resolvedPath = path32.resolve(targetPath);
     const expectedUrl = pathToFileURL(resolvedPath).href;
     return metaUrl === expectedUrl;
   } catch {

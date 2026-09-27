@@ -3,7 +3,7 @@
 /**
  * Deterministic public package packager for Resin.
  *
- * Packages all 13 public packages into standalone release tarballs,
+ * Packages all 19 public packages into standalone release tarballs,
  * rewriting workspace:* references to immutable HTTPS artifact release URLs
  * and emitting a machine-readable JSON artifact manifest with SHA-256 digests.
  */
@@ -15,7 +15,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-export const PUBLIC_PACKAGE_COUNT = 13;
+export const PUBLIC_PACKAGE_COUNT = 19;
 export const DEFAULT_MANIFEST_FILENAME = "packages-manifest.json";
 export const REQUIRED_METADATA_FILES = ["LICENSE", "NOTICE"];
 export const OPTIONAL_METADATA_FILES = ["README.md", "SECURITY.md"];

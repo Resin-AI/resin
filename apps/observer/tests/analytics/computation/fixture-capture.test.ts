@@ -535,7 +535,8 @@ describe("Computation fixture capture (every family variant through the real pip
     expect(definitionOnlySeen).toBeGreaterThan(0);
     expect(pendingSeen).toBeGreaterThan(0);
     expect(pendingSeen).toBeLessThan(carriersSeen);
-  });
+    // Runs every fixture family variant through the real pipeline: ~5 s on a loaded runner.
+  }, 30_000);
 
   it("keeps only the corrected helper version and reports the superseded digest", async () => {
     const family = families.find((entry) => entry.familyId === "record-join-lineage")!;
