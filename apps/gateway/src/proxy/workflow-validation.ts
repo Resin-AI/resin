@@ -509,13 +509,15 @@ export function createRecordingCheckValidator(
       for (const candidate of candidates) {
         if (candidate.proposed.kind !== "input" || candidate.path[0] === "tokens") continue;
         const step = plan.steps.find((entry) => entry.id === candidate.stepId);
-        const recorded = step === undefined ? undefined : await options.localCalls.lookup(step.callId);
+        const recorded =
+          step === undefined ? undefined : await options.localCalls.lookup(step.callId);
         const types = [
           typeAt(recorded?.argumentReferences[candidate.argument], candidate.path),
           ...selected.iterations.map((iteration) =>
             typeAt(
               iteration.demonstration.inputs.find(
-                (entry) => entry.stepId === candidate.stepId && entry.argument === candidate.argument,
+                (entry) =>
+                  entry.stepId === candidate.stepId && entry.argument === candidate.argument,
               )?.reference,
               candidate.path,
             ),

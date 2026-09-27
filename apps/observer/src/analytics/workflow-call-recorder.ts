@@ -1344,11 +1344,13 @@ export class WorkflowCallRecorder {
     for (const candidate of derivation.candidates) {
       // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.
       if (candidate.stepId !== ownStepId || candidate.reason === "derived-from-inputs") continue;
-      if (candidate.proposed.kind === "input") {
+      const proposed = candidate.proposed;
+      // The recorder sees the value, so it never proposes an input of unknown type.
+      if (proposed.kind === "input" && proposed.type !== "unknown") {
         candidates.push({
           argument: candidate.argument,
           path: candidate.path,
-          proposed: candidate.proposed,
+          proposed: { ...proposed, type: proposed.type },
           reason: candidate.reason,
           missing: candidate.missing,
         });

@@ -166,7 +166,9 @@ export function applyConfirmedWorkflowBinding(
   };
   steps[stepIndex] = { ...step, arguments: args };
   const inputs =
-    proposed.kind === "input" && !plan.inputs.some((input) => input.name === proposed.name)
+    proposed.kind === "input" &&
+    proposed.type !== "unknown" &&
+    !plan.inputs.some((input) => input.name === proposed.name)
       ? [
           ...plan.inputs,
           {
