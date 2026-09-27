@@ -7904,6 +7904,7 @@ function renderPiResinExtension(server) {
 import { spawn } from "node:child_process";
 
 const SERVER = ${config};
+const HIDDEN_TOOLS = ${JSON.stringify(PI_BRIDGE_HIDDEN_TOOLS)};
 const CONNECT_TIMEOUT_MS = 20000;
 const PROTOCOL_VERSION = "2025-06-18";
 
@@ -8067,6 +8068,7 @@ export default function resinMcpBridge(pi) {
     const current = new Set();
     const added = [];
     for (const tool of tools) {
+      if (HIDDEN_TOOLS.includes(tool.name)) continue;
       const name = piToolName(tool.name);
       current.add(name);
       if (!registered.has(name)) added.push(name);
@@ -8113,13 +8115,19 @@ export default function resinMcpBridge(pi) {
 }
 `;
 }
-var PI_RESIN_EXTENSION_MARKER, PI_RESIN_EXTENSION_FILE_NAME, PI_MCP_TOOL_PREFIX;
+var PI_RESIN_EXTENSION_MARKER, PI_RESIN_EXTENSION_FILE_NAME, PI_MCP_TOOL_PREFIX, PI_BRIDGE_HIDDEN_TOOLS;
 var init_extension = __esm({
   "adapters/pi/dist/extension.js"() {
     "use strict";
     PI_RESIN_EXTENSION_MARKER = "// resin-managed: pi-mcp-bridge";
     PI_RESIN_EXTENSION_FILE_NAME = "resin.ts";
     PI_MCP_TOOL_PREFIX = "mcp__";
+    PI_BRIDGE_HIDDEN_TOOLS = [
+      "search_tools",
+      "get_tool_schema",
+      "invoke_tool",
+      "manage_tools"
+    ];
   }
 });
 
@@ -8285,11 +8293,10 @@ var init_registration = __esm({
     };
     PI_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\`; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+\`mcp__resin__\` tools are procedures Resin learned from earlier work in this workspace. Each description lists the commands it runs, with \`{input}\` where a value you pass goes and each input's recorded value; omitted inputs reuse the recorded values.
 
-- Before starting a task, check whether one of your \`mcp__resin__\` tools (other than \`mcp__resin__search_tools\`, \`mcp__resin__get_tool_schema\`, \`mcp__resin__invoke_tool\`, and \`mcp__resin__manage_tools\`) already does it.
-- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.`;
+- If one does your task, call it with your task's values instead of re-reading docs or \`--help\` to rediscover the steps, then check its output and the results.
+- Its output is the commands' current output: use it instead of running those commands yourself.`;
     PI_CONTEXT_FILE_NAMES = [
       "AGENTS.override.md",
       "AGENTS.md",

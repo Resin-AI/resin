@@ -33,7 +33,9 @@ format. The extension:
 
 - starts `resin mcp` on `session_start` and closes it on `session_shutdown`;
 - registers every gateway tool as `mcp__resin__<tool>` (non `[A-Za-z0-9_-]` characters become
-  `_`, 64-character limit), passing the tool's input schema through unchanged;
+  `_`, 64-character limit), passing the tool's input schema through unchanged — except the
+  gateway's discovery meta-tools (`search_tools`, `get_tool_schema`, `invoke_tool`,
+  `manage_tools`), which it never registers;
 - follows `notifications/tools/list_changed`: new tools are registered and activated, dropped
   tools are deactivated, all without restarting Pi;
 - maps MCP `isError` results to thrown errors so Pi records `isError: true` tool results;
@@ -44,11 +46,21 @@ Guidance goes into the agent directory's context file (Pi reads only the first e
 because a project's `.pi/APPEND_SYSTEM.md` replaces the agent-directory one. `resin uninstall`
 deletes the extension only when it carries the marker, and removes the guidance block.
 
+The meta-tools exist for MCP clients whose native catalog can go stale. The bridge follows
+`list_changed`, so every learned tool is already a first-class Pi tool and the meta-tools add
+nothing but tokens: Pi sends each tool's definition with every request and also lists its
+description in the system prompt. In Pi 0.87.1 conformance they plus the earlier guidance cost
+about 1,400 input tokens on every model request (first request 2,511 tokens with Resin and no
+learned tools vs 1,118 without Resin), which outweighed the calls a learned tool saved. The
+guidance is correspondingly short and no longer names the meta-tools.
+
 ## Consequences
 
-- Verified end to end on Pi 0.87.1: a Pi session with the installed extension listed
-  `mcp__resin__get_tool_schema`, `mcp__resin__invoke_tool`, and `mcp__resin__manage_tools`, and
-  a recorded session called `mcp__resin__manage_tools` through the real gateway.
+- Verified end to end on Pi 0.87.1: a Pi session with the installed extension listed the gateway
+  tools and called them through the real gateway; learned tools reach the model as
+  `mcp__resin__<tool>` while the discovery meta-tools do not.
+- Pi sessions cannot manage tool state (pin, disable, roll back) through the model; that stays
+  with the `resin` CLI.
 - Transcripts show bridged calls as ordinary Pi tool calls named `mcp__<server>__<tool>`; the Pi
   decoder reports `<server>` as the call's connection.
 - Pi runs started with `--no-extensions` / `-ne` do not load the bridge and see no Resin tools.

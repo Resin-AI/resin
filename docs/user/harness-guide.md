@@ -359,7 +359,7 @@ Copilot writes every session, including ones started before Resin was installed,
 
 ### Native Dynamic Catalogs
 
-Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot CLI keep their native dynamic tool catalogs. The Gateway sends `notifications/tools/list_changed`; the harness invalidates its tool cache and requests the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`.
+Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot CLI keep their native dynamic tool catalogs. The Gateway sends `notifications/tools/list_changed`; the harness invalidates its tool cache and requests the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`, except in Pi: its extension registers learned tools directly and leaves out the four discovery meta-tools, because Pi resends every tool definition on every model request.
 
 Codex instead uses the stable gateway described above. Its four advertised tools do not change when the underlying catalog changes, so newly available tools do not depend on native tool-list refresh.
 

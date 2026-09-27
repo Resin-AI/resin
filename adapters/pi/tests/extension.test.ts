@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderPiResinExtension } from "../src/extension.js";
 
 // A stdio MCP server whose catalog changes when `learn` is called, like Resin's gateway after
-// it learns a tool: the new tool is added, `old` is dropped, and list_changed is sent.
+// it learns a tool: the new tool is added, `old` is dropped, and list_changed is sent. The
+// gateway's `manage_tools` meta-tool is always listed and must never reach Pi.
 const SERVER = `
 import { createInterface } from "node:readline";
 let tools = [
   { name: "learn", description: "Learn a tool", inputSchema: { type: "object", properties: {} } },
   { name: "old", description: "Old tool", inputSchema: { type: "object", properties: {} } },
+  { name: "manage_tools", description: "Meta", inputSchema: { type: "object", properties: {} } },
 ];
 const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -20,7 +22,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (msg.method === "initialize") return send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "t", version: "1" } } });
   if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools } });
   if (msg.method === "tools/call" && msg.params.name === "learn") {
-    tools = [tools[0], { name: "greet.v2", description: "Greets", inputSchema: { type: "object", properties: { who: { type: "string" } } } }];
+    tools = [tools[0], tools[2], { name: "greet.v2", description: "Greets", inputSchema: { type: "object", properties: { who: { type: "string" } } } }];
     send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
     return send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "learned" }] } });
   }
