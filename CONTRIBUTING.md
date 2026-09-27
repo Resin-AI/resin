@@ -36,6 +36,7 @@ pnpm run check:all
 8. `pnpm run typecheck` — TypeScript strict type checking across all packages and apps
 9. `pnpm run build` — Topological build of all workspace packages and apps
 10. `pnpm run test` — Unit test suite execution via Vitest
+10a. `pnpm run test:sandbox` — Derivation tests against the real Deno + Pyodide sandbox
 11. `pnpm run release:test` — Unit and integrity test suite for release packaging and Ed25519 signing
 12. `pnpm run test:e2e` — End-to-end integration test suite
 13. `pnpm run check:smoke` (or `pnpm run smoke`) — Binary entry point smoke verification
@@ -46,6 +47,7 @@ pnpm run check:all
 - **Typecheck:** `pnpm run typecheck`
 - **Build:** `pnpm run build`
 - **Unit Tests:** `pnpm run test`
+- **Sandbox Tests (real Deno + Pyodide; run when changing derivation/sandbox code):** `pnpm run test:sandbox`
 - **E2E Tests:** `pnpm run test:e2e`
 - **Smoke Tests:** `pnpm run check:smoke` (or `pnpm run smoke`)
 - **Package Boundaries:** `pnpm run check:boundaries`

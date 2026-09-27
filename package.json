@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "turbo run build",
-    "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/platform-qualification.test.mjs --exclude scripts/release-evidence.test.mjs --exclude scripts/standalone-release-artifact.test.mjs --exclude apps/cli/tests/installer-e2e.test.ts --exclude apps/cli/tests/installer/npm-pack-offline-install.test.ts --exclude apps/cli/tests/installer/packaged-cli-production-http.test.ts",
+    "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/platform-qualification.test.mjs --exclude scripts/release-evidence.test.mjs --exclude scripts/standalone-release-artifact.test.mjs --exclude apps/cli/tests/installer-e2e.test.ts --exclude apps/cli/tests/installer/npm-pack-offline-install.test.ts --exclude apps/cli/tests/installer/packaged-cli-production-http.test.ts --exclude packages/runtime/tests/workflow/derivation-steps.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-imports.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-host.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-bounds.test.ts --exclude apps/gateway/tests/proxy/derivation-binding-replay.test.ts --exclude scripts/release-packaging-hygiene.test.mjs --exclude scripts/pack-public-packages.test.mjs",
+    "test:sandbox": "vitest run packages/runtime/tests/workflow/derivation-steps.test.ts packages/runtime/tests/workflow/derivation-sandbox-imports.test.ts packages/runtime/tests/workflow/derivation-sandbox-host.test.ts packages/runtime/tests/workflow/derivation-sandbox-bounds.test.ts apps/gateway/tests/proxy/derivation-binding-replay.test.ts",
     "test:e2e": "vitest run --no-file-parallelism apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
     "test:watch": "vitest",
     "lint": "biome check . && oxlint .",
@@ -18,7 +19,7 @@
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
     "check": "pnpm run check:all",
-    "check:all": "pnpm run check:adrs && pnpm run check:boundaries && pnpm run check:secrets && pnpm run check:privacy-boundary && pnpm run check:hostile-cloud && pnpm run check:runtime-security && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run release:test && pnpm run test:e2e && pnpm run check:smoke && pnpm run release:package:test && pnpm run release:verify:test",
+    "check:all": "pnpm run check:adrs && pnpm run check:boundaries && pnpm run check:secrets && pnpm run check:privacy-boundary && pnpm run check:hostile-cloud && pnpm run check:runtime-security && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run test:sandbox && pnpm run release:test && pnpm run test:e2e && pnpm run check:smoke && pnpm run release:package:test && pnpm run release:verify:test",
     "check:adrs": "node scripts/verify-adrs.mjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:repo-boundary": "node scripts/check-boundaries.mjs",
@@ -36,7 +37,7 @@
     "release:package:test": "node scripts/package-release.mjs --test-only",
     "release:verify:test": "node scripts/verify-release-cli.mjs --test-only",
     "savings:proof": "node scripts/generate-savings-proof.mjs",
-    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/release-evidence.test.mjs && pnpm run check:public-artifact",
+    "release:test": "vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/verify-release.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/platform-qualification.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/release-evidence.test.mjs && vitest run --no-file-parallelism --testTimeout=90000 --hookTimeout=120000 scripts/release-packaging-hygiene.test.mjs scripts/pack-public-packages.test.mjs && pnpm run check:public-artifact",
     "clean": "turbo run clean"
   },
   "devDependencies": {

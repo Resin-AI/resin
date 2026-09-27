@@ -27,13 +27,22 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 let priorNoService: string | undefined;
 
+const realSetTimeout = globalThis.setTimeout;
+
 beforeEach(() => {
   priorNoService = process.env.RESIN_NO_SERVICE;
   process.env.RESIN_NO_SERVICE = "1";
   vi.mocked(spawn).mockClear();
+  // The device-code poll waits its 1 s floor before every token request; skip only that wait.
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    callback: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => realSetTimeout(callback, ms === 1000 ? 0 : ms, ...args)) as typeof setTimeout);
 });
 
 afterEach(() => {
+  vi.mocked(globalThis.setTimeout).mockRestore();
   if (priorNoService === undefined) {
     delete process.env.RESIN_NO_SERVICE;
   } else {
