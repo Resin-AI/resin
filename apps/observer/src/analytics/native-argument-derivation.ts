@@ -753,27 +753,33 @@ export function deriveNativeCalls(
         ) {
           continue;
         }
+        // Only a span the call can still offer an input for may split the token: one the per-call
+        // input cap turns away would leave the token pinned to its recorded text.
+        chosen.sort((left, right) => left.start - right.start);
+        const slots = new Set(offered);
+        const offerable = chosen.filter((match) => {
+          const slot = programInputs.get(scalarKey(match.needle)) ?? `\u0000${match.needle}`;
+          if (!slots.has(slot) && slots.size >= MAX_PROGRAM_INPUTS_PER_CALL) return false;
+          slots.add(slot);
+          return true;
+        });
         // A token offered whole stays whole unless an input it carries says where it came from.
         if (wholeIndex >= 0) {
-          if (!chosen.some((match) => match.input)) continue;
+          if (!offerable.some((match) => match.input)) continue;
           inputCandidates.splice(wholeIndex, 1);
           inputUsed[family] -= 1;
         }
-        chosen.sort((left, right) => left.start - right.start);
-        for (const match of chosen) {
+        for (const match of offerable) {
           if (inputFull()) break;
           const key = scalarKey(match.needle);
           let name = programInputs.get(key);
           if (name === undefined) {
-            if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
             const base = programInputBaseName(match.needle, undefined);
             name = base;
             for (let suffix = 2; programInputNames.has(name); suffix += 1)
               name = `${base}_${suffix}`;
             programInputs.set(key, name);
             programInputNames.add(name);
-          } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
-            continue;
           }
           offered.add(name);
           const address = programTokenPath(target.path)!;

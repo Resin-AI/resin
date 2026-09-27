@@ -332,6 +332,53 @@ describe("a value embedded in a recorded program", () => {
     expect(derivation.candidates.filter((entry) => entry.stepId === "step1")).toEqual([]);
   });
 
+  it("keeps a literal whole when the call can offer no input for the part it carries", () => {
+    const shell = (stepId: string, command: string) => ({
+      callId: `call_${stepId}`,
+      stepId,
+      toolName: "bash",
+      runtime: RESIN_PROCESS_RUNTIME,
+      arguments: { command },
+      program: { kind: "shell" as const, argument: "command" },
+    });
+    const verify =
+      "python3 - <<'PY'\nfor name, version in [('alpha', '1.4.2'), ('beta', '0.9.0')]:\n    print(name, version)\nPY";
+    const derivation = deriveNativeCalls(
+      [
+        // `2` becomes an input here, and `1.4.2` ends with it.
+        shell("step0", "find projects/alpha projects/beta -maxdepth 2 -type f"),
+        shell("step1", `sha256sum -c dist/alpha-1.4.2.tar.gz.sha256 dist/beta-0.9.0.tar.gz.sha256 && ${verify}`),
+        shell("step2", `sha256sum -c alpha-1.4.2.tar.gz.sha256 beta-0.9.0.tar.gz.sha256 && ${verify}`),
+      ],
+      new Set(["alpha", "beta"]),
+    );
+
+    // By its spans step2 has offered six inputs, so no `2` span can replace the whole offer: the
+    // script's versions stay bound to the inputs the command's file names carry.
+    const embedded = derivation.candidates.flatMap((candidate) =>
+      candidate.stepId === "step2" && candidate.path[2] === "embedded" && candidate.proposed.kind === "input"
+        ? [[candidate.path[3], candidate.proposed.name]]
+        : [],
+    );
+    const spans = derivation.candidates.flatMap((candidate) =>
+      candidate.stepId === "step2" && candidate.path[2] === "span" && candidate.proposed.kind === "input"
+        ? [[candidate.path[1], candidate.proposed.name]]
+        : [],
+    );
+    expect(embedded).toEqual([
+      [2, "text"],
+      [3, "path_5"],
+      [4, "text_2"],
+      [5, "path_6"],
+    ]);
+    expect(spans).toEqual([
+      [2, "text"],
+      [2, "path_5"],
+      [3, "text_2"],
+      [3, "path_6"],
+    ]);
+  });
+
   it("offers every position of a value the program repeats, and no operator", () => {
     const derivation = deriveNativeCalls([
       PRODUCER,
