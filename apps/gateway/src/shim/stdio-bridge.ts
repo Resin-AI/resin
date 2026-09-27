@@ -431,21 +431,19 @@ export class McpStdioShim {
         version: "0.1.0",
       },
       // OMP reads learned tools only through `xd://` devices its prompt names, so a catalog change
-      // rewrites the managed block in OMP's appended system prompt.
-      ...(this.harnessId === "omp"
-        ? {
-            refreshCoordinatorOptions: {
-              adapters: {
-                omp: {
-                  harnessId: "omp",
-                  getCapabilities: getOmpRefreshCapability,
-                  notifyCatalogRefresh: (workspace, changeSummary) =>
-                    new OmpHarnessAdapter().notifyCatalogRefresh(workspace, changeSummary),
-                },
-              },
-            },
-          }
-        : {}),
+      // rewrites the managed block in OMP's appended system prompt. The coordinator dispatches by the
+      // harness each connection's MCP client names itself as, so this is wired whether or not the
+      // shim was started with `--harness omp` (`resin init` registers OMP as plain `resin mcp`).
+      refreshCoordinatorOptions: {
+        adapters: {
+          omp: {
+            harnessId: "omp",
+            getCapabilities: getOmpRefreshCapability,
+            notifyCatalogRefresh: (workspace, changeSummary) =>
+              new OmpHarnessAdapter().notifyCatalogRefresh(workspace, changeSummary),
+          },
+        },
+      },
     });
 
     this.activeGateway = gateway;

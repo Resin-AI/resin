@@ -3069,6 +3069,15 @@ export class CodexSessionDecoder {
         hasNoNativeConnectionOrForeignNamespace(p, codexNative)
           ? asString(p.input)
           : undefined;
+      // Codex's own terminal command (no MCP connection or foreign namespace): its `cmd` is the
+      // shell program the harness ran, which the recorder may expose as a scrubbed program view.
+      const nativeExecCommand =
+        nativeResponseItem &&
+        rawType === "function_call" &&
+        toolName === "exec_command" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "function_call" &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative);
       const nativeCallId = asString(p.callId) ?? asString(p.call_id) ?? asString(p.tool_call_id);
       if (codexNative && !nativeCallId) {
         events.push({
@@ -3100,12 +3109,19 @@ export class CodexSessionDecoder {
         if (extracted.workdir !== undefined) parameters.workdir = extracted.workdir;
       }
       const header = this.emitHeader("tool_call", timestamp, rawEventId);
-      if (codexNative && (Object.keys(nativeFields).length > 0 || rawExecSource !== undefined)) {
+      if (
+        codexNative &&
+        (Object.keys(nativeFields).length > 0 || rawExecSource !== undefined || nativeExecCommand)
+      ) {
         const metadata = { ...(header.metadata ?? {}) };
         metadata.codexNative = {
           ...(asObject(metadata.codexNative) ?? {}),
           ...nativeFields,
-          ...(rawExecSource === undefined ? {} : { sourceInterface: "codex-exec" }),
+          ...(rawExecSource !== undefined
+            ? { sourceInterface: "codex-exec" }
+            : nativeExecCommand
+              ? { sourceInterface: "codex-exec-command" }
+              : {}),
         };
         header.metadata = metadata;
       }
