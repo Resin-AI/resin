@@ -842,13 +842,23 @@ function demonstratedWorkflow(
     if (existing === undefined) calls.push({ stepId, callIds: [entry.callId] });
     else existing.callIds.push(entry.callId);
   }
+  // Coverage is judged by step identity. A carrier that names no calls (a native or older
+  // demonstration) covers the steps its values address.
+  const covered =
+    calls.length > 0
+      ? calls.map((call) => call.stepId)
+      : planStepIds.filter(
+          (stepId) =>
+            inputs.some((entry) => entry.stepId === stepId) ||
+            observed.some((entry) => entry.stepId === stepId),
+        );
   if (
-    calls.length !== planStepIds.length ||
-    calls.some((call, index) => call.stepId !== planStepIds[index])
+    covered.length !== planStepIds.length ||
+    covered.some((stepId, index) => stepId !== planStepIds[index])
   ) {
     return undefined;
   }
-  return { inputs, observed, calls };
+  return calls.length === 0 ? { inputs, observed } : { inputs, observed, calls };
 }
 
 /**
