@@ -7,8 +7,10 @@ import {
   buildOmpCatalogInstructionsBlock,
   parseCatalogInstructionToolNames,
   renderOmpInvocationSnippet,
+  resolveOmpGuidancePath,
   syncOmpCatalogInstructions,
 } from "../src/instructions.js";
+import { ompHarness } from "../src/harness.js";
 
 describe("renderOmpInvocationSnippet", () => {
   it("renders xd:// invocation and docs paths with underscored server name", () => {
@@ -160,5 +162,21 @@ describe("syncOmpCatalogInstructions", () => {
         fetchFn,
       }),
     ).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("OMP guidance surface", () => {
+  it("resolves the user AGENTS.md under OMP_HOME, else ~/.omp/agent", () => {
+    expect(resolveOmpGuidancePath("/home/dev", {})).toBe("/home/dev/.omp/agent/AGENTS.md");
+    expect(resolveOmpGuidancePath("/home/dev", { OMP_HOME: "/profiles/omp" })).toBe(
+      "/profiles/omp/agent/AGENTS.md",
+    );
+  });
+
+  it("is installed next to the MCP registration it describes", () => {
+    const env = { OMP_HOME: "/profiles/omp" };
+    expect(path.dirname(ompHarness.guidance!.resolvePath("/home/dev", env))).toBe(
+      path.dirname(ompHarness.mcpConfig.resolvePath("/home/dev", env)),
+    );
   });
 });

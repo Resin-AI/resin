@@ -2,14 +2,12 @@ import path from "node:path";
 import type { HarnessInstallDefinition } from "@resin/harness-contracts";
 import { planOmpMcpConfig } from "./config-planner.js";
 import { OMP_TESTED_VERSIONS, probeOmpInstallation } from "./discovery.js";
-
-function resolveOmpConfigHome(home: string, env: NodeJS.ProcessEnv): string {
-  const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find(
-    (candidate): candidate is string =>
-      typeof candidate === "string" && candidate.trim().length > 0,
-  );
-  return configuredHome ? path.resolve(configuredHome) : path.join(home, ".omp");
-}
+import {
+  OMP_GUIDANCE_MARKERS,
+  OMP_RESIN_GUIDANCE,
+  resolveOmpConfigHome,
+  resolveOmpGuidancePath,
+} from "./instructions.js";
 
 export const ompInstallHarness: HarnessInstallDefinition = {
   id: "omp",
@@ -40,5 +38,10 @@ export const ompInstallHarness: HarnessInstallDefinition = {
     transports: ["stdio", "sse", "websocket", "http"],
     planRegistration: ({ targetPath, command, args, fsBridge }) =>
       planOmpMcpConfig({ customConfigPath: targetPath, command, args: [...args], fsBridge }),
+  },
+  guidance: {
+    resolvePath: resolveOmpGuidancePath,
+    markers: OMP_GUIDANCE_MARKERS,
+    body: OMP_RESIN_GUIDANCE,
   },
 };
