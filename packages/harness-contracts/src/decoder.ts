@@ -168,7 +168,7 @@ export interface IntermediateErrorEvent extends BaseIntermediateEventFields {
 export interface IntermediateSubagentLifecycleEvent extends BaseIntermediateEventFields {
   type: "subagent_lifecycle";
   subagentId: string;
-  lifecycleType: "spawn" | "start" | "pause" | "resume" | "terminate" | "settle" | "end" | "crash";
+  lifecycleType: "spawn" | "start" | "pause" | "resume" | "terminate" | "settle";
   parentId?: string;
   role?: string;
   reason?: string;

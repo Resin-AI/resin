@@ -2295,15 +2295,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
               ? "pause"
               : rawLType === "resume" || rawLType === "subagent_resume"
                 ? "resume"
-                : rawLType === "crash" || rawLType === "subagent_crash"
-                  ? "crash"
-                  : rawLType === "terminate" ||
-                      rawLType === "subagent_terminate" ||
-                      rawLType === "subagent_end" ||
-                      rawLType === "agent_end" ||
-                      rawLType === "end"
-                    ? "terminate"
-                    : "spawn";
+                : rawLType === "crash" ||
+                    rawLType === "subagent_crash" ||
+                    rawLType === "terminate" ||
+                    rawLType === "subagent_terminate" ||
+                    rawLType === "subagent_end" ||
+                    rawLType === "agent_end" ||
+                    rawLType === "end"
+                  ? "terminate"
+                  : "spawn";
 
     const parentId =
       asString(obj.parentId) ??

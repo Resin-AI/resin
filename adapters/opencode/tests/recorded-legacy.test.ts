@@ -70,7 +70,7 @@ describe("OpenCode 1.1.65 recorded legacy JSON storage", () => {
         .map((e) => [e.lifecycleType, e.subagentId]),
     ).toEqual([
       ["spawn", CHILD],
-      ["end", CHILD],
+      ["settle", CHILD],
     ]);
     const usage = events
       .filter((e) => e.type === "message" && e.role === "assistant")

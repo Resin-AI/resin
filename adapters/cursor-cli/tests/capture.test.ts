@@ -139,11 +139,15 @@ describe("decoder", () => {
 
     const shellCall = events[3]!;
     expect(shellCall).toMatchObject({
-      toolCallId: "call-shell-1",
+      callId: "call-shell-1",
       toolName: "Shell",
-      input: { command: "wc -l README.md", working_directory: "/w" },
+      parameters: { command: "wc -l README.md", working_directory: "/w" },
     });
-    expect(events[4]).toMatchObject({ toolCallId: "call-shell-1", isError: false, durationMs: 42 });
+    expect(events[4]).toMatchObject({
+      callId: "call-shell-1",
+      isError: false,
+      executionDurationMs: 42,
+    });
     expect(events[5]).toMatchObject({
       command: "wc -l README.md",
       cwd: "/w",
@@ -151,13 +155,13 @@ describe("decoder", () => {
       stdout: "3 README.md\n",
     });
     expect(events[7]).toMatchObject({
-      toolCallId: "call-read-2",
+      callId: "call-read-2",
       isError: true,
       error: "File not found",
     });
     expect(events[8]).toMatchObject({ filePath: "/w/notes.txt", operation: "create" });
     expect(events[8]!.metadata?.edits).toEqual([{ oldString: "", newString: "hello\n" }]);
-    expect(events[9]).toMatchObject({ toolName: "mcp_demo_echo", input: { text: "ping" } });
+    expect(events[9]).toMatchObject({ toolName: "mcp_demo_echo", parameters: { text: "ping" } });
     expect(events[11]).toMatchObject({
       role: "assistant",
       content: "README.md has 3 lines.",
@@ -206,7 +210,7 @@ describe("decoder", () => {
       decoder.decode(
         record({ ...base, hook_event_name: "stop", status: "completed", extra: 1 }, 3),
       ),
-    ).toEqual([]);
+    ).toMatchObject([{ type: "session_lifecycle", lifecycleType: "end", exitReason: "completed" }]);
     expect(
       decoder.driftIssues.map((issue) => [issue.recordId, issue.kind, issue.field ?? issue.event]),
     ).toEqual([

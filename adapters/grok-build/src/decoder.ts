@@ -175,6 +175,8 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
               branchId: sessionId,
               parentBranchId: parentSessionId,
               sourceSessionId: parentSessionId,
+              // Grok records no fork point; the fork copies the parent's history from its root.
+              branchPointEventId: "root",
               forkReason: "fork_session",
             },
           ]
@@ -284,6 +286,8 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
             parentBranchId: sessionId,
             sourceSessionId: sessionId,
             forkReason: "rewind",
+            // A rewind names a prompt index, not an event; the index rides as divergenceSequence.
+            branchPointEventId: "root",
             ...(target !== undefined ? { divergenceSequence: target } : {}),
             metadata: { targetPromptIndex: target ?? null },
           },
@@ -294,8 +298,9 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
           {
             ...base,
             type: "compaction",
-            tokensBefore: asCount(update.tokens_before),
-            tokensAfter: asCount(update.tokens_after),
+            triggerReason: "context_limit",
+            tokensBefore: asCount(update.tokens_before) ?? 0,
+            tokensAfter: asCount(update.tokens_after) ?? 0,
             ...(asString(update.summary_preview)
               ? { summary: asString(update.summary_preview) }
               : {}),
@@ -311,7 +316,11 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
             ...base,
             type: "subagent_lifecycle",
             subagentId,
-            lifecycleType: spawned ? "spawn" : update.status === "completed" ? "end" : "crash",
+            lifecycleType: spawned
+              ? "spawn"
+              : update.status === "completed"
+                ? "settle"
+                : "terminate",
             parentId: sessionId,
             ...(asString(update.subagent_type) ? { role: asString(update.subagent_type) } : {}),
             ...(asString(update.status) ? { reason: asString(update.status) } : {}),

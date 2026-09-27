@@ -126,7 +126,7 @@ describe("recorded grok 1.0.13 sessions", () => {
     );
     expect(lifecycle).toEqual([
       ["spawn", CHILD, "explore"],
-      ["end", CHILD, undefined],
+      ["settle", CHILD, undefined],
     ]);
     expect(sessions.get(CHILD)?.metadata).toMatchObject({
       sessionKind: "agent",

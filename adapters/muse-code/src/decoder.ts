@@ -18,8 +18,8 @@ const MUSE_ACCOUNTING_VERSION = "muse-code-usage/1";
  *
  * `unknown` covers every call whose effect may have partially or fully applied without a
  * recorded completion: cancelled mid-flight, or in flight when the process died (muse later
- * reports "The outcome is unknown"). Such calls surface with `isError` unset so they are never
- * treated as successful demonstrations.
+ * reports "The outcome is unknown"). Such calls surface as errors (`isError: true`, with
+ * `museOutcome: "unknown"`) so they are never treated as successful demonstrations.
  */
 export type MuseToolOutcome = "succeeded" | "failed" | "unknown";
 
@@ -35,6 +35,8 @@ interface CallState {
   toolName: string;
   connection?: string;
   parameters: DecoderMetadataRecord;
+  /** When the call was committed; its result's timestamp minus this is the execution time. */
+  calledAt: string;
 }
 
 interface SessionState {
@@ -45,6 +47,8 @@ interface SessionState {
   patches: Map<string, { added?: number; removed?: number }>;
   mcpTools: Map<string, { server: string; tool: string }>;
   pendingUsage?: ProviderReportedUsage;
+  /** The current run already ended the session with its completed terminal. */
+  ended?: boolean;
 }
 
 type Json = Record<string, unknown>;
@@ -96,10 +100,9 @@ export function classifyMuseEffectOutcome(outcome: unknown): MuseToolOutcome {
   return "unknown";
 }
 
-function isErrorFor(outcome: MuseToolOutcome | undefined): boolean | undefined {
-  if (outcome === "succeeded") return false;
-  if (outcome === "failed") return true;
-  return undefined;
+function elapsedMs(from: string, to: string): number {
+  const elapsed = Date.parse(to) - Date.parse(from);
+  return Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0;
 }
 
 /**
@@ -115,7 +118,11 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
   canDecode(record: RawHarnessRecord): boolean {
     if (record.harnessId !== this.harnessId) return false;
     const payload = asRecord(record.rawPayload);
-    return typeof payload?.payload_type === "string";
+    // A retained marker stands in for an ephemeral live-only record the log omitted; it decodes
+    // to nothing rather than falling through to a generic passthrough.
+    return (
+      typeof payload?.payload_type === "string" || typeof payload?.retained_marker === "string"
+    );
   }
 
   decode(record: RawHarnessRecord, context?: RecordDecoderContext): IntermediateSessionEvent[] {
@@ -140,7 +147,12 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       ...event,
       eventId: event.eventId ?? `muse_${nativeId}_${index}`,
       schemaVersion: "1.0.0",
-      causalRef: { causalSequence: record.sequenceNumber, predecessorIds: [] },
+      // Several events decoded from one record are distinct steps of that record.
+      causalRef: {
+        causalSequence: record.sequenceNumber,
+        predecessorIds: [],
+        ...(index > 0 ? { stepIndex: index } : {}),
+      },
     }));
   }
 
@@ -161,6 +173,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         state.model = asString(body?.model_id) ?? state.model;
         return [];
       case "session.opened.observed":
+        state.ended = false;
         return [
           {
             ...base,
@@ -170,6 +183,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
           },
         ];
       case "session.resumed":
+        state.ended = false;
         return [
           {
             ...base,
@@ -179,6 +193,8 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
           },
         ];
       case "session.end":
+        if (state.ended) return this.flushUsage(state, base);
+        state.ended = true;
         return [
           ...this.flushUsage(state, base),
           {
@@ -226,7 +242,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
             ...base,
             type: "subagent_lifecycle",
             subagentId,
-            lifecycleType: errorKind ? "crash" : "settle",
+            lifecycleType: errorKind ? "terminate" : "settle",
             parentId: sessionId,
             role: "subagent",
             ...(errorKind ? { reason: errorKind } : {}),
@@ -315,6 +331,21 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       }
       case "terminal": {
         const flushed = this.flushUsage(state, base);
+        if (event.terminal === "completed") {
+          // A completed run settles the session; subagent and observer logs end here, without
+          // the `session.end` the lead log writes afterwards.
+          state.ended = true;
+          return [
+            ...flushed,
+            {
+              ...base,
+              type: "session_lifecycle",
+              lifecycleType: "end",
+              exitReason: "completed",
+              harnessName: MUSE_HARNESS_ID,
+            },
+          ];
+        }
         if (event.terminal !== "failed") return flushed;
         return [
           ...flushed,
@@ -411,7 +442,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       if (!callId || !name) continue;
       const { toolName, connection } = this.resolveTool(name, state);
       const parameters = parseArgs(call?.args);
-      state.calls.set(callId, { toolName, connection, parameters });
+      state.calls.set(callId, { toolName, connection, parameters, calledAt: base.timestamp });
       events.push({
         ...base,
         type: "tool_call",
@@ -457,7 +488,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       const outcome: MuseToolOutcome | undefined = text.startsWith(UNKNOWN_OUTCOME_PREFIX)
         ? "unknown"
         : state.outcomes.get(callId);
-      const isError = isErrorFor(outcome);
+      const executionDurationMs = call ? elapsedMs(call.calledAt, base.timestamp) : 0;
       events.push({
         ...base,
         type: "tool_result",
@@ -465,7 +496,8 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         toolCallId: callId,
         ...(call ? { toolName: call.toolName } : {}),
         result: text,
-        ...(isError === undefined ? {} : { isError }),
+        isError: outcome !== "succeeded",
+        executionDurationMs,
         metadata: {
           museOutcome: outcome ?? "unknown",
           ...(call?.connection ? { connection: call.connection } : {}),
@@ -474,7 +506,7 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
       if (!call || outcome === undefined || outcome === "unknown") continue;
       if (call.toolName === "bash" && !call.connection) {
         const exec = this.decodeShellResult(text, call);
-        if (exec) events.push({ ...base, ...exec });
+        if (exec) events.push({ ...base, ...exec, durationMs: executionDurationMs });
       }
       const operation = FILE_WRITE_TOOLS[call.toolName];
       const filePath = asString(call.parameters.path);

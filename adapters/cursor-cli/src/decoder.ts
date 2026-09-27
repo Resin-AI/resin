@@ -84,7 +84,8 @@ function shellOutcome(output: unknown): { stdout?: string; stderr?: string; exit
 }
 
 type EventBase = BaseIntermediateEventFields & { metadata: DecoderMetadataRecord };
-type EventBaseFactory = (suffix: string) => EventBase;
+/** `step` separates the events one hook record produces (call, result, shell step). */
+type EventBaseFactory = (suffix: string, step?: number) => EventBase;
 
 /**
  * Decodes Resin's Cursor hook spool records (one hook payload each) into intermediate events.
@@ -114,11 +115,11 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
     const event = payload.hook_event_name as string;
     const sessionId = record.sessionId;
     const timestamp = (payload.resin_received_at as string) ?? record.timestamp;
-    const base: EventBaseFactory = (suffix) => ({
+    const base: EventBaseFactory = (suffix, step) => ({
       sessionId,
       timestamp,
       eventId: `${sessionId}:${record.sequenceNumber}:${suffix}`,
-      causalRef: { causalSequence: record.sequenceNumber },
+      causalRef: { causalSequence: record.sequenceNumber, ...(step ? { stepIndex: step } : {}) },
       metadata: {
         hookEvent: event,
         generationId: stringField(payload, "generation_id"),
@@ -166,7 +167,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
           {
             ...base("thought"),
             type: "model_reasoning",
-            reasoningText: payload.text as string,
+            reasoningContent: payload.text as string,
             visibility: "visible",
             model: stringField(payload, "model"),
             durationMs: nonNegativeInt(payload.duration_ms),
@@ -212,7 +213,9 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             ...base("compaction"),
             type: "compaction",
             triggerReason: payload.trigger === "manual" ? "manual" : "context_limit",
-            tokensBefore: nonNegativeInt(payload.context_tokens),
+            // The hook fires before compacting, so only the size going in is known.
+            tokensBefore: nonNegativeInt(payload.context_tokens) ?? 0,
+            tokensAfter: 0,
             metadata: {
               ...base("compaction").metadata,
               contextWindowSize: nonNegativeInt(payload.context_window_size),
@@ -229,7 +232,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             ...base("subagent"),
             type: "subagent_lifecycle",
             subagentId,
-            lifecycleType: event === "subagentStart" ? "start" : "end",
+            lifecycleType: event === "subagentStart" ? "start" : "settle",
             parentId: stringField(payload, "parent_conversation_id") ?? sessionId,
             role: stringField(payload, "subagent_type"),
             reason: stringField(payload, "task") ?? stringField(payload, "status"),
@@ -243,7 +246,17 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
       }
       case "stop": {
         const status = payload.status as string;
-        if (status === "completed") return [];
+        // A completed turn settles everything the agent did since its prompt.
+        if (status === "completed")
+          return [
+            {
+              ...base("stop"),
+              type: "session_lifecycle",
+              lifecycleType: "end",
+              harnessName: CURSOR_HARNESS_ID,
+              exitReason: "completed",
+            },
+          ];
         return [
           {
             ...base("stop"),
@@ -273,24 +286,23 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
       {
         ...base("call"),
         type: "tool_call",
-        toolCallId,
         callId: toolCallId,
         toolName,
-        input: toMetadata(input),
+        parameters: toMetadata(input) ?? {},
         rawInput: typeof payload.tool_input === "string" ? payload.tool_input : undefined,
       },
       {
-        ...base("result"),
+        ...base("result", 1),
         type: "tool_result",
-        toolCallId,
         callId: toolCallId,
         toolName,
-        output: failed ? undefined : output,
+        // A failed call's result is the error the agent was shown.
+        result: failed ? (payload.error_message as string) : output,
         isError: failed,
         error: failed ? (payload.error_message as string) : undefined,
-        durationMs,
+        executionDurationMs: durationMs ?? 0,
         metadata: {
-          ...base("result").metadata,
+          ...base("result", 1).metadata,
           failureType: stringField(payload, "failure_type"),
           interrupted: payload.is_interrupt === true,
         },
@@ -301,7 +313,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
     if (SHELL_TOOL_NAMES[toolName] && command !== undefined) {
       const outcome = failed ? {} : shellOutcome(output);
       events.push({
-        ...base("exec"),
+        ...base("exec", 2),
         type: "command_exec",
         command,
         cwd:
@@ -309,7 +321,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             ? input.working_directory
             : undefined,
         ...outcome,
-        durationMs,
+        durationMs: durationMs ?? 0,
       });
     }
     return events;
