@@ -173,18 +173,24 @@ jobs:
       - name: Build exact candidate
         run: pnpm build
 
-      - name: Package release candidate
-        run: pnpm release:package
-
-      - name: Verify release candidate
-        run: pnpm release:verify
-
-      - name: Run release-bound public core qualification
-        run: >-
-          node scripts/system-qualification.mjs
-          --release-dir=dist/release/v1.0.3
-          --output=dist/qualification/system-e2e.json
-          --commit-sha=${{ env.RELEASE_SHA }}
+      # The suites don't read the packaged release, so package and verify it
+      # concurrently; the evidence is bound to it once both have finished.
+      - name: Package release candidate and run release-bound public core qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready="$RUNNER_TEMP/release-ready"
+          ( set +e; pnpm release:package && pnpm release:verify; echo $? > "$ready" ) > "$RUNNER_TEMP/package.log" 2>&1 &
+          package_pid=$!
+          status=0
+          node scripts/system-qualification.mjs \
+            --release-dir=dist/release/v1.0.3 \
+            --output=dist/qualification/system-e2e.json \
+            --commit-sha="$RELEASE_SHA" \
+            --release-ready-file="$ready" || status=$?
+          wait "$package_pid" || true
+          cat "$RUNNER_TEMP/package.log"
+          exit "$status"
 
       - name: Upload system qualification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
