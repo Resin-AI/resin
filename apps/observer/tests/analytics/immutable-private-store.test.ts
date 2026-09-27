@@ -46,6 +46,31 @@ describe("immutable private reference persistence", () => {
     );
   });
 
+  it("does not rewrite the legacy file for an identical entry and shares writes across instances", () => {
+    const root = directory();
+    const first = new FilePrivateValueStore(root);
+    const second = new FilePrivateValueStore(root);
+    for (let i = 0; i < 50; i++)
+      first.set(`[REDACTED_SECRET:${i}]`, `secret-${i}`, { workspaceId: "ws-legacy" });
+    const file = path.join(root, "private-values", "private-values.json");
+    const before = statSync(file, { bigint: true });
+    first.set("[REDACTED_SECRET:7]", "secret-7", { workspaceId: "ws-legacy" });
+    const after = statSync(file, { bigint: true });
+    expect([after.ino, after.mtimeNs]).toEqual([before.ino, before.mtimeNs]);
+
+    for (let i = 0; i < 50; i++) expect(second.get(`[REDACTED_SECRET:${i}]`)).toBe(`secret-${i}`);
+    second.set("[REDACTED_SECRET:second]", "from-second", { workspaceId: "ws-legacy" });
+    first.set("[REDACTED_SECRET:first]", "from-first", { workspaceId: "ws-legacy" });
+    second.set("[REDACTED_SECRET:7]", "changed", { workspaceId: "ws-legacy" });
+    const reopened = new FilePrivateValueStore(root);
+    for (const store of [first, second, reopened]) {
+      expect(store.get("[REDACTED_SECRET:second]")).toBe("from-second");
+      expect(store.get("[REDACTED_SECRET:first]")).toBe("from-first");
+      expect(store.get("[REDACTED_SECRET:7]")).toBe("changed");
+      expect(store.get("[REDACTED_SECRET:49]")).toBe("secret-49");
+    }
+  });
+
   it("retains all entries written by separate simultaneous processes", async () => {
     const root = directory();
     const moduleUrl = new URL("../../dist/analytics/private-value-store.js", import.meta.url).href;
