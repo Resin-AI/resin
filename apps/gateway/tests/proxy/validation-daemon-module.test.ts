@@ -192,6 +192,25 @@ describe("the daemon's validation module", () => {
     expect(new Headers(listInit?.headers as HeadersInit).get("x-workspace-id")).toBe(WORKSPACE_ID);
   });
 
+  it("answers an ask that names no device, as the cloud lists them for this device", async () => {
+    const recorded = recording();
+    const cloud = fakeCloud(askFor(recorded.plan, { deviceId: undefined }));
+    vi.stubGlobal("fetch", cloud.fetchImpl);
+    const module = createWorkflowValidationDaemonModule(context, {
+      privateValues: recorded.store,
+      localCalls: localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]),
+      pollIntervalMs: 10,
+      pollJitterRatio: 0,
+    });
+
+    await module.start(moduleContext());
+    try {
+      await vi.waitFor(() => expect(cloud.decisions).toHaveLength(1));
+    } finally {
+      await module.stop(moduleContext());
+    }
+  });
+
   it.each([
     ["a workspace the device is not enrolled in", { workspaceId: OTHER_WORKSPACE_ID }],
     ["another device", { deviceId: "dev_daemon_other" }],

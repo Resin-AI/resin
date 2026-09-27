@@ -680,7 +680,8 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
-    if (request.deviceId !== this.deviceId) {
+    // The listing is already scoped to this device; an ask that names one must name this one.
+    if (request.deviceId !== undefined && request.deviceId !== this.deviceId) {
       this.log(
         `workflow validation: refused ask '${request.requestId}': it names device '${request.deviceId}', not this identity's device`,
       );
