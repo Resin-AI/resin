@@ -754,15 +754,20 @@ export function deriveNativeCalls(
           continue;
         }
         // Only a span the call can still offer an input for may split the token: one the per-call
-        // input cap turns away would leave the token pinned to its recorded text.
+        // input cap or the family's candidate budget turns away would leave the token pinned to its
+        // recorded text.
         chosen.sort((left, right) => left.start - right.start);
         const slots = new Set(offered);
-        const offerable = chosen.filter((match) => {
-          const slot = programInputs.get(scalarKey(match.needle)) ?? `\u0000${match.needle}`;
-          if (!slots.has(slot) && slots.size >= MAX_PROGRAM_INPUTS_PER_CALL) return false;
-          slots.add(slot);
-          return true;
-        });
+        const budget =
+          MAX_CANDIDATES_PER_FAMILY - inputUsed[family] + (wholeIndex >= 0 ? 1 : 0);
+        const offerable = chosen
+          .filter((match) => {
+            const slot = programInputs.get(scalarKey(match.needle)) ?? `\u0000${match.needle}`;
+            if (!slots.has(slot) && slots.size >= MAX_PROGRAM_INPUTS_PER_CALL) return false;
+            slots.add(slot);
+            return true;
+          })
+          .slice(0, Math.max(0, budget));
         // A token offered whole stays whole unless an input it carries says where it came from.
         if (wholeIndex >= 0) {
           if (!offerable.some((match) => match.input)) continue;
