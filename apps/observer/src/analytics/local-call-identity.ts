@@ -43,6 +43,11 @@ export interface LocalRecordedCall {
    * calls of the same `epoch`. Absent for a call recorded before the recorder kept an order.
    */
   sequence?: { epoch: string; index: number };
+  /**
+   * The root of the workspace the harness recorded this call's session in: what a relative working
+   * directory the call named, or an omitted one, stood for.
+   */
+  workspaceRoot?: string;
 }
 
 /** This device cannot list its own sessions right now; the caller should try again later. */
@@ -55,10 +60,11 @@ export class LocalSessionDiscoveryUnavailableError extends Error {
 
 async function discoverSessionIds(
   adapters: readonly HarnessAdapter[],
-): Promise<ReadonlySet<string> | undefined> {
+): Promise<ReadonlyMap<string, string | undefined> | undefined> {
   if (adapters.length === 0 || adapters.length > MAX_ADAPTERS) return undefined;
   try {
-    const sessionIds = new Set<string>();
+    // Each session's workspace root; undefined when two workspaces claim the same session.
+    const sessionIds = new Map<string, string | undefined>();
     let workspaceCount = 0;
     let sessionCount = 0;
     for (const adapter of adapters) {
@@ -88,7 +94,13 @@ async function discoverSessionIds(
           ) {
             return undefined;
           }
-          sessionIds.add(session.sessionId);
+          const root = workspace.rootPath;
+          sessionIds.set(
+            session.sessionId,
+            sessionIds.has(session.sessionId) && sessionIds.get(session.sessionId) !== root
+              ? undefined
+              : root,
+          );
         }
       }
     }
@@ -163,9 +175,11 @@ export function createLocalCallIdentity(options: {
   const workspaceId = options.workspaceId;
   const store = options.privateValues;
 
-  let cached: { expiresAt: number; sessions: ReadonlySet<string> | undefined } | undefined;
-  let inFlight: Promise<ReadonlySet<string> | undefined> | undefined;
-  const sessions = async (): Promise<ReadonlySet<string> | undefined> => {
+  let cached:
+    | { expiresAt: number; sessions: ReadonlyMap<string, string | undefined> | undefined }
+    | undefined;
+  let inFlight: Promise<ReadonlyMap<string, string | undefined> | undefined> | undefined;
+  const sessions = async (): Promise<ReadonlyMap<string, string | undefined> | undefined> => {
     if (cached !== undefined && Date.now() < cached.expiresAt) return cached.sessions;
     if (inFlight !== undefined) return await inFlight;
     const pending = discoverSessionIds(adapters).then((found) => {
@@ -191,7 +205,7 @@ export function createLocalCallIdentity(options: {
             identity: unknown;
           }
         | undefined;
-      for (const sessionId of discovered) {
+      for (const sessionId of discovered.keys()) {
         for (const representation of PRIVATE_REPRESENTATIONS) {
           const reference = workflowPrivateReference("demonstration", workspaceId, representation, [
             sessionId,
@@ -252,6 +266,7 @@ export function createLocalCallIdentity(options: {
         workspaceId,
       );
       const sequence = order === undefined ? undefined : RecordedCallOrder.safeParse(order.value);
+      const workspaceRoot = discovered.get(match.sessionId);
       return {
         sessionId: match.sessionId,
         callId,
@@ -260,6 +275,7 @@ export function createLocalCallIdentity(options: {
         argumentReferences,
         ...(result === undefined ? {} : { result }),
         ...(sequence?.success === true ? { sequence: sequence.data } : {}),
+        ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       };
     },
   };

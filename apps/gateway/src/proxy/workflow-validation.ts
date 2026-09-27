@@ -172,6 +172,15 @@ async function localDemonstration(
     located.push({ step, calls });
   }
   if (located.length === 0) return undefined;
+  // Where the plan's own calls ran: what the plan's working directories stand for.
+  const planRoots = new Map<string, string>();
+  for (const { step } of located) {
+    const own =
+      step.callId === undefined || step.callId.length === 0
+        ? undefined
+        : await localCalls.lookup(step.callId);
+    if (own?.workspaceRoot !== undefined) planRoots.set(step.id, own.workspaceRoot);
+  }
   const items = located[0]!.calls.length;
   const mismatched = located
     .filter(({ step, calls }) => calls.length !== items || incoherent.has(step.id))
@@ -197,7 +206,7 @@ async function localDemonstration(
       }
       previous = sequence ?? previous;
     }
-    iterations.push(iterationDemonstration(iteration));
+    iterations.push(iterationDemonstration(iteration, planRoots));
   }
   if (unordered.size > 0) {
     return { mismatched: located.map(({ step }) => step.id).filter((id) => unordered.has(id)) };
@@ -208,6 +217,7 @@ async function localDemonstration(
 /** One iteration's recording and demonstration: each step's call for that item, in plan order. */
 function iterationDemonstration(
   located: ReadonlyArray<{ step: WorkflowStep; call: LocalRecordedCall }>,
+  planRoots: ReadonlyMap<string, string>,
 ): LocalDemonstration {
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
   // calls. A token or leaf it traces to an earlier recorded output must be read by the plan.
@@ -265,6 +275,9 @@ function iterationDemonstration(
       arguments: call.arguments,
       result: call.result.value,
       hiddenDependencies: hidden.get(stepId) ?? [],
+      ...(call.workspaceRoot === undefined || !planRoots.has(stepId)
+        ? {}
+        : { roots: { recorded: call.workspaceRoot, plan: planRoots.get(stepId)! } }),
     });
   }
   return { recording, demonstration };
