@@ -11,8 +11,8 @@
  * `materializeRecordedHomes(version, createHome)`, which places the recorded fixtures of
  * `tests/fixtures/recorded/<version>/` into one or more fresh homes where the adapter's default
  * discovery looks. Each home is captured with HOME pointing at it and no other environment.
- * A harness without tested versions (Cursor) is qualified once, with `version` undefined, from
- * whatever synthetic capture its module produces; that does not make any version tested.
+ * A harness without tested versions is qualified once, with `version` undefined, from whatever
+ * synthetic capture its module produces; that does not make any version tested.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -76,8 +76,8 @@ const EXPECTED_PASSTHROUGH: Record<string, readonly string[]> = {
 const EXPECTED_CALLLESS_STEPS: Record<string, (event: NormalizedSessionEvent) => boolean> = {
   // `!command` typed by the user runs in Pi's shell directly; no model tool call exists.
   pi: (event) => event.type === "command_exec" && event.metadata?.userShell === true,
-  // Cursor's afterFileEdit hook carries no tool_use_id, and its order against postToolUse is
-  // unspecified, so the edit cannot be attributed to a call.
+  // Cursor's afterFileEdit hook carries no tool_use_id and fires before its Write's postToolUse
+  // (recorded with 2026.09.26), so the edit cannot be attributed to a call.
   "cursor-cli": (event) => event.type === "file_edit",
   // Memory-reminder observers are side agents Muse starts itself, not through a model call.
   "muse-code": (event) =>

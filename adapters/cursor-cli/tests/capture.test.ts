@@ -18,6 +18,7 @@ import {
   resolveCursorProjectsDir,
 } from "../src/index.js";
 import { conversationPayloads, installedHook, tempHome } from "./helpers.js";
+import { materializeRecordedHomes } from "./qualification-fixtures.js";
 
 async function capture(home: string, payloads: Record<string, unknown>[]): Promise<void> {
   const run = await installedHook(home);
@@ -107,72 +108,57 @@ describe("event source", () => {
 });
 
 describe("decoder", () => {
-  it("decodes every captured hook event into ordered, identified events", async () => {
+  it("decodes recorded cursor-agent hooks without drift, with one identity per tool call", async () => {
     const home = tempHome();
-    await capture(
-      home,
-      conversationPayloads({ conversationId: "c1", workspace: "/w", subagentId: "sub-1" }),
-    );
+    await materializeRecordedHomes(CURSOR_TARGET_VERSION, () => home);
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
     const decoder = new CursorRecordDecoder();
-    const records = await readAll(new CursorHarnessAdapter({ home, env: {} }), "c1");
-    const events = records.flatMap((record) => decoder.decode(record) ?? []);
-    expect(decoder.driftIssues).toEqual([]);
-    expect(events.map((e) => e.type)).toEqual([
-      "session_lifecycle",
-      "message",
-      "model_reasoning",
-      "tool_call",
-      "tool_result",
-      "tool_call",
-      "tool_result",
-      "file_edit",
-      "tool_call",
-      "tool_result",
-      "message",
-      "compaction",
-      "subagent_lifecycle",
-      "error",
-      "session_lifecycle",
-    ]);
-    expect(new Set(events.map((e) => e.eventId)).size).toBe(events.length);
+    const decode = async (id: string) =>
+      (await readAll(adapter, id)).flatMap((record) => decoder.decode(record) ?? []);
 
-    const shellCall = events[3]!;
-    expect(shellCall).toMatchObject({
-      callId: "call-shell-1",
-      toolName: "Shell",
-      parameters: { command: "wc -l README.md", working_directory: "/w" },
-    });
-    expect(events[4]).toMatchObject({
-      callId: "call-shell-1",
-      isError: false,
-      executionDurationMs: 42,
-    });
-    expect(events[6]).toMatchObject({
-      callId: "call-read-2",
+    // Headless run: failed shell, edit reported as Read + Write sharing one tool_use_id, MCP call.
+    const headless = await decode("a4624dd3-4991-4bb6-ba65-cf699d7609f9");
+    const calls = headless.filter((e) => e.type === "tool_call");
+    expect(calls.map((c) => c.toolName)).toEqual([
+      "Read",
+      "Shell",
+      "Read",
+      "Read",
+      "MCP:echo",
+      "Write",
+      "Write",
+    ]);
+    expect(new Set(calls.map((c) => c.callId)).size).toBe(calls.length);
+    for (const id of calls.map((c) => c.callId)) expect(id).toMatch(/^[\w-][\w.:-]{0,127}$/);
+    expect(headless.find((e) => e.type === "tool_result" && e.toolName === "Shell")).toMatchObject({
       isError: true,
-      error: "File not found",
+      error: "wc: README.md: No such file or directory",
     });
-    expect(events[7]).toMatchObject({ filePath: "/w/notes.txt", operation: "create" });
-    expect(events[7]!.metadata?.edits).toEqual([{ oldString: "", newString: "hello\n" }]);
-    expect(events[8]).toMatchObject({ toolName: "mcp_demo_echo", parameters: { text: "ping" } });
-    expect(events[10]).toMatchObject({
-      role: "assistant",
-      content: "README.md has 3 lines.",
-      providerUsage: {
-        inputTokens: 1200,
-        outputTokens: 80,
-        cachedInputTokens: 900,
-        availability: "partial",
-      },
+    expect(
+      headless.filter((e) => e.type === "file_edit").map((e) => [e.filePath, e.operation]),
+    ).toEqual([
+      ["/workspace/project/notes.txt", "create"],
+      ["/workspace/project/hello.py", "patch"],
+    ]);
+
+    // Interactive run with /compact: usage from `stop`, counted once per turn.
+    const interactive = await decode("1e94d25f-abf7-4a83-9810-9fed67a25942");
+    expect(interactive.find((e) => e.type === "compaction")).toMatchObject({
+      triggerReason: "manual",
+      tokensBefore: 9753,
     });
-    expect(events[11]).toMatchObject({ triggerReason: "context_limit", tokensBefore: 180000 });
-    expect(events[12]).toMatchObject({
-      subagentId: "sub-1",
-      parentId: "c1",
-      lifecycleType: "start",
-    });
-    expect(events[13]).toMatchObject({ errorType: "aborted" });
-    expect(events[1]).toMatchObject({ role: "user", content: "count the lines in README.md" });
+    const usage = interactive.flatMap((e) => (e.providerUsage ? [e.providerUsage] : []));
+    expect(usage).toEqual([
+      expect.objectContaining({ inputTokens: 9559, outputTokens: 194, cachedInputTokens: 9344 }),
+    ]);
+    expect(interactive.at(-1)).toMatchObject({ type: "session_lifecycle", lifecycleType: "end" });
+
+    for (const workspace of await adapter.listWorkspaces()) {
+      for (const session of await adapter.listSessions(workspace)) {
+        await decode(session.sessionId);
+      }
+    }
+    expect(decoder.driftIssues).toEqual([]);
   });
 
   it("reports drift instead of guessing at unknown events or changed fields", () => {

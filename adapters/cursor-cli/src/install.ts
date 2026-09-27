@@ -44,9 +44,11 @@ export const cursorInstallHarness: HarnessInstallDefinition = {
     "Capture requires Resin's hooks in ~/.cursor/hooks.json (installed by `resin init`); sessions from before installation, or run while hooks were removed, are reported as uncaptured, not decoded.",
     "Cursor Cloud Agents that run on Cursor's machines leave no local record and cannot be captured; cursor-agent 2026.09.26 removed the CLI's --cloud/--background flags. Self-hosted `cursor-agent worker` sessions are captured and flagged isBackgroundAgent.",
     "Hook payloads carry no timestamps; event times are when Resin's hook received them.",
-    "Per-generation usage comes from afterAgentResponse (input, output, cache-read tokens); totals are not reported by cursor-agent and are not synthesized.",
-    "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is killed are not recorded.",
-    "Whether cursor-agent applies user rules from ~/.cursor/rules and reacts to MCP list_changed is unverified; new Resin tools are assumed to reach the next session.",
+    "Token usage is per turn, from the `stop` hook (input, output, cache-read tokens). Headless `cursor-agent -p` runs fire no beforeSubmitPrompt, afterAgentResponse or stop hooks (verified with 2026.09.26), so their prompt, final answer and usage are not captured; their tool calls, edits and session end are.",
+    "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
+    "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
+    "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
+    "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session. Whether user rules in ~/.cursor/rules are applied is unverified.",
   ],
   probeInstallation: (context) =>
     probeCursorInstallation({
