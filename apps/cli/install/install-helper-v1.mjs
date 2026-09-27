@@ -12076,6 +12076,16 @@ var CatalogSnapshotResponseSchema = external_exports.object({
   tools: external_exports.array(ToolManifestSchema),
   activeDeployments: external_exports.array(DeploymentRecordSchema)
 });
+var CATALOG_CAPABILITIES_HEADER = "x-resin-catalog-capabilities";
+var CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY = "snapshot-unchanged-v1";
+var CatalogSnapshotUnchangedResponseSchema = external_exports.object({
+  unchanged: external_exports.literal(true),
+  snapshotVersion: CatalogSnapshotResponseSchema.shape.snapshotVersion
+}).strict();
+var CatalogSnapshotResultSchema = external_exports.union([
+  CatalogSnapshotResponseSchema,
+  CatalogSnapshotUnchangedResponseSchema
+]);
 var ArtifactDownloadRequestSchema = external_exports.object({
   digest: Sha256DigestSchema,
   workspaceId: IdentifierSchema,
@@ -12153,6 +12163,423 @@ var HealthNegotiateResponseSchema = external_exports.object({
   serverTime: ISOTimestampSchema,
   clockSkewMs: external_exports.number()
 });
+var OPENAPI_V1_SPEC = {
+  openapi: "3.1.0",
+  info: {
+    title: "Resin Cloud Control & Ingestion API",
+    version: "1.0.0",
+    description: "Versioned local-to-cloud protocol for device authentication, observation ingestion, catalog synchronization, deployment lifecycle, and telemetry."
+  },
+  servers: [
+    {
+      url: "https://api.resin.sh",
+      description: "Production Cloud Control Plane"
+    },
+    {
+      url: "http://127.0.0.1:8787",
+      description: "Local Development Mock Server"
+    }
+  ],
+  paths: {
+    "/v1/auth/device/code": {
+      post: {
+        summary: "Initiate Device Authorization Code flow",
+        operationId: "bootstrapDeviceAuth",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeviceAuthBootstrapRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Device authorization initialized",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DeviceAuthBootstrapResponse" }
+              }
+            }
+          },
+          "400": {
+            description: "Invalid bootstrap request",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ProtocolErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/device/token": {
+      post: {
+        summary: "Poll or exchange device code for access token",
+        operationId: "exchangeDeviceToken",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeviceTokenExchangeRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Access token granted",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DeviceTokenExchangeResponse" }
+              }
+            }
+          },
+          "400": {
+            description: "Token error or authorization pending",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/TokenErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/token/refresh": {
+      post: {
+        summary: "Rotate and refresh device access token",
+        operationId: "refreshToken",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/TokenRotationRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Token refreshed and rotated",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/TokenRotationResponse" }
+              }
+            }
+          },
+          "401": {
+            description: "Refresh token expired or invalid",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/TokenErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/device/revoke": {
+      post: {
+        summary: "Revoke device authorization and all active tokens",
+        operationId: "revokeDevice",
+        security: [{ BearerAuth: ["admin:all", "device:connect"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeviceRevocationRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Device successfully revoked",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DeviceRevocationResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/installations/register": {
+      post: {
+        summary: "Register or update local installation record",
+        operationId: "registerInstallation",
+        security: [{ BearerAuth: ["device:connect"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/InstallationRegisterRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Installation registered",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/InstallationRegisterResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workspaces/register": {
+      post: {
+        summary: "Register or update workspace capability envelope",
+        operationId: "registerWorkspace",
+        security: [{ BearerAuth: ["device:connect"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/WorkspaceRegisterRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Workspace registered",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/WorkspaceRegisterResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/observations/batch": {
+      post: {
+        summary: "Batch ingest normalized session observations",
+        operationId: "ingestObservationBatch",
+        security: [{ BearerAuth: ["observations:write"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ObservationBatchRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Batch processed (accepted or partial)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ObservationBatchResponse" }
+              }
+            }
+          },
+          "400": {
+            description: "Batch rejection or validation failure",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ProtocolErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/catalog/snapshot": {
+      get: {
+        summary: "Fetch tool catalog snapshot and active deployment records",
+        operationId: "getCatalogSnapshot",
+        security: [{ BearerAuth: ["catalog:read"] }],
+        parameters: [
+          { name: "workspaceId", in: "query", required: true, schema: { type: "string" } },
+          { name: "deviceId", in: "query", required: true, schema: { type: "string" } },
+          { name: "currentVersion", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: CATALOG_CAPABILITIES_HEADER,
+            in: "header",
+            required: false,
+            description: `Comma-separated capability tokens. With '${CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY}' and a currentVersion equal to the current snapshot version, the server replies with CatalogSnapshotUnchangedResponse instead of the full snapshot.`,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Catalog snapshot, or an unchanged marker when the client advertised the capability and already holds the current version",
+            content: {
+              "application/json": {
+                schema: {
+                  oneOf: [
+                    { $ref: "#/components/schemas/CatalogSnapshotResponse" },
+                    { $ref: "#/components/schemas/CatalogSnapshotUnchangedResponse" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/artifacts/{digest}/download": {
+      get: {
+        summary: "Download compiled tool artifact package with checksum validation",
+        operationId: "downloadArtifact",
+        security: [{ BearerAuth: ["artifacts:read"] }],
+        parameters: [
+          { name: "digest", in: "path", required: true, schema: { type: "string" } },
+          { name: "workspaceId", in: "query", required: true, schema: { type: "string" } }
+        ],
+        responses: {
+          "200": {
+            description: "Artifact binary stream",
+            content: {
+              "application/octet-stream": {
+                schema: { type: "string", format: "binary" }
+              }
+            }
+          },
+          "404": {
+            description: "Artifact not found",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ProtocolErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deployments/status": {
+      post: {
+        summary: "Report local deployment status and receive sync directives",
+        operationId: "reportDeploymentStatus",
+        security: [{ BearerAuth: ["deployments:write"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeploymentStatusReportRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Status acknowledged and sync directives provided",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/DeploymentStatusReportResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/telemetry/batch": {
+      post: {
+        summary: "Ingest runtime invocation and performance telemetry batch",
+        operationId: "ingestTelemetryBatch",
+        security: [{ BearerAuth: ["telemetry:write"] }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/TelemetryBatchRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Telemetry batch accepted",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/TelemetryBatchResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health/negotiate": {
+      post: {
+        summary: "Negotiate protocol version, supported capabilities, and clock synchronization",
+        operationId: "negotiateHealth",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/HealthNegotiateRequest" }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Protocol negotiation result",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthNegotiateResponse" }
+              }
+            }
+          },
+          "426": {
+            description: "Upgrade required",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ProtocolErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  components: {
+    securitySchemes: {
+      BearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT"
+      },
+      DeviceAuth: {
+        type: "apiKey",
+        in: "header",
+        name: "X-Device-Id"
+      }
+    },
+    schemas: {
+      DeviceAuthBootstrapRequest: { type: "object" },
+      DeviceAuthBootstrapResponse: { type: "object" },
+      DeviceTokenExchangeRequest: { type: "object" },
+      DeviceTokenExchangeResponse: { type: "object" },
+      TokenRotationRequest: { type: "object" },
+      TokenRotationResponse: { type: "object" },
+      DeviceRevocationRequest: { type: "object" },
+      DeviceRevocationResponse: { type: "object" },
+      TokenErrorResponse: { type: "object" },
+      InstallationRegisterRequest: { type: "object" },
+      InstallationRegisterResponse: { type: "object" },
+      WorkspaceRegisterRequest: { type: "object" },
+      WorkspaceRegisterResponse: { type: "object" },
+      ObservationBatchRequest: { type: "object" },
+      ObservationBatchResponse: { type: "object" },
+      CatalogSnapshotResponse: { type: "object" },
+      CatalogSnapshotUnchangedResponse: {
+        type: "object",
+        additionalProperties: false,
+        required: ["unchanged", "snapshotVersion"],
+        properties: {
+          unchanged: { const: true },
+          snapshotVersion: { type: "string", minLength: 1 }
+        }
+      },
+      DeploymentStatusReportRequest: { type: "object" },
+      DeploymentStatusReportResponse: { type: "object" },
+      TelemetryBatchRequest: { type: "object" },
+      TelemetryBatchResponse: { type: "object" },
+      HealthNegotiateRequest: { type: "object" },
+      HealthNegotiateResponse: { type: "object" },
+      ProtocolErrorResponse: { type: "object" }
+    }
+  }
+};
 
 // packages/protocol/dist/stream.js
 init_common();
