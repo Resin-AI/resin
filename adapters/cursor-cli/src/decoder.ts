@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ProviderReportedUsage } from "@resin/contracts";
 import type {
   BaseIntermediateEventFields,
@@ -49,7 +50,11 @@ function stringField(payload: Record<string, unknown>, key: string): string | un
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/** Usage reported on `afterAgentResponse`: one model generation. Never synthesizes totals. */
+/**
+ * Turn usage as reported on `stop`. cursor-agent repeats the same numbers on the turn's
+ * `afterAgentResponse` (same generation_id), which fires only for completed turns, so usage is
+ * taken from `stop` alone to count each turn once. Never synthesizes totals.
+ */
 function usageFrom(payload: Record<string, unknown>): ProviderReportedUsage | undefined {
   const inputTokens = nonNegativeInt(payload.input_tokens);
   const outputTokens = nonNegativeInt(payload.output_tokens);
@@ -81,6 +86,18 @@ function shellOutcome(output: unknown): { stdout?: string; stderr?: string; exit
     stderr: typeof output.stderr === "string" ? output.stderr : undefined,
     exitCode: exit as number | undefined,
   };
+}
+
+/**
+ * The event call id for one tool record: `<tool_name>:<tool_use_id>`, since cursor-agent reports
+ * one model edit as a Read and a Write sharing a tool_use_id. Real ids join two provider ids with
+ * a newline (`call-…-3\nfc_…_0`), which event identifiers do not allow, so characters outside the
+ * identifier alphabet become `_`; an id still over the 128-character limit is hashed.
+ */
+export function cursorCallId(toolName: string, toolUseId: string): string {
+  const id = `${toolName}:${toolUseId}`.replace(/[^a-zA-Z0-9_.:-]/g, "_");
+  if (id.length <= 128) return id;
+  return `${id.slice(0, 63)}:${createHash("sha256").update(id).digest("hex").slice(0, 64)}`;
 }
 
 type EventBase = BaseIntermediateEventFields & { metadata: DecoderMetadataRecord };
@@ -181,7 +198,6 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             role: "assistant",
             content: payload.text as string,
             model: stringField(payload, "model"),
-            providerUsage: usageFrom(payload),
           },
         ];
       case "postToolUse":
@@ -250,11 +266,14 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
       }
       case "stop": {
         const status = payload.status as string;
+        // `stop` fires for every turn with its token usage (see usageFrom).
+        const providerUsage = usageFrom(payload);
         // A completed turn settles everything the agent did since its prompt.
         if (status === "completed")
           return [
             {
               ...base("stop"),
+              ...(providerUsage ? { providerUsage } : {}),
               type: "session_lifecycle",
               lifecycleType: "end",
               harnessName: CURSOR_HARNESS_ID,
@@ -265,6 +284,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
           {
             ...base("stop"),
             type: "error",
+            ...(providerUsage ? { providerUsage } : {}),
             errorType: status === "aborted" ? "aborted" : "turn_error",
             message: status === "aborted" ? "Turn aborted" : `Turn ended with status ${status}`,
             recoverable: true,
@@ -281,8 +301,11 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
     failed: boolean,
     base: EventBaseFactory,
   ): IntermediateSessionEvent[] {
-    const toolCallId = payload.tool_use_id as string;
     const toolName = payload.tool_name as string;
+    // cursor-agent reports one model edit as a Read and a Write postToolUse sharing one
+    // tool_use_id (observed with 2026.09.26-dd393fe), so the id alone is not unique per call.
+    const toolCallId = cursorCallId(toolName, payload.tool_use_id as string);
+    const nativeToolUseId = payload.tool_use_id as string;
     const input = decodeMaybeJson(payload.tool_input);
     const output = decodeMaybeJson(payload.tool_output);
     const durationMs = nonNegativeInt(payload.duration);
@@ -316,6 +339,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
         metadata: {
           ...base("result", 1).metadata,
           failureType: stringField(payload, "failure_type"),
+          toolUseId: nativeToolUseId,
           interrupted: payload.is_interrupt === true,
         },
       },

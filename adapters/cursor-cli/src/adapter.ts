@@ -144,13 +144,15 @@ export class CursorHarnessAdapter implements StrictHarnessAdapter {
         supportsNativeListChange: false,
         supportsContextNudge: false,
         requiresSessionRestart: true,
-        description: "MCP tool list refresh is unverified for cursor-agent; treat as next session.",
+        description:
+          "cursor-agent 2026.09.26 ignores MCP tools/list_changed mid-session; new tools reach the next session.",
       },
       fidelity: createObservationFidelity({
         transcriptAvailability: "file_tail",
         toolCallVisibility: "full",
         toolResultVisibility: "full",
-        subagentVisibility: "full",
+        // Subagent sessions are captured, but unlinked to the parent's Task call.
+        subagentVisibility: "shallow",
         mcpListChange: "requires_restart",
         contextNudge: "via_file",
         notes:

@@ -1,24 +1,25 @@
 /**
- * Registry qualification convention (apps/observer/tests/harness-qualification.test.ts). Cursor
- * has no tested versions: cursor-agent needs a login before any hook fires, so nothing was
- * recorded. This feeds the synthetic hook payloads from ./helpers through the real installed
- * capture hook into `home`, so the capture path is still qualified.
+ * Registry qualification convention (apps/observer/tests/harness-qualification.test.ts): places
+ * the scrubbed hook spool files recorded with cursor-agent `<version>` (see
+ * fixtures/recorded/CAPTURE.md) where Resin's capture hook writes them, `~/.resin/capture/cursor-cli/`.
  */
-import { conversationPayloads, installedHook } from "./helpers.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolveCursorSpoolDir } from "../src/paths.js";
+
+const RECORDED = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "recorded");
 
 export async function materializeRecordedHomes(
-  _version: string | undefined,
+  version: string | undefined,
   createHome: () => string,
 ): Promise<void> {
+  if (version === undefined) throw new Error("cursor-cli qualification needs a tested version");
   const home = createHome();
-  const run = await installedHook(home);
-  const payloads = [
-    ...conversationPayloads({
-      conversationId: "qualify-parent",
-      workspace: "/workspace/project",
-      subagentId: "qualify-child",
-    }),
-    ...conversationPayloads({ conversationId: "qualify-child", workspace: "/workspace/project" }),
-  ];
-  for (const payload of payloads) run(payload);
+  const spool = resolveCursorSpoolDir(home);
+  fs.mkdirSync(spool, { recursive: true });
+  const dir = path.join(RECORDED, version);
+  for (const file of fs.readdirSync(dir).filter((name) => name.endsWith(".jsonl"))) {
+    fs.copyFileSync(path.join(dir, file), path.join(spool, file));
+  }
 }

@@ -3,17 +3,16 @@ import path from "node:path";
 export const CURSOR_HARNESS_ID = "cursor-cli" as const;
 
 /**
- * The cursor-agent build this adapter's hook contract was read from (bundle inspection),
+ * The cursor-agent build this adapter's hook contract was verified against with real captures,
  * normalized to semver: `cursor-agent --version` prints `2026.09.26-dd393fe`.
  */
 export const CURSOR_TARGET_VERSION = "2026.9.26-dd393fe";
 
 /**
- * Versions qualified with recorded fixtures (normalized, see {@link normalizeCursorVersion}).
- * Empty until a logged-in capture of {@link CURSOR_TARGET_VERSION} is recorded under
- * `tests/fixtures/recorded/`; until then every install reports `untested`.
+ * Versions qualified with recorded fixtures (normalized, see {@link normalizeCursorVersion});
+ * each has a `tests/fixtures/recorded/<version>/` directory of real hook captures.
  */
-export const CURSOR_TESTED_VERSIONS: readonly string[] = [];
+export const CURSOR_TESTED_VERSIONS: readonly string[] = [CURSOR_TARGET_VERSION];
 
 /**
  * Cursor's per-user directory. cursor-agent 2026.09.26 hard-codes `os.homedir()/.cursor` for
