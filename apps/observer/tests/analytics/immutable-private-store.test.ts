@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FilePrivateValueStore,
   InMemoryPrivateValueStore,
@@ -10,6 +10,9 @@ import {
 } from "../../src/analytics/private-value-store.js";
 
 const directories: string[] = [];
+afterEach(() => {
+  vi.useRealTimers();
+});
 afterEach(() => {
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
@@ -47,6 +50,8 @@ describe("immutable private reference persistence", () => {
   });
 
   it("does not rewrite the legacy file for an identical entry and shares writes across instances", () => {
+    // A fixed clock keeps the re-set entry in the newer half of the retained window.
+    vi.useFakeTimers({ toFake: ["Date"] });
     const root = directory();
     const first = new FilePrivateValueStore(root);
     const second = new FilePrivateValueStore(root);
@@ -70,6 +75,36 @@ describe("immutable private reference persistence", () => {
       expect(store.get("[REDACTED_SECRET:49]")).toBe("secret-49");
     }
   });
+
+  it("keeps an identically re-set legacy key while untouched old keys are evicted", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const root = directory();
+    const origin = { workspaceId: "ws-legacy" };
+    let now = 1_000_000;
+    // Seed a full legacy store (hot key oldest) in its on-disk format; 4096 set() calls would be slow.
+    const seeded: Record<string, unknown> = {
+      "[REDACTED_SECRET:hot]": { value: "hot", origin, at: now },
+    };
+    for (let i = 1; i < 4096; i++)
+      seeded[`[REDACTED_SECRET:old-${i}]`] = { value: `old-${i}`, origin, at: now };
+    mkdirSync(path.join(root, "private-values"), { recursive: true });
+    writeFileSync(path.join(root, "private-values", "private-values.json"), JSON.stringify(seeded));
+    const store = new FilePrivateValueStore(root);
+    // A separate instance reads the file as another process would, after each capacity overflow.
+    const reader = new FilePrivateValueStore(root);
+    for (let i = 0; i < 200; i++) {
+      vi.setSystemTime(++now);
+      store.set("[REDACTED_SECRET:hot]", "hot", origin);
+      store.set(`[REDACTED_SECRET:new-${i}]`, `new-${i}`, origin);
+      expect(reader.get("[REDACTED_SECRET:hot]")).toBe("hot");
+    }
+    const reopened = new FilePrivateValueStore(root);
+    expect(reopened.get("[REDACTED_SECRET:hot]")).toBe("hot");
+    expect(reopened.get("[REDACTED_SECRET:old-1]")).toBeUndefined();
+    expect(reopened.get("[REDACTED_SECRET:old-150]")).toBeUndefined();
+    expect(reopened.get("[REDACTED_SECRET:old-4095]")).toBe("old-4095");
+    expect(reopened.get("[REDACTED_SECRET:new-199]")).toBe("new-199");
+  }, 30_000);
 
   it("retains all entries written by separate simultaneous processes", async () => {
     const root = directory();

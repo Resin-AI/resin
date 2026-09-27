@@ -273,7 +273,16 @@ export class FilePrivateValueStore implements PrivateValueStore {
       assertSameEntry(existing, entry, key);
       return;
     }
-    if (existing !== undefined && isSameEntry(existing, entry)) return;
+    if (existing !== undefined && isSameEntry(existing, entry)) {
+      // Refresh recency only when eviction is within reach (store over half full) and the entry has
+      // fallen into the older half of the retained time window, so hot aliases never reach eviction
+      // while a key cycling below capacity is never rewritten.
+      if (entries.size <= MAX_ENTRIES / 2) return;
+      const oldestKey = entries.keys().next().value;
+      const oldestAt =
+        oldestKey === undefined ? entry.at : (entries.get(oldestKey)?.at ?? entry.at);
+      if (existing.at >= (oldestAt + entry.at) / 2) return;
+    }
     // Legacy placeholder keys are aliases, not unique reference identities.
     entries.delete(key);
     entries.set(key, entry);
