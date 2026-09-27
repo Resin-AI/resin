@@ -35,6 +35,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@resin/adapter-omp": "workspace:*",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
     "@resin/db": "workspace:*",

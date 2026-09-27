@@ -330,7 +330,13 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     changeSummary: CatalogChangeSummary,
   ): Promise<RefreshResult> {
     this.cachedCatalog = undefined;
-    return handleOmpCatalogRefresh(workspace, changeSummary);
+    // The block tells the model how to reach each learned tool through OMP's `xd://` devices; an
+    // empty catalog removes it. A summary that carries no catalog leaves the block untouched.
+    return handleOmpCatalogRefresh(workspace, changeSummary, {
+      catalogMarkdown: changeSummary.instructionsMarkdown,
+      toolNames: changeSummary.evolvedToolNames,
+      ompHome: this.discoveryOptions?.customHome ?? this.discoveryOptions?.ompHome,
+    });
   }
 
   /**

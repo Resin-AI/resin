@@ -1,3 +1,7 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { OmpHarnessAdapter } from "@resin/adapter-omp";
 import { describe, expect, it, vi } from "vitest";
 import { CatalogRefreshCoordinator, type McpGatewayLike } from "../../src/refresh/index.js";
 import { FakeRefreshAdapter, createMockConnection, createRefreshMatrix } from "./fake-matrix.js";
@@ -212,5 +216,70 @@ describe("CatalogRefreshCoordinator - Adapter-Specific Nudge Dispatch", () => {
     expect(matrix.claudeCode.refreshCalls[1]?.changeSummary.addedToolIds).toContain("tool_v2");
 
     coordinator.destroy();
+  });
+});
+
+describe("OMP learned-tool guidance", () => {
+  async function refreshWith(
+    ompHome: string,
+    learned: Array<{ name: string; description?: string }>,
+    revision: number,
+  ) {
+    const conn = createMockConnection({
+      connectionId: "conn-omp-guidance",
+      harnessId: "omp",
+      workspaceId: "ws-omp-guidance",
+      supportsListChanged: true,
+    });
+    const coordinator = new CatalogRefreshCoordinator({
+      debounceMs: 0,
+      gateway: {
+        getAllConnections: () => [conn.connection],
+        getConnection: () => conn.connection,
+        sendNotificationToConnection: vi.fn(),
+        listLearnedTools: async () => learned,
+      },
+      adapters: {
+        omp: {
+          harnessId: "omp",
+          getCapabilities: () => ({
+            supportsNativeListChange: true,
+            supportsContextNudge: true,
+            requiresSessionRestart: false,
+            description: "omp",
+          }),
+          notifyCatalogRefresh: (workspace, summary) =>
+            new OmpHarnessAdapter({ customHome: ompHome }).notifyCatalogRefresh(workspace, summary),
+        },
+      },
+    });
+    await coordinator.triggerRefresh("ws-omp-guidance", revision, { changedToolIds: ["t"] });
+    coordinator.destroy();
+    return fs.readFile(path.join(ompHome, "agent", "APPEND_SYSTEM.md"), "utf8").catch(() => "");
+  }
+
+  it("writes each learned tool's name, description and xd:// path, then removes the block when none remain", async () => {
+    const ompHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-guidance-"));
+    try {
+      await fs.mkdir(path.join(ompHome, "agent"), { recursive: true });
+      await fs.writeFile(path.join(ompHome, "agent", "APPEND_SYSTEM.md"), "User notes\n");
+      const tools = [
+        { name: "release_notes", description: "Drafts release notes.\nSecond line" },
+        { name: "sync_fixtures" },
+      ];
+      const written = await refreshWith(ompHome, tools, 1);
+      expect(written.startsWith("User notes\n")).toBe(true);
+      expect(written).toContain("### `release_notes`\n\nDrafts release notes.");
+      expect(written).not.toContain("Second line");
+      expect(written).toContain("### `sync_fixtures`");
+      expect(written).toContain("xd://mcp__resin_release_notes");
+      expect(written).toContain("xd://mcp__resin_sync_fixtures");
+      expect(await refreshWith(ompHome, tools, 2)).toBe(written);
+
+      const cleared = await refreshWith(ompHome, [], 3);
+      expect(cleared).toBe("User notes\n");
+    } finally {
+      await fs.rm(ompHome, { recursive: true, force: true });
+    }
   });
 });

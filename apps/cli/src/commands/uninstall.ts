@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { applyOmpCatalogInstructions } from "@resin/adapter-omp";
 import {
   type ConfigFsBridge,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
@@ -225,6 +226,11 @@ export async function removeHarnessMcpConfigurations(options: {
   for (const configPath of ompPaths) {
     ompCleaned = (await removeResinFromJsonConfig(configPath, fsBridge)) || ompCleaned;
   }
+  // The learned-tool block Resin keeps in OMP's appended system prompt goes with the server.
+  const ompInstructions = await applyOmpCatalogInstructions({ ompHome: activeOmpHome }).catch(
+    () => undefined,
+  );
+  ompCleaned = ompInstructions?.action === "removed" || ompCleaned;
   if (ompCleaned) {
     cleaned.push("Oh My Pi (OMP)");
   }
