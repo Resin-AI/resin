@@ -90,7 +90,7 @@ export function resolveLocalSourceInstallPaths(sourceRoot: string): LocalSourceI
   }
   const root = path.resolve(sourceRoot);
   return {
-    daemonPath: path.join(root, "apps", "observer", "dist", "bin", "daemon.js"),
+    daemonPath: path.join(root, "apps", "gateway", "dist", "bin", "daemon.js"),
     runtimePath: path.join(root, "packages", "runtime", "dist", "index.js"),
     mcpShimPath: path.join(root, "apps", "gateway", "dist", "bin", "mcp-shim.js"),
     resinCommand: path.join(root, "apps", "cli", "bin", "resin.mjs"),

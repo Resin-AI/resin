@@ -220,7 +220,6 @@ export const INTERNAL_WORKSPACE_REGISTRY = Object.freeze([
     name: "@resin/observer",
     path: "apps/observer",
     entry: "dist/index.js",
-    bin: "dist/bin/daemon.js",
     type: "app",
     private: false,
   },

@@ -16,7 +16,4 @@ if (!fs.existsSync(target)) {
   process.exit(1);
 }
 
-// The executable must run even when invoked by a Vitest-owned process.
-delete process.env.VITEST;
-
 await import(pathToFileURL(target).href);

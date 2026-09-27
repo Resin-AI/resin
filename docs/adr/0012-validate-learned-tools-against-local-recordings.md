@@ -63,9 +63,9 @@ A validation decision carries `verification.replay = { kind: "recording", planDi
 
 ### 6. The background daemon answers; one process per device at a time
 
-The background daemon (`resin-daemon`) runs the same validation worker the `resin mcp` gateway runs, with the same transport, recording check and refusals, so a pending ask is answered whenever the device is up, not only while an agent session is open. The worker polls on its adaptive cadence (15 s while asks arrive, backing off to 120 s when idle) and answers only asks naming the workspace and device the daemon is enrolled as. Because `@resin/gateway` depends on `@resin/observer`, the packaged daemon entry is `@resin/gateway`'s `bin/daemon`, which registers the worker as a daemon module before loading the observer's daemon.
+The background daemon (`resin-daemon`) runs the same validation worker the `resin mcp` gateway runs, with the same transport, recording check and refusals, so a pending ask is answered whenever the device is up, not only while an agent session is open. The worker polls on its adaptive cadence (15 s while asks arrive, backing off to 120 s when idle) and answers only asks naming the workspace and device the daemon is enrolled as. Because `@resin/gateway` depends on `@resin/observer`, the only daemon entry is `@resin/gateway`'s `bin/daemon` (the `resin-daemon` bin), which registers the worker as a daemon module and then runs the observer's daemon command line. The observer's daemon module is not an entry point and exits with an error when run directly.
 
-Every gateway and the daemon take a device-wide pass lease (`<state>/workflow-validation.lease`) before a pass. A process that cannot take it skips the pass, so no two processes check and deliver the same ask; the cloud still keeps only the first decision for an attempt.
+Every gateway and the daemon take a device-wide pass lease (`<state>/workflow-validation.lease`) before a pass. A process that cannot take it skips the pass, so no two processes check and deliver the same ask. The holder renews the lease before each ask and starts no ask past half the 30-minute stale bound; an abandoned lease is removed only under an exclusive takeover guard, so exactly one process takes it over; the cloud still keeps only the first decision for an attempt.
 
 ## Rejected Alternatives
 

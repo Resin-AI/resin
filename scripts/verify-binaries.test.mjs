@@ -14,7 +14,10 @@ describe("verify-binaries", () => {
 
       const packageNames = BINARY_SPECS.map((s) => s.packageName);
       expect(packageNames).toContain("resin");
-      expect(packageNames).toContain("@resin/observer");
+      expect(packageNames).not.toContain("@resin/observer");
+      expect(BINARY_SPECS.find((s) => s.binKey === "resin-daemon")?.packageName).toBe(
+        "@resin/gateway",
+      );
       expect(packageNames).toContain("@resin/test-fixtures");
 
       const resinSpecs = BINARY_SPECS.filter((s) => s.packageName === "resin");

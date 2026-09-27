@@ -158,7 +158,7 @@ export async function discoverAndVerifyAssets(
   const digestMismatches: Array<{ name: string; expected: string; actual: string }> = [];
 
   // 1. Daemon Asset
-  const daemonPath = options.customPaths?.daemon ?? "apps/observer/dist/bin/daemon.js";
+  const daemonPath = options.customPaths?.daemon ?? "apps/gateway/dist/bin/daemon.js";
   const daemonExpected = manifest?.assets.daemon?.sha256;
   const daemonExists = await fsBridge.exists(daemonPath);
   let daemonActualSha256: string | undefined;

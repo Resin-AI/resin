@@ -1403,6 +1403,7 @@ export async function awaitBackgroundDaemonStartup(
 }
 
 async function runBackground(
+  entryFile: string,
   argv: string[],
   _options: {
     configPath?: string;
@@ -1411,8 +1412,6 @@ async function runBackground(
     socketPath?: string;
   },
 ): Promise<void> {
-  // The entry that loaded this daemon, so a packaged entry's registered modules come with it.
-  const entryFile = process.argv[1] ?? fileURLToPath(import.meta.url);
   const childArgs = [
     entryFile,
     "--foreground",
@@ -1442,7 +1441,7 @@ async function runBackground(
   }
 }
 
-async function main(): Promise<void> {
+async function main(entryFile: string): Promise<void> {
   const argv = process.argv.slice(2);
 
   let foreground = false;
@@ -1491,12 +1490,19 @@ async function main(): Promise<void> {
   if (foreground) {
     await runForeground({ configPath, home, port, socketPath });
   } else {
-    await runBackground(argv, { configPath, home, port, socketPath });
+    await runBackground(entryFile, argv, { configPath, home, port, socketPath });
   }
 }
 
-if (!process.env.VITEST) {
-  main().catch((err) => {
+/**
+ * Runs the daemon command line. The only caller is the packaged entry, `@resin/gateway`'s
+ * `bin/daemon`, which registers its daemon modules first: there is one daemon, and it includes them.
+ */
+export async function runDaemonCli(options: {
+  /** The entry file the background child re-runs, so the registered modules come with it. */
+  entryFile: string;
+}): Promise<void> {
+  await main(options.entryFile).catch((err) => {
     const message = sanitizeStartupError(err);
     sendStartupMessage({
       type: "startup-error",
@@ -1505,4 +1511,15 @@ if (!process.env.VITEST) {
     console.error("Fatal error in daemon CLI:", err);
     process.exit(1);
   });
+}
+
+// Run directly, this module would start a daemon without the packaged entry's modules.
+if (
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  console.error(
+    "The observer daemon is not an entry point; run `resin-daemon` (@resin/gateway bin/daemon).",
+  );
+  process.exit(1);
 }

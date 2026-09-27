@@ -17,13 +17,10 @@
     "access": "public",
     "provenance": true
   },
-  "files": ["dist", "bin", "README.md", "LICENSE", "NOTICE"],
+  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "resin-daemon": "./bin/daemon.mjs"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

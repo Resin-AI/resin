@@ -330,7 +330,7 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(uninstalled.success).toBe(true);
     });
     it("registers explicit local-source daemon and supervisor paths", async () => {
-      const daemonPath = "/work/resin/apps/observer/dist/bin/daemon.js";
+      const daemonPath = "/work/resin/apps/gateway/dist/bin/daemon.js";
       const supervisorEntryPath = "/work/resin/apps/cli/dist/index.js";
       const setupResult = await setupAndStartDaemonService({
         homeDir: fakeHome,

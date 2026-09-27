@@ -34,7 +34,10 @@ import {
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
 import { z } from "zod";
-import type { WorkflowValidationPassLease } from "./validation-lease.js";
+import type {
+  WorkflowValidationPassLease,
+  WorkflowValidationPassLeaseHandle,
+} from "./validation-lease.js";
 import {
   type LocalWorkflowValidationResult,
   createRecordingCheckValidator,
@@ -573,32 +576,39 @@ export class WorkflowValidationWorker {
       skipped: false,
     };
     if (!this.passLease) return await this.runPass(summary, signal);
-    let release: (() => Promise<void>) | undefined;
+    let lease: WorkflowValidationPassLeaseHandle | undefined;
     try {
-      release = await this.passLease.tryAcquire();
+      lease = await this.passLease.tryAcquire();
     } catch (error) {
       this.log(`workflow validation: could not take the pass lease (${describe(error)})`);
       summary.deferred += 1;
       return summary;
     }
-    if (release === undefined) {
+    if (lease === undefined) {
       // Another process on this device is answering; its answers are gone from the next listing.
       summary.skipped = true;
       this.emptyPolls += 1;
       return summary;
     }
+    const held = lease;
     try {
-      return await this.runPass(summary, signal);
+      return await this.runPass(summary, signal, {
+        lease: held,
+        deadline: Date.now() + this.passLease.maxHoldMs,
+      });
     } finally {
-      await release().catch((error: unknown) =>
-        this.log(`workflow validation: could not release the pass lease (${describe(error)})`),
-      );
+      await held
+        .release()
+        .catch((error: unknown) =>
+          this.log(`workflow validation: could not release the pass lease (${describe(error)})`),
+        );
     }
   }
 
   private async runPass(
     summary: WorkflowValidationPassSummary,
     signal?: AbortSignal,
+    held?: { lease: WorkflowValidationPassLeaseHandle; deadline: number },
   ): Promise<WorkflowValidationPassSummary> {
     let requests: WorkflowValidationRequest[];
     try {
@@ -614,6 +624,14 @@ export class WorkflowValidationWorker {
     summary.pending = requests.length;
     for (const request of requests) {
       if (signal?.aborted) break;
+      if (held) {
+        // Asks past the lease's hold bound wait for the next pass; the rest keep the lease fresh.
+        if (Date.now() >= held.deadline) {
+          summary.deferred += 1;
+          continue;
+        }
+        await held.lease.renew();
+      }
       const decision = await this.decide(request);
       if (decision === undefined) {
         summary.refused += 1;
@@ -649,8 +667,8 @@ export class WorkflowValidationWorker {
   /**
    * Builds the decision for one ask, or refuses to build one.
    *
-   * Three things decide whether an ask may be answered at all: it must name this identity's
-   * workspace, its plan must be the exact plan whose digest it carries, and it must not have
+   * Four things decide whether an ask may be answered at all: it must name this identity's
+   * workspace and device, its plan must be the exact plan whose digest it carries, and it must not have
    * expired. A refusal is not an answer — the ask stays pending for the cloud to re-issue.
    */
   private async decide(
@@ -659,6 +677,12 @@ export class WorkflowValidationWorker {
     if (request.workspaceId !== this.workspaceId) {
       this.log(
         `workflow validation: refused ask '${request.requestId}': it names workspace '${request.workspaceId}', not this identity's workspace`,
+      );
+      return undefined;
+    }
+    if (request.deviceId !== this.deviceId) {
+      this.log(
+        `workflow validation: refused ask '${request.requestId}': it names device '${request.deviceId}', not this identity's device`,
       );
       return undefined;
     }

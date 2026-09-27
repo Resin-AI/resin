@@ -69,17 +69,21 @@ function recording(): { plan: RecordedWorkflow; store: InMemoryPrivateValueStore
   return { plan, store };
 }
 
-function askFor(plan: RecordedWorkflow, workspaceId = WORKSPACE_ID): WorkflowValidationRequest {
+function askFor(
+  plan: RecordedWorkflow,
+  overrides: Partial<WorkflowValidationRequest> = {},
+): WorkflowValidationRequest {
   return {
     schemaVersion: WORKFLOW_VALIDATION_SCHEMA_VERSION,
     requestId: "req-daemon-01",
-    workspaceId,
+    workspaceId: WORKSPACE_ID,
     deviceId: DEVICE_ID,
     attempt: "attempt-01",
     planDigest: workflowValidationPlanDigest(plan),
     evidenceDigest: "evidence-digest-01",
     createdAt: "2026-09-27T12:00:00.000Z",
     plan,
+    ...overrides,
   };
 }
 
@@ -188,9 +192,13 @@ describe("the daemon's validation module", () => {
     expect(new Headers(listInit?.headers as HeadersInit).get("x-workspace-id")).toBe(WORKSPACE_ID);
   });
 
-  it("refuses an ask for a workspace the device is not enrolled in, posting nothing", async () => {
+  it.each([
+    ["a workspace the device is not enrolled in", { workspaceId: OTHER_WORKSPACE_ID }],
+    ["another device", { deviceId: "dev_daemon_other" }],
+    ["a plan other than the one its digest names", { planDigest: "sha256:not-this-plan" }],
+  ] as const)("refuses an ask for %s, posting nothing", async (_label, overrides) => {
     const recorded = recording();
-    const cloud = fakeCloud(askFor(recorded.plan, OTHER_WORKSPACE_ID));
+    const cloud = fakeCloud(askFor(recorded.plan, overrides));
     vi.stubGlobal("fetch", cloud.fetchImpl);
     const module = createWorkflowValidationDaemonModule(context, {
       privateValues: recorded.store,
@@ -239,6 +247,7 @@ describe("the daemon's validation module", () => {
     const module = createWorkflowValidationDaemonModule(context, {
       ...checked,
       passLease: {
+        maxHoldMs: daemonLease.maxHoldMs,
         async tryAcquire() {
           const release = await daemonLease.tryAcquire();
           if (release === undefined) daemonSkips += 1;
@@ -290,9 +299,9 @@ describe("the validation pass lease", () => {
 
     expect(await second.tryAcquire()).toBeUndefined();
     fs.rmSync(filePath);
-    const release = await first.tryAcquire();
-    expect(release).toBeDefined();
-    await release?.();
+    const held = await first.tryAcquire();
+    expect(held).toBeDefined();
+    await held?.release();
     expect(await second.tryAcquire()).toBeDefined();
   });
 
@@ -312,5 +321,45 @@ describe("the validation pass lease", () => {
       staleMs: 1000,
     });
     expect(await stale.tryAcquire()).toBeDefined();
+  });
+
+  it("renews a held lease, so a long pass is not taken over as stale", async () => {
+    const filePath = path.join(tempDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME);
+    let clock = 0;
+    const holder = new FileWorkflowValidationPassLease({
+      filePath,
+      staleMs: 1000,
+      now: () => clock,
+    });
+    const contender = new FileWorkflowValidationPassLease({
+      filePath,
+      staleMs: 1000,
+      now: () => clock,
+      isAlive: () => true,
+    });
+    const held = await holder.tryAcquire();
+    clock = 900;
+    await held?.renew();
+    clock = 1500;
+    expect(await contender.tryAcquire()).toBeUndefined();
+    clock = 2000;
+    expect(await contender.tryAcquire()).toBeDefined();
+  });
+
+  it("lets one of several processes take over the same abandoned lease", async () => {
+    const filePath = path.join(tempDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME);
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({ pid: 999_999, token: "dead", acquiredAt: Date.now() }),
+    );
+    const contenders = Array.from(
+      { length: 6 },
+      () => new FileWorkflowValidationPassLease({ filePath, isAlive: (pid) => pid !== 999_999 }),
+    );
+
+    const taken = await Promise.all(contenders.map((lease) => lease.tryAcquire()));
+
+    expect(taken.filter((held) => held !== undefined)).toHaveLength(1);
+    expect(fs.readdirSync(tempDir)).toEqual([WORKFLOW_VALIDATION_LEASE_FILE_NAME]);
   });
 });
