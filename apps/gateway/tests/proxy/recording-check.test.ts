@@ -611,3 +611,60 @@ describe("a held-out demonstration recorded in another session", () => {
     expect(answer.verdicts[0]).toMatchObject({ confirmed: true, confirmedType: "number" });
   });
 });
+
+describe("a held-out command whose harness chose its own non-program arguments", () => {
+  const OTHER = "recording-check-labelled-session";
+  /** One `./dbtool check` call as an OMP bash call records it: an intent label beside the program. */
+  const check = (callId: string, database: string, label: string, cwd = "."): Turn[] => [
+    { user: `Check the ${database} database` },
+    {
+      callId,
+      toolName: "bash",
+      parameters: { i: label, command: `./dbtool check ${database}`, cwd, timeout: 60 },
+      result: `${database}: ok\n`,
+    },
+  ];
+  function heldOutAsk(store: InMemoryPrivateValueStore, heldOut: Turn[]) {
+    const recorded = record(store, check("billing-check", "billing", "Checking billing database"));
+    record(store, heldOut, owner, OTHER);
+    const step = recorded.steps[0]!;
+    const candidate: WorkflowBindingCandidate = {
+      stepId: step.id,
+      argument: "command",
+      path: ["tokens", 2],
+      proposed: { kind: "input", name: "text", type: "string", recordedDefault: true },
+      reason: "native-data-argument",
+      missing: "one recording does not establish that this value varies",
+    };
+    const plan: RecordedWorkflow = {
+      ...recorded,
+      candidates: [candidate],
+      heldOut: {
+        inputs: [],
+        observed: [],
+        calls: [{ stepId: step.id, callIds: [heldOut[1]!.callId as string] }],
+      },
+    };
+    return validator(store, { sessions: [SESSION, OTHER] })(plan);
+  }
+
+  it("reproduces the other session's call although its intent label differs", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const answer = await heldOutAsk(
+      store,
+      check("inventory-check", "inventory", "Checking inventory integrity"),
+    );
+    expect(answer.verification?.status).toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+  });
+
+  it("still misses the call when the other session ran it in another directory", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const answer = await heldOutAsk(
+      store,
+      check("inventory-check", "inventory", "Checking billing database", "services/db"),
+    );
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+  });
+});

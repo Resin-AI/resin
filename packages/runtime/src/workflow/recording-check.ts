@@ -3,7 +3,8 @@
  *
  * Each recorded step is resolved exactly as an invocation resolves it — templates, holes, inputs,
  * extracts and derivation outputs — and the resolved call is then compared with the call the
- * recording made for that step: the same callable, and every argument equal to the recorded value.
+ * recording made for that step: the same callable, and every argument that reaches what the call
+ * runs equal to the recorded value.
  * A match answers with what the recording observed that call produce. A mismatch, or a step the
  * recording has no call for, fails the step. Nothing is spawned, dispatched or written: the only
  * code a check runs is a model-written derivation step, through the adapter the caller supplies.
@@ -140,6 +141,43 @@ export function stepBindsPosition(
   return source.kind === "template" && templateBinds(source.template, path);
 }
 
+/**
+ * Arguments of a recorded program call that decide what its replay runs, beside the program
+ * argument itself: where it runs and how the program runner invokes it. Everything else a harness
+ * passed with the program — an intent label, a timeout, an output limit, a yield interval — never
+ * reaches the program runner, and another session of the same job routinely chose it differently.
+ */
+const PROGRAM_CONTEXT_ARGUMENTS: Record<string, true> = {
+  workdir: true,
+  cwd: true,
+  resinCodexShellProfile: true,
+  raw: true,
+  patch: true,
+};
+
+/**
+ * The arguments of a call that the check compares: every argument of a call without a program, and
+ * the program argument and its context arguments of a process or program call.
+ */
+function comparedArguments(
+  step: WorkflowStep,
+  args: Record<string, WorkflowJsonValue>,
+): Record<string, WorkflowJsonValue> {
+  const program = step.callable.program;
+  const runtime = step.callable.runtime;
+  if (
+    program === undefined ||
+    (runtime !== RESIN_PROCESS_RUNTIME && runtime !== RESIN_PROGRAM_RUNTIME)
+  ) {
+    return args;
+  }
+  return Object.fromEntries(
+    Object.entries(args).filter(
+      ([name]) => name === program.argument || Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name),
+    ),
+  );
+}
+
 /** Why a resolved call is not the recorded one; undefined when it is. */
 function mismatch(step: WorkflowStep, request: RecordedCallRequest, recorded: RecordedCall) {
   const callable = step.callable;
@@ -151,7 +189,12 @@ function mismatch(step: WorkflowStep, request: RecordedCallRequest, recorded: Re
   ) {
     return "names a different callable than the recording";
   }
-  if (!deepEqual(request.arguments, recorded.arguments)) {
+  if (
+    !deepEqual(
+      comparedArguments(step, request.arguments),
+      comparedArguments(step, recorded.arguments),
+    )
+  ) {
     return "resolves to arguments the recording did not pass";
   }
   for (const dependency of recorded.hiddenDependencies) {
