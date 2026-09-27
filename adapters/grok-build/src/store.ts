@@ -210,6 +210,53 @@ function splitTurns(content: string): PromptTurn[] {
   return turns;
 }
 
+const TAIL_READ_BYTES = 64 * 1024;
+
+/**
+ * Whether the last prompt in an `updates.jsonl` is still running: a real user prompt appears after
+ * the last `turn_completed`. A headless (`grok -p`) run need not appear in `active_sessions.json`,
+ * so this is its live signal. Reads backwards from the end and stops at the first decisive line.
+ */
+export async function isGrokTurnOpen(updatesPath: string): Promise<boolean> {
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(updatesPath, "r");
+  } catch {
+    return false;
+  }
+  try {
+    let end = (await handle.stat()).size;
+    let carry = Buffer.alloc(0);
+    while (end > 0) {
+      const start = Math.max(0, end - TAIL_READ_BYTES);
+      const chunk = Buffer.alloc(end - start);
+      await handle.read(chunk, 0, chunk.length, start);
+      end = start;
+      let block = Buffer.concat([chunk, carry]);
+      let newline = block.lastIndexOf(0x0a, block.length - 1);
+      // The first (partial) line of this block is completed by the next read.
+      while (newline >= 0) {
+        const decision = turnDecision(block.subarray(newline + 1).toString("utf8"));
+        if (decision !== undefined) return decision;
+        block = block.subarray(0, newline);
+        newline = block.lastIndexOf(0x0a, block.length - 1);
+      }
+      carry = block;
+    }
+    return turnDecision(carry.toString("utf8")) ?? false;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+function turnDecision(line: string): boolean | undefined {
+  if (!line.trim()) return undefined;
+  const update = parseUpdate(line);
+  if (!update) return undefined;
+  if (update.sessionUpdate === "turn_completed") return false;
+  return userPromptKey(update) !== null ? true : undefined;
+}
+
 /**
  * Byte offset where a forked session's own history starts in its `updates.jsonl`.
  *

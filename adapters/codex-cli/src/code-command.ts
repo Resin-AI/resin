@@ -220,14 +220,48 @@ function memberName(node: unknown): { object: unknown; property: string } | unde
     : undefined;
 }
 
+const PURE_CALLBACK_METHODS: Record<string, true> = {
+  filter: true,
+  map: true,
+  forEach: true,
+  some: true,
+  every: true,
+  find: true,
+};
+const PURE_METHODS: Record<string, true> = {
+  ...PURE_CALLBACK_METHODS,
+  join: true,
+  slice: true,
+  includes: true,
+  startsWith: true,
+  endsWith: true,
+  trim: true,
+  toLowerCase: true,
+  toUpperCase: true,
+  test: true,
+};
+
+function mentionsTools(node: AstNode): boolean {
+  if (node.type === "Identifier" && node.name === "tools") return true;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "loc" || key.endsWith("Comments") || key === "extra") continue;
+    if (Array.isArray(value)) {
+      if (value.some((child) => isAstNode(child) && mentionsTools(child))) return true;
+    } else if (isAstNode(value) && mentionsTools(value)) return true;
+  }
+  return false;
+}
+
 /**
  * A cell whose every command call has settled once the cell reports `Script completed`, so none of
  * its commands can start afterwards. Each `tools.<name>(…)` call must be awaited directly, or be the
  * whole body of a synchronous arrow passed to `<array>.map` whose result `await
- * Promise.allSettled(…)` receives. The only functions allowed are such `map`/`forEach` callbacks on
- * a `const` bound to an array literal or to that awaited settlement; nothing can defer, alias
- * `tools`, construct objects, or call anything but `text`, `String`, `tools.*`,
- * `Promise.allSettled`, `map` and `forEach`. Anything else is not proven.
+ * Promise.allSettled(…)` receives. The only other functions allowed are such `map`/`forEach`
+ * callbacks on a `const` bound to an array literal or to that awaited settlement, and synchronous
+ * callbacks that never mention `tools` passed to a pure array method (`ALL_TOOLS.filter(t => …)`):
+ * with no `tools` reference, even a deferred callback cannot start a command. Nothing can defer,
+ * alias `tools`, or construct objects, and the only calls are `text`, `String`, `tools.*`,
+ * `Promise.allSettled`, and the pure methods below. Anything else is not proven.
  */
 export function settlesBeforeCompletion(source: string): boolean {
   if (source.length > 32_768) return false;
@@ -283,13 +317,26 @@ export function settlesBeforeCompletion(source: string): boolean {
       isCallbackReceiver(callee.object, callee.property)
     );
   };
+  /** A synchronous callback without any `tools` reference, passed alone to a pure array method. */
+  const isPureCallback = (arrow: AstNode, parent: AstNode | undefined): boolean => {
+    if (arrow.async || arrow.generator || parent?.type !== "CallExpression") return false;
+    const args = parent.arguments as unknown[];
+    const callee = memberName(parent.callee);
+    return (
+      args.length === 1 &&
+      args[0] === arrow &&
+      callee !== undefined &&
+      Object.hasOwn(PURE_CALLBACK_METHODS, callee.property) &&
+      !mentionsTools(arrow)
+    );
+  };
   let proven = true;
   const visit = (node: AstNode, parents: AstNode[]): void => {
     if (!proven) return;
     const parent = parents[parents.length - 1];
     switch (node.type) {
       case "ArrowFunctionExpression":
-        if (!isArrayCallback(node, parent)) proven = false;
+        if (!isArrayCallback(node, parent) && !isPureCallback(node, parent)) proven = false;
         break;
       case "FunctionDeclaration":
       case "FunctionExpression":
@@ -360,11 +407,13 @@ export function settlesBeforeCompletion(source: string): boolean {
         const member = memberName(callee);
         if (member !== undefined && isNamed(member.object, "tools")) break;
         if (isSettlement(node)) break;
-        if (member?.property === "map" || member?.property === "forEach") {
-          const [callback] = node.arguments as AstNode[];
+        if (member !== undefined && Object.hasOwn(PURE_METHODS, member.property)) {
+          const args = node.arguments as AstNode[];
           if (
-            callback?.type === "ArrowFunctionExpression" &&
-            (node.arguments as unknown[]).length === 1
+            args.every((arg) => arg.type !== "ArrowFunctionExpression") ||
+            (Object.hasOwn(PURE_CALLBACK_METHODS, member.property) &&
+              args.length === 1 &&
+              args[0]!.type === "ArrowFunctionExpression")
           )
             break;
         }

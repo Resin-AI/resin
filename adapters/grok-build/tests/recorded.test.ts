@@ -12,6 +12,7 @@ const MAIN = "11111111-1111-4111-8111-111111111111";
 const FORK = "22222222-2222-4222-8222-222222222222";
 const REWIND = "33333333-3333-4333-8333-333333333333";
 const CHILD = "01a0dfee-1b9f-7c33-9932-c0ca2035569f";
+const HEADLESS = "44444444-4444-4444-8444-444444444444";
 
 let home: string;
 let sessions: Map<string, HarnessSession>;
@@ -69,16 +70,14 @@ describe("recorded grok 1.0.13 sessions", () => {
     ]);
     const echo = calls.find((c) => c.toolName === "fixture__echo");
     expect(echo?.connection).toBe("fixture");
-    expect(echo?.input).toEqual({ text: "ping" });
+    expect(echo?.parameters).toEqual({ text: "ping" });
     expect(calls.find((c) => c.toolName === "resin__manage_tools")?.connection).toBe("resin");
     expect(calls.find((c) => c.toolName === "read_file")?.connection).toBeUndefined();
 
-    const echoResult = events.find(
-      (e) => e.type === "tool_result" && e.toolCallId === echo?.toolCallId,
-    );
+    const echoResult = events.find((e) => e.type === "tool_result" && e.callId === echo?.callId);
     expect(echoResult).toMatchObject({
       toolName: "fixture__echo",
-      output: "echo: ping",
+      result: "echo: ping",
       isError: false,
     });
 
@@ -95,9 +94,7 @@ describe("recorded grok 1.0.13 sessions", () => {
     // Every result follows its call.
     const order = new Map(events.map((e, i) => [e, i]));
     for (const call of calls) {
-      const result = events.find(
-        (e) => e.type === "tool_result" && e.toolCallId === call.toolCallId,
-      );
+      const result = events.find((e) => e.type === "tool_result" && e.callId === call.callId);
       expect(order.get(result as IntermediateSessionEvent)).toBeGreaterThan(order.get(call) ?? -1);
     }
   });
@@ -116,7 +113,11 @@ describe("recorded grok 1.0.13 sessions", () => {
       reasoningTokens: 995,
       costMicroUsd: 122858,
     });
-    expect(turns.every((t) => t.lifecycleType === "pause")).toBe(true);
+    // Both turns stopped with `end_turn`, which ends each prompt's execution.
+    expect(turns.map((t) => [t.lifecycleType, t.exitReason])).toEqual([
+      ["end", "end_turn"],
+      ["end", "end_turn"],
+    ]);
   });
 
   it("links the background subagent to its child session", async () => {
@@ -148,9 +149,9 @@ describe("recorded grok 1.0.13 sessions", () => {
       "/compact",
     ]);
     const parentCallIds = new Set(
-      parent.flatMap((e) => (e.type === "tool_call" ? [e.toolCallId] : [])),
+      parent.flatMap((e) => (e.type === "tool_call" ? [e.callId] : [])),
     );
-    const forkCalls = fork.flatMap((e) => (e.type === "tool_call" ? [e.toolCallId] : []));
+    const forkCalls = fork.flatMap((e) => (e.type === "tool_call" ? [e.callId] : []));
     expect(forkCalls).toHaveLength(2);
     expect(forkCalls.filter((id) => parentCallIds.has(id))).toEqual([]);
     expect(fork.find((e) => e.type === "compaction")).toMatchObject({
@@ -187,5 +188,28 @@ describe("recorded grok 1.0.13 sessions", () => {
     );
     expect(timeline).toEqual(["Create", "Append", "rewind->1", "Read"]);
     expect(events.find((e) => e.type === "branch_fork")).toMatchObject({ forkReason: "rewind" });
+  });
+
+  it("reports a headless run as active until its prompt completes", async () => {
+    const running = sessions.get(HEADLESS);
+    if (!running) throw new Error("missing headless session");
+    const updatesPath = running.transcriptPath;
+    const full = await fs.readFile(updatesPath, "utf8");
+    const [workspace] = await adapter.listWorkspaces();
+    if (!workspace) throw new Error("no workspace");
+    const status = async () =>
+      (await adapter.listSessions(workspace)).find((s) => s.sessionId === HEADLESS)?.status;
+    try {
+      // Mid-run: the last prompt has no `turn_completed` yet, and nothing lists it as active.
+      await fs.writeFile(
+        updatesPath,
+        full.slice(0, full.lastIndexOf('"turn_completed"')).replace(/[^\n]*$/, ""),
+      );
+      expect(await status()).toBe("active");
+      await fs.writeFile(updatesPath, full);
+      expect(await status()).toBe("completed");
+    } finally {
+      await fs.writeFile(updatesPath, full);
+    }
   });
 });

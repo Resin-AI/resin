@@ -4,6 +4,7 @@ import {
   type MessageContentPart,
   type ProviderReportedUsage,
   ProviderReportedUsageSchema,
+  RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   RESIN_CODEX_COMMAND_METADATA_KEY,
   type RedactionMeta,
 } from "@resin/contracts";
@@ -318,14 +319,62 @@ function withBaseFields<T extends IntermediateSessionEvent>(
   };
 }
 
+/** A `tool_use` seen earlier in the transcript, awaiting the `tool_result` that answers it. */
+export interface PendingClaudeToolCall {
+  toolName: string;
+  timestamp: string;
+  command?: string;
+  workingDirectory?: string;
+}
+
+/** Tool calls awaiting their results, keyed by Claude's `tool_use` id. */
+export type PendingClaudeToolCalls = Map<string, PendingClaudeToolCall>;
+
+/** Canonical call id for a Claude `tool_use` id (`toolu_…`), constrained to identifier characters. */
+export function claudeCallId(toolCallId: string): string {
+  const sanitized = toolCallId.replace(/[^a-zA-Z0-9_.:-]/g, "_");
+  const safe = /^[a-zA-Z0-9_-]/.test(sanitized) ? sanitized : `_${sanitized}`;
+  return safe.length > 0 ? safe.slice(0, 128) : "_";
+}
+
+/** Exit status of a Claude `Bash` result: Claude prefixes failed output with `Exit code N`. */
+function claudeBashExitCode(output: string, isError: boolean): number {
+  if (!isError) return 0;
+  const match = /^Exit code (\d+)/u.exec(output);
+  return match ? Number(match[1]) : 1;
+}
+
 /**
  * Decodes a single Claude Code JSONL or memory transcript line into canonical intermediate events.
+ * `pendingCalls` carries tool calls across lines so a result can name its tool, measure its
+ * duration, and report the shell command it completed.
  */
 export function decodeClaudeTranscriptLine(
   lineOrPayload: string | ClaudeTranscriptPayload,
   sessionId: string,
   sequenceNumber = 0,
   timestamp = new Date().toISOString(),
+  pendingCalls: PendingClaudeToolCalls = new Map(),
+): IntermediateSessionEvent[] {
+  const events = decodeLineEvents(lineOrPayload, sessionId, sequenceNumber, timestamp, pendingCalls);
+  // Every event of one line shares the line's sequence; its position within the line keeps each
+  // one distinct (a tool result and the command it completed would otherwise collide).
+  if (events.length > 1) {
+    events.forEach((event, stepIndex) => {
+      if (event.causalRef && event.causalRef.stepIndex === undefined) {
+        event.causalRef = { ...event.causalRef, stepIndex };
+      }
+    });
+  }
+  return events;
+}
+
+function decodeLineEvents(
+  lineOrPayload: string | ClaudeTranscriptPayload,
+  sessionId: string,
+  sequenceNumber: number,
+  timestamp: string,
+  pendingCalls: PendingClaudeToolCalls,
 ): IntermediateSessionEvent[] {
   const payload = parseRawPayload(lineOrPayload);
   if (!payload) {
@@ -353,6 +402,25 @@ export function decodeClaudeTranscriptLine(
     ""
   ).toLowerCase();
   const recordTime = asString(payload.timestamp) || timestamp;
+
+  // Claude appends `cost-state` as its process exits (again after each resume): the session ended.
+  if (rawType === "cost-state") {
+    return [
+      withBaseFields<IntermediateSessionLifecycleEvent>(
+        {
+          type: "session_lifecycle",
+          sessionId,
+          timestamp: recordTime,
+          lifecycleType: "end",
+          exitReason: "normal",
+          harnessName: "claude-code",
+        },
+        sessionId,
+        recordTime,
+        sequenceNumber,
+      ),
+    ];
+  }
 
   // 1. Session Lifecycle Events
   if (
@@ -642,15 +710,22 @@ export function decodeClaudeTranscriptLine(
               asString(block.id) ||
               asString(block.toolCallId) ||
               "call-unknown";
+            const pending = pendingCalls.get(toolCallId);
+            pendingCalls.delete(toolCallId);
             const toolName =
               asString(block.name) ||
               asString(block.tool_name) ||
               asString(block.toolName) ||
+              pending?.toolName ||
               "unknown";
             const rawOutput = block.content ?? block.output ?? "";
             const output =
               asString(rawOutput) ?? (rawOutput !== undefined ? JSON.stringify(rawOutput) : "");
             const isError = Boolean(block.is_error ?? block.isError ?? false);
+            const startedAt = Date.parse(pending?.timestamp ?? "");
+            const endedAt = Date.parse(recordTime);
+            const durationKnown = Number.isFinite(startedAt) && Number.isFinite(endedAt);
+            const durationMs = durationKnown ? Math.max(0, endedAt - startedAt) : 0;
 
             events.push(
               withBaseFields<IntermediateToolResultEvent>(
@@ -658,10 +733,15 @@ export function decodeClaudeTranscriptLine(
                   type: "tool_result",
                   sessionId,
                   timestamp: recordTime,
+                  callId: claudeCallId(toolCallId),
                   toolCallId,
                   toolName,
-                  output,
+                  result: output,
                   isError,
+                  ...(isError ? { error: output } : {}),
+                  executionDurationMs: durationMs,
+                  outputSizeBytes: Buffer.byteLength(output, "utf8"),
+                  ...(durationKnown ? {} : { metadata: { executionDurationUnknown: true } }),
                 },
                 sessionId,
                 recordTime,
@@ -669,6 +749,29 @@ export function decodeClaudeTranscriptLine(
               ),
             );
             toolResultIds.push(toolCallId);
+
+            if (pending?.command !== undefined) {
+              const shell = asObject(payload.toolUseResult);
+              events.push(
+                withBaseFields<IntermediateCommandExecEvent>(
+                  {
+                    type: "command_exec",
+                    sessionId,
+                    timestamp: recordTime,
+                    command: pending.command,
+                    workingDirectory: pending.workingDirectory,
+                    exitCode: claudeBashExitCode(output, isError),
+                    stdout: asString(shell?.stdout) ?? output,
+                    ...(asString(shell?.stderr) ? { stderr: asString(shell?.stderr) } : {}),
+                    durationMs,
+                    metadata: { toolCallId },
+                  },
+                  sessionId,
+                  recordTime,
+                  sequenceNumber,
+                ),
+              );
+            }
           } else if (blockType === "text" || asString(block.text) !== undefined) {
             const text = asString(block.text) || asString(block.content) || "";
             events.push(
@@ -690,9 +793,11 @@ export function decodeClaudeTranscriptLine(
         }
       }
       // A successful Edit/Write records what it applied; that edit, restated as a patch, is the
-      // step. It is identified by its tool call so the workflow recorder can place it.
+      // step. It is named after its tool call so the workflow recorder can place it, but is a call
+      // of its own (`apply_patch`), so it must not reuse the Edit/Write call's id.
       const edit = toolResultIds.length === 1 ? claudeFileEdit(payload.toolUseResult) : undefined;
-      const nativeId = toolResultIds[0];
+      const toolUseId = toolResultIds[0];
+      const nativeId = toolUseId === undefined ? undefined : `${toolUseId}-patch`;
       if (
         edit !== undefined &&
         nativeId !== undefined &&
@@ -801,7 +906,6 @@ export function decodeClaudeTranscriptLine(
             const toolName = asString(block.name) || asString(block.toolName) || "unknown";
             const rawInput = block.input;
             const inputRecord = asObject(rawInput) ?? {};
-            const rawInputStr = asString(rawInput) ?? JSON.stringify(rawInput ?? {});
 
             assistantTurnEvents.push(
               withBaseFields<IntermediateToolCallEvent>(
@@ -809,10 +913,10 @@ export function decodeClaudeTranscriptLine(
                   type: "tool_call",
                   sessionId,
                   timestamp: recordTime,
+                  callId: claudeCallId(toolCallId),
                   toolCallId,
                   toolName,
-                  input: inputRecord,
-                  rawInput: rawInputStr,
+                  parameters: inputRecord,
                 },
                 sessionId,
                 recordTime,
@@ -820,24 +924,19 @@ export function decodeClaudeTranscriptLine(
               ),
             );
 
-            // Specialization for Bash command tool
-            if (toolName.toLowerCase() === "bash" && asString(inputRecord.command)) {
-              assistantTurnEvents.push(
-                withBaseFields<IntermediateCommandExecEvent>(
-                  {
-                    type: "command_exec",
-                    sessionId,
-                    timestamp: recordTime,
-                    command: asString(inputRecord.command)!,
+            // The Bash command becomes a command_exec once its result reports how it exited.
+            const command =
+              toolName.toLowerCase() === "bash" ? asString(inputRecord.command) : undefined;
+            pendingCalls.set(toolCallId, {
+              toolName,
+              timestamp: recordTime,
+              ...(command
+                ? {
+                    command,
                     workingDirectory: asString(inputRecord.cwd) ?? asString(payload.cwd),
-                    metadata: { toolCallId },
-                  },
-                  sessionId,
-                  recordTime,
-                  sequenceNumber,
-                ),
-              );
-            }
+                  }
+                : {}),
+            });
           }
         }
       }
@@ -856,6 +955,15 @@ export function decodeClaudeTranscriptLine(
       }
       if (targetEvent) {
         targetEvent.providerUsage = providerUsage;
+      }
+    }
+
+    // Claude writes one content block per record, each repeating the message's stop reason; an
+    // `end_turn` on the final block is what closes the turn.
+    const stopReason = asString(asObject(payload.message)?.stop_reason);
+    if (stopReason) {
+      for (const event of assistantTurnEvents) {
+        event.metadata = { ...event.metadata, [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: stopReason };
       }
     }
 
@@ -1090,6 +1198,8 @@ export function decodeClaudeTranscriptLine(
 export class ClaudeRecordDecoder implements HarnessRecordDecoder {
   readonly harnessId = "claude-code";
   readonly decoderVersion = CLAUDE_ACCOUNTING_VERSION;
+  /** Tool calls awaiting results; Claude `tool_use` ids are unique across sessions. */
+  private readonly pendingCalls: PendingClaudeToolCalls = new Map();
 
   canDecode(record: RawHarnessRecord): boolean {
     if (!record) return false;
@@ -1115,7 +1225,13 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
 
     const rawPayload = record.rawPayload;
     if (String(rawPayload) === rawPayload) {
-      return decodeClaudeTranscriptLine(rawPayload, sessionId, sequenceNumber, timestamp);
+      return decodeClaudeTranscriptLine(
+        rawPayload,
+        sessionId,
+        sequenceNumber,
+        timestamp,
+        this.pendingCalls,
+      );
     }
     if (
       rawPayload !== null &&
@@ -1129,6 +1245,7 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
         sessionId,
         sequenceNumber,
         timestamp,
+        this.pendingCalls,
       );
     }
     return [];

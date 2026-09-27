@@ -1,0 +1,23 @@
+{
+  "info": {
+    "id": "44444444-4444-4444-8444-444444444444",
+    "cwd": "/workspace/project"
+  },
+  "session_summary": "Promote the `web` app to production, following RUNBOOK.md.",
+  "created_at": "2026-09-26T23:46:18.265256969Z",
+  "updated_at": "2026-09-26T23:46:38.763732668Z",
+  "num_messages": 56,
+  "num_chat_messages": 38,
+  "current_model_id": "grok-4.7",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/workspace/project/",
+  "request_id": "867a1f7b-72f5-4e3f-898c-589e6280ea51",
+  "grok_home": "/home/user/.grok",
+  "last_active_at": "2026-09-26T23:46:38.763732668Z",
+  "generated_title": "Promote the `web` app to production, following RUNBOOK.md.",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off",
+  "reasoning_effort": "high"
+}

@@ -21,6 +21,7 @@ const SUBAGENT = `${MAIN}/subagents/agent-a83a4563dddcae8c8.jsonl`;
 const WRITE = "b167cb7a-84a9-42dd-ad65-c356fdb2bc6c";
 const COMPACT = "e1932364-9a56-4cdc-8b03-da1b498bedb9";
 const ABORT = "01d6de19-d55c-4671-8141-54e696554d63";
+const PROMOTE = "8ea90a99-82b6-4c6c-b8cb-4fa5f5dee9dd";
 
 function decode(relativePath: string, sessionId = "session"): IntermediateSessionEvent[] {
   const decoder = new ClaudeRecordDecoder();
@@ -60,7 +61,7 @@ describe("recorded Claude Code 2.1.283 sessions", () => {
     expect(shell?.type === "command_exec" && shell.command).toBe("python3 calc.py");
     expect(shell?.type === "command_exec" && shell.workingDirectory).toBe("/workspace/project");
     const mcp = events.find(
-      (event) => event.type === "tool_result" && event.output.includes("RESIN"),
+      (event) => event.type === "tool_result" && String(event.result).includes("RESIN"),
     );
     expect(mcp).toBeDefined();
     const usage = events.flatMap((event) =>
@@ -108,7 +109,7 @@ describe("recorded Claude Code 2.1.283 sessions", () => {
       resinCodexCommandV1: {
         version: 1,
         kind: "file-change",
-        nativeId: "toolu_01NGRLJwTd2CKUGfGPEYjsjD",
+        nativeId: "toolu_01NGRLJwTd2CKUGfGPEYjsjD-patch",
       },
       claudeNative: { cwd: "/workspace/project" },
     });
@@ -195,6 +196,50 @@ describe("recorded Claude Code 2.1.283 sessions", () => {
           parentToolCallId: "toolu_01XZcqwLKdzwvtkV4SCgu2d4",
         },
       });
+    });
+  });
+});
+
+describe("recorded Claude Code 2.1.283 one-block-per-record session", () => {
+  it("pairs every tool call with its result under one call id and reports each shell command", () => {
+    const events = decode(`${PROMOTE}.jsonl`);
+    const calls = events.flatMap((event) => (event.type === "tool_call" ? [event] : []));
+    const results = events.flatMap((event) => (event.type === "tool_result" ? [event] : []));
+    expect(calls.map((call) => call.toolName)).toEqual(["Read", ...Array(9).fill("Bash"), "Read"]);
+    expect(results.map((result) => [result.callId, result.toolName])).toEqual(
+      calls.map((call) => [call.callId, call.toolName]),
+    );
+    expect(calls[1]?.parameters).toMatchObject({ command: "./deployctl --help" });
+    for (const result of results) {
+      expect(result.executionDurationMs).toBeGreaterThanOrEqual(0);
+      expect(result.metadata?.executionDurationUnknown).toBeUndefined();
+    }
+    const commands = events.flatMap((event) => (event.type === "command_exec" ? [event] : []));
+    expect(commands.map((command) => [command.command, command.exitCode])).toContainEqual([
+      "./deployctl promote dep-1cba2e --to production",
+      0,
+    ]);
+    expect(commands).toHaveLength(9);
+    expect(commands[0]?.stdout).toMatch(/^usage: deployctl/);
+    // Each tool result and the command it completed come from one record; they stay distinct.
+    const keys = events.map(
+      (event) => `${event.causalRef?.causalSequence}:${event.causalRef?.stepIndex ?? 0}`,
+    );
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("closes the turn with the assistant's end_turn and the session with the exit record", () => {
+    const events = decode(`${PROMOTE}.jsonl`);
+    const assistant = events.filter(
+      (event) => event.type === "message" && event.role === "assistant",
+    );
+    expect(assistant.at(-1)?.metadata?.stopReason).toBe("end_turn");
+    const toolCall = events.find((event) => event.type === "tool_call");
+    expect(toolCall?.metadata?.stopReason).toBe("tool_use");
+    expect(events.at(-1)).toMatchObject({
+      type: "session_lifecycle",
+      lifecycleType: "end",
+      exitReason: "normal",
     });
   });
 });
