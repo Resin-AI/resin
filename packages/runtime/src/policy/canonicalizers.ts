@@ -1374,8 +1374,7 @@ export function resolveCanonicalBinary(
   let sha256Hash: string | undefined;
   if (options.computeDigest) {
     try {
-      const content = fs.readFileSync(realPath);
-      sha256Hash = crypto.createHash("sha256").update(content).digest("hex");
+      sha256Hash = executableSha256(realPath);
     } catch {
       // ignore
     }
@@ -1392,6 +1391,60 @@ export function resolveCanonicalBinary(
     gid: stat.gid,
     sha256: sha256Hash,
   };
+}
+
+/** File identity that changes whenever a binary is replaced or modified in place. */
+interface FileVersion {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+/**
+ * A version whose ctime is this recent may still be written within the same timestamp tick
+ * without changing any stat field, so its digest is never cached (git's "racy clean" rule).
+ */
+const RACY_WINDOW_NS = 2_000_000_000n;
+
+const digestCache = new Map<string, FileVersion & { sha256: string }>();
+
+function fileVersion(filePath: string): FileVersion {
+  const stat = fs.statSync(filePath, { bigint: true });
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+  };
+}
+
+function sameVersion(a: FileVersion, b: FileVersion): boolean {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.size === b.size &&
+    a.mtimeNs === b.mtimeNs &&
+    a.ctimeNs === b.ctimeNs
+  );
+}
+
+/**
+ * SHA-256 of an executable, reusing the digest computed for the same file version. Any
+ * replacement (new inode or device) or in-place change (size, mtime or ctime) re-hashes.
+ */
+export function executableSha256(realPath: string): string {
+  const before = fileVersion(realPath);
+  const cached = digestCache.get(realPath);
+  if (cached !== undefined && sameVersion(cached, before)) return cached.sha256;
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(realPath)).digest("hex");
+  const after = fileVersion(realPath);
+  const settled = BigInt(Date.now()) * 1_000_000n - after.ctimeNs > RACY_WINDOW_NS;
+  if (sameVersion(before, after) && settled) digestCache.set(realPath, { ...after, sha256 });
+  else digestCache.delete(realPath);
+  return sha256;
 }
 
 /**
@@ -1456,8 +1509,7 @@ export function verifyExecutableIdentity(
 
   if (expected.sha256) {
     try {
-      const content = fs.readFileSync(currentRealPath);
-      const hash = crypto.createHash("sha256").update(content).digest("hex");
+      const hash = executableSha256(currentRealPath);
       if (hash !== expected.sha256) {
         return {
           valid: false,

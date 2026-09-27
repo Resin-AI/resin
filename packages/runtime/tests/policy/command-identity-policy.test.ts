@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CapabilityEnvelope, CapabilityManifest } from "@resin/contracts";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   PolicyCanonicalizationError,
   canonicalizeCommand,
@@ -181,6 +181,66 @@ describe("Command Identity Policy & Verification", () => {
       const verification = verifyExecutableIdentity(identity);
       expect(verification.valid).toBe(false);
       expect(verification.reason).toContain("does not exist");
+    });
+  });
+
+  describe("executable digest reuse", () => {
+    // Digests of files changed in the last 2 s are never cached; move the clock past that window.
+    const settle = () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 10_000);
+    };
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it("reuses the digest of an unchanged binary instead of reading it again", () => {
+      const targetFile = path.join(tempDir, "cached_bin");
+      fs.writeFileSync(targetFile, "#!/bin/sh\necho cached", { mode: 0o755 });
+      settle();
+      const reads = vi.spyOn(fs, "readFileSync");
+
+      const identity = resolveCanonicalBinary(targetFile, { computeDigest: true });
+      expect(verifyExecutableIdentity(identity).valid).toBe(true);
+      expect(verifyExecutableIdentity(identity).valid).toBe(true);
+      expect(reads.mock.calls.filter(([file]) => file === identity.realPath)).toHaveLength(1);
+    });
+
+    it("re-hashes and rejects a cached binary modified in place with its mtime restored", () => {
+      const targetFile = path.join(tempDir, "same_size_bin");
+      fs.writeFileSync(targetFile, "#!/bin/sh\necho original", { mode: 0o755 });
+      const { mtime } = fs.statSync(targetFile);
+      settle();
+      const identity = resolveCanonicalBinary(targetFile, { computeDigest: true });
+      expect(verifyExecutableIdentity(identity).valid).toBe(true);
+
+      // Same size, same inode, same mtime: only ctime records the change.
+      fs.writeFileSync(targetFile, "#!/bin/sh\necho hijacked");
+      fs.utimesSync(targetFile, mtime, mtime);
+
+      const verification = verifyExecutableIdentity(identity);
+      expect(verification.valid).toBe(false);
+      expect(verification.reason).toContain("SHA256 digest mismatch");
+    });
+
+    it("re-hashes and rejects a cached binary replaced by a new file at the same path", () => {
+      const targetFile = path.join(tempDir, "replaced_cached_bin");
+      fs.writeFileSync(targetFile, "#!/bin/sh\necho original", { mode: 0o755 });
+      settle();
+      const identity = resolveCanonicalBinary(targetFile, { computeDigest: true });
+      expect(verifyExecutableIdentity(identity).valid).toBe(true);
+
+      fs.unlinkSync(targetFile);
+      fs.writeFileSync(targetFile, "#!/bin/sh\necho hijackd", { mode: 0o755 });
+      const reads = vi.spyOn(fs, "readFileSync");
+
+      // Without the inode check, the digest alone must still catch the replacement.
+      const verification = verifyExecutableIdentity({ ...identity, inode: undefined });
+      expect(verification.valid).toBe(false);
+      expect(verification.reason).toContain("SHA256 digest mismatch");
+      expect(reads.mock.calls.filter(([file]) => file === identity.realPath)).toHaveLength(1);
     });
   });
 
