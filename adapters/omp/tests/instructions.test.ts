@@ -2,6 +2,7 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { ompHarness } from "../src/harness.js";
 import {
   applyOmpCatalogInstructions,
   buildOmpCatalogInstructionsBlock,
@@ -10,7 +11,6 @@ import {
   resolveOmpGuidancePath,
   syncOmpCatalogInstructions,
 } from "../src/instructions.js";
-import { ompHarness } from "../src/harness.js";
 
 describe("renderOmpInvocationSnippet", () => {
   it("renders xd:// invocation and docs paths with underscored server name", () => {
