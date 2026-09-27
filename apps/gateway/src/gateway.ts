@@ -588,8 +588,14 @@ export class LocalMcpGateway {
       }
     }
     // The catalog may have changed while this harness was not connected, which raises no change
-    // event; render its learned-tool instructions from the catalog as it is now.
-    void this.refreshCoordinator?.syncConnectionInstructions(connection).catch((error: unknown) => {
+    // event; render its learned-tool instructions from the catalog once it is known. Before the
+    // cloud answers, an empty registry means "not loaded yet", so nothing is written until then.
+    void (async () => {
+      if (!this.refreshCoordinator) return;
+      await this.cloudRuntime?.whenCatalogLoaded?.();
+      if (connection.isClosed || this.isClosed) return;
+      await this.refreshCoordinator.syncConnectionInstructions(connection);
+    })().catch((error: unknown) => {
       this.logger?.(
         "warn",
         `Learned-tool instructions sync failed: ${error instanceof Error ? error.message : String(error)}`,

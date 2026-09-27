@@ -257,7 +257,8 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
 
       const second = await connectOmp(root, router);
       try {
-        // Let the connect-time sync run to completion before checking it wrote nothing.
+        // An unchanged block leaves no observable signal to await, so give the connect-time sync a
+        // real moment to finish before checking it wrote nothing.
         await new Promise((resolve) => setTimeout(resolve, 200));
         expect(fs.statSync(appendSystem).mtimeMs).toBe(before);
         expect(fs.readFileSync(appendSystem, "utf8")).toBe(contentBefore);

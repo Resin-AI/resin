@@ -194,6 +194,11 @@ export class CloudCatalogSyncCoordinator {
    * left nothing to retry. An unchanged catalog skips reconciliation while this still matches.
    */
   private settledReconcile?: SettledReconcile;
+  /**
+   * Settles once the cloud has answered for the bound workspace's catalog. Until then an empty
+   * registry means "not loaded yet", not "no tools".
+   */
+  private catalogLoaded = Promise.withResolvers<void>();
 
   constructor(options: CloudCatalogSyncOptions) {
     this.options = options;
@@ -241,6 +246,9 @@ export class CloudCatalogSyncCoordinator {
    */
   bindWorkspace(binding: WorkspaceSyncBinding): void {
     this.settledReconcile = undefined;
+    if (binding.workspaceId !== undefined && binding.workspaceId !== this.workspaceId) {
+      this.catalogLoaded = Promise.withResolvers<void>();
+    }
     if (binding.workspaceId !== undefined) {
       this.workspaceId = binding.workspaceId;
     }
@@ -262,6 +270,11 @@ export class CloudCatalogSyncCoordinator {
    */
   async sync(options: { fresh?: boolean } = {}): Promise<CatalogSnapshotResponse> {
     return this.runSync(true, options.fresh === true);
+  }
+
+  /** Resolves once the cloud has answered for the bound workspace's catalog; see `catalogLoaded`. */
+  whenCatalogLoaded(): Promise<void> {
+    return this.catalogLoaded.promise;
   }
 
   setCatalogSyncEnabled(enabled: boolean): void {
@@ -329,6 +342,8 @@ export class CloudCatalogSyncCoordinator {
           } catch (error) {
             this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
           }
+          // The cloud confirmed this account has no tool access: the catalog is known to be empty.
+          this.catalogLoaded.resolve();
           return this.emptySnapshot();
         }
         if (confirmationRejected) {
@@ -405,6 +420,7 @@ export class CloudCatalogSyncCoordinator {
         await this.reconcileSnapshot(snapshot);
       }
 
+      this.catalogLoaded.resolve();
       this.options.onSyncSuccess?.(snapshot);
 
       return snapshot;
