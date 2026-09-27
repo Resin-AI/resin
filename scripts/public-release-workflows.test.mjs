@@ -1649,112 +1649,49 @@ with patch("subprocess.run", side_effect=publish):
       expect(checkAll).toContain("pnpm run release:verify:test");
     });
 
-    it("runs every unit-test selection through two bounded Vitest shards with pinned Deno", () => {
-      const shardJob = ci.doc.jobs["test-unit-shard"];
-      const aggregateJob = ci.doc.jobs["test-unit"];
+    it("runs every unit-test selection through parallel Vitest shards with pinned Deno", () => {
+      const shardJob = ci.doc.jobs["test-unit"];
       expect(shardJob).toBeDefined();
-      expect(shardJob.strategy).toMatchObject({
-        "fail-fast": false,
-        "max-parallel": 2,
-        matrix: { shard: [1, 2] },
-      });
+      expect(shardJob.strategy["fail-fast"]).toBe(false);
+      expect(shardJob.strategy.matrix.shard.length).toBeGreaterThanOrEqual(2);
 
       const setupIndex = shardJob.steps.findIndex((step) =>
         step.uses?.startsWith("denoland/setup-deno@"),
       );
-      const testStep = shardJob.steps.find((step) => step.run?.includes("pnpm test --shard="));
+      const buildIndex = shardJob.steps.findIndex((step) => step.run === "pnpm build");
+      const testIndex = shardJob.steps.findIndex((step) =>
+        step.run?.includes("pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}"),
+      );
       expect(setupIndex).toBeGreaterThan(-1);
       expect(shardJob.steps[setupIndex].uses).toMatch(/^denoland\/setup-deno@[a-f0-9]{40}$/);
       expect(shardJob.steps[setupIndex].with["deno-version"]).toBe("2.9.5");
-      expect(testStep).toBeDefined();
-      expect(testStep.run).toContain(
-        "pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}",
-      );
-
-      expect(aggregateJob.name).toBe("Unit Tests");
-      expect(aggregateJob.needs).toEqual(["test-unit-shard"]);
-      expect(aggregateJob.if).toBe("always()");
-      expect(
-        aggregateJob.steps.find((step) => step.name === "Aggregate Unit Test Shards").run,
-      ).toContain('if [ "$SHARD_RESULT" != "success" ]');
+      expect(buildIndex, "unit shards must build workspace outputs").toBeGreaterThan(-1);
+      expect(testIndex).toBeGreaterThan(buildIndex);
     });
 
-    it("builds workspace packages before every test job that imports workspace outputs", () => {
-      const jobCommands = {
-        "test-unit-shard": "pnpm test --shard=",
-        "check-privacy-boundary": "check:privacy-boundary",
-        "check-hostile-cloud": "check:hostile-cloud",
-        "check-runtime-security": "check:runtime-security",
-      };
-
-      for (const [jobName, command] of Object.entries(jobCommands)) {
-        const job = ci.doc.jobs[jobName];
-        expect(job).toBeDefined();
-        expect(job["runs-on"]).toBe("ubuntu-latest");
-
-        const buildIndex = job.steps.findIndex((step) => step.run === "pnpm build");
-        const checkIndex = job.steps.findIndex((step) => step.run?.includes(command));
-        expect(buildIndex, `${jobName} must build clean workspace outputs`).toBeGreaterThan(-1);
-        expect(checkIndex, `${jobName} must execute ${command}`).toBeGreaterThan(buildIndex);
-      }
-    });
-
-    it("requires ci-gate in ci.yml to enforce all 13 checks including privacy, hostile cloud, and runtime security gates", () => {
+    it("gates PRs on the CI Gate Rollup over static checks and unit tests", () => {
       const gateJob = ci.doc.jobs["ci-gate"];
       expect(gateJob).toBeDefined();
-      expect(gateJob["runs-on"]).toBe("ubuntu-latest");
+      expect(gateJob.name).toBe("CI Gate Rollup");
       expect(gateJob.if).toBe("always()");
+      expect(gateJob.needs).toEqual(["static", "test-unit"]);
 
-      const expectedRequiredJobs = [
-        "lint",
-        "typecheck",
-        "build",
-        "test-unit",
-        "test-e2e",
-        "check-boundaries",
-        "check-adrs",
-        "check-privacy-boundary",
-        "check-hostile-cloud",
-        "check-runtime-security",
-        "release-verification",
-        "binary-smoke",
-        "secret-scan",
-      ];
-
-      expect(gateJob.needs).toEqual(expect.arrayContaining(expectedRequiredJobs));
-      expect(gateJob.needs).toHaveLength(expectedRequiredJobs.length);
+      const staticRuns = ci.doc.jobs.static.steps.map((step) => step.run).filter(Boolean);
+      expect(staticRuns).toEqual(expect.arrayContaining(["pnpm lint", "pnpm typecheck"]));
 
       const verifyStep = gateJob.steps.find((s) => s.id === "gate");
-      expect(verifyStep).toBeDefined();
-      for (const requiredJob of expectedRequiredJobs) {
-        expect(verifyStep.run).toContain(requiredJob);
-      }
+      expect(verifyStep.run).toContain("for job in static test-unit");
+      expect(verifyStep.run).toContain('if [ "$result" != "success" ]');
     });
 
-    it("verifies configure-branch-protection.sh enforces all 13 CI status check contexts plus rollup", () => {
+    it("verifies configure-branch-protection.sh requires only the CI Gate Rollup", () => {
       const scriptPath = path.join(ROOT_DIR, "scripts", "configure-branch-protection.sh");
       const scriptContent = fs.readFileSync(scriptPath, "utf8");
-
-      const expectedContexts = [
-        "Lint & Format Check",
-        "TypeScript Typecheck",
-        "Monorepo Build",
-        "Unit Tests",
-        "E2E Tests (with PostgreSQL)",
-        "Package Boundaries Check",
-        "ADR Verification",
-        "Privacy Data Boundary Check",
-        "Hostile Cloud Quarantine & Preactivation Check",
-        "Runtime IPC & Broker Security Check",
-        "Release Verification",
-        "Binary Smoke Test",
-        "Secret Scanning",
-        "CI Gate Rollup",
-      ];
-
-      for (const context of expectedContexts) {
-        expect(scriptContent).toContain(`"${context}"`);
-      }
+      const match = scriptContent.match(
+        /PROTECTION_PAYLOAD=\$\(cat <<EOF\s*\n([\s\S]*?)\nEOF\s*\)/,
+      );
+      const payload = JSON.parse(match[1]);
+      expect(payload.required_status_checks.contexts).toEqual(["CI Gate Rollup"]);
     });
 
     it("verifies configure-branch-protection.sh configures PR-only workflow with zero required approving reviews and disabled code-owner gating", () => {

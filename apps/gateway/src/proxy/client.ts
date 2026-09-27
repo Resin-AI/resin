@@ -11,9 +11,12 @@ import {
 import {
   type AccountToolAccessResponse,
   AccountToolAccessResponseSchema,
+  CATALOG_CAPABILITIES_HEADER,
+  CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
   type CatalogSnapshotRequest,
   type CatalogSnapshotResponse,
   CatalogSnapshotResponseSchema,
+  CatalogSnapshotResultSchema,
   PROTOCOL_VERSION,
   type ProjectRegistrationRequest,
   type ProjectRegistrationResponse,
@@ -21,6 +24,7 @@ import {
   type ProtocolClient,
   ProtocolError,
   ValidationError,
+  isCatalogSnapshotUnchanged,
   validateProjectRegistrationRequest,
   validateProjectRegistrationResponse,
 } from "@resin/protocol";
@@ -86,6 +90,90 @@ function isProjectRegistrarCarrier(
 ): client is ProtocolClient & ProjectRegistrarCarrier {
   if (!client || !(client instanceof Object)) return false;
   return "registerProject" in client && client.registerProject instanceof Function;
+}
+
+export interface CatalogSnapshotFetchOptions {
+  currentVersion?: string;
+  filterScopes?: string[];
+  signal?: AbortSignal;
+}
+
+/**
+ * Outcome of one catalog snapshot request: a verified full snapshot, or the cloud's statement
+ * that `snapshotVersion` (the version the request named) is still current.
+ */
+export type CatalogSnapshotFetchResult =
+  | { kind: "snapshot"; snapshot: CatalogSnapshotResponse }
+  | { kind: "unchanged"; snapshotVersion: string };
+
+function invalidSnapshotSchema(error: z.ZodError): ValidationError {
+  return new ValidationError("Invalid catalog snapshot response schema from cloud", {
+    details: {
+      issues: error.issues.map((i) => ({
+        code: i.code,
+        message: i.message,
+        path: i.path.map((p) => String(p)),
+      })),
+    },
+  });
+}
+
+/**
+ * Validates an untrusted catalog snapshot body: protocol schema, canonical checksum over tools
+ * and deployments, and each tool manifest's schema and declared digest.
+ */
+export function verifyCatalogSnapshot(raw: unknown): CatalogSnapshotResponse {
+  const parsed = CatalogSnapshotResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw invalidSnapshotSchema(parsed.error);
+  }
+  return verifyCatalogSnapshotContent(parsed.data);
+}
+
+/** Checksum and manifest-digest verification of a schema-valid snapshot. */
+function verifyCatalogSnapshotContent(response: CatalogSnapshotResponse): CatalogSnapshotResponse {
+  const computedChecksum = hashCanonicalContent({
+    tools: response.tools,
+    activeDeployments: response.activeDeployments,
+  });
+  if (normalizeSha256(computedChecksum) !== normalizeSha256(response.checksum)) {
+    throw new ValidationError(
+      "Catalog snapshot checksum mismatch: payload may be tampered or corrupted",
+      {
+        details: {
+          expected: response.checksum,
+          computed: computedChecksum,
+        },
+      },
+    );
+  }
+
+  for (const tool of response.tools) {
+    const manifestResult = ToolManifestSchema.safeParse(tool);
+    if (!manifestResult.success) {
+      throw new ValidationError(`Invalid tool manifest schema for tool '${tool.id || tool.name}'`, {
+        details: {
+          issues: manifestResult.error.issues.map((i) => ({
+            code: i.code,
+            message: i.message,
+            path: i.path.map((p) => String(p)),
+          })),
+          toolId: tool.id,
+        },
+      });
+    }
+
+    const manifest = manifestResult.data;
+    if (manifest.digest) {
+      const computedDigest = computeManifestDigest(manifest);
+      if (normalizeSha256(manifest.digest) !== normalizeSha256(computedDigest)) {
+        throw new ValidationError(`Manifest digest verification failed for tool '${manifest.id}'`, {
+          details: { declaredDigest: manifest.digest, computedDigest },
+        });
+      }
+    }
+  }
+  return response;
 }
 
 const RawErrorPayloadSchema = z.record(z.union([z.string(), z.number(), z.boolean(), z.null()]));
@@ -225,14 +313,28 @@ export class CloudCatalogClient {
 
   /**
    * Fetches a scoped cloud catalog snapshot, validating schema, canonical checksum, and manifest digests.
+   * Never advertises the unchanged capability, so the result is always a full snapshot.
    */
   async fetchCatalogSnapshot(
-    options: {
-      currentVersion?: string;
-      filterScopes?: string[];
-      signal?: AbortSignal;
-    } = {},
+    options: CatalogSnapshotFetchOptions = {},
   ): Promise<CatalogSnapshotResponse> {
+    const result = await this.fetchCatalogSnapshotResult({ ...options, acceptUnchanged: false });
+    if (result.kind !== "snapshot") {
+      throw new ValidationError("Cloud answered 'unchanged' to a request that did not accept it");
+    }
+    return result.snapshot;
+  }
+
+  /**
+   * Fetches the catalog snapshot, or learns that `currentVersion` is still current.
+   *
+   * With `acceptUnchanged` and a `currentVersion`, the HTTP transport advertises
+   * `snapshot-unchanged-v1`; the cloud may then reply with the unchanged marker instead of the
+   * full body. The caller owns checking that the marker names the version it holds.
+   */
+  async fetchCatalogSnapshotResult(
+    options: CatalogSnapshotFetchOptions & { acceptUnchanged?: boolean } = {},
+  ): Promise<CatalogSnapshotFetchResult> {
     // 1. Check paused state
     if (this.isPaused) {
       throw new ProtocolError(
@@ -284,80 +386,33 @@ export class CloudCatalogClient {
         currentVersion: options.currentVersion,
         filterScopes: options.filterScopes,
       };
+      const advertiseUnchanged =
+        options.acceptUnchanged === true && Boolean(options.currentVersion);
 
-      const rawResponse = await this.executeFetch(request, options.signal);
+      const rawResponse = await this.executeFetch(request, options.signal, advertiseUnchanged);
 
-      // 3. Validate response schema with protocol parser
-      const parsed = CatalogSnapshotResponseSchema.safeParse(rawResponse);
-      if (!parsed.success) {
-        throw new ValidationError("Invalid catalog snapshot response schema from cloud", {
-          details: {
-            issues: parsed.error.issues.map((i) => ({
-              code: i.code,
-              message: i.message,
-              path: i.path.map((p) => String(p)),
-            })),
-          },
-        });
-      }
-      const response = parsed.data;
-
-      // 4. Verify canonical checksum
-      const computedChecksum = hashCanonicalContent({
-        tools: response.tools,
-        activeDeployments: response.activeDeployments,
-      });
-
-      if (normalizeSha256(computedChecksum) !== normalizeSha256(response.checksum)) {
-        throw new ValidationError(
-          "Catalog snapshot checksum mismatch: payload may be tampered or corrupted",
-          {
-            details: {
-              expected: response.checksum,
-              computed: computedChecksum,
-            },
-          },
-        );
-      }
-
-      // 5. Validate individual ToolManifests and digests
-      for (const tool of response.tools) {
-        const manifestResult = ToolManifestSchema.safeParse(tool);
-        if (!manifestResult.success) {
-          throw new ValidationError(
-            `Invalid tool manifest schema for tool '${tool.id || tool.name}'`,
-            {
-              details: {
-                issues: manifestResult.error.issues.map((i) => ({
-                  code: i.code,
-                  message: i.message,
-                  path: i.path.map((p) => String(p)),
-                })),
-                toolId: tool.id,
-              },
-            },
-          );
+      // 4. Parse the body. The unchanged marker is only valid when this request advertised it.
+      let response: CatalogSnapshotResponse;
+      if (advertiseUnchanged) {
+        const parsed = CatalogSnapshotResultSchema.safeParse(rawResponse);
+        if (!parsed.success) {
+          throw invalidSnapshotSchema(parsed.error);
         }
-
-        // Verify manifest digest
-        const manifest = manifestResult.data;
-        if (manifest.digest) {
-          const computedDigest = computeManifestDigest(manifest);
-          if (normalizeSha256(manifest.digest) !== normalizeSha256(computedDigest)) {
-            throw new ValidationError(
-              `Manifest digest verification failed for tool '${manifest.id}'`,
-              {
-                details: { declaredDigest: manifest.digest, computedDigest },
-              },
-            );
-          }
+        if (isCatalogSnapshotUnchanged(parsed.data)) {
+          this.circuitBreaker.recordSuccess();
+          return { kind: "unchanged", snapshotVersion: parsed.data.snapshotVersion };
         }
+        // 5. Verify canonical checksum and manifest digests
+        response = verifyCatalogSnapshotContent(parsed.data);
+      } else {
+        // 5. Validate schema, canonical checksum, and manifest digests
+        response = verifyCatalogSnapshot(rawResponse);
       }
 
       // 6. Record success in circuit breaker
       this.circuitBreaker.recordSuccess();
 
-      return response;
+      return { kind: "snapshot", snapshot: response };
     } catch (error) {
       // Record failure in circuit breaker
       this.circuitBreaker.recordFailure(error instanceof Error ? error : new Error(String(error)));
@@ -367,8 +422,9 @@ export class CloudCatalogClient {
 
   private async executeFetch(
     request: CatalogSnapshotRequest,
-    signal?: AbortSignal,
-  ): Promise<CatalogSnapshotResponse> {
+    signal: AbortSignal | undefined,
+    advertiseUnchanged: boolean,
+  ): Promise<unknown> {
     if (this.isPaused) {
       throw new ProtocolError(
         "terminal",
@@ -442,6 +498,9 @@ export class CloudCatalogClient {
           if (targetDeviceId) {
             headers["x-device-id"] = targetDeviceId;
           }
+        }
+        if (advertiseUnchanged) {
+          headers[CATALOG_CAPABILITIES_HEADER] = CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY;
         }
         return headers;
       };
@@ -529,7 +588,8 @@ export class CloudCatalogClient {
         });
       }
 
-      return CatalogSnapshotResponseSchema.parse(await response.json());
+      const body: unknown = await response.json();
+      return body;
     }
 
     throw new Error(

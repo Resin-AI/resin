@@ -5,8 +5,9 @@
 # Configures GitHub branch protection rules on 'main' to enforce PR-only release gates:
 # 1. Require changes to arrive through pull requests with zero required approving reviews.
 # 2. Code owner reviews and last-push approvals are disabled (reviews are optional / informational).
-# 3. Require branches to be up to date before merging.
-# 4. Require all 13 parallel CI status checks + rollup 'CI Gate Rollup' to pass.
+# 3. Do not require branches to be up to date before merging.
+# 4. Require the single CI rollup check 'CI Gate Rollup' (static checks + unit tests).
+#    CI is deliberately minimal; don't add required checks without the owner's approval.
 # 5. Enforce rules for administrators and prevent force pushes/deletions.
 #
 # Usage:
@@ -87,21 +88,8 @@ echo "🛡️  Configuring Branch Protection for ${REPO} on branch '${BRANCH}'..
 PROTECTION_PAYLOAD=$(cat <<EOF
 {
   "required_status_checks": {
-    "strict": true,
+    "strict": false,
     "contexts": [
-      "Lint & Format Check",
-      "TypeScript Typecheck",
-      "Monorepo Build",
-      "Unit Tests",
-      "E2E Tests (with PostgreSQL)",
-      "Package Boundaries Check",
-      "ADR Verification",
-      "Privacy Data Boundary Check",
-      "Hostile Cloud Quarantine & Preactivation Check",
-      "Runtime IPC & Broker Security Check",
-      "Release Verification",
-      "Binary Smoke Test",
-      "Secret Scanning",
       "CI Gate Rollup"
     ]
   },

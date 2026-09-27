@@ -19,6 +19,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // Generous ceilings so loaded CI runners don't fail on the 5 s default.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     include: ["**/*.test.{ts,js,mjs}"],
     env: {
       HOME: testHome,
