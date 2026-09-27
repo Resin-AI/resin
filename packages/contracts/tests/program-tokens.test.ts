@@ -194,6 +194,21 @@ describe("tokenizeProgram", () => {
     expect(substitutions.find((token) => token.raw === "`whoami`")?.bindable).toBe(false);
   });
 
+  it("keeps the source after an interpreter's -c/-e opaque, but a data command's argument a value", () => {
+    const code = (source: string, raw: string) =>
+      tokenizeProgram("shell", source).find((token) => token.raw === raw)?.bindable;
+    expect(code("bash -c 'make release'", "'make release'")).toBe(false);
+    expect(code("sudo -u ci /usr/bin/python3 -c 'print(1)'", "'print(1)'")).toBe(false);
+    expect(code("timeout 5 perl -e 'print 1'", "'print 1'")).toBe(false);
+    expect(code("sed -e 's/a/b/' notes.txt", "'s/a/b/'")).toBe(false);
+    const check = "sha256sum -c alpha-1.4.2.tar.gz.sha256 beta-0.9.0.tar.gz.sha256";
+    expect(code(check, "alpha-1.4.2.tar.gz.sha256")).toBe(true);
+    expect(code(check, "beta-0.9.0.tar.gz.sha256")).toBe(true);
+    expect(code("grep -e alpha notes.txt", "alpha")).toBe(true);
+    // A command after a separator is its own command: the earlier shell does not reach it.
+    expect(code("bash build.sh && sha256sum -c sums.txt", "sums.txt")).toBe(true);
+  });
+
   it("binds only static arguments in complete ordinary command substitutions", () => {
     const source = "D=$(printf '%s' '/old/path') && A=$(printf '%s' '/old/path')";
     const tokens = tokenizeProgram("shell", source);
