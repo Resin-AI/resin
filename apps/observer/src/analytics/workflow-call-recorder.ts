@@ -134,6 +134,21 @@ const KNOWN_SHELL_COMMANDS: readonly {
       event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call",
   },
   {
+    // Codex's direct terminal tool; the decoder marks only its own native call, never an MCP tool.
+    argument: "cmd",
+    proves: (event) => {
+      const native = event.metadata?.codexNative;
+      return (
+        event.toolName === "exec_command" &&
+        event.connection === undefined &&
+        typeof native === "object" &&
+        native !== null &&
+        "sourceInterface" in native &&
+        native.sourceInterface === "codex-exec-command"
+      );
+    },
+  },
+  {
     argument: "command",
     proves: (event) =>
       event.toolName === "bash" &&
