@@ -21,9 +21,6 @@ permissions:
   contents: read
 
 env:
-  # Turbo's local cache, kept outside the checkout (so lint never sees it) and
-  # persisted between runs with actions/cache.
-  TURBO_CACHE_DIR: ${{ github.workspace }}/../turbo-cache
   TURBO_TELEMETRY_DISABLED: "1"
 
 jobs:
@@ -62,6 +59,11 @@ jobs:
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
+
+      # Turbo's local cache, kept outside the checkout (so lint never sees it) and
+      # persisted between runs with actions/cache.
+      - name: Locate turbo cache
+        run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
       - name: Restore turbo cache
         uses: actions/cache@v4
@@ -139,6 +141,11 @@ jobs:
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
+
+      # Turbo's local cache, kept outside the checkout (so lint never sees it) and
+      # persisted between runs with actions/cache.
+      - name: Locate turbo cache
+        run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
       - name: Restore turbo cache
         uses: actions/cache@v4
