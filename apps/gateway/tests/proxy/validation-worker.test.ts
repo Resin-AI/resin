@@ -261,6 +261,7 @@ describe("WorkflowValidationWorker", () => {
       refused: 0,
       rejected: 0,
       deferred: 0,
+      skipped: false,
     });
     expect(calls).toHaveLength(2);
     const post = calls[1] as RecordedCall;
@@ -361,6 +362,7 @@ describe("WorkflowValidationWorker", () => {
       refused: 1,
       rejected: 0,
       deferred: 0,
+      skipped: false,
     });
     expect(validate).not.toHaveBeenCalled();
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
@@ -446,6 +448,7 @@ describe("WorkflowValidationWorker", () => {
         refused: 0,
         rejected: 1,
         deferred: 0,
+        skipped: false,
       });
       expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(1);
       expect(logs.some((message) => message.includes(`(${outcome}`))).toBe(true);
@@ -479,6 +482,7 @@ describe("WorkflowValidationWorker", () => {
       refused: 0,
       rejected: 0,
       deferred: 1,
+      skipped: false,
     });
     expect(second.answered).toBe(1);
     expect(posts).toBe(2);

@@ -26,6 +26,7 @@ import {
   ControlPlaneRuntimeModule,
   FileControlPlaneApplyAdapter,
 } from "../control-plane.js";
+import { registeredDaemonModuleProviders } from "../daemon-extensions.js";
 import { IpcClient } from "../ipc/client.js";
 import { IpcServer } from "../ipc/server.js";
 import type { DaemonModule, Logger, ModuleContext } from "../lifecycle.js";
@@ -1264,6 +1265,15 @@ async function runForeground(options: {
         }),
       }),
     );
+    for (const provide of registeredDaemonModuleProviders()) {
+      const module = provide({
+        paths,
+        logger,
+        credentialStore,
+        credentials: deviceCredentials.credentials,
+      });
+      if (module) supervisor.registerModule(module);
+    }
   }
 
   const ipcServer = new IpcServer({
@@ -1401,9 +1411,10 @@ async function runBackground(
     socketPath?: string;
   },
 ): Promise<void> {
-  const currentFile = fileURLToPath(import.meta.url);
+  // The entry that loaded this daemon, so a packaged entry's registered modules come with it.
+  const entryFile = process.argv[1] ?? fileURLToPath(import.meta.url);
   const childArgs = [
-    currentFile,
+    entryFile,
     "--foreground",
     ...argv.filter((argument) => argument !== "--daemon" && argument !== "-d"),
   ];

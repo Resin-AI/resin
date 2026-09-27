@@ -7,7 +7,7 @@
 
 ## Context and Problem Statement
 
-Before a learned tool is published, the cloud asks the device to validate its plan: would the tool, given the recorded inputs, do what the user's session did? The gateway answers these asks on its own, without user interaction.
+Before a learned tool is published, the cloud asks the device to validate its plan: would the tool, given the recorded inputs, do what the user's session did? The device answers these asks on its own, without user interaction and without an agent session (see §6).
 
 Validation used to answer by re-running the recorded commands against a copy of the project. That had four problems:
 
@@ -60,6 +60,12 @@ Derivation steps are short Python programs a cloud model writes to compute a val
 ### 5. Proof kind "recording"
 
 A validation decision carries `verification.replay = { kind: "recording", planDigest }`, together with step ids, verdicts and fixed reason strings only. The earlier execution-replay proof kinds are removed; the cloud accepts only "recording" proofs whose digest matches the plan.
+
+### 6. The background daemon answers; one process per device at a time
+
+The background daemon (`resin-daemon`) runs the same validation worker the `resin mcp` gateway runs, with the same transport, recording check and refusals, so a pending ask is answered whenever the device is up, not only while an agent session is open. The worker polls on its adaptive cadence (15 s while asks arrive, backing off to 120 s when idle) and answers only asks naming the workspace and device the daemon is enrolled as. Because `@resin/gateway` depends on `@resin/observer`, the packaged daemon entry is `@resin/gateway`'s `bin/daemon`, which registers the worker as a daemon module before loading the observer's daemon.
+
+Every gateway and the daemon take a device-wide pass lease (`<state>/workflow-validation.lease`) before a pass. A process that cannot take it skips the pass, so no two processes check and deliver the same ask; the cloud still keeps only the first decision for an attempt.
 
 ## Rejected Alternatives
 

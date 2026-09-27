@@ -34,6 +34,7 @@ import {
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
 import { z } from "zod";
+import type { WorkflowValidationPassLease } from "./validation-lease.js";
 import {
   type LocalWorkflowValidationResult,
   createRecordingCheckValidator,
@@ -323,6 +324,8 @@ export interface WorkflowValidationPassSummary {
   rejected: number;
   /** Asks left for the next pass because a transport call failed. */
   deferred: number;
+  /** True when another process on this device held the pass lease, so nothing was listed. */
+  skipped: boolean;
 }
 
 /** Checks one plan; the validator `workflow-validation.ts` builds, or a test's stand-in. */
@@ -368,6 +371,11 @@ export interface WorkflowValidationWorkerOptions {
    * a library, so the sink is the caller's: a daemon writes it to its stderr, a test records it.
    */
   log?: (message: string) => void;
+  /**
+   * Device-wide owner of a pass, shared by the daemon and every gateway on the device. A worker
+   * that cannot take it skips the pass, so no two processes check and deliver the same ask.
+   */
+  passLease?: WorkflowValidationPassLease;
 }
 
 function boundedTimeout(value: number | undefined): number {
@@ -420,6 +428,7 @@ export class WorkflowValidationWorker {
   private readonly now: () => Date;
   private readonly random: () => number;
   private readonly log: (message: string) => void;
+  private readonly passLease?: WorkflowValidationPassLease;
   private timer?: NodeJS.Timeout;
   /** When the armed timer fires, in `Date.now()` time; lets a wake pull it earlier. */
   private timerDueAt?: number;
@@ -455,6 +464,7 @@ export class WorkflowValidationWorker {
     this.now = options.now ?? (() => new Date());
     this.random = options.random ?? Math.random;
     this.log = options.log ?? (() => undefined);
+    this.passLease = options.passLease;
   }
 
   /** Arms the poll, on the fast cadence. Passes never hold the process open: the timer is unref'd. */
@@ -502,7 +512,7 @@ export class WorkflowValidationWorker {
     const existing = this.inFlight;
     if (existing) return await existing;
     const signal = this.abortController?.signal;
-    const pass = this.runPass(signal);
+    const pass = this.runLeasedPass(signal);
     this.inFlight = pass;
     try {
       return await pass;
@@ -553,14 +563,43 @@ export class WorkflowValidationWorker {
     this.emptyPolls = arriving ? 0 : this.emptyPolls + 1;
   }
 
-  private async runPass(signal?: AbortSignal): Promise<WorkflowValidationPassSummary> {
+  private async runLeasedPass(signal?: AbortSignal): Promise<WorkflowValidationPassSummary> {
     const summary: WorkflowValidationPassSummary = {
       pending: 0,
       answered: 0,
       refused: 0,
       rejected: 0,
       deferred: 0,
+      skipped: false,
     };
+    if (!this.passLease) return await this.runPass(summary, signal);
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await this.passLease.tryAcquire();
+    } catch (error) {
+      this.log(`workflow validation: could not take the pass lease (${describe(error)})`);
+      summary.deferred += 1;
+      return summary;
+    }
+    if (release === undefined) {
+      // Another process on this device is answering; its answers are gone from the next listing.
+      summary.skipped = true;
+      this.emptyPolls += 1;
+      return summary;
+    }
+    try {
+      return await this.runPass(summary, signal);
+    } finally {
+      await release().catch((error: unknown) =>
+        this.log(`workflow validation: could not release the pass lease (${describe(error)})`),
+      );
+    }
+  }
+
+  private async runPass(
+    summary: WorkflowValidationPassSummary,
+    signal?: AbortSignal,
+  ): Promise<WorkflowValidationPassSummary> {
     let requests: WorkflowValidationRequest[];
     try {
       requests = await this.client.listPending(this.deviceId, signal);
