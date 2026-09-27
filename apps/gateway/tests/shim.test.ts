@@ -5,6 +5,7 @@ import path from "node:path";
 import stream from "node:stream";
 import { describe, expect, it } from "vitest";
 import { parseArgs } from "../src/bin/mcp-shim.js";
+import type { LocalMcpGateway } from "../src/gateway.js";
 import { McpStdioShim, checkDaemonReachable } from "../src/shim/stdio-bridge.js";
 
 describe("Stdio Shim & Bridge Lifecycle", () => {
@@ -142,6 +143,63 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("keeps OMP's learned-tool block current when started without --harness", async () => {
+    // `resin init` registers OMP as plain `resin mcp`; the harness is known only from the client name.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-omp-"));
+    const appendSystem = path.join(home, ".omp", "agent", "APPEND_SYSTEM.md");
+    fs.mkdirSync(path.dirname(appendSystem), { recursive: true });
+    fs.writeFileSync(
+      appendSystem,
+      "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
+    );
+    const previousOmpHome = process.env.RESIN_OMP_HOME;
+    process.env.RESIN_OMP_HOME = path.join(home, ".omp");
+    const stdin = new stream.PassThrough();
+    const shim = new McpStdioShim({
+      socketPath: path.join(os.tmpdir(), `test-absent-omp-${Date.now()}.sock`),
+      standaloneFallback: true,
+      maxStartupAttempts: 0,
+      home,
+      resinHome: path.join(home, ".resin"),
+      stdin,
+      stdout: new stream.PassThrough(),
+      stderr: new stream.PassThrough(),
+      cwd: os.tmpdir(),
+    });
+    try {
+      await shim.start();
+      stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+            capabilities: {},
+          },
+        })}\n`,
+      );
+      // A catalog change reaches the connection the OMP client opened; the catalog holds no learned
+      // tools now, so the refresh leaves only the user's own text. The shim keeps its gateway
+      // private; the test reads it to raise the change a cloud sync would.
+      const shimInternals = shim as unknown as { activeGateway: LocalMcpGateway };
+      const gateway = shimInternals.activeGateway;
+      await expect.poll(() => gateway.getAllConnections()[0]?.isInitialized).toBe(true);
+      const connection = gateway.getAllConnections()[0]!;
+      expect(connection.harnessId).toBe("omp");
+      await gateway.refreshCoordinator!.triggerRefresh(connection.workspaceContext.workspaceId, 1, {
+        changedToolIds: ["retired_tool"],
+      });
+      await expect.poll(() => fs.readFileSync(appendSystem, "utf8")).toBe("User notes\n");
+    } finally {
+      await shim.stop();
+      if (previousOmpHome === undefined) delete process.env.RESIN_OMP_HOME;
+      else process.env.RESIN_OMP_HOME = previousOmpHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("reports actionable error when daemon is absent and standalone fallback disabled", async () => {
     const nonExistentSocket = path.join(os.tmpdir(), `test-absent-${Date.now()}.sock`);
