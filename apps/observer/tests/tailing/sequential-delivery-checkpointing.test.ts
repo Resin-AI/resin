@@ -295,6 +295,62 @@ describe("Sequential Record Delivery and Atomic Checkpointing", () => {
     await tailer.close();
   });
 
+  it("asks a coalescing consumer to release held acknowledgements while a terminal drain waits", async () => {
+    const lines = [
+      JSON.stringify({ type: "prompt", text: "Line 1" }),
+      JSON.stringify({ type: "completion", text: "Line 2" }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
+
+    const tailer = new TranscriptTailer({ defaultBatchSize: 10, defaultMaxInFlightBatches: 100 });
+    const session: HarnessSession = {
+      sessionId: "sess-drain-hint",
+      workspaceId: "ws-1",
+      harnessId: "fake",
+      transcriptPath,
+      status: "active",
+      startedAt: new Date().toISOString(),
+    };
+
+    // A coalescing consumer returns immediately and acknowledges later, when it uploads.
+    const heldAcks: Array<() => Promise<void>> = [];
+    const deliveries: Array<{ status: string; count: number }> = [];
+    const firstDelivery = Promise.withResolvers<void>();
+    tailer.onRecords(async (sess, records, ack) => {
+      deliveries.push({ status: sess.status, count: records.length });
+      if (records.length > 0) {
+        heldAcks.push(ack);
+        firstDelivery.resolve();
+      } else {
+        await ack();
+      }
+    });
+    const drained: string[] = [];
+    tailer.on("session:draining", (event: { sessionId: string }) => {
+      drained.push(event.sessionId);
+      const acks = heldAcks.splice(0);
+      void (async () => {
+        for (const ack of acks) await ack();
+      })();
+    });
+
+    await tailer.attachSession(session, undefined, { pollingIntervalMs: 20 });
+    await tailer.pumpSession(session.sessionId);
+    await firstDelivery.promise;
+    expect(heldAcks).toHaveLength(1);
+
+    await tailer.notifyTerminalState({ ...session, status: "completed" });
+
+    expect(drained).toContain(session.sessionId);
+    expect(deliveries).toEqual([
+      { status: "active", count: 2 },
+      { status: "completed", count: 0 },
+    ]);
+    expect(tailer.getSessionStatus(session.sessionId)?.ackedCursor?.sequence).toBe(2);
+
+    await tailer.close();
+  });
+
   it("delivers in-flight pump readNext that resolves after terminalization starts before the terminal callback", async () => {
     const tailer = new TranscriptTailer({ defaultBatchSize: 10 });
     const session: HarnessSession = {

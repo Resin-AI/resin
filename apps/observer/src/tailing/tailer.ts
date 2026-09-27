@@ -751,6 +751,16 @@ export class TranscriptTailer extends EventEmitter {
   }
 
   /**
+   * Tells downstream consumers that a terminal drain is waiting on their acknowledgements, so a
+   * consumer that holds batches for a coalescing window can send them now.
+   */
+  private emitDraining(context: TailerSessionContext): void {
+    if (context.inFlightBatches > 0) {
+      this.emit("session:draining", { sessionId: context.session.sessionId });
+    }
+  }
+
+  /**
    * Delivers updated terminal session state downstream with an empty record batch
    * prior to detachment, allowing consumers to synthesize terminal lifecycle events.
    */
@@ -828,6 +838,7 @@ export class TranscriptTailer extends EventEmitter {
         }
 
         if (context.inFlightBatches >= maxInFlight) {
+          this.emitDraining(context);
           await this.waitForProgress(context);
           continue;
         }
@@ -842,6 +853,7 @@ export class TranscriptTailer extends EventEmitter {
           }
 
           // Source is at EOF but batches are still in flight or queued waiting for ack
+          this.emitDraining(context);
           await this.waitForProgress(context);
         }
       }
