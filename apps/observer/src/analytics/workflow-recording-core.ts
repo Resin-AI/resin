@@ -688,6 +688,7 @@ export function reconstructWorkflowFromEvents(
   const heldOut = demonstratedWorkflow(
     demonstrationOf(allEvents, selectedExecutionIndex),
     stepIdByPosition,
+    recipe.workflow.steps.map((step) => step.id),
   );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
   if (carrierCandidates.length > 0) {
@@ -802,10 +803,17 @@ function demonstrationOf(
   return demonstration;
 }
 
-/** The demonstration, addressed by the steps this recording gave the work it demonstrates. */
+/**
+ * The demonstration, addressed by the steps this recording gave the work it demonstrates.
+ *
+ * Only a whole repeat is a demonstration: its calls must cover every plan step, in plan order. An
+ * earlier execution that ran only part of the work cannot reproduce the plan, so offering it would
+ * only make a validator report every step it lacks as missed.
+ */
 function demonstratedWorkflow(
   demonstration: WorkflowCallHeldOut | undefined,
   stepIdByPosition: ReadonlyMap<number, string>,
+  planStepIds: readonly string[],
 ): RecordedWorkflow["heldOut"] | undefined {
   if (demonstration === undefined) return undefined;
   const inputs: NonNullable<RecordedWorkflow["heldOut"]>["inputs"] = [];
@@ -834,7 +842,13 @@ function demonstratedWorkflow(
     if (existing === undefined) calls.push({ stepId, callIds: [entry.callId] });
     else existing.callIds.push(entry.callId);
   }
-  return calls.length === 0 ? { inputs, observed } : { inputs, observed, calls };
+  if (
+    calls.length !== planStepIds.length ||
+    calls.some((call, index) => call.stepId !== planStepIds[index])
+  ) {
+    return undefined;
+  }
+  return { inputs, observed, calls };
 }
 
 /**
