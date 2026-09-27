@@ -225,7 +225,7 @@ describe("Public Release Workflows Contract", () => {
       expect(start).toBeGreaterThan(-1);
       expect(end).toBeGreaterThan(start);
       const gate = script.slice(start, end);
-      const run = (repository) =>
+      const run = (repository, overrides = {}) =>
         spawnSync(
           "bash",
           [
@@ -248,8 +248,11 @@ describe("Public Release Workflows Contract", () => {
                 head_repository: { full_name: repository },
                 path: ".github/workflows/ci.yml",
                 head_sha: "a".repeat(40),
+                event: "push",
+                head_branch: "main",
                 status: "completed",
                 conclusion: "success",
+                ...overrides,
               }),
             },
           },
@@ -260,6 +263,16 @@ describe("Public Release Workflows Contract", () => {
       const rejected = run("untrusted/fork");
       expect(rejected.status).not.toBe(0);
       expect(rejected.stdout).not.toContain("QUALIFIED");
+      for (const overrides of [
+        { event: "pull_request" },
+        { head_branch: "feature" },
+        { head_sha: "b".repeat(40) },
+        { conclusion: "failure" },
+      ]) {
+        const result = run("Resin-AI/resin", overrides);
+        expect(result.status, JSON.stringify(overrides)).not.toBe(0);
+        expect(result.stdout).not.toContain("QUALIFIED");
+      }
     });
 
     it("validates every supplied upstream run via actions/runs/<id> without polling fallbacks", () => {
@@ -282,6 +295,45 @@ describe("Public Release Workflows Contract", () => {
       );
       expect(auditStep.run).toContain("vulnerability-scan-evidence.json");
       expect(script, "Must not contain sleep polling loops").not.toMatch(/sleep\s+\d+/);
+    });
+
+    it("waits for the exact-SHA CI push run to succeed before generating signed evidence", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const waitIndex = steps.findIndex(
+        (s) => s.name === "Wait for the exact-SHA CI run to succeed",
+      );
+      const evidenceIndex = steps.findIndex(
+        (s) => s.name === "Generate production qualification evidence",
+      );
+      expect(waitIndex).toBeGreaterThan(-1);
+      expect(waitIndex).toBeLessThan(evidenceIndex);
+      const script = steps[waitIndex].run;
+      expect(script).toContain("actions/runs/$CI_RUN_ID");
+      expect(script).toContain('"$run_path" != ".github/workflows/ci.yml"');
+      expect(script).toContain('"$run_sha" != "$RELEASE_SHA"');
+      expect(script).toContain('"$run_event" != "push"');
+      expect(script).toContain('"$run_branch" != "main"');
+      expect(script).toContain('"$run_repo" != "$GITHUB_REPOSITORY"');
+      expect(script).toContain('"$run_conclusion" != "success"');
+      expect(script).toContain("SECONDS + 900");
+    });
+
+    it("downloads qualification evidence only from this run and requires all five lanes", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const downloads = steps.filter((s) => s.uses?.startsWith("actions/download-artifact"));
+      expect(downloads).toHaveLength(2);
+      for (const step of downloads) {
+        expect(step.with?.["run-id"]).toBeUndefined();
+        expect(step.with?.repository).toBeUndefined();
+        expect(step.with?.["github-token"]).toBeUndefined();
+      }
+      const laneCheck = steps.find(
+        (s) => s.name === "Require evidence for every qualification lane",
+      );
+      expect(laneCheck.run).toContain(
+        "test \"$(find dist/upstream-qualification/platform -name '*.json' -type f | wc -l)\" -eq 5",
+      );
+      expect(laneCheck.run).toContain("test -s dist/upstream-qualification/system/system-e2e.json");
     });
 
     it("requires qualification for all four production platforms", () => {
@@ -432,6 +484,8 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain(".ciRunId");
       expect(script).toContain('"$run_path" != ".github/workflows/ci.yml"');
       expect(script).toContain('"$run_sha" != "$RELEASE_SHA"');
+      expect(script).toContain('"$run_event" != "push"');
+      expect(script).toContain('"$run_branch" != "main"');
       expect(script).toContain(
         '"$run_status" != "completed" ] || [ "$run_conclusion" != "success"',
       );

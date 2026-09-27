@@ -289,10 +289,12 @@ jobs:
           run_repo="$(echo "$run_info" | jq -r '.head_repository.full_name // (.head_repository_owner.login + "/" + .head_repository.name)')"
           run_path="$(echo "$run_info" | jq -r '.path')"
           run_sha="$(echo "$run_info" | jq -r '.head_sha')"
+          run_event="$(echo "$run_info" | jq -r '.event')"
+          run_branch="$(echo "$run_info" | jq -r '.head_branch')"
           run_status="$(echo "$run_info" | jq -r '.status')"
           run_conclusion="$(echo "$run_info" | jq -r '.conclusion')"
-          if [ "$run_repo" != "$GITHUB_REPOSITORY" ] || [ "$run_path" != ".github/workflows/ci.yml" ] || [ "$run_sha" != "$RELEASE_SHA" ]; then
-            echo "::error::CI run $ci_run_id ($run_repo $run_path $run_sha) is not ci.yml on $GITHUB_REPOSITORY@$RELEASE_SHA"
+          if [ "$run_repo" != "$GITHUB_REPOSITORY" ] || [ "$run_path" != ".github/workflows/ci.yml" ] || [ "$run_sha" != "$RELEASE_SHA" ] || [ "$run_event" != "push" ] || [ "$run_branch" != "main" ]; then
+            echo "::error::CI run $ci_run_id ($run_repo $run_path $run_event $run_branch $run_sha) is not the ci.yml push to main on $GITHUB_REPOSITORY@$RELEASE_SHA"
             exit 1
           fi
           if [ "$run_status" != "completed" ] || [ "$run_conclusion" != "success" ]; then

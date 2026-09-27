@@ -271,8 +271,9 @@ jobs:
           '
 
           # The CI run may still be in progress (it runs concurrently with this
-          # workflow); a finished run must have succeeded. release.yml requires
-          # this exact run to have completed successfully before promotion.
+          # workflow); a finished run must have succeeded. The next step waits for
+          # it to succeed before any evidence is generated, and release.yml
+          # re-checks it before promotion.
           validate_run() {
             local run_id="$1"
             local expected_path="$2"
@@ -289,6 +290,8 @@ jobs:
             run_repo="$(echo "$run_info" | jq -r '.head_repository.full_name // (.head_repository_owner.login + "/" + .head_repository.name)')"
             run_path="$(echo "$run_info" | jq -r '.path')"
             run_sha="$(echo "$run_info" | jq -r '.head_sha')"
+            run_event="$(echo "$run_info" | jq -r '.event')"
+            run_branch="$(echo "$run_info" | jq -r '.head_branch')"
             run_status="$(echo "$run_info" | jq -r '.status')"
             run_conclusion="$(echo "$run_info" | jq -r '.conclusion')"
 
@@ -307,6 +310,11 @@ jobs:
               exit 1
             fi
 
+            if [ "$run_event" != "push" ] || [ "$run_branch" != "main" ]; then
+              echo "::error::$label run $run_id is a $run_event run on $run_branch (must be a push to main)"
+              exit 1
+            fi
+
             if [ "$run_status" = "completed" ] && [ "$run_conclusion" != "success" ]; then
               echo "::error::$label run $run_id conclusion is $run_conclusion (must be success)"
               exit 1
@@ -316,6 +324,39 @@ jobs:
 
           validate_run "$CI_RUN_ID" ".github/workflows/ci.yml" "CI suite"
           echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact-SHA CI run to succeed
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 900))
+          while :; do
+            run_info="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID")"
+            run_repo="$(echo "$run_info" | jq -r '.head_repository.full_name // (.head_repository_owner.login + "/" + .head_repository.name)')"
+            run_path="$(echo "$run_info" | jq -r '.path')"
+            run_sha="$(echo "$run_info" | jq -r '.head_sha')"
+            run_event="$(echo "$run_info" | jq -r '.event')"
+            run_branch="$(echo "$run_info" | jq -r '.head_branch')"
+            run_status="$(echo "$run_info" | jq -r '.status')"
+            run_conclusion="$(echo "$run_info" | jq -r '.conclusion')"
+            if [ "$run_repo" != "$GITHUB_REPOSITORY" ] || [ "$run_path" != ".github/workflows/ci.yml" ] || [ "$run_sha" != "$RELEASE_SHA" ] || [ "$run_event" != "push" ] || [ "$run_branch" != "main" ]; then
+              echo "::error::CI run $CI_RUN_ID ($run_repo $run_path $run_event $run_branch $run_sha) is not the ci.yml push to main on $RELEASE_SHA"
+              exit 1
+            fi
+            if [ "$run_status" = "completed" ]; then
+              if [ "$run_conclusion" != "success" ]; then
+                echo "::error::CI run $CI_RUN_ID concluded $run_conclusion (must be success)"
+                exit 1
+              fi
+              echo "CI run $CI_RUN_ID succeeded on $RELEASE_SHA"
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::CI run $CI_RUN_ID still $run_status after 15 minutes"
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Download platform qualification evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
