@@ -21,8 +21,9 @@ permissions:
   contents: read
 
 env:
-  # Turbo's local cache, persisted between runs with actions/cache.
-  TURBO_CACHE_DIR: .turbo-cache
+  # Turbo's local cache, kept outside the checkout (so lint never sees it) and
+  # persisted between runs with actions/cache.
+  TURBO_CACHE_DIR: ${{ github.workspace }}/../turbo-cache
   TURBO_TELEMETRY_DISABLED: "1"
 
 jobs:
@@ -65,7 +66,7 @@ jobs:
       - name: Restore turbo cache
         uses: actions/cache@v4
         with:
-          path: .turbo-cache
+          path: ${{ env.TURBO_CACHE_DIR }}
           key: ${{ runner.os }}-turbo-static-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-turbo-static-
@@ -142,7 +143,7 @@ jobs:
       - name: Restore turbo cache
         uses: actions/cache@v4
         with:
-          path: .turbo-cache
+          path: ${{ env.TURBO_CACHE_DIR }}
           key: ${{ runner.os }}-turbo-unit-${{ matrix.shard }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-turbo-unit-${{ matrix.shard }}-
