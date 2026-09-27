@@ -98,10 +98,11 @@ export const PI_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  */
 export const PI_RESIN_GUIDANCE = `# Resin learned tools
 
-\`mcp__resin__\` tools are procedures Resin learned from earlier work in this workspace. Each description lists the commands it runs, with \`{input}\` where a value you pass goes and each input's recorded value; omitted inputs reuse the recorded values.
+Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\` in your tool list; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- If one does your task, call it with your task's values instead of re-reading docs or \`--help\` to rediscover the steps, then check its output and the results.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
 const PI_CONTEXT_FILE_NAMES = [

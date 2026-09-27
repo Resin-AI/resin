@@ -39,11 +39,11 @@ export const CLAUDE_GUIDANCE_MARKERS = {
  */
 export const CLAUDE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\`, and \`manage_tools\`). Each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a task from docs or \`--help\`, check whether a Resin tool already does it. If the tools are deferred, load them with tool search (query \`resin\`).
-- A tool whose commands do your task is the procedure an earlier run already worked out: call it with your task's values, then check its output. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, list the \`mcp__resin__\` tools and their descriptions; if they are deferred, load them with tool search (query \`resin\`).
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
 
 export const claudeCodeInstallHarness: HarnessInstallDefinition = {
   id: "claude-code",

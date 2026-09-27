@@ -28,10 +28,11 @@ export const cursorGuidance: HarnessGuidanceSurface = {
   },
   body: `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server; each description lists the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a multi-step procedure yourself, check the \`resin\` tools. A tool whose commands do your task is the procedure an earlier run already worked out: call it with your task's values instead of rediscovering the steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`,
+- In your first step, next to your own first look at the task, list the \`resin\` server's tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`,
 };
 
 export const cursorInstallHarness: HarnessInstallDefinition = {

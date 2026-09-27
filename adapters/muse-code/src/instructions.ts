@@ -12,8 +12,9 @@ export const MUSE_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  */
 export const MUSE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin serves tools learned from earlier work through the \`resin\` MCP server; they appear as \`mcp__resin__<name>\`. Each description lists the commands it runs and the inputs it takes.
+Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before re-deriving a procedure from docs or \`--help\`, check whether a \`mcp__resin__\` tool already does it; if one does, call it with this task's values and check its output.
-- A learned tool's output is the commands' current output: use it instead of running those commands again.
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
 `;

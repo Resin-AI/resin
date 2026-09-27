@@ -5018,11 +5018,11 @@ var init_install = __esm({
     };
     CLAUDE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\`, and \`manage_tools\`). Each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a task from docs or \`--help\`, check whether a Resin tool already does it. If the tools are deferred, load them with tool search (query \`resin\`).
-- A tool whose commands do your task is the procedure an earlier run already worked out: call it with your task's values, then check its output. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, list the \`mcp__resin__\` tools and their descriptions; if they are deferred, load them with tool search (query \`resin\`).
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
     claudeCodeInstallHarness = {
       id: "claude-code",
       displayName: "Claude Code CLI",
@@ -6320,11 +6320,11 @@ var init_instructions2 = __esm({
     };
     COPILOT_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server, named \`resin-<name>\` in your tool list; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server, named \`resin-<name>\` in your tool list (besides \`resin-search_tools\`, \`resin-get_tool_schema\`, \`resin-invoke_tool\` and \`resin-manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a procedure yourself, check your tool list for \`resin-\` tools other than \`resin-search_tools\`, \`resin-get_tool_schema\`, \`resin-invoke_tool\` and \`resin-manage_tools\`.
-- A tool whose commands do your task is the procedure an earlier run already worked out: call it with your task's values instead of re-reading docs or \`--help\`, then check its output. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.
+- In your first step, next to your own first look at the task, go through the \`resin-\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
 - Resin can add tools while you work. A tool added during a task appears in your tool list on your next step; use it from then on.
 `;
   }
@@ -6410,12 +6410,13 @@ function normalizeCursorVersion(raw) {
   const core = [major, minor, patch].map((part) => String(Number(part))).join(".");
   return pre ? `${core}-${pre}` : core;
 }
-var CURSOR_HARNESS_ID, CURSOR_TESTED_VERSIONS;
+var CURSOR_HARNESS_ID, CURSOR_TARGET_VERSION, CURSOR_TESTED_VERSIONS;
 var init_paths = __esm({
   "adapters/cursor-cli/dist/paths.js"() {
     "use strict";
     CURSOR_HARNESS_ID = "cursor-cli";
-    CURSOR_TESTED_VERSIONS = [];
+    CURSOR_TARGET_VERSION = "2026.9.26-dd393fe";
+    CURSOR_TESTED_VERSIONS = [CURSOR_TARGET_VERSION];
   }
 });
 
@@ -6715,10 +6716,11 @@ var init_install4 = __esm({
       },
       body: `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server; each description lists the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a multi-step procedure yourself, check the \`resin\` tools. A tool whose commands do your task is the procedure an earlier run already worked out: call it with your task's values instead of rediscovering the steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`
+- In your first step, next to your own first look at the task, list the \`resin\` server's tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`
     };
     cursorInstallHarness = {
       id: CURSOR_HARNESS_ID,
@@ -6730,9 +6732,11 @@ Resin learned tools from earlier work in your projects. They are MCP tools on th
         "Capture requires Resin's hooks in ~/.cursor/hooks.json (installed by `resin init`); sessions from before installation, or run while hooks were removed, are reported as uncaptured, not decoded.",
         "Cursor Cloud Agents that run on Cursor's machines leave no local record and cannot be captured; cursor-agent 2026.09.26 removed the CLI's --cloud/--background flags. Self-hosted `cursor-agent worker` sessions are captured and flagged isBackgroundAgent.",
         "Hook payloads carry no timestamps; event times are when Resin's hook received them.",
-        "Per-generation usage comes from afterAgentResponse (input, output, cache-read tokens); totals are not reported by cursor-agent and are not synthesized.",
-        "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is killed are not recorded.",
-        "Whether cursor-agent applies user rules from ~/.cursor/rules and reacts to MCP list_changed is unverified; new Resin tools are assumed to reach the next session."
+        "Token usage is per turn, from the `stop` hook (input, output, cache-read tokens). Headless `cursor-agent -p` runs fire no beforeSubmitPrompt, afterAgentResponse or stop hooks (verified with 2026.09.26), so their prompt, final answer and usage are not captured; their tool calls, edits and session end are.",
+        "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
+        "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
+        "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
+        "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session. Whether user rules in ~/.cursor/rules are applied is unverified."
       ],
       probeInstallation: (context) => probeCursorInstallation({
         home: context.home,
@@ -6909,11 +6913,11 @@ var init_install5 = __esm({
     });
     GROK_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`. Each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`, and each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working on a task, call \`search_tool\` with a few words describing it to see matching \`resin__\` tools.
-- A tool whose commands do your task is the procedure an earlier run already worked out: call it with \`use_tool\` (\`tool_name: "resin__<name>"\`) and your task's values instead of rediscovering those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, call \`search_tool\` with a few words describing the task to list the matching \`resin__\` tools.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call it with \`use_tool\` (\`tool_name: "resin__<name>"\`). Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
     grokBuildInstallHarness = {
       id: GROK_HARNESS_ID,
       displayName: GROK_DISPLAY_NAME,
@@ -7132,10 +7136,11 @@ var init_instructions3 = __esm({
     };
     MUSE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin serves tools learned from earlier work through the \`resin\` MCP server; they appear as \`mcp__resin__<name>\`. Each description lists the commands it runs and the inputs it takes.
+Resin learned tools from earlier work in this workspace. They are MCP tools from the \`resin\` server named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before re-deriving a procedure from docs or \`--help\`, check whether a \`mcp__resin__\` tool already does it; if one does, call it with this task's values and check its output.
-- A learned tool's output is the commands' current output: use it instead of running those commands again.
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
 `;
   }
 });
@@ -7546,8 +7551,8 @@ var init_instructions4 = __esm({
 
 Resin learned tools from earlier work in this workspace. They are MCP tools mounted as \`xd://mcp__resin_<name>\` devices; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before starting a task, check whether one of the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\`, and \`manage_tools\`) already does it: \`read\` a device path to see its commands and inputs.
-- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`) with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Omitted inputs reuse the recorded values.
+- In your first step, next to your own first look at the task, \`read\` the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`) to see their commands and inputs.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call one by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`); when several apply, call them together. Omitted inputs reuse the recorded values.
 - Their output is the commands' current output: use it instead of running those commands yourself.`;
   }
 });
@@ -7875,10 +7880,11 @@ var init_instructions5 = __esm({
     };
     OPENCODE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are MCP tools named \`resin_<name>\`; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in this workspace. They are MCP tools named \`resin_<name>\` (besides Resin's own \`resin_search_tools\`, \`resin_get_tool_schema\`, \`resin_invoke_tool\` and \`resin_manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working out a procedure yourself, check the \`resin_\` tools: one whose commands do your task is the procedure an earlier run already worked out. Call it with your task's values instead of re-reading docs or \`--help\`; omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself, then check the results.
+- In your first step, next to your own first look at the task, go through the \`resin_\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.
 `;
   }
 });
@@ -8322,10 +8328,11 @@ var init_registration = __esm({
     };
     PI_RESIN_GUIDANCE = `# Resin learned tools
 
-\`mcp__resin__\` tools are procedures Resin learned from earlier work in this workspace. Each description lists the commands it runs, with \`{input}\` where a value you pass goes and each input's recorded value; omitted inputs reuse the recorded values.
+Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\` in your tool list; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- If one does your task, call it with your task's values instead of re-reading docs or \`--help\` to rediscover the steps, then check its output and the results.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
     PI_CONTEXT_FILE_NAMES = [
       "AGENTS.override.md",
       "AGENTS.md",
@@ -11453,7 +11460,12 @@ var NormalizedFileEditEventSchema = external_exports.object({
   patch: external_exports.string().optional(),
   beforeHash: Sha256DigestSchema.optional(),
   afterHash: Sha256DigestSchema.optional(),
-  diffStats: FileDiffStatsSchema.optional()
+  diffStats: FileDiffStatsSchema.optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional()
 });
 var NormalizedErrorEventSchema = external_exports.object({
   ...BaseEventFields,
@@ -11487,7 +11499,12 @@ var NormalizedSubagentLifecycleEventSchema = external_exports.object({
   lifecycleType: external_exports.enum(["spawn", "start", "pause", "resume", "terminate", "settle"]),
   parentId: IdentifierSchema.optional(),
   role: external_exports.string().optional(),
-  reason: external_exports.string().optional()
+  reason: external_exports.string().optional(),
+  /**
+   * The tool call (its `callId` in this session) whose execution produced this event, when the
+   * record names one. A linked event is part of that call's step, not a step of its own.
+   */
+  producedByCallId: IdentifierSchema.optional()
 });
 var NormalizedSessionLifecycleEventSchema = external_exports.object({
   ...BaseEventFields,

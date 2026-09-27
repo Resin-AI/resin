@@ -20,11 +20,11 @@ export const GROK_GUIDANCE_MARKERS = Object.freeze({
  */
 export const GROK_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`. Each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`, and each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- Before working on a task, call \`search_tool\` with a few words describing it to see matching \`resin__\` tools.
-- A tool whose commands do your task is the procedure an earlier run already worked out: call it with \`use_tool\` (\`tool_name: "resin__<name>"\`) and your task's values instead of rediscovering those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- In your first step, next to your own first look at the task, call \`search_tool\` with a few words describing the task to list the matching \`resin__\` tools.
+- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call it with \`use_tool\` (\`tool_name: "resin__<name>"\`). Omitted inputs reuse the recorded values.
+- Their output is the commands' current output: use it instead of running those commands yourself.`;
 
 export const grokBuildInstallHarness: HarnessInstallDefinition = {
   id: GROK_HARNESS_ID,
