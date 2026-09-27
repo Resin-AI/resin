@@ -47,6 +47,24 @@ export function calculateShannonEntropy(str: string): number {
   return entropy;
 }
 
+/** Longest run between path separators a path-shaped value may have (a file or directory name). */
+const MAX_PATH_RUN_LENGTH = 12;
+
+/**
+ * Whether a high-entropy candidate is an ordinary file path (`backups/inventory-2025-06-01.sql`)
+ * rather than a key. Standard base64 has `/` but none of `.`, `-`, `_`; URL-safe base64 has no `/`;
+ * a random key has long runs between separators; URL userinfo, `key=value` pairs and base64 padding
+ * carry `@`, `:`, `=` or `+`. Named-secret rules still scan every value.
+ */
+function isPathShaped(candidate: string): boolean {
+  return (
+    candidate.includes("/") &&
+    /[._-]/.test(candidate) &&
+    !/[@:=+]/.test(candidate) &&
+    candidate.split(/[/._-]/).every((run) => run.length <= MAX_PATH_RUN_LENGTH)
+  );
+}
+
 export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
   {
     id: "openai_api_key",
@@ -253,7 +271,7 @@ export class ContentScanner {
         const alreadyCovered = matches.some(
           (m) => (start >= m.start && start < m.end) || (end > m.start && end <= m.end),
         );
-        if (alreadyCovered) {
+        if (alreadyCovered || isPathShaped(candidate)) {
           continue;
         }
 

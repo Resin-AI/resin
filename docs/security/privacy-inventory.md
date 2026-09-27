@@ -70,7 +70,7 @@ Before any event or diagnostic metadata is written to cloud storage or diagnosti
 
 - **Secret & Token Redaction**: Scans for JWTs, Bearer tokens, GitHub PATs, AWS access keys, Anthropic/OpenAI API keys, private key headers, credential assignments including secret-named variables (`DB_PASS=V`, `GH_TOKEN=V`), and passwords passed as command-line arguments (`--password V`, `--token=V`, `sshpass -p V`, `docker login -p V`, `redis-cli -a V`, `mysql -pV`).
 - **Path & Username Redaction**: Normalizes local file paths (e.g. `/Users/alice/projects/app` → `~/app`) to prevent username leakage.
-- **High-Entropy Filtering**: Filters unstructured high-entropy strings exceeding Shannon entropy thresholds.
+- **High-Entropy Filtering**: Filters unstructured high-entropy strings exceeding Shannon entropy thresholds, except path-shaped values (contain `/` and one of `.`, `-`, `_`; none of `@`, `:`, `=`, `+`; every run between `/ . - _` at most 12 characters). Named-secret patterns still scan those.
 
 ### Metadata-only evidence: what the cloud receives per event
 

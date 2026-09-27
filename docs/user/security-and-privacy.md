@@ -112,7 +112,7 @@ Tools requiring authentication tokens receive them exclusively as mediated envir
 All logs, error messages, and telemetry streams pass through a continuous redaction filter detecting:
 - AWS, GitHub, OpenAI, Anthropic, and generic API keys.
 - JWT tokens and bearer credentials.
-- High-entropy base64 and hex strings.
+- High-entropy base64 and hex strings. An ordinary relative file path (slashes plus `.`, `-` or `_`, short names between them, and no `@`, `:`, `=` or `+`) is not treated as one; named key patterns still apply to it.
 - Passwords and SSH private keys.
 
 ---

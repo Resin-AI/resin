@@ -20,6 +20,48 @@ describe("Privacy Redaction & Secret Scrubbing", () => {
     expect(calculateShannonEntropy(highEntropy)).toBeGreaterThan(4.0);
   });
 
+  describe("high-entropy scanning of path-shaped values", () => {
+    const flagged = (text: string, entropyThreshold?: number) =>
+      new ContentScanner(entropyThreshold === undefined ? {} : { entropyThreshold })
+        .scan(text)
+        .map((match) => match.match);
+
+    it.each([
+      "backups/inventory-2025-06-01.sql",
+      "backups/inventory-2025-06-01.sql.gz",
+      "data/archive/2025-06/inventory-2025-06-01.sql.gz",
+    ])("does not flag the file path %s", (path) => {
+      expect(flagged(`./dbtool restore-test ${path}`)).toEqual([]);
+    });
+
+    it.each([
+      [
+        "a standard-base64 key with short runs between slashes",
+        "k9QxB2vT/mZ4pL7r/Yc3Nw8K/dF6hJ1s/Ea5Gu0Wq",
+      ],
+      ["a URL-safe base64 key", "k9QxB2vT_mZ4pL7r-Yc3Nw8KdF6hJ1sEa5Gu0Wq"],
+      ["the AWS example secret", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"],
+      [
+        "a URL with userinfo credentials",
+        "https://deploy:Zx9Kq2Lm7Pv4Tn8R@git.example.com/org/repo.git",
+      ],
+      ["a key=value secret", "API_SECRET=Zx9Kq2Lm7Pv4Tn8RwY3b"],
+      [
+        "a JWT",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      ],
+    ])("still flags %s", (_name, secret) => {
+      expect(flagged(`value ${secret} end`).length).toBeGreaterThan(0);
+    });
+
+    it("still flags hex whenever the entropy threshold admits it", () => {
+      // Hex carries at most 4 bits per character, under the default threshold; a lower one flags it.
+      expect(
+        flagged("value 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b end", 3.5).length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
   it("scans and detects multiple types of secrets in text", () => {
     const scanner = new ContentScanner();
 
