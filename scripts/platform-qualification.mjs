@@ -1094,28 +1094,42 @@ async function reservePort() {
 }
 
 async function probeHarnesses(installedRoot) {
-  const probes = Object.values(V1_SUPPORT_MATRIX.harnesses).map((harness) => ({
-    id: harness.id,
-    module: path.join(installedRoot, harness.probeModule),
-    fn: harness.probeFunction,
-  }));
+  const registryModule = path.join(installedRoot, "apps", "cli", "dist", "harness-registry.js");
+  const contractsModule = path.join(
+    installedRoot,
+    "packages",
+    "harness-contracts",
+    "dist",
+    "index.js",
+  );
+  for (const module of [registryModule, contractsModule]) {
+    if (!fs.existsSync(module)) {
+      return Object.keys(V1_SUPPORT_MATRIX.harnesses).map((harnessId) => ({
+        harnessId,
+        status: "unavailable",
+        qualified: false,
+        reason: `module_not_found: ${module}`,
+      }));
+    }
+  }
+  const { HARNESS_DEFINITIONS } = await import(pathToFileURL(registryModule).href);
+  const { classifyHarnessVersion, defaultFsBridge } = await import(
+    pathToFileURL(contractsModule).href
+  );
+  const home = os.homedir();
+  const env = process.env;
   const results = [];
-  for (const probe of probes) {
+  for (const definition of HARNESS_DEFINITIONS) {
     try {
-      if (!fs.existsSync(probe.module)) {
-        results.push({
-          harnessId: probe.id,
-          status: "unavailable",
-          qualified: false,
-          reason: `module_not_found: ${probe.module}`,
-        });
-        continue;
-      }
-      const imported = await import(pathToFileURL(probe.module).href);
-      const installation = await imported[probe.fn]({ checkPermissions: true });
+      const installation = await definition.probeInstallation({
+        targetPath: definition.mcpConfig.resolvePath(home, env),
+        home,
+        env,
+        fsBridge: defaultFsBridge,
+      });
       if (!installation) {
         results.push({
-          harnessId: probe.id,
+          harnessId: definition.id,
           status: "unavailable",
           qualified: false,
           reason: "not_detected",
@@ -1123,18 +1137,20 @@ async function probeHarnesses(installedRoot) {
         continue;
       }
       const qualified = installation.status === "ready" && installation.isInstalled === true;
+      const version = installation.version ?? null;
       results.push({
-        harnessId: probe.id,
+        harnessId: definition.id,
         status: qualified ? "ready" : "unavailable",
         qualified,
         detectedStatus: installation.status,
-        version: installation.version ?? null,
+        version,
+        versionStatus: classifyHarnessVersion(version ?? undefined, definition.testedVersions),
         executablePath: installation.executablePath ?? null,
         reason: qualified ? "qualified" : `status_${installation.status}`,
       });
     } catch (error) {
       results.push({
-        harnessId: probe.id,
+        harnessId: definition.id,
         status: "unavailable",
         qualified: false,
         reason: error instanceof Error ? error.message : String(error),

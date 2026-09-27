@@ -363,7 +363,17 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
     "harness-contracts",
     "db",
   ]);
-  const allowedAdapterDirs = new Set(["claude-code", "codex-cli", "omp"]);
+  const allowedAdapterDirs = new Set([
+    "claude-code",
+    "codex-cli",
+    "copilot-cli",
+    "cursor-cli",
+    "grok-build",
+    "muse-code",
+    "omp",
+    "opencode",
+    "pi",
+  ]);
   const allowedFixtureDirs = new Set(["test-fixtures"]);
 
   for (const entry of entries) {
