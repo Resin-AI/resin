@@ -3,7 +3,7 @@
  * chain can be compared, held out and replayed as a step of its own.
  *
  * The splitter is an allowlist, not a parser: a program splits only when all of it is written in a
- * tiny grammar in which every shell (bash, zsh, dash) reads it the same way and running its segments
+ * tiny grammar in which every shell it covers (bash, sh, dash) reads it the same way and running its segments
  * one after another, each aborting the rest on a non-zero exit, is exactly what the chain did.
  *
  * - Printable ASCII only; the only blanks are space and tab.
@@ -12,9 +12,14 @@
  * - Quotes are plain single-quoted strings (POSIX has no escapes inside them) and double-quoted
  *   strings drawn from the same safe set (no `$`, backtick, backslash or `!` inside).
  * - Every segment's first word, quotes removed, is an external command: never a builtin, keyword or
- *   special word of bash, zsh or dash, never an assignment, never an option.
+ *   special word of bash or dash, never an assignment, never an option.
  *
- * Anything else stays one program. Segments are exact byte ranges of the recorded source, and the
+ * Anything else stays one program.
+ *
+ * What the grammar cannot see: a function or alias the shell defined before running the program —
+ * from an rc or profile file a login shell (`bash -lc`) reads, or a harness's shell snapshot — may
+ * shadow an external command name. Such a definition that keeps state across commands would make
+ * segments run apart differ from the chain; the split is only as faithful as that environment. Segments are exact byte ranges of the recorded source, and the
  * segments re-joined with the recorded separators are the source byte for byte. The splitter carries
  * a version: a device whose splitter version differs from the one a plan was split with admits
  * none of its segments.
@@ -25,17 +30,18 @@ import type { WorkflowStep } from "./recorded-workflow.js";
 /** The version of these splitting rules; bump it whenever a program would split differently. */
 export const SHELL_AND_CHAIN_SPLITTER_VERSION = 1 as const;
 
-/** Shells whose `&&` lists these rules describe. PowerShell and any other language never split. */
+/**
+ * Shells whose `&&` lists these rules describe. zsh, PowerShell and any other shell never split.
+ */
 const POSIX_SHELLS: Readonly<Record<string, true>> = {
   bash: true,
   sh: true,
-  zsh: true,
   dash: true,
 };
 
 /**
- * Every builtin, reserved word and special word of bash 5, zsh 5 and dash (their manuals' builtin
- * and reserved-word lists). A segment starting with one never splits: a builtin may change state a
+ * Every builtin, reserved word and special word of bash 5 and dash (their manuals' builtin and
+ * reserved-word lists). A segment starting with one never splits: a builtin may change state a
  * later segment sees, or read state an earlier one set.
  */
 const SHELL_WORDS: ReadonlySet<string> = new Set([
@@ -130,63 +136,6 @@ const SHELL_WORDS: ReadonlySet<string> = new Set([
   "unalias",
   "unset",
   "wait",
-  // zsh builtins beyond bash's.
-  "autoload",
-  "bindkey",
-  "bye",
-  "cap",
-  "chdir",
-  "clone",
-  "comparguments",
-  "compcall",
-  "compctl",
-  "compdescribe",
-  "compfiles",
-  "compgroups",
-  "compquote",
-  "comptags",
-  "comptry",
-  "compvalues",
-  "disable",
-  "echotc",
-  "echoti",
-  "emulate",
-  "float",
-  "functions",
-  "getcap",
-  "getln",
-  "integer",
-  "limit",
-  "log",
-  "print",
-  "private",
-  "pushln",
-  "r",
-  "rehash",
-  "sched",
-  "setcap",
-  "setopt",
-  "stat",
-  "unfunction",
-  "unhash",
-  "unlimit",
-  "unsetopt",
-  "vared",
-  "whence",
-  "where",
-  "which",
-  "zcompile",
-  "zformat",
-  "zftp",
-  "zle",
-  "zmodload",
-  "zparseopts",
-  "zprof",
-  "zpty",
-  "zregexparse",
-  "zsocket",
-  "zstyle",
-  "ztcp",
 ]);
 
 /** Characters never allowed outside single quotes. */

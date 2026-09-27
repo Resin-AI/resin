@@ -64,14 +64,6 @@ describe("splitting a shell && chain", () => {
     ["wait", "wait && ls"],
     ["disown", "disown && ls"],
     ["bind", "bind x && ls"],
-    ["setopt", "mkdir a && setopt x && ls"],
-    ["unsetopt", "mkdir a && unsetopt x && ls"],
-    ["emulate", "mkdir a && emulate sh && ls"],
-    ["zmodload", "mkdir a && zmodload x && ls"],
-    ["autoload", "mkdir a && autoload x && ls"],
-    ["integer", "mkdir a && integer x && ls"],
-    ["float", "mkdir a && float x && ls"],
-    ["functions", "mkdir a && functions && ls"],
     ["command -p cd", "command -p cd /tmp && ls"],
     ["builtin cd", "builtin cd /tmp && ls"],
     ["a quoted builtin", "'cd' /tmp && ls"],
@@ -128,10 +120,12 @@ describe("splitting a shell && chain", () => {
   });
 
   it("splits only in POSIX shells", () => {
-    for (const shell of ["bash", "sh", "zsh", "dash"])
+    for (const shell of ["bash", "sh", "dash"])
       expect(splitShellAndChain(shell, "make && ls")?.segments).toHaveLength(2);
-    for (const shell of ["powershell", "pwsh", "cmd", "python", "fish"])
+    for (const shell of ["zsh", "powershell", "pwsh", "cmd", "python", "fish"])
       expect(splitShellAndChain(shell, "make && ls")).toBeUndefined();
+    // zsh builtins (setopt, emulate, zmodload, ...) are never split because zsh never splits.
+    expect(splitShellAndChain("zsh", "mkdir a && setopt x && ls")).toBeUndefined();
   });
 
   it("offers only mkdir -p of plain paths as optional setup", () => {

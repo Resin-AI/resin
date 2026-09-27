@@ -628,10 +628,11 @@ export class WorkflowCallRecorder {
         codex?.kind === "result" ? native?.exitCode : undefined,
       );
       // The cell completed, but the command it ran failed: the step failed.
-      const resultEvent =
+      const resultEvent = withoutLocalOmpSourceInterface(
         codex?.kind === "result" && native !== undefined && native.exitCode !== 0
           ? { ...event, isError: true, metadata: observed.metadata }
-          : { ...event, metadata: observed.metadata };
+          : { ...event, metadata: observed.metadata },
+      );
       if (suppressResult) {
         retainLocalWorkflowPayload(resultEvent, { result: event.result }, { suppressResult: true });
       } else if (resultObservation !== undefined) {
@@ -1665,8 +1666,15 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
+        // An OMP bash call's status is known only for a run the decoder saw finish in the
+        // foreground; a result that returned early carries no exit status at all.
         const exitCode =
-          nativeExitCode ?? (call.ompBash === true && event.isError === false ? 0 : undefined);
+          nativeExitCode ??
+          (call.ompBash === true &&
+          event.isError === false &&
+          event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash-completed"
+            ? 0
+            : undefined);
         if (exitCode !== undefined) {
           this.localReference(exitCode, event.sessionId, call.callId, WORKFLOW_CALL_EXIT_CODE_SLOT);
         }

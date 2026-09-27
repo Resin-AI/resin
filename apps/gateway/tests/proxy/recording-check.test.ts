@@ -55,6 +55,8 @@ type Turn =
       failed?: boolean;
       /** Recorded through the OMP decoder's proven bash interface. */
       ompBash?: boolean;
+      /** An OMP bash result the decoder saw finish in the foreground. */
+      ompCompleted?: boolean;
     };
 
 /** Records turns as one session would have produced them; nothing is executed. */
@@ -105,6 +107,9 @@ function record(
       toolName: turn.toolName,
       result: turn.result,
       isError: turn.failed === true,
+      ...(turn.ompCompleted === true
+        ? { metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash-completed" } }
+        : {}),
       executionDurationMs: 1,
     });
   }
@@ -690,7 +695,7 @@ describe("a held-out command whose harness chose its own non-program arguments",
 describe("a held-out run of one segment of a recorded && chain", () => {
   const OTHER = "recording-check-chain-session";
   /** The report job as one OMP bash call ran it: a setup segment, then the report itself. */
-  const report = (callId: string, chain: string, failed = false, ompBash = true): Turn[] => [
+  const report = (callId: string, chain: string, failed = false, completed = !failed): Turn[] => [
     { user: "Produce the monthly report" },
     {
       callId,
@@ -698,7 +703,8 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       parameters: { command: chain },
       result: "done\n",
       failed,
-      ompBash,
+      ompBash: true,
+      ompCompleted: completed,
     },
   ];
   const EMEA = "mkdir -p out && ./reportctl render --region EMEA";
@@ -777,7 +783,7 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       1,
     ],
     [
-      "the harness recorded no exit status",
+      "the OMP run returned before it finished (async, backgrounded or a service)",
       report("apac", "mkdir -p out && ./reportctl render --region APAC", false, false),
       1,
     ],
