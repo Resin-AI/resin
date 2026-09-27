@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Regenerates the muse-code recorded fixtures with the real `muse` binary driven headlessly
-# against the scripted provider in fake-meta.py. See ../CAPTURE.md.
+# Regenerates the muse-code recorded fixtures with the real `muse` binary and the real Meta model,
+# driven headlessly in an isolated XDG home whose auth.json is symlinked from the user's muse login.
+# See ../CAPTURE.md.
 #
 # Usage: capture.sh [output-dir]   (default: ../<muse version>)
 set -euo pipefail
@@ -12,18 +13,14 @@ OUT="${1:-$HERE/../$VERSION}"
 H=/tmp/resin-fixture-muse-home
 P=/tmp/resin-fixture-muse-cap
 RAW=/tmp/resin-fixture-muse-raw
-PORT=18777
-export MUSE_NO_AUTO_UPDATE=1
-
-SCRIPT="$(mktemp)"
-SCRIPT="$SCRIPT" PORT="$PORT" python3 "$HERE/fake-meta.py" &
-SERVER=$!
-trap 'kill "$SERVER" 2>/dev/null || true; rm -f "$SCRIPT"' EXIT
-sleep 1
+AUTH="${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json"
+[ -f "$AUTH" ] || { echo "run 'muse login' first ($AUTH missing)" >&2; exit 1; }
+export MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME="$H/.config" XDG_DATA_HOME="$H/.local/share"
 
 reset_home() {
   rm -rf "$H" "$P"
   mkdir -p "$H/.config/muse" "$P"
+  ln -s "$AUTH" "$H/.config/muse/auth.json"
   printf '{"schema_version":1,"mcp_servers":{"demo":{"command":"python3","args":["%s"]}}}\n' \
     "$HERE/demo-mcp-server.py" >"$H/.config/muse/settings.json"
   (cd "$P" && git init -q && echo "# demo" >README.md && git add . &&
@@ -33,9 +30,17 @@ reset_home() {
 run_muse() { # <signal> <seconds> <prompt> [extra muse args...]
   local signal="$1" seconds="$2" prompt="$3"
   shift 3
-  (cd "$P" && META_API_KEY=dummy HOME="$H" timeout -s "$signal" "$seconds" \
-    muse exec --base-url "http://127.0.0.1:$PORT" --model fake-model --approval-judge off --yolo \
+  (cd "$P" && timeout -s "$signal" "$seconds" muse exec --approval-judge off --yolo \
     "$@" "$prompt" >/dev/null 2>&1) || true
+}
+
+run_until_started() { # <signal> <prompt>: send <signal> once started.txt exists (the effect is running)
+  (cd "$P" && exec muse exec --approval-judge off --yolo --json "$2" >/dev/null 2>&1) &
+  local pid=$! i
+  for i in $(seq 1 600); do [ -f "$P/started.txt" ] && break; sleep 0.5; done
+  sleep 2
+  kill -"$1" "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
 }
 
 save_raw() { # <scenario>
@@ -45,37 +50,25 @@ save_raw() { # <scenario>
   rm -rf "$RAW/$1/sessions/.msp-view-v1"
 }
 
-# full: shell, read, edit, write, MCP call, failing shell, subagent spawn + wait.
-cat >"$SCRIPT" <<'EOF'
-[{"ns":"muse","name":"bash","args":{"command":"ls && git status --short","description":"List files"}},
- {"ns":"muse","name":"read_file","args":{"path":"README.md"}},
- {"ns":"muse","name":"edit_file","args":{"path":"README.md","find":"# demo","replace":"# demo project"}},
- {"ns":"muse","name":"write_file","args":{"path":"hello.py","content":"print('hello')\n"}},
- {"name":"mcp__demo__add","args":{"a":2,"b":3}},
- {"ns":"muse","name":"bash","args":{"command":"exit 3","description":"Run failing command"}},
- {"ns":"muse","name":"subagent_spawn","args":{"command_id":"spawn-1","role":"explorer","objective":"Count lines in README.md and report."}},
- {"ns":"muse","name":"subagent_wait","args":{"command_id":"wait-1","agent_path":"main/explorer/1","timeout_ms":30000}}]
-EOF
+LONG="Run exactly this shell command and nothing else: echo start > started.txt && sleep 60 && echo end > ended.txt"
+
+# full: shell, read, edit, write, MCP call, failing shell, subagent spawn + wait (+ observers).
 reset_home
-run_muse TERM 120 "Inspect the repo, tweak README, add hello.py, add 2+3 via demo MCP, then delegate a line count." --json
+run_muse TERM 600 "Do these steps in order, one tool call per step: 1) run the shell command 'ls && git status --short'; 2) read README.md; 3) edit README.md replacing '# demo' with '# demo project'; 4) create hello.py containing print('hello'); 5) call the demo MCP server's add tool with a=2 b=3; 6) run the shell command 'exit 3'; 7) spawn an explorer subagent to count lines in README.md and wait for it. Then report briefly." --json
 save_raw full
 
-# abort: SIGINT while a side-effecting shell command runs.
-cat >"$SCRIPT" <<'EOF'
-[{"ns":"muse","name":"bash","args":{"command":"echo start > started.txt && sleep 30 && echo end > ended.txt","description":"Run long command"}}]
-EOF
+# abort: SIGINT once the side-effecting shell command has started.
 reset_home
-run_muse INT 6 "Run the long command." --json
+run_until_started INT "$LONG"
 save_raw abort
 
 # kill: SIGKILL mid-command, then resume the same session so muse reconciles the call.
 reset_home
-run_muse KILL 6 "Run the long command." --json
+run_until_started KILL "$LONG"
 save_raw kill
 cp "$(find "$RAW/kill/sessions" -maxdepth 5 -name session.jsonl | head -1)" "$RAW/kill/session.before-resume.jsonl"
-echo '[]' >"$SCRIPT"
 SESSION_ID="$(basename "$(dirname "$(find "$H/.local/share/muse/sessions" -maxdepth 5 -path '*/20*' -name session.jsonl | head -1)")")"
-run_muse TERM 60 "continue" --session-id "$SESSION_ID"
+run_muse TERM 300 "The previous command was interrupted. Do not rerun it; just say done." --session-id "$SESSION_ID"
 rm -rf "$RAW/kill/sessions"
 cp -r "$H/.local/share/muse/sessions/." "$RAW/kill/sessions"
 rm -rf "$RAW/kill/sessions/.msp-view-v1"

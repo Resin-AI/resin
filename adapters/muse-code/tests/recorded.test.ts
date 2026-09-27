@@ -13,14 +13,14 @@ const RECORDED = path.join(
   "recorded",
   "1.4.0",
 );
-const FULL_ID = "01a0dff1-74b8-79f2-b971-9e4e19e1ffc5";
-const EXPLORER_ID = "01a0dff1-7cc3-77e3-af82-f201c7fe49bf";
-const VERIFY_OBSERVER_ID = "b6eec446-f467-490f-9291-77d135b94fb3";
-const ABORT_ID = "01a0dff1-9cbe-7361-b166-521d8ce7531b";
-const KILL_ID = "01a0dff1-d0ce-7711-b56c-b4134602612f";
+const FULL_ID = "01a0e32b-fc8b-7c80-a607-f243653ef38c";
+const EXPLORER_ID = "01a0e32c-51c0-7143-bf90-f840deb3756d";
+const VERIFY_OBSERVER_ID = "a90941e0-4df6-4edf-96e9-5ec33fd962e7";
+const ABORT_ID = "01a0e32c-9aff-72c1-9dfa-b3a6610ae0cd";
+const KILL_ID = "01a0e32c-eaea-7092-a1d6-709bb7abd500";
 
 function logPath(scenario: string, sessionId: string, childId?: string): string {
-  const dir = path.join(RECORDED, scenario, "sessions", "2026", "09", "26", sessionId);
+  const dir = path.join(RECORDED, scenario, "sessions", "2026", "09", "27", sessionId);
   return childId
     ? path.join(dir, "subagent", childId, "session.jsonl")
     : path.join(dir, "session.jsonl");
@@ -102,7 +102,7 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
       ofType(events, "tool_result").map((result) => [result.toolName, result]),
     );
     expect(ofType(events, "tool_result")).toHaveLength(8);
-    expect(results.get("add")).toMatchObject({ result: "5", isError: false });
+    expect(results.get("add")).toMatchObject({ result: "5.0", isError: false });
     expect(ofType(events, "tool_discovery")[0]?.tools).toEqual([{ name: "add", provider: "demo" }]);
 
     const failing = ofType(events, "tool_result").find((result) =>
@@ -124,7 +124,7 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
     ]);
     expect(
       ofType(events, "message").filter((message) => message.role === "user")[0]?.content,
-    ).toContain("Inspect the repo");
+    ).toContain("Do these steps in order");
   });
 
   it("links the spawned subagent and background observers to the lead session", async () => {
@@ -152,15 +152,15 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
   it("counts every model call once, in the lead session and in subagent and observer logs", async () => {
     for (const [filePath, sessionId, modelCalls] of [
       [logPath("full", FULL_ID), FULL_ID, 9],
-      [logPath("full", FULL_ID, EXPLORER_ID), EXPLORER_ID, 1],
-      [logPath("full", FULL_ID, VERIFY_OBSERVER_ID), VERIFY_OBSERVER_ID, 4],
+      [logPath("full", FULL_ID, EXPLORER_ID), EXPLORER_ID, 2],
+      [logPath("full", FULL_ID, VERIFY_OBSERVER_ID), VERIFY_OBSERVER_ID, 1],
     ] as const) {
       const usage = usageEvents(await decodeLog(filePath, sessionId));
       expect(usage).toHaveLength(modelCalls);
       for (const entry of usage) {
         expect(entry).toMatchObject({
           provider: "meta",
-          model: "fake-model",
+          model: "muse-spark-1.3-contributor",
           availability: "complete",
         });
         expect(entry.totalTokens).toBe((entry.inputTokens ?? 0) + (entry.outputTokens ?? 0));

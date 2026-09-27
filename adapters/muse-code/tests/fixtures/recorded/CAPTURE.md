@@ -1,6 +1,7 @@
 # Muse Code recorded fixtures
 
-Recorded with `muse` 1.4.0 (`Muse Code 1.4.0 (1.4.0-R4161.1)`, linux arm64) on 2026-09-26.
+Recorded with `muse` 1.4.0 (`Muse Code 1.4.0 (1.4.0-R4302.1)`, linux arm64) on 2026-09-27, against
+the real Meta model (`muse-spark-1.3-contributor`, muse's default).
 
 ## Capture source: `session.jsonl`
 
@@ -20,47 +21,52 @@ payload_type, payload}`, or a `retained_frame` whose `children[].record_json` ho
 
 ## Model provider
 
-Muse was not authenticated (`muse login` is an interactive browser device-code login). The real
-binary was run with `--base-url http://127.0.0.1:18777`, pointed at `capture/fake-meta.py`, a
-scripted stand-in for the Meta Responses endpoint (`GET /muse-code/models`, streaming
-`POST /responses`). Everything in the logs is written by muse 1.4.0 itself: tool execution, MCP
-server calls, subagent spawning, observers, cancellation, and resume. Only the model's choices and
-its token counts come from the script. `META_API_KEY=dummy` satisfies the client and is never sent
-anywhere but the local stand-in.
+Every scenario runs the real `muse` binary against the real Meta model with the user's existing
+`muse login`: the capture home gets `.config/muse/auth.json` as a symlink to
+`${XDG_CONFIG_HOME:-~/.config}/muse/auth.json` (never copied, so a token refresh updates the one
+real store). Model choices, token usage, and the model id in the logs are real. No scenario needs a
+scripted model.
+
+Usage lands where each model call ran: the lead log and each subagent and observer log carry a
+`model_completed` event with `usage` per call. The lead additionally writes
+`subagent.control.runtime_observed` with the subagent's aggregated usage; the decoder ignores it
+because the subagent's own log already counts those calls.
 
 ## Scenarios
 
 | Directory | What happens |
 | --- | --- |
-| `1.4.0/full` | `bash` (`ls && git status`), `read_file`, `edit_file`, `write_file`, MCP `mcp__demo__add` on a local stdio server, a failing `bash` (`exit 3`), `subagent_spawn` + `subagent_wait`. Includes the explorer subagent log and the `verify-reminder` observer log. |
-| `1.4.0/abort` | A side-effecting `bash` (`echo start > started.txt && sleep 30 …`) interrupted with SIGINT; muse records the call as cancelled. |
-| `1.4.0/kill` | The same command with muse killed by SIGKILL (`session.before-resume.jsonl` is the log at that moment: an effect started with no terminal record), then `muse exec --session-id <id>` resumes it and muse records "The outcome is unknown". |
+| `1.4.0/full` | `bash` (`ls && git status`), `read_file`, `edit_file`, `write_file`, MCP `mcp__demo__add` on a local stdio server, a failing `bash` (`exit 3`), `subagent_spawn` + `subagent_wait`. Includes the explorer subagent log (2 model calls) and the `verify-reminder` observer log (1 model call). |
+| `1.4.0/abort` | A side-effecting `bash` (`echo start > started.txt && sleep 30 …`) sent SIGINT once `started.txt` exists; muse records the call as cancelled. |
+| `1.4.0/kill` | The same command with muse killed by SIGKILL once `started.txt` exists (`session.before-resume.jsonl` is the log at that moment: an effect started with no terminal record), then `muse exec --session-id <id>` resumes it (telling the model not to rerun it) and muse records "The outcome is unknown". |
 
 ## Regenerate
 
-Requires `muse` on PATH, `python3`, `git`, and `node`. From this directory:
+Requires `muse` on PATH and logged in (`muse login`), `git`, `python3`, and `node`. From this
+directory:
 
 ```sh
 ./capture/capture.sh            # writes ./<muse version>/
 ./capture/capture.sh /tmp/out   # writes elsewhere
 ```
 
-The script runs every scenario with `HOME=/tmp/resin-fixture-muse-home`,
-`MUSE_NO_AUTO_UPDATE=1`, in `/tmp/resin-fixture-muse-cap`, with:
+The script runs every scenario with `XDG_CONFIG_HOME=/tmp/resin-fixture-muse-home/.config`,
+`XDG_DATA_HOME=/tmp/resin-fixture-muse-home/.local/share`, `MUSE_NO_AUTO_UPDATE=1`, in a fresh git
+project at `/tmp/resin-fixture-muse-cap`, with:
 
 ```sh
-META_API_KEY=dummy muse exec --base-url http://127.0.0.1:18777 --model fake-model \
-  --approval-judge off --yolo --json "<prompt>"
+muse exec --approval-judge off --yolo --json "<prompt>"
 ```
 
 and scrubs each log with
 `node scripts/harness-fixtures/scrub.mjs <raw> <out> --project /tmp/resin-fixture-muse-cap --replace /tmp/resin-fixture-muse-home=/home/user`.
-Session ids change on every capture; update the ids in `tests/recorded.test.ts` after regenerating.
+Session ids and the date directory change on every capture; update the ids and date in
+`tests/recorded.test.ts` after regenerating. The model's wording varies between captures, but the
+prompts name each tool call explicitly.
 
 ## Not captured
 
-- Real Meta model output and pricing (no provider login).
 - `skill-reminder` observer calls: muse 1.4.0 links them from the lead log
-  (`memory_reminder_child_session_linked`) but writes no log or usage for them; the stand-in saw
-  their requests.
+  (`memory_reminder_child_session_linked`) but writes no log or usage for them, so their model
+  calls cannot be counted.
 - Context compaction.
