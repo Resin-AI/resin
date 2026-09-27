@@ -257,8 +257,10 @@ describe("Codex single-command result carriers", () => {
   for (const [name, survey, status] of [
     ["an earlier cell that failed", SURVEY, "failed"],
     [
-      "an earlier cell whose commands may outlive it",
-      SURVEY.replace("Promise.allSettled", "Promise.all"),
+      "an earlier cell whose commands may outlive a caught rejection",
+      `const cmds=["cat a.md","cat b.md"];
+try { await Promise.all(cmds.map(cmd=>tools.exec_command({cmd,workdir:"/app"}))); } catch (e) { text(String(e)); }
+`,
       "completed",
     ],
     [

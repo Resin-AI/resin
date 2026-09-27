@@ -284,6 +284,33 @@ describe("stock Codex command reconciliation", () => {
       expect(associated(unproven, true)).not.toHaveProperty("association");
   });
 
+  it("trusts a later wrapper after a completed uncaught Promise.all cell, not a caught one", () => {
+    const pooled =
+      "const [info, r] = await Promise.all([Promise.resolve(ALL_TOOLS.map(t => t.name).join('\\n')), tools.exec_command({cmd:'cat a',workdir:'/repo'})]);\ntext(info);\ntext(r.output);";
+    const associated = (source: string) => {
+      const decoder = new CodexSessionDecoder({ sessionId: "s" });
+      const survey = call("survey", "ignored", base);
+      survey.payload.input = source;
+      decoder.decodeRecord(survey);
+      decoder.decodeRecord(reply("survey", base + 5));
+      decoder.decodeRecord(call("later", "echo ok", base + 10));
+      decoder.decodeRecord(command("n1", "echo ok", base + 20, base + 30));
+      return readCodexCommandMetadata(decoder.decodeRecord(reply("later", base + 40))[0]!.metadata);
+    };
+    expect(associated(pooled)).toMatchObject({
+      association: { callId: "later", nativeCommandId: "n1" },
+    });
+    // A caught rejection completes the cell while the other commands may still be running.
+    for (const unproven of [
+      `try {\n${pooled}\n} catch (e) { text(String(e)); }`,
+      pooled.replace(
+        "tools.exec_command({cmd:'cat a',workdir:'/repo'})",
+        "Promise.resolve(tools.exec_command({cmd:'cat a'}))",
+      ),
+    ])
+      expect(associated(unproven)).not.toHaveProperty("association");
+  });
+
   it("does not treat quoted apply-patch source as a concurrent command", () => {
     const decoder = new CodexSessionDecoder({ sessionId: "s" });
     const patch = call("patch", "ignored", base);

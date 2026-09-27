@@ -252,16 +252,30 @@ function mentionsTools(node: AstNode): boolean {
   return false;
 }
 
+function containsType(node: AstNode, type: string): boolean {
+  if (node.type === type) return true;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "loc" || key.endsWith("Comments") || key === "extra") continue;
+    if (Array.isArray(value)) {
+      if (value.some((child) => isAstNode(child) && containsType(child, type))) return true;
+    } else if (isAstNode(value) && containsType(value, type)) return true;
+  }
+  return false;
+}
+
 /**
  * A cell whose every command call has settled once the cell reports `Script completed`, so none of
- * its commands can start afterwards. Each `tools.<name>(…)` call must be awaited directly, or be the
- * whole body of a synchronous arrow passed to `<array>.map` whose result `await
- * Promise.allSettled(…)` receives. The only other functions allowed are such `map`/`forEach`
- * callbacks on a `const` bound to an array literal or to that awaited settlement, and synchronous
- * callbacks that never mention `tools` passed to a pure array method (`ALL_TOOLS.filter(t => …)`):
- * with no `tools` reference, even a deferred callback cannot start a command. Nothing can defer,
- * alias `tools`, or construct objects, and the only calls are `text`, `String`, `tools.*`,
- * `Promise.allSettled`, callback-free `JSON.stringify`/`JSON.parse`, and the pure methods below. Anything else is not proven.
+ * its commands can start afterwards. Each `tools.<name>(…)` call must be awaited directly, be an
+ * element of the array literal a directly awaited settlement receives, or be the whole body of a
+ * synchronous arrow passed to `<array>.map` whose result a directly awaited settlement receives.
+ * A settlement is `Promise.allSettled(…)`, or `Promise.all(…)` in a cell without `try`: an uncaught
+ * rejection fails the cell, so `Script completed` means every element fulfilled. The only other
+ * functions allowed are such `map`/`forEach` callbacks on a `const` bound to an array literal or to
+ * that awaited settlement, and synchronous callbacks that never mention `tools` passed to a pure
+ * array method (`ALL_TOOLS.filter(t => …)`): with no `tools` reference, even a deferred callback
+ * cannot start a command. Nothing can defer, alias `tools`, or construct objects, and the only calls
+ * are `text`, `String`, `tools.*`, settlements, `Promise.resolve`, callback-free
+ * `JSON.stringify`/`JSON.parse`, and the pure methods below. Anything else is not proven.
  */
 export function settlesBeforeCompletion(source: string): boolean {
   if (source.length > 32_768) return false;
@@ -271,6 +285,8 @@ export function settlesBeforeCompletion(source: string): boolean {
   } catch {
     return false;
   }
+  // `try` can swallow a `Promise.all` rejection while its other commands still run.
+  const catches = containsType(program, "TryStatement");
   const arrays = new Set<string>();
   const settled = new Set<string>();
   const constants = new Set<string>();
@@ -296,7 +312,10 @@ export function settlesBeforeCompletion(source: string): boolean {
     )
       return false;
     const callee = memberName(node.callee);
-    return callee?.property === "allSettled" && isNamed(callee.object, "Promise");
+    return (
+      (callee?.property === "allSettled" || (callee?.property === "all" && !catches)) &&
+      isNamed(callee.object, "Promise")
+    );
   }
   const isCallbackReceiver = (node: unknown, method: string): boolean =>
     (isAstNode(node) && node.type === "ArrayExpression") ||
@@ -383,7 +402,20 @@ export function settlesBeforeCompletion(source: string): boolean {
         }
         const holder = parents[parents.length - 3];
         if (holder?.type === "AwaitExpression" && holder.argument === call) break;
-        // `<array>.map(cmd => tools.x(…))`, settled by a directly awaited `Promise.allSettled`.
+        // `await Promise.all([tools.x(…), …])`: an element of the settled array literal.
+        const elementSettlement = parents[parents.length - 4];
+        const elementAwaited = parents[parents.length - 5];
+        if (
+          holder?.type === "ArrayExpression" &&
+          (holder.elements as unknown[]).includes(call) &&
+          elementSettlement !== undefined &&
+          isSettlement(elementSettlement) &&
+          (elementSettlement.arguments as unknown[])[0] === holder &&
+          elementAwaited?.type === "AwaitExpression" &&
+          elementAwaited.argument === elementSettlement
+        )
+          break;
+        // `<array>.map(cmd => tools.x(…))`, settled by a directly awaited settlement.
         const mapCall = parents[parents.length - 4];
         const settlement = parents[parents.length - 5];
         const awaited = parents[parents.length - 6];
@@ -407,6 +439,8 @@ export function settlesBeforeCompletion(source: string): boolean {
         const member = memberName(callee);
         if (member !== undefined && isNamed(member.object, "tools")) break;
         if (isSettlement(node)) break;
+        // `Promise.resolve(value)` starts nothing; its argument is checked like any other.
+        if (member?.property === "resolve" && isNamed(member.object, "Promise")) break;
         // `JSON.stringify(result)` / `JSON.parse(text)` without a reviver or replacer callback.
         if (
           member !== undefined &&

@@ -11,6 +11,7 @@ recognize.
 | `<version>/subagent-child.jsonl` | the spawned child's own rollout (`thread_source: "subagent"`, `parent_thread_id`) |
 | `<version>/compaction.jsonl` | automatic compaction (`compacted`, `ContextCompaction`) |
 | `<version>/aborted-turn.jsonl` | a turn interrupted with SIGINT during a running shell command (`turn_aborted`) |
+| `0.157.1/promise-all-cell.jsonl` | a conformance learn session (`resin_bench.conformance`, `gpt-6-luna`) whose first cell awaits `Promise.all([Promise.resolve(…), tools.exec_command(…)])`, then six single-command cells, one whose native command completes after the cell reply; scrubbed with `--project <work dir>` and `--replace <codex home>=/home/user` |
 
 Versions: `0.157.1` (npm global install) and `0.156.1` (`npm i @openai/codex@0.156.1` in a
 scratch directory). Model `gpt-5.6-luna`, reasoning effort `low`.

@@ -294,6 +294,44 @@ function operationIdentityProblem(
   return undefined;
 }
 
+/** Code-mode calls whose linked native command carries their result (it completed after the cell). */
+function resultsCarriedByNativeCommand(events: readonly NormalizedSessionEvent[]): Set<string> {
+  const carried = new Set<string>();
+  for (const event of events) {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (
+      event.type === "command_exec" &&
+      native?.kind === "command" &&
+      native.association &&
+      readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])
+    )
+      carried.add(native.association.callId);
+  }
+  return carried;
+}
+
+/**
+ * Mirrors Cloud's capture rule for a Codex code-mode cell result that stands for one native command
+ * (`resinCodexCommandV1` kind `result`): unless the decoder linked that command to the cell, by an
+ * association on the result or on the native command, Cloud skips the call ("native command result
+ * is missing or ambiguous") and defers the workflow as capture_incomplete.
+ */
+function uncoveredNativeResults(events: readonly NormalizedSessionEvent[]): string[] {
+  const linkedCalls = new Set<string>();
+  for (const event of events) {
+    const native = readCodexCommandMetadata(event.metadata);
+    if (event.type === "command_exec" && native?.kind === "command" && native.association)
+      linkedCalls.add(native.association.callId);
+  }
+  return events.flatMap((event) => {
+    if (event.type !== "tool_result") return [];
+    const native = readCodexCommandMetadata(event.metadata);
+    if (native?.kind !== "result") return [];
+    if (native.association?.callId === event.callId || linkedCalls.has(event.callId)) return [];
+    return [event.callId];
+  });
+}
+
 /** Problems that would make Cloud detection miss or reject this session's work. */
 function qualificationProblems(key: string, sessions: SessionCapture[]): string[] {
   const problems: string[] = [];
@@ -306,6 +344,9 @@ function qualificationProblems(key: string, sessions: SessionCapture[]): string[
       if (callless?.(event)) continue;
       const problem = operationIdentityProblem(event, identities);
       if (problem !== undefined) problems.push(`${at} ${problem}`);
+    }
+    for (const callId of uncoveredNativeResults(session.events)) {
+      problems.push(`${at} native command result for ${callId} is missing or ambiguous`);
     }
     for (const { observed, command, parameters } of session.shellCalls) {
       // Shell commands become program steps whose program argument holds the exact source.
@@ -321,6 +362,7 @@ function qualificationProblems(key: string, sessions: SessionCapture[]): string[
       }
     }
     for (const reason of session.deadLetters) problems.push(`${at} dead letter ${reason}`);
+    const nativeCarried = resultsCarriedByNativeCommand(session.events);
     for (const event of session.events) {
       if (event.type === "tool_call") {
         if (!readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])) {
@@ -329,6 +371,7 @@ function qualificationProblems(key: string, sessions: SessionCapture[]): string[
       } else if (event.type === "tool_result") {
         if (
           !session.unknownOutcomeResults.has(event) &&
+          !nativeCarried.has(event.callId) &&
           !readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])
         ) {
           problems.push(`${at} tool_result ${event.callId} has no workflowResult`);
