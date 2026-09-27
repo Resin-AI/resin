@@ -77,4 +77,41 @@ describe("segment steps of a recorded chain", () => {
     const { segment: _b, ...second } = { ...chain[1]!, id: "s1" };
     expect(validateRecordedWorkflow(plan([first, second])).valid).toBe(false);
   });
+
+  it("requires a held-out call of a segment step to name its segment in that call's own chain", () => {
+    const withCalls = (calls: unknown[]) =>
+      validateRecordedWorkflow({
+        ...plan(chain),
+        heldOut: { inputs: [], observed: [], calls },
+      }).valid;
+    const address = (index: number) => ({ index, count: 3, version: 1 });
+    expect(
+      withCalls([
+        { stepId: "s0", callIds: ["other"], segments: [address(1)] },
+        { stepId: "s1", callIds: ["other"], segments: [address(2)] },
+      ]),
+    ).toBe(true);
+    expect(withCalls([{ stepId: "s0", callIds: ["other"] }])).toBe(false);
+    expect(withCalls([{ stepId: "s0", callIds: ["a", "b"], segments: [address(1)] }])).toBe(false);
+    expect(
+      withCalls([
+        { stepId: "s0", callIds: ["other"], segments: [{ index: 3, count: 3, version: 1 }] },
+      ]),
+    ).toBe(false);
+  });
+
+  it("refuses a segment address on a held-out call of a step that is not a segment", () => {
+    const { segment: _a, ...first } = chain[0]!;
+    const plain = plan([{ ...first, callId: "one" }]);
+    const heldOut = {
+      inputs: [],
+      observed: [],
+      calls: [{ stepId: "s0", callIds: ["other"], segments: [{ index: 0, count: 2, version: 1 }] }],
+    };
+    expect(validateRecordedWorkflow({ ...plain, heldOut }).valid).toBe(false);
+    const { segments: _s, ...call } = heldOut.calls[0]!;
+    expect(
+      validateRecordedWorkflow({ ...plain, heldOut: { ...heldOut, calls: [call] } }).valid,
+    ).toBe(true);
+  });
 });

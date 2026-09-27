@@ -737,32 +737,49 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     }));
     return { ...plan, steps, candidates: [] };
   }
-  async function ask(heldOut: Turn[], version = 1) {
+  /**
+   * Asks to confirm `region` on every segment naming it, with the other session's chain as the
+   * held-out run at `addresses` (by default the plan's own segment addresses).
+   */
+  async function ask(
+    heldOut: Turn[],
+    version = 1,
+    chain = EMEA,
+    addresses?: Array<{ index: number; count: number; version: number }>,
+  ) {
     const store = new InMemoryPrivateValueStore();
-    const recorded = record(store, report("emea", EMEA));
+    const recorded = record(store, report("emea", chain));
     record(store, heldOut, owner, OTHER);
-    const plan = segmented(recorded, ["mkdir -p out", "./reportctl render --region EMEA"], version);
+    const texts = chain.split(" && ");
+    const plan = segmented(recorded, texts, version);
     delete (plan as { baseline?: unknown }).baseline;
-    const region = tokenizeProgram("shell", plan.steps[1]!.callable.program!.source).findIndex(
-      (token) => token.raw === "EMEA",
-    );
-    const candidate: WorkflowBindingCandidate = {
-      stepId: plan.steps[1]!.id,
-      argument: "command",
-      path: ["tokens", region],
-      proposed: { kind: "input", name: "region", type: "string" },
-      reason: "varies-across-executions",
-      missing: "a demonstration with a different value",
-    };
+    const candidates = plan.steps.flatMap((step): WorkflowBindingCandidate[] => {
+      const region = tokenizeProgram("shell", step.callable.program!.source).findIndex(
+        (token) => token.raw === "EMEA",
+      );
+      return region === -1
+        ? []
+        : [
+            {
+              stepId: step.id,
+              argument: "command",
+              path: ["tokens", region],
+              proposed: { kind: "input", name: "region", type: "string" },
+              reason: "varies-across-executions",
+              missing: "a demonstration with a different value",
+            },
+          ];
+    });
     return validator(store, { sessions: [SESSION, OTHER] })({
       ...plan,
-      candidates: [candidate],
+      candidates,
       heldOut: {
         inputs: [],
         observed: [],
-        calls: plan.steps.map((step) => ({
+        calls: plan.steps.map((step, index) => ({
           stepId: step.id,
           callIds: [heldOut[1]!.callId as string],
+          segments: [addresses?.[index] ?? step.segment!],
         })),
       },
     });
@@ -807,5 +824,44 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     expect(answer.verification?.status).not.toBe("verified");
     expect(second(answer)).toBe(true);
     expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+  });
+
+  describe("recorded by another session behind an extra mkdir -p setup segment", () => {
+    const PLAN = "./reportctl extract --region EMEA && ./reportctl render --region EMEA";
+    const APAC = report(
+      "apac",
+      "mkdir -p out/APAC && ./reportctl extract --region APAC && ./reportctl render --region APAC",
+    );
+    const at = (...indexes: number[]) => indexes.map((index) => ({ index, count: 3, version: 1 }));
+
+    it("confirms the region from that call's own segments", async () => {
+      const answer = await ask(APAC, 1, PLAN, at(1, 2));
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true, true]);
+    });
+
+    it.each([
+      ["the mkdir -p segment, which the plan step is not", at(0, 2)],
+      ["another step's segment", at(2, 2)],
+      ["segments out of order", at(2, 1)],
+      [
+        "the plan's own count",
+        [
+          { index: 0, count: 2, version: 1 },
+          { index: 1, count: 2, version: 1 },
+        ],
+      ],
+      [
+        "another splitter version",
+        [
+          { index: 1, count: 3, version: 2 },
+          { index: 2, count: 3, version: 2 },
+        ],
+      ],
+    ])("misses the segments when the held-out address names %s", async (_, addresses) => {
+      const answer = await ask(APAC, 1, PLAN, addresses);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+    });
   });
 });

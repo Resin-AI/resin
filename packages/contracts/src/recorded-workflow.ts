@@ -382,7 +382,17 @@ export type WorkflowHeldOutDemonstration = {
    * execution order; more than one only for `for_each` iterations. The host recomputes every
    * recorded value from these call ids and its own sessions, so a plan never carries the recording.
    */
-  calls?: Array<{ stepId: string; callIds: string[] }>;
+  calls?: Array<{
+    stepId: string;
+    callIds: string[];
+    /**
+     * For a segment step (`WorkflowStep.segment`), where each named call's segment sits in that
+     * call's own recorded chain, parallel to `callIds`: another run may have chained the same
+     * command with a different setup, so its index and count need not be the plan step's. The host
+     * re-splits its own recording at this address and admits nothing when it does not split so.
+     */
+    segments?: Array<{ index: number; count: number; version: number }>;
+  }>;
 };
 
 export type RecordedWorkflow = {
@@ -947,8 +957,47 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
  * adjacent and in order, of one shell program, one count and one splitter version; no step shares
  * a callId otherwise, and nothing reads a segment's result but the chain's last segment's.
  */
+/** Whether a value is a segment address: an index below a count of two or more, and a version. */
+function isSegmentAddress(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    hasOnlyKeys(value, ["index", "count", "version"]) &&
+    Number.isSafeInteger(value.index) &&
+    Number.isSafeInteger(value.count) &&
+    Number.isSafeInteger(value.version) &&
+    (value.count as number) >= 2 &&
+    (value.index as number) >= 0 &&
+    (value.index as number) < (value.count as number)
+  );
+}
+
 function validateWorkflowSegments(workflow: Record<string, unknown>, errors: string[]): void {
   const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  // A held-out call of a segment step names its segment in its own chain; nothing else does.
+  const heldOut = isPlainObject(workflow.heldOut) ? workflow.heldOut : undefined;
+  for (const entry of Array.isArray(heldOut?.calls) ? heldOut.calls : []) {
+    if (!isPlainObject(entry)) continue;
+    const step = steps.find((candidate) => candidate.id === entry.stepId);
+    const segmented = step !== undefined && Object.hasOwn(step, "segment");
+    const segments = entry.segments;
+    if (!segmented) {
+      if (segments !== undefined)
+        errors.push(
+          `heldOut.calls entry for step ${String(entry.stepId)} addresses segments of a step that is not one`,
+        );
+      continue;
+    }
+    if (
+      !Array.isArray(segments) ||
+      !Array.isArray(entry.callIds) ||
+      segments.length !== entry.callIds.length ||
+      !segments.every(isSegmentAddress)
+    ) {
+      errors.push(
+        `heldOut.calls entry for segment step ${String(entry.stepId)} needs one segment address per call`,
+      );
+    }
+  }
   const nonFinal = new Set<string>();
   const seen = new Set<string>();
   for (let position = 0; position < steps.length; position += 1) {

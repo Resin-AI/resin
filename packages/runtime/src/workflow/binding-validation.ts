@@ -35,6 +35,7 @@ import {
   programTokenPath,
   programTokenValueAt,
   segmentOriginal,
+  shellAndChainSegmentText,
   tokenizeProgram,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
@@ -769,14 +770,20 @@ export async function demonstrationEnvironment(params: {
     return value;
   };
   // A segment step's program argument is supplied as its recorded chain; what the segment ran is
-  // that chain's segment, re-split as the recording check split it.
+  // that chain's segment, re-split at the demonstration's own address as the recording check did.
   const suppliedFor = async (
     step: WorkflowStep,
     argument: string,
     reference: string,
   ): Promise<WorkflowJsonValue | undefined> => {
     const value = await resolveOnce(reference);
-    return segmentOriginal(step, argument, value) as WorkflowJsonValue | undefined;
+    if (step.segment === undefined || step.callable.program?.argument !== argument) return value;
+    // The demonstration's call names where its segment sits in its own chain; the plan's own
+    // baseline call sits where the plan step does.
+    const address =
+      demonstration.calls?.find((entry) => entry.stepId === step.id)?.segments?.[0] ??
+      (label === "baseline" ? step.segment : undefined);
+    return address === undefined ? undefined : shellAndChainSegmentText("sh", value, address);
   };
   for (const entry of demonstration.inputs) {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);
