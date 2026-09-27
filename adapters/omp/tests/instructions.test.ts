@@ -19,6 +19,15 @@ describe("renderOmpInvocationSnippet", () => {
     expect(snippet).toContain("write");
     expect(snippet).toContain("read");
   });
+
+  it("spells the server and tool the way OMP normalizes them", () => {
+    expect(renderOmpInvocationSnippet("resin_Git-Status", "resin-dev")).toContain(
+      "`xd://mcp__resin_dev_resin_git_status`",
+    );
+    expect(renderOmpInvocationSnippet("resin_git_status", "resin")).toContain(
+      "`xd://mcp__resin_git_status`",
+    );
+  });
 });
 
 describe("buildOmpCatalogInstructionsBlock", () => {

@@ -30,6 +30,27 @@ export const OMP_DEVICE_SURFACE_WRITE_TOOL = "write";
  */
 export const OMP_DEVICE_SURFACE_READ_TOOL = "read";
 
+function ompNamePart(value: string, fallback: string): string {
+  const part = value
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return part.length > 0 ? part : fallback;
+}
+
+/**
+ * The name OMP registers an MCP tool under: both parts lowercased with every other run of
+ * characters as one `_`, and a tool name that already starts with `<server>_` not prefixed twice.
+ * Its device path is `xd://` followed by it. Resin keeps published names short enough that OMP
+ * never cuts one at its 64-character limit.
+ */
+export function ompMcpToolName(serverName: string, toolName: string): string {
+  const server = ompNamePart(serverName, "server");
+  const tool = ompNamePart(toolName, "tool");
+  return `mcp__${server}_${tool.startsWith(`${server}_`) ? tool.slice(server.length + 1) : tool}`;
+}
+
 export interface OmpDeviceSurfaceCall {
   /** The configured server the path names, as the harness itself spells it. */
   connection: string;
