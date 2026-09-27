@@ -731,9 +731,11 @@ export function deriveNativeCalls(
           chosen.push(match);
         }
         if (chosen.length === 0) continue;
-        // A token a result may have produced is decided by that evidence, not split into parts.
+        // A token a result may have produced — equal to an earlier result, or printed inside an
+        // earlier call's output — is decided by that evidence, not split into parts: an input span
+        // inside it would carry the recorded text the evidence says to read from that result.
         if (
-          candidates.some(
+          [...candidates, ...extracts].some(
             (candidate) =>
               candidate.stepId === call.stepId && JSON.stringify(candidate.path) === pathKey,
           )

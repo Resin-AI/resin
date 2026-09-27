@@ -500,3 +500,38 @@ it("reprojects Codex exec profiles through the frozen workflow carrier vocabular
 
   expect(carrier?.program).toEqual(program);
 });
+
+describe("a path an earlier step printed", () => {
+  it("is read from that step's output, never rebuilt from input spans carrying its recorded text", () => {
+    const shell = (index: number, cmd: string, result: string) => ({
+      callId: `call_${index}`,
+      stepId: `step${index}`,
+      toolName: "exec_command",
+      runtime: RESIN_PROCESS_RUNTIME,
+      arguments: { cmd },
+      result,
+      program: { kind: "shell" as const, argument: "cmd" },
+    });
+    const derivation = deriveNativeCalls(
+      [
+        shell(0, "./dbtool check billing", "billing: integrity ok\n"),
+        shell(
+          1,
+          "./dbtool dump billing --date 2025-06-15",
+          "billing -> backups/billing-2025-06-15.sql\n",
+        ),
+        shell(2, "./dbtool compress backups/billing-2025-06-15.sql", "compressed\n"),
+      ],
+      new Set(["billing", "2025-06-15"]),
+    );
+    const compress = [...derivation.candidates, ...derivation.extracts].filter(
+      (entry) => entry.stepId === "step2",
+    );
+    // One whole-token binding to the dump's output: a plan cannot hold both it and span holes in
+    // the same token, and with the spans the recording check sees the recorded path as literal text.
+    expect(compress.map((entry) => entry.path)).toEqual([["tokens", 2]]);
+    expect(derivation.extracts.map((entry) => [entry.stepId, entry.producerStepId])).toEqual([
+      ["step2", "step1"],
+    ]);
+  });
+});
