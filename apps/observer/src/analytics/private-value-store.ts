@@ -76,12 +76,16 @@ interface ImmutableEntry extends PrivateEntry {
   key: string;
 }
 
+function isSameEntry(current: PrivateEntry, next: PrivateEntry): boolean {
+  return (
+    isDeepStrictEqual(current.value, next.value) &&
+    isDeepStrictEqual(current.origin, next.origin) &&
+    (current.representation ?? "redacted") === (next.representation ?? "redacted")
+  );
+}
+
 function assertSameEntry(current: PrivateEntry, next: PrivateEntry, key: string): void {
-  if (
-    !isDeepStrictEqual(current.value, next.value) ||
-    !isDeepStrictEqual(current.origin, next.origin) ||
-    (current.representation ?? "redacted") !== (next.representation ?? "redacted")
-  ) {
+  if (!isSameEntry(current, next)) {
     throw new Error(
       `private value reference '${key}' already exists with different content or origin (different value or owner)`,
     );
@@ -109,7 +113,8 @@ export class FilePrivateValueStore implements PrivateValueStore {
   private static shared: FilePrivateValueStore | undefined;
   private readonly file: string;
   private entries: Map<string, PrivateEntry> | undefined;
-  private loadedMtimeMs = -1;
+  /** Stat signature of the legacy file last read or written by this instance. */
+  private loadedSignature: string | undefined;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
 
   constructor(dataDir: string) {
@@ -190,13 +195,8 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   private load(): Map<string, PrivateEntry> {
-    let mtimeMs = -1;
-    try {
-      mtimeMs = fs.statSync(this.file).mtimeMs;
-    } catch {
-      // A missing legacy file starts empty. V2 entries are independent of this file.
-    }
-    if (this.entries && mtimeMs === this.loadedMtimeMs) return this.entries;
+    const signature = this.legacySignature();
+    if (this.entries && signature === this.loadedSignature) return this.entries;
     this.entries = new Map();
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(this.file, "utf8"));
@@ -216,11 +216,25 @@ export class FilePrivateValueStore implements PrivateValueStore {
           });
         }
       }
-      this.loadedMtimeMs = mtimeMs;
+      this.loadedSignature = signature;
     } catch {
       // Existing behavior: unavailable legacy values fail resolution, never become guessed data.
     }
     return this.entries;
+  }
+
+  /**
+   * Every legacy write renames a fresh temp file into place, so the inode changes with each
+   * writer; with mtime and size this detects another process's write even within one mtime tick.
+   */
+  private legacySignature(): string | undefined {
+    try {
+      const stat = fs.statSync(this.file, { bigint: true });
+      return `${stat.ino}:${stat.mtimeNs}:${stat.size}`;
+    } catch {
+      // A missing legacy file starts empty. V2 entries are independent of this file.
+      return undefined;
+    }
   }
 
   get(key: string): unknown | undefined {
@@ -252,13 +266,22 @@ export class FilePrivateValueStore implements PrivateValueStore {
       this.writeImmutable(key, entry);
       return;
     }
-    this.entries = undefined;
-    this.loadedMtimeMs = -1;
+    // load() re-reads only when another writer changed the file since this instance last saw it.
     const entries = this.load();
     const existing = entries.get(key);
-    if (key.startsWith("private:") && existing !== undefined) {
+    if (existing !== undefined && key.startsWith("private:")) {
       assertSameEntry(existing, entry, key);
       return;
+    }
+    if (existing !== undefined && isSameEntry(existing, entry)) {
+      // Refresh recency only when eviction is within reach (store over half full) and the entry has
+      // fallen into the older half of the retained time window, so hot aliases never reach eviction
+      // while a key cycling below capacity is never rewritten.
+      if (entries.size <= MAX_ENTRIES / 2) return;
+      const oldestKey = entries.keys().next().value;
+      const oldestAt =
+        oldestKey === undefined ? entry.at : (entries.get(oldestKey)?.at ?? entry.at);
+      if (existing.at >= (oldestAt + entry.at) / 2) return;
     }
     // Legacy placeholder keys are aliases, not unique reference identities.
     entries.delete(key);
@@ -282,6 +305,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
         mode: 0o600,
       });
       fs.renameSync(temporary, this.file);
+      this.loadedSignature = this.legacySignature();
       try {
         fs.chmodSync(this.file, 0o600);
       } catch {
