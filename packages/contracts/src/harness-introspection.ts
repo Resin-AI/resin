@@ -247,13 +247,19 @@ const RESIN_DISCOVERY_TOOLS: Readonly<Record<string, true>> = {
 
 /**
  * Whether a tool call is a call to one of Resin's own discovery meta tools, however the harness
- * names it: `mcp__resin__<tool>` (Codex, Claude), `mcp__resin_<tool>` (OMP), `resin_<tool>`
- * (OpenCode), `resin-<tool>`, or the bare name with connection `resin` (Copilot) or no reported
- * connection (Cursor names MCP calls without their server). Listing Resin's catalog is not the
- * user's work; recorded as a step, it varies run to run and keeps repeated runs apart.
+ * names it: `mcp__resin__<tool>` (Codex, Claude), `mcp__resin_<tool>` (OMP), `resin__<tool>`
+ * (Grok), `resin_<tool>` (OpenCode), `resin-<tool>`, or the bare name with connection `resin`
+ * (Copilot) or no reported connection (Cursor names MCP calls without their server). Claude Code's
+ * built-in `ToolSearch`, which loads deferred MCP tools (Resin's guidance has it search `resin`), and
+ * Grok Build's built-in `search_tool`, which Resin's Grok guidance has it call first, are the same
+ * discovery. Listing Resin's catalog is not the user's work; recorded as a step, it varies
+ * run to run and keeps repeated runs apart.
  */
 export function isResinDiscoveryToolCall(toolName: string, connection?: string): boolean {
-  const bare = /^(?:mcp__resin__?|resin[_-])(.+)$/.exec(toolName)?.[1];
+  if ((toolName === "ToolSearch" || toolName === "search_tool") && connection === undefined) {
+    return true;
+  }
+  const bare = /^(?:mcp__resin__?|resin__|resin[_-])(.+)$/.exec(toolName)?.[1];
   if (bare !== undefined) return Object.hasOwn(RESIN_DISCOVERY_TOOLS, bare);
   return (
     Object.hasOwn(RESIN_DISCOVERY_TOOLS, toolName) &&
