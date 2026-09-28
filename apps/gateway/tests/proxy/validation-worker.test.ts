@@ -37,6 +37,7 @@ import {
   WorkflowValidationWorker,
   type WorkflowValidationWorkerOptions,
 } from "../../src/proxy/validation-worker.js";
+import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { localCallsFor, recordSession } from "./recorded-sessions.js";
 
@@ -311,24 +312,48 @@ describe("WorkflowValidationWorker", () => {
         ? jsonResponse({ requests: [requestFor(plan)] })
         : jsonResponse({ status: "recorded" }),
     );
+    let clock = Date.parse(DECIDED_AT);
     const lookup = vi.fn(localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]).lookup);
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       privateValues: recorded.store,
       localCalls: { lookup },
-      now: () => new Date(DECIDED_AT),
+      now: () => new Date(clock),
       log: (message) => logs.push(message),
     });
 
     expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0, refused: 1 });
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
     expect(logs.join("\n")).toMatch(/did not record its demonstration/);
-    // A later pass remembers the ask instead of checking it again.
+    // A pass right after does not check it again; one past the short backoff does, because the
+    // recording may simply not have arrived yet (a single-device workspace has no one else).
     const looked = lookup.mock.calls.length;
     expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0 });
     expect(lookup.mock.calls.length).toBe(looked);
+    clock += 2 * 60 * 1000;
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0 });
+    expect(lookup.mock.calls.length).toBeGreaterThan(looked);
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+  });
+
+  it("names a held-out recorded by another tool, rather than calling its calls missing", async () => {
+    const recorded = recording();
+    expect(recorded.plan.heldOut).toBeDefined();
+    // The plan's steps as another harness's tool would name them; the held-out stays as recorded.
+    const plan = {
+      ...recorded.plan,
+      steps: recorded.plan.steps.map((step) => ({
+        ...step,
+        callable: { ...step.callable, name: `other_${step.callable.name}` },
+      })),
+    };
+    const result = await createRecordingCheckValidator({
+      workspaceId: WORKSPACE_ID,
+      ...checkedAgainst(recorded),
+    })(plan);
+    expect(result.unavailable).toMatch(/recorded with a different tool/);
+    expect(result.notRecordedHere).toBeUndefined();
   });
 
   it("still answers a failed decision when this device recorded the demonstration", async () => {

@@ -107,6 +107,8 @@ const TYPE_DISAGREES =
   "the demonstrations' values for this input do not share one JSON type; the binding was not confirmed";
 const PRIVATE_DERIVATION =
   "a derivation step of this plan reads recorded data this device redacted as secret; no recording check or parameter decision was performed";
+const OTHER_TOOL =
+  "the demonstration was recorded with a different tool than the plan's step; no recording check or parameter decision was performed";
 const UNAVAILABLE =
   "this device could not identify the demonstration's recorded calls; no parameter decision was performed";
 
@@ -730,6 +732,19 @@ export function createRecordingCheckValidator(
       };
     }
     const baselineRun = runs.get("baseline")?.iterations?.[0];
+    // A held-out recorded by another tool (Claude `Bash` against Codex `exec_command`) names other
+    // arguments and another callable: it cannot be checked, and must not read as missing calls.
+    const otherTool = (selected.iterations ?? []).some(({ recording }) =>
+      plan.steps.some((step) => {
+        const recorded = recording.get(step.id);
+        return (
+          recorded !== undefined &&
+          (recorded.callable.name !== step.callable.name ||
+            recorded.callable.program?.argument !== step.callable.program?.argument)
+        );
+      }),
+    );
+    if (otherTool) return { verdicts: [], unavailable: OTHER_TOOL };
     // A derivation that reads private recorded data would turn the check into a computation over it:
     // such an ask is never checked, and every such ask gets this same answer.
     if (
