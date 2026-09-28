@@ -4857,8 +4857,9 @@ async function findHostExecutable(names, options = {}) {
     for (const name of names) {
       for (const fileName of executableFileNames(name, options)) {
         const candidate = path3.join(dir, fileName);
-        if (await isFile(candidate))
-          return candidate;
+        if (await isFile(candidate)) {
+          return platform === "win32" && !path3.isAbsolute(candidate) ? path3.resolve(candidate) : candidate;
+        }
       }
     }
   }
@@ -5027,12 +5028,18 @@ function readAcl(target) {
     throw translateNativeError(error, target);
   }
 }
+function isAcceptableOwner(owner, userSid) {
+  if (owner === null)
+    return false;
+  const normalized = owner.toUpperCase();
+  return normalized === userSid.toUpperCase() || TRUSTED_NON_USER_OWNERS.has(normalized);
+}
 function ownerOnlyProblems(acl, userSid, options = {}) {
   const problems = [];
   const me = userSid.toUpperCase();
   if (acl.owner === null) {
     problems.push("has no owner");
-  } else if (acl.owner.toUpperCase() !== me) {
+  } else if (!isAcceptableOwner(acl.owner, userSid)) {
     problems.push(`is owned by ${acl.owner}, not the current user ${userSid}`);
   }
   if (!acl.daclPresent) {
@@ -5057,7 +5064,7 @@ function ownerOnlyProblems(acl, userSid, options = {}) {
   return problems;
 }
 function isOwner(acl, sid) {
-  return acl.owner !== null && acl.owner.toUpperCase() === sid.toUpperCase();
+  return isAcceptableOwner(acl.owner, sid);
 }
 function checkOwnerOnly(target, options = {}) {
   if (process.platform !== "win32")
@@ -5136,13 +5143,19 @@ function ensurePrivateDirectoryBoundary(directory) {
     ensureOwnerOnly(resolved, { directory: true });
   }
 }
-var WIN32_FILE_NOT_FOUND, WIN32_PATH_NOT_FOUND;
+var WIN32_FILE_NOT_FOUND, WIN32_PATH_NOT_FOUND, TRUSTED_NON_USER_OWNERS;
 var init_acl = __esm({
   "packages/windows-security/dist/acl.js"() {
     "use strict";
     init_native();
     WIN32_FILE_NOT_FOUND = "WIN32_2";
     WIN32_PATH_NOT_FOUND = "WIN32_3";
+    TRUSTED_NON_USER_OWNERS = /* @__PURE__ */ new Set([
+      "S-1-5-32-544",
+      // BUILTIN\Administrators
+      "S-1-5-18"
+      // NT AUTHORITY\SYSTEM
+    ]);
   }
 });
 
@@ -7145,11 +7158,11 @@ var init_discovery4 = __esm({
 
 // adapters/cursor-cli/dist/hooks.js
 import path15 from "node:path";
-function shellQuote(value) {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+function shellQuote(value, platform) {
+  return platform === "win32" ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, `'\\''`)}'`;
 }
-function renderCursorHookCommand(scriptPath) {
-  return `node ${shellQuote(scriptPath)}`;
+function renderCursorHookCommand(scriptPath, platform = process.platform) {
+  return `node ${shellQuote(scriptPath, platform)}`;
 }
 function isResinHookEntry(entry) {
   return isRecord(entry) && typeof entry.command === "string" && RESIN_HOOK_SCRIPT_SUFFIX.test(entry.command);
