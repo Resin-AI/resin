@@ -26,6 +26,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./node-warning-filter": {
+      "types": "./dist/node-warning-filter.d.ts",
+      "import": "./dist/node-warning-filter.js",
+      "default": "./dist/node-warning-filter.js"
     }
   },
   "scripts": {

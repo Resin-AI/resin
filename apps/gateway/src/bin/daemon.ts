@@ -5,6 +5,8 @@
  * import itself, because `@resin/gateway` depends on `@resin/observer`. Providers are registered
  * before the daemon command line runs.
  */
+// Must stay first: suppresses the node:sqlite ExperimentalWarning before anything loads it.
+import "@resin/db/node-warning-filter";
 import { fileURLToPath } from "node:url";
 import { registerDaemonModuleProvider } from "@resin/observer";
 import { runDaemonCli } from "@resin/observer/daemon";
