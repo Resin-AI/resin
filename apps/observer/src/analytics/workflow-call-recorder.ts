@@ -187,7 +187,6 @@ const KNOWN_SHELL_COMMANDS: readonly {
   {
     argument: "command",
     proves: (event) =>
-<<<<<<< HEAD
       (event.toolName === "Shell" || event.toolName === "run_terminal_cmd") &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "cursor-shell",
   },
@@ -198,11 +197,13 @@ const KNOWN_SHELL_COMMANDS: readonly {
       event.toolName === "bash" &&
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "copilot-bash",
-=======
+  },
+  {
+    argument: "command",
+    proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "pi-bash",
->>>>>>> 9c28afa (fix(pi,observer): share Pi built-in bash commands as program views so runs pair; stop guidance-induced tool announcements)
   },
 ];
 
