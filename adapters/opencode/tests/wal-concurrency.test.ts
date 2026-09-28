@@ -14,16 +14,21 @@ const COMMITS = 400;
 /**
  * Writer that behaves like OpenCode: WAL journal, one short IMMEDIATE transaction per event,
  * periodic passive checkpoints. `busy_timeout = 0` makes any lock held by the reader fail a
- * commit immediately instead of waiting.
+ * commit immediately instead of waiting. Like OpenCode, it holds its connection open before the
+ * reader arrives, and says `ready` once it does: a reader opening the database while no other
+ * connection has it rebuilds the WAL index, which briefly locks out a connection being set up
+ * then. That is connection setup, not a commit.
  */
 const WRITER = `
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync(process.argv[1]);
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA busy_timeout = 0");
+process.stdout.write("ready\\n");
 const sid = ${JSON.stringify(SESSION)};
 const insert = db.prepare("INSERT INTO event (id, aggregate_id, seq, type, data) VALUES (?, ?, ?, ?, ?)");
 const bump = db.prepare("UPDATE event_sequence SET seq = ? WHERE aggregate_id = ?");
+process.stdin.once("data", () => {
 for (let i = 1; i <= ${COMMITS}; i++) {
   db.exec("BEGIN IMMEDIATE");
   const id = String(i).padStart(6, "0");
@@ -36,6 +41,8 @@ for (let i = 1; i <= ${COMMITS}; i++) {
   if (i % 50 === 0) db.exec("PRAGMA wal_checkpoint(PASSIVE)");
 }
 db.close();
+process.stdin.destroy();
+});
 `;
 
 let dir: string | undefined;
@@ -99,8 +106,10 @@ describe("reading OpenCode's SQLite store next to a live WAL writer", () => {
     });
 
     const writer = spawn(process.execPath, ["-e", WRITER, dbPath], {
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    const { promise: ready, resolve: onReady } = Promise.withResolvers<void>();
+    writer.stdout.once("data", () => onReady());
     let stderr = "";
     writer.stderr.on("data", (chunk) => {
       stderr += String(chunk);
@@ -113,6 +122,10 @@ describe("reading OpenCode's SQLite store next to a live WAL writer", () => {
     });
 
     const records: RawHarnessRecord[] = [];
+    await Promise.race([ready, exited]);
+    // Commits start only once the reader is polling.
+    records.push(...(await source.readNext(1000)));
+    writer.stdin.write("go\n");
     let readsDuringWrites = 0;
     while (!done) {
       records.push(...(await source.readNext(1000)));
