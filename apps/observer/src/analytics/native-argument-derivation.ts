@@ -833,10 +833,14 @@ export function deriveNativeCalls(
   return { calls: derived, candidates, extracts, inputNames: programInputs };
 }
 
-/** Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash. */
+/**
+ * Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash, or
+ * a prefixed hex id whose random part happens to be letters only (`dep-abcdef`, about 1 in 360).
+ */
 function looksMinted(value: string): boolean {
   if (/\s/.test(value)) return false;
   if (value.length >= 12) return true;
+  if (/[-_.:][0-9a-f]{6,}$|^[0-9a-f]{6,}[-_.:]/i.test(value)) return true;
   return value.length >= 4 && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
 }
 

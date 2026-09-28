@@ -40,7 +40,7 @@ set -e
 state=.deployments
 case "$1" in
   create)
-    id="dep-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \\n')"
+    id="\${DEPLOY_ID:-dep-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \\n')}"
     echo "$id" >> "$state"
     echo "created deployment $id"
     ;;
@@ -72,8 +72,15 @@ function workspace(prefix: string): string {
   return directory;
 }
 
-/** Runs the job for real in an author directory and records it as one execution. */
-function recordJob(store: InMemoryPrivateValueStore): { plan: RecordedWorkflow; id: string } {
+/**
+ * Runs the job for real in an author directory and records it as one execution. The recorded id is
+ * fixed, so what a check decides never depends on which id a run happened to mint; invocations of
+ * a promoted plan still mint fresh ones.
+ */
+function recordJob(
+  store: InMemoryPrivateValueStore,
+  recordedId = "dep-4f2a91",
+): { plan: RecordedWorkflow; id: string } {
   const authorDir = workspace("resin-extract-author-");
   const recorder = new WorkflowCallRecorder({ privateValues: store });
   const events: NormalizedSessionEvent[] = [];
@@ -101,7 +108,11 @@ function recordJob(store: InMemoryPrivateValueStore): { plan: RecordedWorkflow; 
     content: "Deploy the worker app to staging, wait, smoke test /health and promote to production",
   });
   const run = (callId: string, command: string): string => {
-    const printed = execFileSync("/bin/sh", ["-c", command], { cwd: authorDir, encoding: "utf8" });
+    const printed = execFileSync("/bin/sh", ["-c", command], {
+      cwd: authorDir,
+      encoding: "utf8",
+      env: { ...process.env, DEPLOY_ID: recordedId },
+    });
     emit({ type: "tool_call", callId, toolName: "bash", parameters: { command } });
     emit({
       type: "tool_result",
@@ -181,34 +192,41 @@ describe("extract bindings confirmed against the recording", () => {
     expect(printed.has(id)).toBe(false);
   });
 
-  it("does not verify the closed plan without the bindings (hidden dependency)", async () => {
-    const store = new InMemoryPrivateValueStore();
-    const { plan } = recordJob(store);
-    const answer = await validate({ ...plan, candidates: [] }, store);
-    expect(answer.verification?.status).not.toBe("verified");
-  });
+  // An id of hex letters only reads like a word; it is still a value the create step printed.
+  it.each(["dep-4f2a91", "dep-abcdef"])(
+    "does not verify the closed plan without the bindings (hidden dependency on %s)",
+    async (recordedId) => {
+      const store = new InMemoryPrivateValueStore();
+      const { plan } = recordJob(store, recordedId);
+      const answer = await validate({ ...plan, candidates: [] }, store);
+      expect(answer.verification?.status).not.toBe("verified");
+    },
+  );
 
-  it("verifies the id read from the create step but not the same hole carrying the recorded id", async () => {
-    const store = new InMemoryPrivateValueStore();
-    const { plan, id } = recordJob(store);
-    const extracts = (plan.candidates ?? []).filter(
-      (candidate) => candidate.proposed.kind === "extract",
-    );
-    const bound = { ...applyAcceptedBindings(plan, extracts), candidates: [] };
-    expect((await validate(bound, store)).verification?.status).toBe("verified");
+  it.each(["dep-4f2a91", "dep-abcdef"])(
+    "verifies the id read from the create step but not the same hole carrying the recorded id %s",
+    async (recordedId) => {
+      const store = new InMemoryPrivateValueStore();
+      const { plan, id } = recordJob(store, recordedId);
+      const extracts = (plan.candidates ?? []).filter(
+        (candidate) => candidate.proposed.kind === "extract",
+      );
+      const bound = { ...applyAcceptedBindings(plan, extracts), candidates: [] };
+      expect((await validate(bound, store)).verification?.status).toBe("verified");
 
-    // The very same plan, its holes now binding the printed id as recorded literal text.
-    const literal = JSON.parse(
-      JSON.stringify(bound, (key, value) =>
-        value !== null && typeof value === "object" && value.type === "extract"
-          ? { type: "literal", value: id }
-          : value,
-      ),
-    ) as RecordedWorkflow;
-    const answer = await validate(literal, store);
-    expect(answer.verification?.status).not.toBe("verified");
-    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain("step1");
-  });
+      // The very same plan, its holes now binding the printed id as recorded literal text.
+      const literal = JSON.parse(
+        JSON.stringify(bound, (key, value) =>
+          value !== null && typeof value === "object" && value.type === "extract"
+            ? { type: "literal", value: id }
+            : value,
+        ),
+      ) as RecordedWorkflow;
+      const answer = await validate(literal, store);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain("step1");
+    },
+  );
 
   it("does not verify a recorded default offered for the printed id", async () => {
     const store = new InMemoryPrivateValueStore();
