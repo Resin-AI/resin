@@ -76,6 +76,11 @@ export interface LocalWorkflowValidationResult {
    * recording whose proposals were never tried keeps every value it was recorded with.
    */
   unavailable?: string;
+  /**
+   * Set when none of the calls the plan names (its own and the held-out's) is in this device's
+   * recordings: the demonstration was recorded on another device, which is the one to answer.
+   */
+  notRecordedHere?: true;
 }
 
 export interface RecordingCheckValidatorOptions {
@@ -673,6 +678,25 @@ export function createRecordingCheckValidator(
         unavailable:
           "the selected workflow has no recorded demonstration; no recording check or parameter decision was performed",
       };
+    }
+    // A plan none of whose calls this device recorded is another device's to check.
+    const namedCallIds = new Set([
+      ...plan.steps.flatMap((step) =>
+        step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
+          ? [step.callId]
+          : [],
+      ),
+      ...(plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
+    ]);
+    let recordedHere = false;
+    for (const callId of namedCallIds) {
+      if ((await options.localCalls.lookup(callId)) !== undefined) {
+        recordedHere = true;
+        break;
+      }
+    }
+    if (namedCallIds.size > 0 && !recordedHere) {
+      return { verdicts: [], unavailable: UNAVAILABLE, notRecordedHere: true };
     }
     const derivation = options.derivation ?? createProgramAdapter({ timeoutMs: options.timeoutMs });
     const runs = new Map<DemonstrationLabel, LocalDemonstrationRuns>();

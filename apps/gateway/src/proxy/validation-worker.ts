@@ -375,6 +375,9 @@ export interface WorkflowValidationWorkerOptions {
   askLedger?: Pick<FileValidationAskLedger, "admit">;
 }
 
+/** How long an ask without an expiry stays remembered as another device's to answer. */
+const SKIPPED_ASK_RETENTION_MS = 60 * 60 * 1000;
+
 function boundedTimeout(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) {
     return DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS;
@@ -436,6 +439,8 @@ export class WorkflowValidationWorker {
   private emptyPolls = 0;
   /** Asks the last pass listed but left undecided or saw declined, keyed by `askKey`. */
   private settledAsks = new Set<string>();
+  /** Asks this device did not record, by `askKey`, with when to stop remembering them. */
+  private readonly skippedAsks = new Map<string, number>();
 
   constructor(options: WorkflowValidationWorkerOptions) {
     this.client = options.client;
@@ -700,6 +705,9 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
+    const now = this.now().getTime();
+    for (const [key, until] of this.skippedAsks) if (until <= now) this.skippedAsks.delete(key);
+    if (this.skippedAsks.has(askKey(request))) return undefined;
     // Every recorded call the plan names, from both demonstrations, and every private reference
     // it resolves: what this answer is about.
     const references = new Set<string>();
@@ -745,6 +753,19 @@ export class WorkflowValidationWorker {
         planDigest,
         "the local recording check failed before it could verify the recorded workflow",
       );
+    }
+    if (result.notRecordedHere === true) {
+      // Another device recorded this demonstration; it answers, or the ask lapses at its TTL.
+      this.log(
+        `workflow validation: skipped ask '${request.requestId}': this device did not record its demonstration`,
+      );
+      this.skippedAsks.set(
+        askKey(request),
+        request.expiresAt !== undefined && Number.isFinite(Date.parse(request.expiresAt))
+          ? Date.parse(request.expiresAt)
+          : this.now().getTime() + SKIPPED_ASK_RETENTION_MS,
+      );
+      return undefined;
     }
     if (
       result.unavailable !== undefined ||

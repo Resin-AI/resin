@@ -300,12 +300,40 @@ describe("WorkflowValidationWorker", () => {
     expect(decision.verification?.status).toBe("verified");
   });
 
-  it("records an explicit failed decision when the check cannot resolve its references", async () => {
-    // The same recording, but its values were recorded by a different workspace: a reference is a
-    // name, not a capability, so the check must not resolve them even though the strings match.
+  it("leaves an ask whose demonstration this device did not record for the device that did", async () => {
+    // The same recording, but made in another workspace: none of the plan's calls is this
+    // device's, so it posts nothing and the ask stays for the recording device (or its TTL).
     const recorded = recording(OTHER_WORKSPACE_ID);
     const { plan } = recorded;
     const logs: string[] = [];
+    const { calls, fetchImpl } = recordingFetch((url) =>
+      url.includes("/pending")
+        ? jsonResponse({ requests: [requestFor(plan)] })
+        : jsonResponse({ status: "recorded" }),
+    );
+    const lookup = vi.fn(localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]).lookup);
+    const worker = new WorkflowValidationWorker({
+      client: clientOver(fetchImpl),
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      privateValues: recorded.store,
+      localCalls: { lookup },
+      now: () => new Date(DECIDED_AT),
+      log: (message) => logs.push(message),
+    });
+
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0, refused: 1 });
+    expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+    expect(logs.join("\n")).toMatch(/did not record its demonstration/);
+    // A later pass remembers the ask instead of checking it again.
+    const looked = lookup.mock.calls.length;
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0 });
+    expect(lookup.mock.calls.length).toBe(looked);
+    expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+  });
+
+  it("still answers a failed decision when this device recorded the demonstration", async () => {
+    const recorded = recording();
+    const plan = { ...recorded.plan, steps: recorded.plan.steps.slice().reverse() };
     const { calls, fetchImpl } = recordingFetch((url) =>
       url.includes("/pending")
         ? jsonResponse({ requests: [requestFor(plan)] })
@@ -316,15 +344,10 @@ describe("WorkflowValidationWorker", () => {
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       ...checkedAgainst(recorded),
       now: () => new Date(DECIDED_AT),
-      log: (message) => logs.push(message),
     });
 
-    const summary = await worker.runOnce();
-
-    expect(summary).toMatchObject({ pending: 1, answered: 1, refused: 0 });
-    const decision = postedDecision(calls);
-    expect(decision.verification?.status).toBe("failed");
-    expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 1 });
+    expect(postedDecision(calls).verification?.status).not.toBe("verified");
   });
 
   it("bounds each recorded call and each private reference the plan names, withheld ones included", async () => {
