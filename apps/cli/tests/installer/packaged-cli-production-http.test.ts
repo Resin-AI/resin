@@ -203,7 +203,12 @@ describe("packed CLI production bootstrap", () => {
     ).toBe(true);
 
     const releaseArchive = createTarGz();
-    const denoArchive = createStoredZip("deno", Buffer.from("#!/bin/sh\nexit 0\n", "utf8"));
+    // Answers `--version` like the pinned Deno so init's runtime certification finds the
+    // bundled runtime instead of whatever `deno` the test host has on PATH.
+    const denoArchive = createStoredZip(
+      "deno",
+      Buffer.from('#!/bin/sh\necho "deno 2.9.5 (stable, release, test-fixture)"\n', "utf8"),
+    );
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const der = publicKey.export({ type: "spki", format: "der" });
     const publicKeyHex = der.subarray(-32).toString("hex");
@@ -438,6 +443,11 @@ describe("packed CLI production bootstrap", () => {
       );
       expect(versionMetadata.provenance.manifestSha256).toBe(sha256(manifestBytes));
       expect(versionMetadata.denoRuntime.version).toBe("2.9.5");
+      // Init certifies the tool runtime against the Deno the release bundled.
+      const attestation = JSON.parse(
+        fs.readFileSync(path.join(home, ".resin", "safety-attestation.json"), "utf8"),
+      );
+      expect(JSON.stringify(attestation)).toContain("2.9.5");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
