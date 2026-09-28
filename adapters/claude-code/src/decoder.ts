@@ -324,6 +324,8 @@ function withBaseFields<T extends IntermediateSessionEvent>(
 export interface PendingClaudeToolCall {
   toolName: string;
   timestamp: string;
+  /** A built-in `Bash` call run in the foreground: its result without an error means exit 0. */
+  foregroundShell?: true;
 }
 
 /** Tool calls awaiting their results, keyed by Claude's `tool_use` id. */
@@ -748,7 +750,17 @@ function decodeLineEvents(
                   ...(isError ? { error: output } : {}),
                   executionDurationMs: durationMs,
                   outputSizeBytes: Buffer.byteLength(output, "utf8"),
-                  ...(durationKnown ? {} : { metadata: { executionDurationUnknown: true } }),
+                  ...(durationKnown && !(pending?.foregroundShell && !isError)
+                    ? {}
+                    : {
+                        metadata: {
+                          ...(durationKnown ? {} : { executionDurationUnknown: true }),
+                          // Claude reports a foreground `Bash` that exited non-zero as an error.
+                          ...(pending?.foregroundShell && !isError
+                            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+                            : {}),
+                        },
+                      }),
                 },
                 sessionId,
                 recordTime,
@@ -909,7 +921,14 @@ function decodeLineEvents(
               ),
             );
 
-            pendingCalls.set(toolCallId, { toolName, timestamp: recordTime });
+            pendingCalls.set(toolCallId, {
+              toolName,
+              timestamp: recordTime,
+              ...("metadata" in claudeSourceInterface(toolName, inputRecord) &&
+              inputRecord.run_in_background !== true
+                ? { foregroundShell: true as const }
+                : {}),
+            });
           }
         }
       }

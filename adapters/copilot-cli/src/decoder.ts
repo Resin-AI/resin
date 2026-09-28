@@ -6,6 +6,7 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { COPILOT_HARNESS_ID } from "./discovery.js";
 
 export const COPILOT_DECODER_VERSION = "1.0.0";
@@ -393,6 +394,11 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
           ...base.metadata,
           copilotToolName: rawToolName,
           model: asString(data.model),
+          // Copilot reports MCP tools with their server, so a serverless `bash` with a command is its
+          // built-in shell; only this decoder proves that to the recorder, with a local-only marker.
+          ...(!mcpServerName && rawToolName === "bash" && typeof input?.command === "string"
+            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "copilot-bash" }
+            : {}),
           ...(mcpServerName
             ? {
                 mcpServerName,
@@ -440,6 +446,9 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
         ...(output !== undefined ? { outputSizeBytes: Buffer.byteLength(output, "utf8") } : {}),
         metadata: {
           ...base.metadata,
+          ...(start?.toolName === "bash" && !start.mcpServerName && exitCode === 0 && success
+            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+            : {}),
           ...(asString(result?.detailedContent) !== undefined
             ? { detailedContent: asString(result?.detailedContent) }
             : {}),

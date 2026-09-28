@@ -11,6 +11,8 @@
  * references, names one from the recorded plan where the plan shows it. Both use this vocabulary.
  */
 
+import type { ProgramToken } from "./program-tokens.js";
+
 /** Where one input's value sits in the recorded plan, and what the recording held there. */
 export interface InputSite {
   /** The long flag (`--region`) the whole value follows, if any. */
@@ -78,6 +80,7 @@ function siteRole(site: InputSite): Role {
   if (value !== undefined) {
     if (/^\d{4}-\d{2}-\d{2}$|^\d{4}\d{2}\d{2}$/u.test(value)) return { name: "date", rank: 2 };
     if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:?\d{2}/u.test(value)) return { name: "timestamp", rank: 2 };
+    if (REVISION_RANGE.test(value)) return { name: "revision_range", rank: 2 };
     const base = value.replace(/\/+$/u, "").split("/").at(-1) ?? "";
     for (const [pattern, name] of EXTENSION_ROLES) {
       if (pattern.test(base)) return { name, rank: 3 };
@@ -113,4 +116,78 @@ export function uniqueInputName(base: string, used: Set<string>): string {
   for (let suffix = 2; used.has(name); suffix += 1) name = `${base}_${suffix}`;
   used.add(name);
   return name;
+}
+
+/** A `git`-style revision range (`v0.1..HEAD`, `main...topic`, `HEAD~3..`). */
+const REVISION_RANGE =
+  /^[\w./~^@{}-]*[\w~^@{}]\.\.\.?(?:[\w~^@{}][\w./~^@{}-]*)?$|^\.\.\.?[\w~^@{}][\w./~^@{}-]*$/u;
+
+/**
+ * Long flags that switch behaviour and take no value, so the word after them is not theirs:
+ * `git log --oneline v0.1..HEAD` binds a revision range, not a `oneline`.
+ */
+const BOOLEAN_FLAGS: Readonly<Record<string, true>> = {
+  all: true,
+  amend: true,
+  cached: true,
+  check: true,
+  color: true,
+  decorate: true,
+  "dry-run": true,
+  force: true,
+  graph: true,
+  help: true,
+  "ignore-case": true,
+  json: true,
+  list: true,
+  long: true,
+  merges: true,
+  "name-only": true,
+  "name-status": true,
+  numstat: true,
+  oneline: true,
+  patch: true,
+  porcelain: true,
+  quiet: true,
+  recursive: true,
+  reverse: true,
+  short: true,
+  silent: true,
+  stat: true,
+  summary: true,
+  verbose: true,
+  version: true,
+  yes: true,
+};
+
+/** Short flags whose value's role is known (`head -n 5` binds a count). */
+const SHORT_FLAG_ROLES: Readonly<Record<string, string>> = { n: "count" };
+
+function flagWord(token: ProgramToken | undefined): string | undefined {
+  return token?.kind === "word" && token.raw.startsWith("-") ? token.raw : undefined;
+}
+
+/**
+ * The flag whose value the token at `index` is, named for use as a role: a long flag unless it is a
+ * boolean switch — a known one, a `--no-…` negation, or one the program elsewhere follows directly
+ * with another flag or nothing — or a short flag with a known value role.
+ */
+export function valueFlag(tokens: readonly ProgramToken[], index: number): string | undefined {
+  const raw = index > 0 ? flagWord(tokens[index - 1]) : undefined;
+  if (raw === undefined) return undefined;
+  const short = /^-([A-Za-z])$/u.exec(raw)?.[1];
+  if (short !== undefined) return SHORT_FLAG_ROLES[short];
+  const long = /^--([A-Za-z][A-Za-z0-9-]*)$/u.exec(raw)?.[1];
+  if (long === undefined || BOOLEAN_FLAGS[long] === true || long.startsWith("no-"))
+    return undefined;
+  const switchElsewhere = tokens.some(
+    (token, at) =>
+      at !== index - 1 &&
+      token.kind === "word" &&
+      token.raw === raw &&
+      (at + 1 === tokens.length ||
+        tokens[at + 1]?.kind !== "word" ||
+        flagWord(tokens[at + 1]) !== undefined),
+  );
+  return switchElsewhere ? undefined : long;
 }

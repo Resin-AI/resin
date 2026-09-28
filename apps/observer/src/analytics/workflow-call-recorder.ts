@@ -127,8 +127,20 @@ function withoutLocalSourceInterface(event: NormalizedSessionEvent): NormalizedS
  * its decoder's local-only source-interface marker rather than by a tool name another server could
  * also use.
  */
+/** Result markers by which a decoder proves its shell call ran in the foreground and exited 0. */
+const SHELL_EXITED_ZERO: Readonly<Record<string, true>> = {
+  "omp-bash-completed": true,
+  "shell-exited-0": true,
+};
+
 const KNOWN_SHELL_COMMANDS: readonly {
   argument: string;
+  /**
+   * Arguments that only label the call for the user (`description`): the shell never reads them,
+   * so they are not part of what the step does, and a label the model reworded each run would
+   * otherwise be a pinned value no two recordings share.
+   */
+  labels?: readonly string[];
   proves: (event: Extract<NormalizedSessionEvent, { type: "tool_call" }>) => boolean;
 }[] = [
   {
@@ -159,16 +171,32 @@ const KNOWN_SHELL_COMMANDS: readonly {
   },
   {
     argument: "command",
+    labels: ["description"],
     proves: (event) =>
       event.toolName === "Bash" &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "claude-bash",
   },
   {
     argument: "command",
+    labels: ["description"],
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "opencode-bash",
+  },
+  {
+    argument: "command",
+    proves: (event) =>
+      (event.toolName === "Shell" || event.toolName === "run_terminal_cmd") &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "cursor-shell",
+  },
+  {
+    argument: "command",
+    labels: ["description"],
+    proves: (event) =>
+      event.toolName === "bash" &&
+      event.connection === undefined &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "copilot-bash",
   },
 ];
 
@@ -196,8 +224,11 @@ interface LocalCall {
     argument: string;
     sourceInterface?: "python-eval" | "javascript-eval" | "codex-exec";
   };
-  /** An OMP bash call, whose tool reports an error for any non-zero exit status. */
-  ompBash?: true;
+  /**
+   * A harness's built-in shell call its decoder proved; its exit status is 0 when its decoder marks
+   * the result as a foreground run that exited 0.
+   */
+  provenShell?: true;
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
   /** This call's place among its execution's calls: the position a repeat of it is listed under. */
@@ -1015,6 +1046,11 @@ export class WorkflowCallRecorder {
       if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
       delete observedParameters[argument];
     }
+    for (const label of KNOWN_SHELL_COMMANDS.find((shell) => shell.proves(event))?.labels ?? []) {
+      if (!Object.hasOwn(observedParameters, label)) continue;
+      if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
+      delete observedParameters[label];
+    }
     const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
     const parameters =
       codex?.kind === "call" && typeof observedParameters.cmd === "string"
@@ -1238,9 +1274,9 @@ export class WorkflowCallRecorder {
         : { connection: event.connection ?? discovered?.provider }),
       position: state.position,
       ...("metadata" in event &&
-      event.toolName === "bash" &&
-      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash"
-        ? { ompBash: true as const }
+      event.type === "tool_call" &&
+      KNOWN_SHELL_COMMANDS.some((known) => known.proves(event))
+        ? { provenShell: true as const }
         : {}),
       executionIndex: execution.index,
       executionPosition: execution.calls.length,
@@ -1756,13 +1792,13 @@ export class WorkflowCallRecorder {
             publicEvent.type === "tool_result" ? publicEvent.result : undefined,
           );
         }
-        // An OMP bash call's status is known only for a run the decoder saw finish in the
+        // A harness shell call's status is known only for a run its decoder saw exit 0 in the
         // foreground; a result that returned early carries no exit status at all.
         const exitCode =
           nativeExitCode ??
-          (call.ompBash === true &&
+          (call.provenShell === true &&
           event.isError === false &&
-          event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash-completed"
+          SHELL_EXITED_ZERO[String(event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY])] === true
             ? 0
             : undefined);
         if (exitCode !== undefined) {

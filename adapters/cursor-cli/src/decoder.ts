@@ -7,6 +7,7 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { isRecord } from "./guards.js";
 import {
   type CursorHookDriftIssue,
@@ -355,9 +356,18 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
         toolName,
         parameters: toMetadata(input) ?? {},
         rawInput: typeof payload.tool_input === "string" ? payload.tool_input : undefined,
+        // Cursor names every MCP call `MCP:<tool>`, so an unprefixed shell tool with a command is its
+        // built-in shell; only this decoder proves that to the recorder, with a local-only marker.
         ...(toolName !== cursorToolName
           ? { metadata: { ...base("call").metadata, cursorToolName } }
-          : {}),
+          : SHELL_TOOL_NAMES[toolName] && typeof toMetadata(input)?.command === "string"
+            ? {
+                metadata: {
+                  ...base("call").metadata,
+                  [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "cursor-shell",
+                },
+              }
+            : {}),
       },
       {
         ...base("result", 1),
@@ -378,6 +388,13 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
           failureType: stringField(payload, "failure_type"),
           toolUseId: nativeToolUseId,
           interrupted: payload.is_interrupt === true,
+          // Only a foreground run that finished on its own proves its exit status.
+          ...(toolName === cursorToolName &&
+          exitCode === 0 &&
+          payload.is_interrupt !== true &&
+          toMetadata(input)?.is_background !== true
+            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+            : {}),
         },
       },
     ];

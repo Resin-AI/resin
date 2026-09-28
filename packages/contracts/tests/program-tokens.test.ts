@@ -299,6 +299,10 @@ describe("rendering a bound value back into its token", () => {
     const bare = tokenOf("mkdir -p release", "release")!;
     expect(renderProgramTokenValue(bare, "release-2")).toBe("release-2");
     expect(renderProgramTokenValue(bare, "two words")).toBe("'two words'");
+    // A git revision `~` inside the word is text no shell expands, as the tokenizer reads it.
+    expect(renderProgramTokenValue(bare, "HEAD~2..HEAD")).toBe("HEAD~2..HEAD");
+    for (const expands of ["~", "~/x", "a=~/x", "a:~/x"])
+      expect(renderProgramTokenValue(bare, expands)).toBe(`'${expands}'`);
   });
   it("renders typed literals and strings in the recorded script language", () => {
     const javascript = "const retries = 4; const enabled = true; const label = 'old';";

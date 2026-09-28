@@ -39,6 +39,7 @@ import {
   scriptRecordFieldKeys,
   scriptTokenContextName,
   tokenizeProgram,
+  valueFlag,
 } from "@resin/contracts";
 
 /** Local identities of the resources one call declared it would read and write. */
@@ -286,8 +287,12 @@ function longFlagName(token: ProgramToken | undefined): string | undefined {
  * plays (`data_path`, `archive_path`, `date`, …). Only this machine sees the value, so the role is
  * named here; the cloud only sees private references.
  */
-function programInputBaseName(value: string, previous: ProgramToken | undefined): string {
-  const flag = longFlagName(previous);
+function programInputBaseName(
+  value: string,
+  tokens: readonly ProgramToken[],
+  index: number,
+): string {
+  const flag = valueFlag(tokens, index);
   return inputRoleName([{ value, ...(flag === undefined ? {} : { flag }) }]);
 }
 
@@ -538,7 +543,7 @@ export function deriveNativeCalls(
           if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
           const base =
             (script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined) ??
-            programInputBaseName(token.value, previous);
+            programInputBaseName(token.value, tokens, tokenIndex);
           name = base;
           for (let suffix = 2; programInputNames.has(name); suffix += 1) name = `${base}_${suffix}`;
           programInputs.set(key, name);
@@ -579,7 +584,7 @@ export function deriveNativeCalls(
             const field = /([A-Za-z_][A-Za-z0-9_]{0,30})\s*:\s*$/.exec(
               text.slice(lineStart, token.start),
             )?.[1];
-            const base = field?.toLowerCase() ?? programInputBaseName(value, undefined);
+            const base = field?.toLowerCase() ?? inputRoleName([{ value }]);
             name = base;
             for (let suffix = 2; programInputNames.has(name); suffix += 1)
               name = `${base}_${suffix}`;
@@ -623,7 +628,7 @@ export function deriveNativeCalls(
               if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
               const base =
                 scriptTokenContextName(text, program.tokens, embeddedIndex) ??
-                programInputBaseName(value, program.tokens[embeddedIndex - 1]);
+                programInputBaseName(value, program.tokens, embeddedIndex);
               name = base;
               for (let suffix = 2; programInputNames.has(name); suffix += 1) {
                 name = `${base}_${suffix}`;
@@ -780,7 +785,7 @@ export function deriveNativeCalls(
           const key = scalarKey(match.needle);
           let name = programInputs.get(key);
           if (name === undefined) {
-            const base = programInputBaseName(match.needle, undefined);
+            const base = inputRoleName([{ value: match.needle }]);
             name = base;
             for (let suffix = 2; programInputNames.has(name); suffix += 1)
               name = `${base}_${suffix}`;

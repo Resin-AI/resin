@@ -20,7 +20,7 @@ import {
   programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
-import { SHELL_AND_CHAIN_SPLITTER_VERSION, isOptionalSetupSegment } from "./shell-and-chain.js";
+import { isOptionalSetupSegment } from "./shell-and-chain.js";
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
@@ -1060,7 +1060,7 @@ function validateWorkflowSegments(workflow: Record<string, unknown>, errors: str
     // From splitter version 2 a plan may leave out a segment of its own chain the recording device
     // finds skippable (`isSkippableSegment`): the steps it names stay adjacent, in order, one count
     // and one version. Only the device holds the left-out text, so the device checks it.
-    const gaps = (segment.version as number) >= SHELL_AND_CHAIN_SPLITTER_VERSION;
+    const gaps = (segment.version as number) >= 2;
     const chain = steps.slice(position, position + sharing.length + 1);
     const whole =
       (gaps || chain.length === segment.count) &&
