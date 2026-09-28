@@ -120,6 +120,307 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # Native Windows (no WSL) on GitHub-hosted x64 and arm64 runners. Every step runs in
+  # PowerShell (pwsh, or Windows PowerShell 5.1 where the step says so), never Git Bash.
+  # The lane builds its own-arch native prebuilds, packages the test-signed candidate,
+  # qualifies the extracted artifact (named-pipe daemon, Scheduled Task lifecycle, crash
+  # restart), runs the Windows suites, installs through install.ps1, proves a second local
+  # user can reach neither the daemon pipe nor the private files, then uninstalls and checks
+  # nothing is left. The signing job packages the prebuilds uploaded here.
+  windows-qualification:
+    name: ${{ matrix.check_name }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - lane: windows-x64
+            arch: x64
+            check_name: Qualify windows-x64
+            runner: windows-latest
+          - lane: windows-arm64
+            arch: arm64
+            check_name: Qualify windows-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RESIN_RELEASE_TEST_ONLY: "1"
+      RELEASE_SHA: ${{ inputs.commit_sha }}
+      TURBO_TELEMETRY_DISABLED: "1"
+      LANE: ${{ matrix.lane }}
+      ARCH: ${{ matrix.arch }}
+      RELEASE_DIR: dist/release/v1.0.3
+      PROBE_USER: resinprobe
+      # Windows-specific suites that must pass natively (IPC/pipe and private-file ACLs,
+      # Scheduled Task service, PowerShell learn/replay, capture, scrubbing, installer).
+      WINDOWS_SUITES: >-
+        packages/windows-security/tests/portable.test.ts
+        packages/windows-security/tests/windows.test.ts
+        packages/crypto/tests/vault.test.ts
+        apps/observer/tests/paths.test.ts
+        apps/observer/tests/ipc.test.ts
+        apps/observer/tests/lock.test.ts
+        apps/observer/tests/config.test.ts
+        apps/observer/tests/cloud-credentials.test.ts
+        apps/observer/tests/cloud-auth-recovery.test.ts
+        apps/observer/tests/recovery-healing.test.ts
+        apps/observer/tests/analytics/immutable-private-store.test.ts
+        apps/observer/tests/analytics/shell-dialect-capture.test.ts
+        apps/observer/tests/normalization/upload-redaction-gaps.test.ts
+        apps/observer/tests/normalization/windows-identity-redaction.test.ts
+        apps/cli/tests/service/windows-task.test.ts
+        apps/cli/tests/service/windows-task.win32.test.ts
+        apps/cli/tests/service/windows-supervisor.test.ts
+        apps/cli/tests/installer/harness-mcp-launch.test.ts
+        apps/cli/tests/installer/harness-uninstall-windows.test.ts
+        apps/cli/tests/installer/windows-activation.test.ts
+        apps/gateway/tests/proxy/powershell-learn-replay.test.ts
+        apps/gateway/tests/proxy/local-artifact-trust.test.ts
+        packages/runtime/tests/workflow/shell-dialect-runner.test.ts
+        packages/contracts/tests/powershell-tokens.test.ts
+        packages/contracts/tests/harness-introspection-windows-home.test.ts
+        packages/harness-contracts/tests/windows-host.test.ts
+        adapters/claude-code/tests/windows-capture.test.ts
+        adapters/codex-cli/tests/windows-capture.test.ts
+        adapters/omp/tests/windows-capture.test.ts
+        scripts/harness-fixtures/scrub.test.mjs
+        scripts/install-ps1.test.mjs
+        scripts/windows-lane.test.mjs
+    steps:
+      - name: Checkout exact release candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw "Invalid commit SHA: $env:RELEASE_SHA" }
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:RELEASE_SHA) { throw "Checked out $head, expected $env:RELEASE_SHA" }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Locate turbo cache
+        run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
+
+      - name: Restore turbo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-turbo-release-
+            ${{ runner.os }}-turbo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native Windows prebuilds for this architecture
+        run: |
+          node packages/windows-security/scripts/build-native.mjs --arch $env:ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem "packages/windows-security/prebuilds/win32-$env:ARCH" | Format-Table Name, Length
+
+      - name: Build exact candidate
+        run: pnpm build
+
+      - name: Package signed test-domain release candidate
+        run: pnpm release:package
+
+      - name: Qualify the packaged artifact natively (launchers, named pipe, ACLs, capture)
+        run: |
+          node scripts/platform-qualification.mjs --lane=$env:LANE --mode=native `
+            --release-dir=$env:RELEASE_DIR --output-dir=dist/qualification
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run native Windows qualification suites
+        run: |
+          $suites = $env:WINDOWS_SUITES -split '\s+' | Where-Object { $_ }
+          $missing = $suites | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Windows qualification suites missing: $($missing -join ', ')" }
+          pnpm exec vitest run --no-file-parallelism @suites
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Serve the exact candidate on loopback
+        run: |
+          $runtimes = Join-Path $env:RUNNER_TEMP 'deno-runtime'
+          node scripts/windows-lane.mjs fetch-runtime --lane $env:LANE --out $runtimes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $portFile = Join-Path $env:RUNNER_TEMP 'release-server.port'
+          $server = Start-Process -FilePath node -NoNewWindow -PassThru -ArgumentList @(
+            'scripts/windows-lane.mjs', 'serve', '--release-dir', $env:RELEASE_DIR,
+            '--runtime-dir', $runtimes, '--port-file', $portFile)
+          for ($i = 0; $i -lt 100 -and -not (Test-Path $portFile); $i++) { Start-Sleep -Milliseconds 100 }
+          if (-not (Test-Path $portFile)) { throw 'Release server did not start' }
+          $port = (Get-Content $portFile -Raw).Trim()
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value @(
+            "RELEASE_SERVER_PID=$($server.Id)",
+            "RESIN_CHANNEL_URL=http://127.0.0.1:$port/releases/v1/channels.json")
+
+      # Windows PowerShell 5.1 is what a clean Windows 10/11 machine runs the one-liner in.
+      - name: Install with install.ps1 (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:RESIN_INSTALL_TEST_ONLY = '1'
+          $env:RESIN_INSTALL_HELPER_PATH = (Resolve-Path 'apps/cli/install/install-helper-v1.mjs').Path
+          $env:RESIN_INSTALL_TRUSTED_KEYS_JSON = (Resolve-Path "$env:RELEASE_DIR/release-trust.json").Path
+          & ./apps/cli/install/install.ps1 -ChannelUrl $env:RESIN_CHANNEL_URL -NonInteractive -NoOnboarding
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          if (-not (Test-Path "$env:USERPROFILE\.resin\bin\resin.cmd")) { throw 'install.ps1 did not install resin.cmd' }
+          $version = (& "$env:USERPROFILE\.resin\bin\resin.cmd" --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '1\.0\.3') { throw "Installed resin --version returned '$version'" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -notlike "*$env:USERPROFILE\.resin\bin*") { throw 'install.ps1 did not add resin to the user PATH' }
+
+      # init registers the Scheduled Task; the lifecycle (logon trigger, least privilege, no
+      # time limit, pipe ownership, crash restart, stop/start) is recorded in the lane evidence.
+      - name: resin init registers the Scheduled Task service; crash restart and stop/start
+        run: |
+          node scripts/platform-qualification.mjs --lane=$env:LANE --windows-service `
+            --resin-home="$env:USERPROFILE\.resin" --output-dir=dist/qualification
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: resin status reports healthy
+        run: |
+          $resin = "$env:USERPROFILE\.resin\bin\resin.cmd"
+          # The overall status was required to be "healthy" before the crash test (evidence
+          # checks.windowsService.statusHealthy); the crash keeps the recovery record degraded
+          # for its window, so here the service, pipe and daemon health must be back.
+          $deadline = (Get-Date).AddSeconds(90)
+          do {
+            $status = & $resin status --json | Out-String | ConvertFrom-Json
+            if ($status.service.active -and $status.ipc.responsive -and $status.daemon.health -eq 'healthy') { break }
+            Start-Sleep -Seconds 2
+          } while ((Get-Date) -lt $deadline)
+          $status | ConvertTo-Json -Depth 6
+          if ($status.service.platform -ne 'windows-task') { throw "Service backend is $($status.service.platform)" }
+          if (-not ($status.service.active -and $status.ipc.responsive -and $status.daemon.health -eq 'healthy')) {
+            throw 'resin status is not healthy after init'
+          }
+          $task = Get-ScheduledTask -TaskPath '\Resin\' -TaskName 'ResinDaemon'
+          if ($task.Principal.RunLevel -ne 'Limited') { throw "Task run level $($task.Principal.RunLevel)" }
+          # Recorded for the run log; health is gated on `resin status` above.
+          & $resin doctor --json
+          exit 0
+
+      - name: A second local user cannot open the daemon pipe or read private files
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resinHome = "$env:USERPROFILE\.resin"
+          $pipe = (node scripts/windows-lane.mjs pipe-name --resin-home $resinHome).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Plain files the daemon never holds exclusively (so the owner control can read them).
+          $files = @(Get-ChildItem -File -Recurse "$resinHome\config", "$resinHome\state" -Include *.json, *.pid, *.toml -ErrorAction SilentlyContinue |
+            Select-Object -First 8 -ExpandProperty FullName)
+          if ($files.Count -eq 0) { throw "No private files found under $resinHome" }
+          $targets = @('--endpoint', $pipe, '--dir', $resinHome, '--dir', "$resinHome\state")
+          foreach ($file in $files) { $targets += @('--file', $file) }
+
+          # Positive control: the owner reaches every target.
+          node scripts/windows-isolation-probe.mjs @targets --expect allowed
+          if ($LASTEXITCODE -ne 0) { throw 'Owner could not reach its own daemon pipe or files' }
+
+          # The probe runs from a directory the second user can read, with its own node.exe.
+          $probeDir = 'C:\ResinProbe'
+          New-Item -ItemType Directory -Force $probeDir | Out-Null
+          Copy-Item (Get-Command node).Source "$probeDir\node.exe"
+          Copy-Item scripts/windows-isolation-probe.mjs "$probeDir\probe.mjs"
+          $bytes = [byte[]]::new(24)
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $password = 'Rp9!' + ([Convert]::ToBase64String($bytes) -replace '[+/=]', 'x')
+          net user $env:PROBE_USER $password /add /expires:never | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not create local user $env:PROBE_USER" }
+          icacls $probeDir /grant "${env:PROBE_USER}:(OI)(CI)M" | Out-Null
+          $credential = [pscredential]::new($env:PROBE_USER, (ConvertTo-SecureString $password -AsPlainText -Force))
+          $result = "$probeDir\result.json"
+          $arguments = @("$probeDir\probe.mjs") + $targets + @('--expect', 'denied', '--out', $result) |
+            ForEach-Object { '"{0}"' -f $_ }
+          $probe = Start-Process -FilePath "$probeDir\node.exe" -ArgumentList $arguments -Credential $credential `
+            -WorkingDirectory $probeDir -LoadUserProfile -Wait -PassThru `
+            -RedirectStandardOutput "$probeDir\stdout.txt" -RedirectStandardError "$probeDir\stderr.txt"
+          Get-Content "$probeDir\stdout.txt", "$probeDir\stderr.txt" -ErrorAction SilentlyContinue
+          if (-not (Test-Path $result)) { throw 'Second-user probe produced no result' }
+          $outcome = Get-Content $result -Raw | ConvertFrom-Json
+          # Identity comes from the probe's process token (its environment is the runner's).
+          $ownerSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $probeName = ([string]$outcome.account).Split('\')[-1]
+          if ($outcome.user -ne $env:PROBE_USER -or $probeName -ne $env:PROBE_USER -or -not $outcome.sid -or $outcome.sid -eq $ownerSid) {
+            throw "Probe ran as '$($outcome.account)' ($($outcome.sid)), not $env:PROBE_USER"
+          }
+          if ($probe.ExitCode -ne 0 -or -not $outcome.ok) {
+            throw "Second user reached Resin: $($outcome.failures -join '; ')"
+          }
+          New-Item -ItemType Directory -Force dist/platform-evidence | Out-Null
+          Copy-Item $result dist/platform-evidence/$env:LANE-second-user-isolation.json
+
+      - name: resin uninstall leaves nothing behind
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resinHome = "$env:USERPROFILE\.resin"
+          & "$resinHome\bin\resin.cmd" uninstall --non-interactive --purge-all --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Start-Sleep -Seconds 2
+          $left = @()
+          if (Get-ScheduledTask -TaskPath '\Resin\' -ErrorAction SilentlyContinue) { $left += 'Scheduled Task \Resin\' }
+          if (Test-Path $resinHome) { $left += "$resinHome ($((Get-ChildItem -Recurse -Force $resinHome | Measure-Object).Count) entries)" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -like '*\.resin\*') { $left += "user PATH entry ($userPath)" }
+          $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*\.resin\*' -or $_.Name -eq 'resin-service-host.exe' }
+          if ($procs) { $left += "processes: $(($procs | ForEach-Object { "$($_.ProcessId) $($_.Name)" }) -join ', ')" }
+          if ($left.Count -gt 0) { throw "resin uninstall left: $($left -join '; ')" }
+          'resin uninstall removed the service, home, PATH entry and processes.'
+
+      - name: Collect lane evidence
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force dist/platform-evidence | Out-Null
+          if (Test-Path "dist/qualification/$env:LANE.json") {
+            Copy-Item "dist/qualification/$env:LANE.json" dist/platform-evidence/
+          }
+
+      - name: Clean up probe user and release server
+        if: always()
+        run: |
+          net user $env:PROBE_USER /delete 2>$null | Out-Null
+          Remove-Item -Recurse -Force C:\ResinProbe -ErrorAction SilentlyContinue
+          if ($env:RELEASE_SERVER_PID) { Stop-Process -Id $env:RELEASE_SERVER_PID -Force -ErrorAction SilentlyContinue }
+          exit 0
+
+      - name: Upload qualified native prebuilds for signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-prebuilds-${{ matrix.arch }}
+          path: packages/windows-security/prebuilds/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-qualification-${{ matrix.lane }}
+          path: dist/platform-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
   system-qualification:
     name: Clean Checkout Public Core System Gate
     runs-on: ubuntu-latest
@@ -202,7 +503,7 @@ jobs:
 
   build-and-sign:
     name: Build and Sign Candidate
-    needs: [platform-qualification, system-qualification]
+    needs: [platform-qualification, windows-qualification, system-qualification]
     runs-on: resin-vm-linux-arm64
     environment: production
     permissions:
@@ -371,11 +672,23 @@ jobs:
           name: system-qualification-evidence
           path: dist/upstream-qualification/system
 
+      - name: Download qualified Windows native prebuilds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: windows-prebuilds-*
+          merge-multiple: true
+          path: packages/windows-security/prebuilds
+
       - name: Require evidence for every qualification lane
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist/upstream-qualification/platform -name '*.json' -type f | wc -l)" -eq 5
+          for lane in linux-x64 linux-arm64 darwin-x64 darwin-arm64 wsl windows-x64 windows-arm64; do
+            test -s "dist/upstream-qualification/platform/$lane.json"
+          done
+          for lane in windows-x64 windows-arm64; do
+            test -s "dist/upstream-qualification/platform/$lane-second-user-isolation.json"
+          done
           test -s dist/upstream-qualification/system/system-e2e.json
 
       - name: Setup pnpm
@@ -386,6 +699,14 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify staged Windows prebuilds are the bytes the Windows lanes qualified
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/windows-lane.mjs verify-prebuilds \
+            --evidence-dir dist/upstream-qualification/platform \
+            --prebuilds-dir packages/windows-security/prebuilds
 
       - name: Audit production dependencies
         shell: bash
@@ -447,10 +768,17 @@ jobs:
             const lanes = new Map(
               (evidence.qualification?.platforms?.lanes || []).map((lane) => [lane.id, lane]),
             );
-            const required = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
-            for (const platform of required) {
+            const required = {
+              "darwin-arm64": ["QUALIFIED", "ARTIFACT_VALIDATED"],
+              "darwin-x64": ["QUALIFIED", "ARTIFACT_VALIDATED"],
+              "linux-arm64": ["QUALIFIED", "ARTIFACT_VALIDATED"],
+              "linux-x64": ["QUALIFIED", "ARTIFACT_VALIDATED"],
+              "windows-arm64": ["QUALIFIED"],
+              "windows-x64": ["QUALIFIED"],
+            };
+            for (const [platform, accepted] of Object.entries(required)) {
               const status = lanes.get(platform)?.status;
-              if (!["QUALIFIED", "ARTIFACT_VALIDATED"].includes(status)) {
+              if (!accepted.includes(status)) {
                 console.error(`::error::Platform ${platform} qualification status is ${status || "missing"}`);
                 process.exit(1);
               }
@@ -476,8 +804,8 @@ jobs:
             --output-dir "$package_dir"
           test -s "$package_dir/packages-manifest.json"
           mapfile -t package_tarballs < <(find "$package_dir" -maxdepth 1 -type f -name '*.tgz' -print)
-          if [ "${#package_tarballs[@]}" -ne 19 ]; then
-            echo "::error::Expected exactly 19 public fallback package tarballs, found ${#package_tarballs[@]}"
+          if [ "${#package_tarballs[@]}" -ne 20 ]; then
+            echo "::error::Expected exactly 20 public fallback package tarballs, found ${#package_tarballs[@]}"
             exit 1
           fi
 
@@ -493,8 +821,8 @@ jobs:
           runtime_dir="dist/runtimes/deno-v2.9.5"
           release_dir="dist/release/${RELEASE_TAG}"
           mapfile -t runtimes < <(find "$runtime_dir" -maxdepth 1 -type f -name '*.zip' -print)
-          if [ "${#runtimes[@]}" -ne 4 ]; then
-            echo "::error::Expected exactly four pinned Deno runtime ZIPs, found ${#runtimes[@]}"
+          if [ "${#runtimes[@]}" -ne 6 ]; then
+            echo "::error::Expected exactly six pinned Deno runtime ZIPs, found ${#runtimes[@]}"
             exit 1
           fi
           cp "${runtimes[@]}" "$release_dir/"

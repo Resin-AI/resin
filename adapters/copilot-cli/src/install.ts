@@ -35,8 +35,8 @@ export const copilotInstallHarness: HarnessInstallDefinition = {
     transports: ["stdio", "http", "sse"],
     planRegistration: ({ targetPath, command, args, gatewayUrl, fsBridge }) =>
       planCopilotMcpRegistration({ targetPath, command, args, gatewayUrl, fsBridge }),
-    verifyRegistration: ({ targetPath, command, fsBridge }) =>
-      verifyCopilotMcpRegistration({ targetPath, command, fsBridge }),
+    verifyRegistration: ({ targetPath, command, args, fsBridge }) =>
+      verifyCopilotMcpRegistration({ targetPath, command, args, fsBridge }),
     removeRegistration: ({ home, env, fsBridge, dryRun }) =>
       removeCopilotMcpRegistration({
         targetPath: resolveCopilotMcpConfigPath(home, env),

@@ -53,10 +53,10 @@ describe("Copilot CLI registration on a temporary HOME", () => {
       path.join(home, ".copilot", "mcp-config.json"),
     );
     expect(copilotHarness.mcpConfig.resolvePath(home, { COPILOT_HOME: "/data/cp" })).toBe(
-      "/data/cp/mcp-config.json",
+      path.resolve("/data/cp", "mcp-config.json"),
     );
     expect(copilotHarness.guidance?.resolvePath(home, { COPILOT_HOME: "/data/cp" })).toBe(
-      "/data/cp/copilot-instructions.md",
+      path.resolve("/data/cp", "copilot-instructions.md"),
     );
   });
 

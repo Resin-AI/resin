@@ -12,7 +12,7 @@ Resin turns repeated coding-agent workflows into reusable tools. It works with C
 
 ## Install
 
-Resin requires Node.js 22 or newer and supports Linux, macOS, and WSL2 on x64 and arm64.
+Resin requires Node.js 22 or newer and supports Linux, macOS, WSL2, and native Windows 10/11 on x64 and arm64.
 
 ### Linux, macOS, and WSL2
 
@@ -20,11 +20,16 @@ Resin requires Node.js 22 or newer and supports Linux, macOS, and WSL2 on x64 an
 curl -fsSL https://resin.sh/install.sh | sh
 ```
 
-### PowerShell
+### Windows (PowerShell)
+
+Run in Windows PowerShell 5.1 or PowerShell 7+; no WSL2 or administrator rights needed:
 
 ```powershell
 irm https://resin.sh/install.ps1 | iex
 ```
+
+Resin installs to `%USERPROFILE%\.resin` (or `RESIN_HOME`), adds `resin` to your user `PATH`, and runs its background service as a per-user Scheduled Task that starts at logon. To install into WSL2 instead, run `& ([scriptblock]::Create((irm https://resin.sh/install.ps1))) -UseWsl`.
+
 The installer prompts for device authorization, configures detected coding agents, starts the local service, and verifies the installation.
 
 ## Quick start

@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { HarnessInstallDefinition } from "@resin/harness-contracts";
+import { type HarnessInstallDefinition, readHostPathEnv } from "@resin/harness-contracts";
 import { planCodexMcpConfig } from "./config-planner.js";
 import { CODEX_TESTED_VERSIONS, probeCodexInstallation } from "./discovery.js";
 import {
@@ -10,11 +10,10 @@ import {
 } from "./instructions.js";
 
 function resolveCodexConfigPath(home: string, env: NodeJS.ProcessEnv): string {
-  const configPath = env.CODEX_CONFIG_PATH;
-  if (configPath && configPath.trim().length > 0) {
-    return path.resolve(configPath);
-  }
-  return path.join(resolveCodexHome(home, env), "config.toml");
+  return (
+    readHostPathEnv(env, "CODEX_CONFIG_PATH") ??
+    path.join(resolveCodexHome(home, env), "config.toml")
+  );
 }
 
 export const codexInstallHarness: HarnessInstallDefinition = {
@@ -29,7 +28,11 @@ export const codexInstallHarness: HarnessInstallDefinition = {
     "Compaction boundaries are captured, but Codex does not record the token count after compaction.",
   ],
   probeInstallation: ({ targetPath, home, env }) =>
-    probeCodexInstallation({ customConfigPath: targetPath, env: { ...env, HOME: home } }),
+    probeCodexInstallation({
+      customConfigPath: targetPath,
+      env: { ...env, HOME: home },
+      userHome: home,
+    }),
   mcpConfig: {
     resolvePath: resolveCodexConfigPath,
     uninstallPaths: (home, env) => [

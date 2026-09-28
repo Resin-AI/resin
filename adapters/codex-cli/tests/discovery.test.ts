@@ -68,6 +68,7 @@ describe("Codex CLI Discovery & Version Probing", () => {
 
       const found = await findCodexExecutable({
         pathLookup: mockLookup,
+        platform: "linux",
       });
       expect(found).toBe(path.resolve("/usr/local/bin/codex"));
     });
@@ -118,21 +119,22 @@ describe("Codex CLI Discovery & Version Probing", () => {
       });
 
       expect(paths.homeDir).toBe("/home/testuser/.codex");
-      expect(paths.configPath).toBe(path.resolve("/home/testuser/.codex/config.toml"));
-      expect(paths.sessionRoot).toBe(path.resolve("/home/testuser/.codex/sessions"));
+      expect(paths.configPath).toBe(path.join("/home/testuser/.codex", "config.toml"));
+      expect(paths.sessionRoot).toBe(path.join("/home/testuser/.codex", "sessions"));
       expect(paths.configFormat).toBe("toml");
     });
 
     it("respects custom environment variables", async () => {
+      // Host-absolute paths: on Windows a rooted POSIX value is a leaked MSYS/WSL variable and ignored.
       const paths = await resolveCodexPaths({
         env: {
-          CODEX_HOME: "/custom/codex",
-          CODEX_CONFIG_PATH: "/custom/codex/my-config.json",
-          CODEX_SESSIONS_DIR: "/custom/codex/my-sessions",
+          CODEX_HOME: path.resolve("/custom/codex"),
+          CODEX_CONFIG_PATH: path.resolve("/custom/codex/my-config.json"),
+          CODEX_SESSIONS_DIR: path.resolve("/custom/codex/my-sessions"),
         },
       });
 
-      expect(paths.homeDir).toBe("/custom/codex");
+      expect(paths.homeDir).toBe(path.resolve("/custom/codex"));
       expect(paths.configPath).toBe(path.resolve("/custom/codex/my-config.json"));
       expect(paths.sessionRoot).toBe(path.resolve("/custom/codex/my-sessions"));
       expect(paths.configFormat).toBe("json");

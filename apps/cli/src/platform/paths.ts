@@ -2,6 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import {
+  canonicalLocalPipeName,
+  currentUserSid,
+  windowsDaemonPipeName,
+} from "@resin/windows-security";
+import { currentUserSidFromWhoami } from "../service/windows-task.js";
 import { type PlatformInfo, detectPlatform } from "./platform.js";
 
 /**
@@ -42,6 +48,26 @@ export interface PlatformPathOptions {
   configFile?: string;
   env?: Record<string, string | undefined>;
   wslMountRoot?: string;
+  /**
+   * SID used to derive the Windows daemon pipe name. Defaults to the current user's SID on
+   * Windows; required when simulating a win32 platformInfo elsewhere.
+   */
+  windowsUserSid?: string;
+}
+
+function windowsUserSid(): string {
+  if (process.platform !== "win32") {
+    throw new Error(
+      "Resolving the Windows daemon pipe name needs the user's SID; pass windowsUserSid when simulating win32.",
+    );
+  }
+  try {
+    return currentUserSid();
+  } catch {
+    // The bundled install helper runs without the native prebuilds. The SID only names the pipe
+    // (it is public information); every connection is still verified before use.
+    return currentUserSidFromWhoami();
+  }
 }
 
 /**
@@ -181,11 +207,6 @@ export function resolvePlatformPaths(options: PlatformPathOptions = {}): Platfor
   const baseStateDir = path.join(baseHomeDir, "state");
   const baseLogDir = path.join(baseHomeDir, "logs");
 
-  const defaultSocketPath =
-    platform.platform === "win32"
-      ? "\\\\.\\pipe\\resin-daemon"
-      : path.join(baseStateDir, "daemon.sock");
-
   // Apply overrides if supplied
   const homeDir = baseHomeDir;
   const configDir = path.resolve(
@@ -203,13 +224,17 @@ export function resolvePlatformPaths(options: PlatformPathOptions = {}): Platfor
     normalizeCandidate(options.logDir) ?? normalizeCandidate(env.RESIN_LOG_DIR) ?? baseLogDir,
   );
 
-  let socketPath =
-    normalizeCandidate(options.socketPath) ??
-    normalizeCandidate(env.RESIN_SOCKET_PATH) ??
-    defaultSocketPath;
-  if (platform.platform !== "win32" || !socketPath.startsWith("\\\\.\\pipe\\")) {
-    socketPath = path.resolve(socketPath);
-  }
+  const socketOverride =
+    normalizeCandidate(options.socketPath) ?? normalizeCandidate(env.RESIN_SOCKET_PATH);
+  // Native Windows: the same per-user, per-home owner-only pipe the daemon serves (see
+  // @resin/observer resolvePaths). Non-pipe overrides are kept as paths; the daemon refuses to
+  // serve them and clients refuse to dial them.
+  const socketPath =
+    platform.platform === "win32"
+      ? socketOverride !== undefined
+        ? (canonicalLocalPipeName(socketOverride) ?? path.resolve(socketOverride))
+        : windowsDaemonPipeName(baseHomeDir, options.windowsUserSid ?? windowsUserSid())
+      : path.resolve(socketOverride ?? path.join(baseStateDir, "daemon.sock"));
 
   const lockFilePath = path.resolve(
     normalizeCandidate(env.RESIN_LOCK_FILE) ?? path.join(stateDir, "daemon.lock"),

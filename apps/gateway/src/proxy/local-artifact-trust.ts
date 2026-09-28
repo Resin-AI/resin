@@ -2,6 +2,7 @@ import { createPublicKey } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { InMemoryKeyStore, type KeyStore } from "@resin/runtime";
+import { checkOwnerOnly } from "@resin/windows-security";
 import { z } from "zod";
 
 const localArtifactTrustSchema = z
@@ -44,18 +45,32 @@ export function loadLocalArtifactTrust(
       throw new Error("trust file must be inside the Resin profile");
     }
     const uid = process.getuid?.();
-    if (uid === undefined)
+    const windows = process.platform === "win32";
+    if (uid === undefined && !windows)
       throw new Error("owner-only local trust requires POSIX ownership checks");
+    // Windows has no uid/mode bits: the same owner-only rule is enforced on each DACL.
+    // The Resin profile root is the trust boundary and must hold a protected DACL; everything
+    // below it must be owner-only and inherit only through that protected chain.
+    const ownerOnly = (target: string, stat: fs.Stats): boolean =>
+      windows
+        ? !stat.isSymbolicLink() && checkOwnerOnly(target, { requireProtected: target === root }).ok
+        : stat.uid === uid && (stat.mode & 0o077) === 0;
     let directory = path.dirname(filePath);
     for (;;) {
       const stat = fs.lstatSync(directory);
-      if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) {
+      if (!stat.isDirectory() || !ownerOnly(directory, stat)) {
         throw new Error("trust profile directories must be owner-only and not symlinks");
       }
       if (directory === root) break;
       directory = path.dirname(directory);
     }
 
+    if (windows) {
+      const linkStat = fs.lstatSync(filePath);
+      if (!linkStat.isFile() || !ownerOnly(filePath, linkStat)) {
+        throw new Error("trust file must be an owner-only regular file without links");
+      }
+    }
     const fd = fs.openSync(
       filePath,
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
@@ -63,7 +78,7 @@ export function loadLocalArtifactTrust(
     let raw: string;
     try {
       const stat = fs.fstatSync(fd);
-      if (!stat.isFile() || stat.uid !== uid || (stat.mode & 0o077) !== 0 || stat.nlink !== 1) {
+      if (!stat.isFile() || stat.nlink !== 1 || (!windows && !ownerOnly(filePath, stat))) {
         throw new Error("trust file must be an owner-only regular file without links");
       }
       if (stat.size > 8192) throw new Error("trust file is too large");

@@ -16,7 +16,7 @@ const SYSTEM_META_TOOL_NAMES = [
   "manage_tools",
 ] as const;
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { IpcClient, resolvePaths } from "@resin/observer";
+import { IpcClient, daemonPipePresent, resolvePaths } from "@resin/observer";
 import type { ActionableNotification } from "@resin/protocol";
 import { findDenoExecutable } from "../installer/assets.js";
 import {
@@ -487,7 +487,8 @@ export async function runDiagnostics(options: {
   }
 
   // 5. IPC Ping
-  const socketExists = await fsBridge.exists(daemonPaths.socketPath);
+  const socketExists =
+    daemonPipePresent(daemonPaths.socketPath) ?? (await fsBridge.exists(daemonPaths.socketPath));
   if (socketExists) {
     const ipcClient = new IpcClient({ socketPath: daemonPaths.socketPath, timeoutMs: 2000 });
     try {

@@ -90,7 +90,7 @@ Resin defines five distinct, non-overlapping trust zones:
 
 ### 1. Supervisor Layer
 - Runs at user privilege level (non-root).
-- Uses native OS service managers (`launchd` on macOS, `systemd --user` on Linux/WSL2).
+- Uses native OS service managers (`launchd` on macOS, `systemd --user` on Linux/WSL2, a per-user logon Scheduled Task on native Windows).
 - Automatically restarts the daemon process within 500ms on unexpected exit ([ADR 0009](../adr/0009-nfr-and-performance-targets.md)).
 
 ### 2. Daemon Process (Node.js LTS)

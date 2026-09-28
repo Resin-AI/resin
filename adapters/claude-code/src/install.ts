@@ -1,14 +1,11 @@
 import * as path from "node:path";
-import type { HarnessInstallDefinition } from "@resin/harness-contracts";
+import { type HarnessInstallDefinition, readHostPathEnv } from "@resin/harness-contracts";
 import { planClaudeMcpConfig } from "./config-planner.js";
 import { CLAUDE_TESTED_VERSIONS, probeClaudeInstallation } from "./discovery.js";
 
 /** `$CLAUDE_CONFIG_DIR` when set, else `<home>/.claude` (Claude's settings, CLAUDE.md, projects). */
 export function resolveClaudeConfigDir(home: string, env: NodeJS.ProcessEnv): string {
-  const configured = env.CLAUDE_CONFIG_DIR;
-  return configured && configured.trim().length > 0
-    ? path.resolve(configured)
-    : path.join(home, ".claude");
+  return readHostPathEnv(env, "CLAUDE_CONFIG_DIR") ?? path.join(home, ".claude");
 }
 
 /**
@@ -16,10 +13,8 @@ export function resolveClaudeConfigDir(home: string, env: NodeJS.ProcessEnv): st
  * inside `$CLAUDE_CONFIG_DIR` when that is set (what `claude mcp add -s user` writes).
  */
 export function resolveClaudeMcpConfigPath(home: string, env: NodeJS.ProcessEnv): string {
-  const configured = env.CLAUDE_CONFIG_DIR;
-  return configured && configured.trim().length > 0
-    ? path.join(path.resolve(configured), ".claude.json")
-    : path.join(home, ".claude.json");
+  const configured = readHostPathEnv(env, "CLAUDE_CONFIG_DIR");
+  return configured ? path.join(configured, ".claude.json") : path.join(home, ".claude.json");
 }
 
 /** Claude's user memory file, loaded into every session. */
@@ -55,8 +50,8 @@ export const claudeCodeInstallHarness: HarnessInstallDefinition = {
     "Only user-scope MCP registration (.claude.json) is managed; project .mcp.json files are left alone.",
     "Edit/Write steps are learned only when Claude recorded the resulting patch (toolUseResult.structuredPatch or created-file content).",
   ],
-  probeInstallation: ({ targetPath, fsBridge }) =>
-    probeClaudeInstallation({ customConfigPath: targetPath }, fsBridge),
+  probeInstallation: ({ targetPath, home, env, fsBridge }) =>
+    probeClaudeInstallation({ customConfigPath: targetPath, homeDir: home, env }, fsBridge),
   mcpConfig: {
     resolvePath: resolveClaudeMcpConfigPath,
     uninstallPaths: (home, env) => [
@@ -69,8 +64,8 @@ export const claudeCodeInstallHarness: HarnessInstallDefinition = {
     serverKey: "resin",
     jsonContainerKeys: ["mcpServers"],
     transports: ["stdio"],
-    planRegistration: ({ workspace, gatewayUrl, command, fsBridge }) =>
-      planClaudeMcpConfig(workspace, gatewayUrl, fsBridge, command),
+    planRegistration: ({ workspace, gatewayUrl, command, args, fsBridge }) =>
+      planClaudeMcpConfig(workspace, gatewayUrl, fsBridge, command, args),
   },
   guidance: {
     resolvePath: resolveClaudeGuidancePath,

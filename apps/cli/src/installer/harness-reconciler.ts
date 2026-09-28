@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type Dirent, constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { HarnessId } from "@resin/contracts";
@@ -10,6 +9,7 @@ import {
   applyManagedBlock,
   computeConfigHash,
   isRecognizedResinMcpEntry,
+  resolveHarnessUserHome,
 } from "@resin/harness-contracts";
 import type {
   ConfigBackup,
@@ -18,6 +18,7 @@ import type {
   HarnessInstallation,
   ManagedBlockResult,
 } from "@resin/harness-contracts";
+import { checkOwnerOnly, ensureOwnerOnly } from "@resin/windows-security";
 import { z } from "zod";
 import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../harness-registry.js";
 import {
@@ -860,6 +861,8 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
     while (true) {
       try {
         await fs.mkdir(lockPath, { mode: 0o700 });
+        // Windows ignores the mode; an owner-only DACL (inherited by the claim files) replaces it.
+        ensureOwnerOnly(lockPath, { directory: true });
         return;
       } catch (error: unknown) {
         if (!isAlreadyExistsError(error)) {
@@ -1206,6 +1209,16 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
   }
 
   private assertPrivateLockEntry(entryPath: string, mode: number, uid: number): void {
+    if (process.platform === "win32") {
+      // Node reports 0o666-style modes and uid 0 on Windows; the DACL is what protects the lock.
+      const acl = checkOwnerOnly(entryPath);
+      if (!acl.ok) {
+        throw new Error(
+          `Refusing reconciliation lock with unsafe permissions: ${entryPath} (${acl.problems.join("; ")})`,
+        );
+      }
+      return;
+    }
     if ((mode & 0o077) !== 0) {
       throw new Error(`Refusing reconciliation lock with unsafe permissions: ${entryPath}`);
     }
@@ -1286,7 +1299,8 @@ export class HarnessReconciler {
     const now = options.now ?? (() => new Date());
     const autoRepair = options.autoRepair ?? DEFAULT_HARNESS_AUTO_REPAIR;
     const harnesses = [...new Set(options.harnesses ?? SUPPORTED_HARNESS_IDS)];
-    const customHome = options.customHome ?? options.env?.HOME ?? process.env.HOME ?? os.homedir();
+    const customHome =
+      options.customHome ?? resolveHarnessUserHome({ env: { ...process.env, ...options.env } });
     const env =
       options.env ?? (options.customHome === undefined ? process.env : { HOME: customHome });
     const resolved: ResolvedReconcileOptions = {

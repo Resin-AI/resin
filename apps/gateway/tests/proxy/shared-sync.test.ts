@@ -27,6 +27,8 @@ const INTERVAL_MS = 60_000;
 let root: string;
 let syncDir: string;
 let artifactCache: ArtifactCache;
+/** Closed after each test: an open tool-access.db pins the temp dir on Windows. */
+const openedAccess = new Set<ManagedToolAccess>();
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -37,6 +39,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
+  for (const access of openedAccess) access.close();
+  openedAccess.clear();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -58,6 +62,7 @@ function gateway(cloud: FakeCatalogCloud, options: GatewayOptions = {}) {
   const cache = new CloudCatalogCache();
   const registry = new ToolRegistry({ autoHydrate: false });
   const access = new ManagedToolAccess(path.join(root, "access"), artifactCache, identity);
+  openedAccess.add(access);
   registry.setManagedToolAccess(access);
   const store = new DeviceSyncStore({
     dir: syncDir,

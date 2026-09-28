@@ -6,10 +6,12 @@
 // Must stay first: suppresses the node:sqlite ExperimentalWarning before anything loads it.
 import "@resin/db/node-warning-filter";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CURRENT_VERSION } from "./commands/upgrade.js";
+import { requestDaemonGracefulShutdown } from "./service/daemon-shutdown.js";
 import {
   SERVICE_SUPERVISOR_COMMAND,
   type ServiceSupervisorOptions,
@@ -85,6 +87,13 @@ export async function runServiceSupervisorCommand(argv: string[]): Promise<numbe
   };
   if (resinHome !== undefined) {
     supervisorOptions.resinHome = resinHome;
+  }
+  if (process.platform === "win32") {
+    // Windows cannot deliver SIGTERM to the daemon; ask it to drain over IPC instead.
+    const serviceResinHome =
+      resinHome ?? process.env.RESIN_HOME ?? path.join(os.homedir(), ".resin");
+    supervisorOptions.requestChildShutdown = () =>
+      requestDaemonGracefulShutdown(serviceResinHome, "Resin service stop requested");
   }
   await runServiceSupervisor(supervisorOptions);
   return 0;

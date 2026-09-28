@@ -20,10 +20,20 @@ import { CloudCatalogClient, type CloudRequestIdentity } from "../../src/proxy/c
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { CloudCatalogSyncCoordinator } from "../../src/proxy/sync.js";
-import { ManagedToolAccess } from "../../src/proxy/tool-access.js";
+import { ManagedToolAccess as ProductManagedToolAccess } from "../../src/proxy/tool-access.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
+import { canCreateFileSymlinks } from "../fixtures/symlinks.js";
+
+const openedAccess = new Set<ProductManagedToolAccess>();
+/** Every access view a test opens is closed after it: an open tool-access.db pins the temp dir on Windows. */
+class ManagedToolAccess extends ProductManagedToolAccess {
+  constructor(...args: ConstructorParameters<typeof ProductManagedToolAccess>) {
+    super(...args);
+    openedAccess.add(this);
+  }
+}
 
 const identity: CloudRequestIdentity = {
   cloudUrl: "https://cloud.example.test",
@@ -101,6 +111,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
+  for (const opened of openedAccess) opened.close();
+  openedAccess.clear();
   fs.rmSync(root, { recursive: true, force: true });
 });
 function cacheTool(tool: ToolManifest): void {
@@ -597,9 +609,15 @@ describe("Managed removal and restart protection", () => {
     expect(accessRequests).toBeGreaterThanOrEqual(2);
     expect(await registry.getTool(tool.id, identity.workspaceId)).toBeUndefined();
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+    // The registry lookup reopened the runtime's access database; Windows cannot delete it open.
+    await runtime.stop();
   });
 
-  it("preserves a symlinked project lock target while removing independently owned cache bytes", async () => {
+  it("preserves a symlinked project lock target while removing independently owned cache bytes", async ({
+    skip,
+  }) => {
+    // Plain Windows users cannot create file symlinks (EPERM), so the fixture needs the privilege.
+    skip(!canCreateFileSymlinks, "this user may not create file symlinks");
     const tool = manifest();
     const manager = new ProjectLockManager({ lockPath: path.join(root, "project"), projectId });
     manager.reconcileQualified(entry(tool));
@@ -651,6 +669,8 @@ describe("Managed removal and restart protection", () => {
     ).rejects.toThrow("Managed tool access is unavailable");
     // Live deactivation preserves shared bytes; only quiescent maintenance may evict them.
     expect(artifactCache.isArtifactCached(entry(tool).artifactDigest)).toBe(true);
+    // Releases the runtime's access database, which Windows cannot delete while it is open.
+    await runtime.stop();
   });
 });
 

@@ -15,6 +15,7 @@ import { type InitCommandOptions, initCommand } from "../commands/init.js";
 import { type BrowserLauncher, loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { privacyCommand } from "../commands/privacy.js";
+import { serviceCommand } from "../commands/service.js";
 import { statusCommand } from "../commands/status.js";
 import { uninstallCommand } from "../commands/uninstall.js";
 import { upgradeCommand } from "../commands/upgrade.js";
@@ -273,6 +274,7 @@ Commands:
   init         Install, authorize, and configure AI agent harnesses for Resin.
   login        Authenticate this installation with Resin Cloud.
   status       Display live status and health of the daemon, tools, and harnesses.
+  service      Show, start, stop, or restart the Resin background service.
   mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
   privacy      Inspect and manage device and cloud privacy controls.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.
@@ -504,6 +506,9 @@ export async function main(
 
     case "status":
       return statusCommand(args, { verbose: isVerbose });
+
+    case "service":
+      return serviceCommand(args, { env, stdout, stderr });
 
     case "privacy":
       return privacyCommand(args, {

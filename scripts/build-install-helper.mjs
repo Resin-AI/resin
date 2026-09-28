@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import esbuild from "esbuild";
 
 export const DEFAULT_BANNER = `// Resin Standalone Install Helper V1.0.0
@@ -115,7 +116,7 @@ if (
   globalThis.process !== undefined &&
   process.argv &&
   process.argv[1] &&
-  import.meta.url === `file://${path.resolve(process.argv[1])}`
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
 ) {
   const isCheck = process.argv.includes("--check");
   const isTestOnly = process.argv.includes("--test-only");

@@ -171,7 +171,7 @@ Embedded SQLite with Write-Ahead Logging (WAL mode) and OS-standard identity-par
 1. **Local-First & Offline-Capable**: All local tools execute and function with 100% reliability even when completely disconnected from the internet.
 2. **Zero-Prompt Autonomy within Envelope**: Tools bootstrap, lock, qualify, and execute autonomously without prompting the developer, provided they stay within the pre-authorized security envelope.
 3. **Strict Data Residency**: Raw session transcripts, unredacted conversation turns, original private program source, and private store values remain local. Sanitized observation DTOs may carry engine-redacted program views with non-secret code and literals. Cloud never executes tools against developer repositories.
-4. **Hermetic & Deterministic**: Pinned runtime binaries, exact version/digest locks, and comprehensive contract tests ensure identical behavior across Linux, macOS, and WSL2 ([ADR 0003](../adr/0003-supported-harnesses-and-platforms.md)).
+4. **Hermetic & Deterministic**: Pinned runtime binaries, exact version/digest locks, and comprehensive contract tests ensure identical behavior across Linux, macOS, WSL2, and native Windows ([ADR 0014](../adr/0014-native-windows-support.md)).
 
 ## Architecture References
 - [System Boundaries and Process Model](boundaries.md)
@@ -179,9 +179,10 @@ Embedded SQLite with Write-Ahead Logging (WAL mode) and OS-standard identity-par
 - [Non-Functional Requirements (NFR) Matrix](nfr.md)
 - [ADR 0001: V1 Topology](../adr/0001-v1-topology.md)
 - [ADR 0002: Daemon Architecture & Sandboxing](../adr/0002-daemon-and-worker-isolation.md)
-- [ADR 0003: Supported Harnesses & Platforms](../adr/0003-supported-harnesses-and-platforms.md)
+- [ADR 0003: Supported Harnesses & Platforms](../adr/0003-supported-harnesses-and-platforms.md) (superseded by ADR 0014)
 - [ADR 0005: Privacy & Data Residency](../adr/0005-privacy-data-boundaries.md)
 - [ADR 0006: Storage Systems and Runtime Technology Stack](../adr/0006-storage-and-runtimes.md)
 - [ADR 0007: Capability Envelope & Security](../adr/0007-capability-envelope-and-security.md)
 - [ADR 0009: Non-Functional Requirements](../adr/0009-nfr-and-performance-targets.md)
 - [ADR 0010: ADR Governance](../adr/0010-adr-governance.md)
+- [ADR 0014: Supported Harnesses & Platforms, Including Native Windows](../adr/0014-native-windows-support.md)

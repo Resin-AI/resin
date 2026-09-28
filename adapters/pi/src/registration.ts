@@ -55,6 +55,8 @@ export async function planPiRegistration(
 export async function verifyPiRegistration(options: {
   targetPath: string;
   command: string;
+  /** Expected arguments; `["mcp"]` by default (`[<resin.mjs>, "mcp"]` under node on Windows). */
+  args?: readonly string[];
   fsBridge: ConfigFsBridge;
 }): Promise<boolean> {
   const content = await options.fsBridge.readFile(options.targetPath);
@@ -64,7 +66,7 @@ export async function verifyPiRegistration(options: {
       renderPiResinExtension({
         name: PI_RESIN_SERVER_NAME,
         command: options.command,
-        args: ["mcp"],
+        args: [...(options.args ?? ["mcp"])],
       })
   );
 }

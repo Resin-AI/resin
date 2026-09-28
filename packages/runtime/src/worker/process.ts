@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   CanonicalJsonRecord,
   CanonicalJsonValue,
@@ -32,6 +32,9 @@ import {
 } from "./protocol.js";
 import type { BrokerRequestHandlerFn } from "./sdk.js";
 import { TOOL_SDK_SHIM_SOURCE } from "./tool-sdk-shim.js";
+
+/** How long Windows cleanup waits for a terminated worker to exit before removing its scratch. */
+const WINDOWS_SCRATCH_EXIT_WAIT_MS = 5_000;
 
 /**
  * Options for launching and executing a tool inside a WorkerProcess.
@@ -105,6 +108,8 @@ export class WorkerProcess {
   private timeoutTimer: NodeJS.Timeout | null = null;
   private readonly pendingBrokerWork = new Set<Promise<void>>();
   private isFinalizationScheduled = false;
+  /** Windows: the pending removal of a scratch directory that was still the worker's cwd. */
+  private scratchRemoval: Promise<void> | null = null;
 
   constructor(private readonly options: WorkerProcessOptions) {}
 
@@ -170,7 +175,15 @@ export class WorkerProcess {
       "@resin/runtime": shimFilePath,
     };
     const importMapPath = path.join(this.scratchDir, "import_map.json");
-    fs.writeFileSync(importMapPath, JSON.stringify({ imports: mergedMap }, null, 2), "utf-8");
+    // Deno parses import map targets as URLs, and `C:\…` parses as the URL scheme `c:`, so
+    // absolute paths are written as file URLs (which resolve identically for POSIX paths).
+    const importMapUrls = Object.fromEntries(
+      Object.entries(mergedMap).map(([specifier, target]) => [
+        specifier,
+        target && path.isAbsolute(target) ? pathToFileURL(target).href : target,
+      ]),
+    );
+    fs.writeFileSync(importMapPath, JSON.stringify({ imports: importMapUrls }, null, 2), "utf-8");
     const importMapArg = `--import-map=${importMapPath}`;
     for (const target of Object.values(mergedMap)) {
       if (!target) continue;
@@ -237,7 +250,12 @@ export class WorkerProcess {
         this.timeoutTimer = null;
       }
       this.cleanup();
-      resolve(result);
+      // Windows: settle once the scratch directory is gone, which waits for the worker to exit.
+      if (this.scratchRemoval) {
+        void this.scratchRemoval.then(() => resolve(result));
+      } else {
+        resolve(result);
+      }
     };
 
     // Keep this listener through stream closure: destroying stdin during disposal
@@ -375,7 +393,11 @@ export class WorkerProcess {
     try {
       const initMsg = createInitializeMessage({
         manifest: this.options.manifest,
-        bundleEntrypoint: this.options.bundleEntrypoint,
+        // The bootstrap imports this specifier. An absolute Windows path (`C:\…`) is not a URL
+        // the bootstrap can prefix with `file://`, so absolute paths travel as file URLs.
+        bundleEntrypoint: path.isAbsolute(this.options.bundleEntrypoint)
+          ? pathToFileURL(this.options.bundleEntrypoint).href
+          : this.options.bundleEntrypoint,
         workspaceRoot: this.options.workspaceRoot,
         scratchDir: this.scratchDir,
         capabilities: this.options.capabilities,
@@ -681,8 +703,30 @@ export class WorkerProcess {
       try {
         fs.rmSync(this.scratchDir, { recursive: true, force: true });
       } catch {
-        // ignore cleanup error
+        // Windows refuses to delete the working directory of a live process, and the worker
+        // was only just told to terminate: remove it once the worker has exited. Elsewhere the
+        // error is ignored.
+        if (process.platform === "win32") {
+          this.scratchRemoval = this.removeScratchDirAfterExit(this.scratchDir);
+        }
       }
     }
+  }
+
+  private async removeScratchDirAfterExit(directory: string): Promise<void> {
+    const child = this.childProcess;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const { promise, resolve } = withResolvers<void>();
+      const timer = setTimeout(resolve, WINDOWS_SCRATCH_EXIT_WAIT_MS);
+      timer.unref();
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      await promise;
+    }
+    await fs.promises
+      .rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+      .catch(() => undefined);
   }
 }

@@ -78,3 +78,4 @@ export {
   resolveCodexAgentsPath,
   resolveCodexHome,
 } from "./instructions.js";
+export { recordedFileUrlPath } from "./recorded-file-url.js";

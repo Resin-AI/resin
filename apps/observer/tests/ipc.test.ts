@@ -2,11 +2,18 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { currentUserSid, readPipeAcl } from "@resin/windows-security";
+import {
+  PROBE_ACCESS,
+  probeOpenWithUserSidDisabled,
+  squatPipeForTesting,
+} from "@resin/windows-security/testing";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { type DaemonConfig, DaemonConfigSchema } from "../src/config.js";
 import { IpcClient } from "../src/ipc/client.js";
 import { FrameDecoder, MAX_FRAME_SIZE, encodeFrame } from "../src/ipc/framing.js";
+import { openDaemonConnection } from "../src/ipc/pipe-trust.js";
 import { IPC_ERROR_CODES, type IpcRequest, type IpcResponse } from "../src/ipc/protocol.js";
 import { IpcServer, assertUnixSocketPathFits } from "../src/ipc/server.js";
 import { createInMemoryIpcPair } from "../src/ipc/transport.js";
@@ -211,7 +218,10 @@ describe("ipc", () => {
     it("communicates successfully over a real Unix domain socket file without credentials", async () => {
       const tempDir = path.join(os.tmpdir(), `resin-ipc-uds-${Date.now()}`);
       await fs.promises.mkdir(tempDir, { recursive: true });
-      const socketPath = path.join(tempDir, "daemon.sock");
+      const socketPath =
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\resin-ipc-uds-${process.pid}-${Date.now()}`
+          : path.join(tempDir, "daemon.sock");
 
       const config = DaemonConfigSchema.parse({
         logLevel: "silent",
@@ -246,6 +256,39 @@ describe("ipc", () => {
 
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
+
+    // Named pipes only: a forced close disconnects the client and discards what it has not read
+    // yet, while a Unix socket keeps already-written bytes readable after the server closes.
+    it.runIf(process.platform === "win32")(
+      "delivers a reply written just before the IPC server stops",
+      async () => {
+        const socketPath = `\\\\.\\pipe\\resin-ipc-stop-reply-${process.pid}-${Date.now()}`;
+        // Larger than the pipe buffer, so the write is still pending when stop() runs.
+        const payload = "x".repeat(512 * 1024);
+        let server: IpcServer | undefined;
+        // SAFETY: Stub supervisor implementing the subset of DaemonSupervisor the IPC server calls.
+        const supervisor = {
+          getConfig() {
+            return {};
+          },
+          async getDiagnostics() {
+            // The daemon stops (an idle daemon does so at once) right after this reply is sent.
+            setImmediate(() => void server?.stop());
+            return { payload };
+          },
+        } as unknown as DaemonSupervisor;
+        server = new IpcServer({ supervisor, socketPath });
+        await server.start();
+        const client = new IpcClient({ socketPath });
+        try {
+          await client.connect();
+          await expect(client.getDiagnostics()).resolves.toEqual({ payload });
+        } finally {
+          await client.close();
+          await server.stop();
+        }
+      },
+    );
 
     it("connects and executes requests over local socket without credentials", async () => {
       const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-auth-test-"));
@@ -282,32 +325,131 @@ describe("ipc", () => {
       await fs.promises.rm(tempDir, { recursive: true, force: true });
     });
 
-    it("enforces strict filesystem permission bits (0o600) on POSIX domain socket", async () => {
-      if (process.platform === "win32") return;
+    it.runIf(process.platform === "win32")(
+      "serves Windows IPC over an owner-only pipe that other principals cannot open",
+      async () => {
+        const socketPath = `\\\\.\\pipe\\uds-acl-test-${process.pid}-${Date.now()}`;
+        const supervisor = new DaemonSupervisor({
+          config: DaemonConfigSchema.parse({ instanceId: "uds-acl-test-inst" }),
+        });
+        await supervisor.start();
+        const server = new IpcServer({ supervisor, socketPath });
+        await server.start();
+        try {
+          const sid = currentUserSid();
+          const acl = readPipeAcl(socketPath);
+          expect(acl.owner).toBe(sid);
+          expect(acl.protected).toBe(true);
+          expect(acl.entries.map((entry) => [entry.type, entry.sid])).toEqual([
+            ["deny", "S-1-5-2"],
+            ["allow", sid],
+          ]);
+          // Everyone, Users, Authenticated Users, INTERACTIVE, ... are all refused.
+          expect(probeOpenWithUserSidDisabled(socketPath, PROBE_ACCESS.readWrite)).toEqual({
+            ok: false,
+            win32Error: 5,
+          });
+          // The connection a client talks over is the one whose server was verified.
+          const verified = await openDaemonConnection(socketPath);
+          expect(verified).toMatchObject({ serverPid: process.pid });
+          verified.destroy();
 
-      const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-perm-test-"));
-      const socketPath = path.join(tempDir, "observer.sock");
+          const client = new IpcClient({ socketPath });
+          expect((await client.ping("pipe-acl")).nonce).toBe("pipe-acl");
+          await client.close();
 
-      const config = DaemonConfigSchema.parse({
-        instanceId: "uds-perm-test-inst",
-      });
-      const supervisor = new DaemonSupervisor({ config });
-      await supervisor.start();
+          // A second daemon never shares the name.
+          const second = new IpcServer({ supervisor, socketPath });
+          await expect(second.start()).rejects.toMatchObject({
+            code: "EADDRINUSE",
+            message: expect.stringContaining("Another Resin daemon for this user"),
+          });
+        } finally {
+          await server.stop();
+          await supervisor.stop();
+        }
+      },
+    );
 
-      const server = new IpcServer({
-        supervisor,
-        socketPath,
-      });
-      await server.start();
+    it.runIf(process.platform === "win32")(
+      "fails closed when another principal squats the daemon pipe name",
+      async () => {
+        const socketPath = `\\\\.\\pipe\\uds-squat-test-${process.pid}-${Date.now()}`;
+        const squatter = squatPipeForTesting(socketPath, "D:P(A;;GA;;;SY)");
+        const supervisor = new DaemonSupervisor({
+          config: DaemonConfigSchema.parse({ instanceId: "uds-squat-test-inst" }),
+        });
+        await supervisor.start();
+        try {
+          const server = new IpcServer({ supervisor, socketPath });
+          await expect(server.start()).rejects.toMatchObject({
+            code: "EADDRINUSE",
+            message: expect.stringContaining("held by another principal (access-denied)"),
+          });
+          expect(server.listening).toBe(false);
 
-      // Check socket file permissions (0o600)
-      const socketStat = await fs.promises.stat(socketPath);
-      expect(socketStat.mode & 0o777).toBe(0o600);
+          await expect(openDaemonConnection(socketPath)).rejects.toMatchObject({
+            code: IPC_ERROR_CODES.UNTRUSTED_SERVER,
+            reason: "access-denied",
+          });
+          const client = new IpcClient({ socketPath, timeoutMs: 2_000 });
+          await expect(client.ping()).rejects.toMatchObject({
+            code: IPC_ERROR_CODES.UNTRUSTED_SERVER,
+          });
+          expect(client.connected).toBe(false);
+        } finally {
+          squatter.release();
+          await supervisor.stop();
+        }
+      },
+    );
 
-      await server.stop();
-      await supervisor.stop();
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    });
+    it.runIf(process.platform === "win32")(
+      "refuses to serve or dial Windows IPC anywhere but a local named pipe",
+      async () => {
+        const supervisor = new DaemonSupervisor({
+          config: DaemonConfigSchema.parse({ instanceId: "uds-path-test-inst" }),
+        });
+        const server = new IpcServer({
+          supervisor,
+          socketPath: path.join(os.tmpdir(), "observer.sock"),
+        });
+        await expect(server.start()).rejects.toThrow(/must be a local named pipe/);
+        for (const target of [path.join(os.tmpdir(), "observer.sock"), "\\\\server\\pipe\\resin"]) {
+          await expect(new IpcClient({ socketPath: target }).connect()).rejects.toMatchObject({
+            code: IPC_ERROR_CODES.UNTRUSTED_SERVER,
+          });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "enforces strict filesystem permission bits (0o600) on POSIX domain socket",
+      async () => {
+        const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-perm-test-"));
+        const socketPath = path.join(tempDir, "observer.sock");
+
+        const config = DaemonConfigSchema.parse({
+          instanceId: "uds-perm-test-inst",
+        });
+        const supervisor = new DaemonSupervisor({ config });
+        await supervisor.start();
+
+        const server = new IpcServer({
+          supervisor,
+          socketPath,
+        });
+        await server.start();
+
+        // Check socket file permissions (0o600)
+        const socketStat = await fs.promises.stat(socketPath);
+        expect(socketStat.mode & 0o777).toBe(0o600);
+
+        await server.stop();
+        await supervisor.stop();
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      },
+    );
 
     it("redacts sensitive data from diagnostics, logs, and error responses", async () => {
       const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "uds-redact-test-"));

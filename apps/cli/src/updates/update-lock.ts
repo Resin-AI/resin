@@ -7,6 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleepTimer } from "node:timers/promises";
 import { promisify } from "node:util";
+import { checkOwnerOnly, ensureOwnerOnly } from "@resin/windows-security";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -402,6 +403,11 @@ function validateSecureFile(stats: Stats, lockPath: string): void {
     throw new UnsafeUpdateLockError(lockPath, "path is not a regular file");
   }
 
+  if (process.platform === "win32") {
+    // Node reports 0o666-style modes and uid 0 on Windows; the DACL is checked by path instead.
+    return;
+  }
+
   if ((stats.mode & 0o077) !== 0) {
     throw new UnsafeUpdateLockError(lockPath, "group or other users have permissions");
   }
@@ -409,6 +415,17 @@ function validateSecureFile(stats: Stats, lockPath: string): void {
   const uid = process.getuid?.();
   if (uid !== undefined && stats.uid !== uid) {
     throw new UnsafeUpdateLockError(lockPath, "file is owned by another user");
+  }
+}
+
+/** Windows counterpart of the mode/uid file checks: the file must be private to this user. */
+function validateWindowsFileAcl(filePath: string, lockPath: string): void {
+  if (process.platform !== "win32") {
+    return;
+  }
+  const acl = checkOwnerOnly(filePath);
+  if (!acl.ok) {
+    throw new UnsafeUpdateLockError(lockPath, `file ${acl.problems.join("; ")}`);
   }
 }
 
@@ -420,6 +437,13 @@ function validateDirectoryComponent(
 ): void {
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new UnsafeUpdateLockError(lockPath, `${directory} is not a regular directory`);
+  }
+
+  if (process.platform === "win32") {
+    // POSIX mode bits mean nothing on NTFS (drive roots always look world-writable). Links are
+    // refused above, and the lock directory itself is given a protected owner-only DACL when
+    // it is opened, which also refuses one owned by another user.
+    return;
   }
 
   const uid = process.getuid?.();
@@ -556,15 +580,28 @@ async function openSecureLockDirectory(
     if (!sameFile(pathStats, openedStats)) {
       throw new UnsafeUpdateLockError(lockPath, "lock directory changed while being opened");
     }
-    await handle.chmod(0o700);
+    if (process.platform === "win32") {
+      try {
+        ensureOwnerOnly(directory, { directory: true });
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new UnsafeUpdateLockError(
+          lockPath,
+          `lock directory cannot be made private: ${reason}`,
+        );
+      }
+    } else {
+      await handle.chmod(0o700);
+    }
     let operationPath: string;
     let usesLogicalPath: boolean;
     if (platform === "linux") {
       operationPath = `/proc/self/fd/${handle.fd}`;
       usesLogicalPath = false;
-    } else if (platform === "darwin") {
-      // Darwin can duplicate /dev/fd/<fd>, but cannot traverse children beneath it.
-      // The secure logical path is therefore fenced against the held directory identity.
+    } else if (platform === "darwin" || platform === "win32") {
+      // Darwin can duplicate /dev/fd/<fd>, but cannot traverse children beneath it, and Windows
+      // has no directory-relative file API in Node. The secure logical path is therefore fenced
+      // against the held directory identity.
       operationPath = directory;
       usesLogicalPath = true;
     } else {
@@ -653,6 +690,14 @@ async function readLockSnapshot(
   }
 
   validateSecureFile(pathStats, lockPath);
+  try {
+    validateWindowsFileAcl(anchoredPath, lockPath);
+  } catch (error: unknown) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return null;
+    }
+    throw error;
+  }
   if (pathStats.size > MAX_UPDATE_LOCK_METADATA_BYTES) {
     return { stats: pathStats, metadata: null };
   }

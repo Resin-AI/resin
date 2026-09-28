@@ -17,13 +17,14 @@
 
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { recordedFileUrlPath } from "@resin/adapter-codex";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
   type ProgramLanguage,
   ProgramSourceProjectionError,
   ProgramTokenizationError,
+  type ShellDialect,
   WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowArgumentProvenance,
   type WorkflowJsonValue,
@@ -37,7 +38,9 @@ import {
   programTokenPath,
   programTokenValueAt,
   readCodexCommandMetadata,
+  recordedProgramLanguage,
   tokenizeProgram,
+  windowsShellInvocation,
 } from "@resin/contracts";
 import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import {
@@ -59,6 +62,8 @@ import {
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
 import {
+  WORKFLOW_CALL_DIALECT_CONFLICT_SLOT,
+  WORKFLOW_CALL_DIALECT_SLOT,
   WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
@@ -89,8 +94,12 @@ export {
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_DIALECT_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  type WorkflowDialectUpgrade,
+  applyWorkflowDialectUpgrades,
   readWorkflowCallCarrier,
+  readWorkflowDialectUpgrade,
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
 
@@ -110,7 +119,9 @@ export type {
 } from "./workflow-carrier.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_DIALECT_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  type WorkflowDialectUpgrade,
   readWorkflowCallCarrier,
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
@@ -136,6 +147,13 @@ const SHELL_EXITED_ZERO: Readonly<Record<string, true>> = {
 const KNOWN_SHELL_COMMANDS: readonly {
   argument: string;
   /**
+   * The dialect the harness's own tool runs its command in, as the tool itself establishes it;
+   * `unproven` when the tool's shell is known only up to its family (Claude Code's `PowerShell`
+   * runs `pwsh` when installed, else Windows PowerShell 5.1). Absent keeps the record's original
+   * POSIX reading (a Codex command run in the session's own shell).
+   */
+  dialect?: ShellDialect | "unproven";
+  /**
    * Arguments that only label the call for the user (`description`): the shell never reads them,
    * so they are not part of what the step does, and a label the model reworded each run would
    * otherwise be a pinned value no two recordings share.
@@ -145,6 +163,7 @@ const KNOWN_SHELL_COMMANDS: readonly {
 }[] = [
   {
     argument: "cmd",
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call",
   },
@@ -164,14 +183,32 @@ const KNOWN_SHELL_COMMANDS: readonly {
     },
   },
   {
+    // Codex's string shell tool, run in the session's shell; the decoder marks only its own call.
     argument: "command",
+    proves: (event) => {
+      const native = event.metadata?.codexNative;
+      return (
+        event.toolName === "shell_command" &&
+        event.connection === undefined &&
+        typeof native === "object" &&
+        native !== null &&
+        "sourceInterface" in native &&
+        native.sourceInterface === "codex-shell-command"
+      );
+    },
+  },
+  {
+    argument: "command",
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "bash" &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash",
   },
   {
+    // Claude Code's `Bash` runs bash (Git Bash on native Windows).
     argument: "command",
     labels: ["description"],
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "Bash" &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "claude-bash",
@@ -179,6 +216,16 @@ const KNOWN_SHELL_COMMANDS: readonly {
   {
     argument: "command",
     labels: ["description"],
+    dialect: "unproven",
+    proves: (event) =>
+      event.toolName === "PowerShell" &&
+      event.connection === undefined &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "claude-powershell",
+  },
+  {
+    argument: "command",
+    labels: ["description"],
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
@@ -186,6 +233,7 @@ const KNOWN_SHELL_COMMANDS: readonly {
   },
   {
     argument: "command",
+    dialect: "sh-or-zsh",
     proves: (event) =>
       (event.toolName === "Shell" || event.toolName === "run_terminal_cmd") &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "cursor-shell",
@@ -193,6 +241,7 @@ const KNOWN_SHELL_COMMANDS: readonly {
   {
     argument: "command",
     labels: ["description"],
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
@@ -200,6 +249,7 @@ const KNOWN_SHELL_COMMANDS: readonly {
   },
   {
     argument: "command",
+    dialect: "bash",
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
@@ -208,12 +258,35 @@ const KNOWN_SHELL_COMMANDS: readonly {
   {
     argument: "command",
     labels: ["description"],
+    dialect: "sh-or-zsh",
     proves: (event) =>
       event.toolName === "run_terminal_command" &&
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "grok-shell",
   },
 ];
+
+/**
+ * The dialect fields a shell program recorded from this call carries: the dialect its harness tool
+ * proves, `unprovenDialect` when the decoder saw the shell only up to its family (a Codex command on
+ * Windows, Claude Code's `PowerShell`), or nothing — the record's original POSIX reading.
+ */
+function recordedDialectOf(
+  event: Extract<NormalizedSessionEvent, { type: "tool_call" }>,
+  argument: string | undefined,
+): Pick<WorkflowRecordedProgram, "dialect" | "unprovenDialect"> {
+  if (event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "codex-unproven-shell") {
+    return { unprovenDialect: true };
+  }
+  const known = KNOWN_SHELL_COMMANDS.find(
+    (shell) => shell.argument === argument && shell.proves(event),
+  )?.dialect;
+  return known === undefined
+    ? {}
+    : known === "unproven"
+      ? { unprovenDialect: true }
+      : { dialect: known };
+}
 
 /** One observed call kept locally: its real values never leave this machine. */
 interface LocalCall {
@@ -235,15 +308,25 @@ interface LocalCall {
    * opaque argument.
    */
   program?: {
-    kind: ProgramLanguage;
+    kind: WorkflowRecordedProgram["kind"];
     argument: string;
     sourceInterface?: "python-eval" | "javascript-eval" | "codex-exec";
+    dialect?: ShellDialect;
+    unprovenDialect?: true;
   };
   /**
    * A harness's built-in shell call its decoder proved; its exit status is 0 when its decoder marks
    * the result as a foreground run that exited 0.
    */
   provenShell?: true;
+  /** The Codex thread the call was made in, which its end event must share to prove its dialect. */
+  codexThread?: string;
+  /**
+   * For a program recorded with an unproven dialect: the first completion's evidence, or `null` once
+   * completions disagreed (never proven again), and the dialect the evidence proved.
+   */
+  dialectEvidence?: string | null;
+  provenDialect?: "powershell" | "pwsh" | "cmd";
   /** The execution this call belongs to, so two executions of one session can be told apart. */
   executionIndex: number;
   /** This call's place among its execution's calls: the position a repeat of it is listed under. */
@@ -507,30 +590,46 @@ export class WorkflowCallRecorder {
         state.nativeOutputs.delete(oldest.value);
       }
       const association = command.association;
+      // The end event of a Codex shell tool call already recorded under the same call id is not a
+      // call of its own: it can only prove the dialect that call ran in.
+      const recordedCall =
+        association === undefined ? codexShellToolCall(state, command.nativeId) : undefined;
+      if (recordedCall !== undefined) return this.proveCallDialect(event, raw, state, recordedCall);
       if (association === undefined) {
         if (state.codexWrapperOverflow || state.openCodexWrappers.size > 0) return event;
         const argv = raw.command === "/bin/bash" ? raw.args : undefined;
-        if (
-          argv?.length !== 2 ||
-          argv[0] !== "-lc" ||
-          typeof argv[1] !== "string" ||
-          typeof raw.cwd !== "string"
-        )
-          return event;
+        // The executable Codex recorded running proves the dialect: `/bin/bash -lc`, or on Windows
+        // `powershell.exe`/`pwsh.exe … -Command` and `cmd.exe /c` (see `windowsShellInvocation`).
+        const windows =
+          typeof raw.command === "string" && Array.isArray(raw.args)
+            ? windowsShellInvocation(raw.command, raw.args)
+            : undefined;
+        const script =
+          windows?.program ??
+          (argv?.length === 2 && argv[0] === "-lc" && typeof argv[1] === "string"
+            ? argv[1]
+            : undefined);
+        if (script === undefined || typeof raw.cwd !== "string") return event;
         // Codex records the working directory as a file URL; execution needs the path it names.
         let workdir: string;
         try {
-          workdir = raw.cwd.startsWith("file:") ? fileURLToPath(raw.cwd) : raw.cwd;
+          workdir = raw.cwd.startsWith("file:") ? recordedFileUrlPath(raw.cwd) : raw.cwd;
         } catch {
           return event;
         }
         const callId = command.nativeId;
         const parameters = {
-          cmd: argv[1],
+          cmd: script,
           workdir,
-          resinCodexShellProfile: "bash-login-native-v1",
+          resinCodexShellProfile:
+            windows === undefined ? "bash-login-native-v1" : `${windows.dialect}-native-v1`,
         };
-        const program: WorkflowRecordedProgram = { kind: "shell", source: "", argument: "cmd" };
+        const program: WorkflowRecordedProgram = {
+          kind: "shell",
+          source: "",
+          argument: "cmd",
+          dialect: windows?.dialect ?? "bash",
+        };
         const origins: WorkflowCallCarrier["origins"] = {};
         const provenance: Record<string, WorkflowArgumentProvenance> = {};
         for (const [argument, value] of Object.entries(parameters)) {
@@ -742,7 +841,7 @@ export class WorkflowCallRecorder {
         recordedCwd === undefined
           ? ""
           : recordedCwd.startsWith("file:")
-            ? fileURLToPath(recordedCwd)
+            ? recordedFileUrlPath(recordedCwd)
             : recordedCwd;
     } catch {
       return event;
@@ -1040,6 +1139,95 @@ export class WorkflowCallRecorder {
   }
 
   /**
+   * Proves the dialect of a Codex shell tool call recorded with an unproven one, from its end event:
+   * the executable Codex recorded running it (`powershell.exe`, `pwsh.exe`, `cmd.exe`) with exactly
+   * the call's program text, in the call's own thread. The call's program is then read in that
+   * dialect's grammar — projected, derived and kept locally — and the end event carries the upgrade
+   * for the recording to apply.
+   *
+   * Every completion is evidence. The call's recorded program stays unproven, and a completion that
+   * disagrees with the first one (another executable or argv, another thread, other text, or one
+   * that proves nothing) revokes the proof: locally, through a conflict slot the identity reader
+   * honours, and publicly, through a conflict the recording applies. Nothing reinstates it.
+   */
+  private proveCallDialect(
+    event: Extract<NormalizedSessionEvent, { type: "command_exec" }>,
+    raw: { command?: unknown; args?: unknown },
+    state: SessionDerivationState,
+    call: LocalCall,
+  ): NormalizedSessionEvent {
+    const program = call.program;
+    if (program?.kind !== "shell" || program.unprovenDialect !== true) return event;
+    // A completion Codex derived from the tool output names no executable: it is no evidence.
+    if (!Array.isArray(raw.args) || raw.args.length === 0) return event;
+    const text = call.arguments[program.argument];
+    const proven =
+      typeof raw.command === "string" ? windowsShellInvocation(raw.command, raw.args) : undefined;
+    const thread = codexThreadOf(event);
+    const proves =
+      proven !== undefined &&
+      typeof text === "string" &&
+      proven.program === text &&
+      thread !== undefined &&
+      thread === call.codexThread;
+    const evidence = JSON.stringify([raw.command ?? null, raw.args, thread ?? null, proves]);
+    if (call.dialectEvidence === evidence) return event;
+    if (call.dialectEvidence !== undefined || !proves) {
+      // A second, disagreeing completion, or a first that proves nothing: never proven again.
+      call.dialectEvidence = null;
+      call.provenDialect = undefined;
+      this.localReference(true, event.sessionId, call.callId, WORKFLOW_CALL_DIALECT_CONFLICT_SLOT);
+      return this.withDialectUpgrade(event, {
+        callId: call.callId,
+        argument: program.argument,
+        conflict: true,
+      });
+    }
+    call.dialectEvidence = evidence;
+    call.provenDialect = proven.dialect;
+    this.localReference(proven.dialect, event.sessionId, call.callId, WORKFLOW_CALL_DIALECT_SLOT);
+    const recorded: WorkflowRecordedProgram = {
+      kind: "shell",
+      source: "",
+      argument: program.argument,
+      dialect: proven.dialect,
+    };
+    // The same private leaf the call's own carrier holds for its program text.
+    const origins: WorkflowCallCarrier["origins"] = {
+      [program.argument]: this.storeLocalValue(text, event.sessionId, call.callId, [
+        program.argument,
+      ]),
+    };
+    this.projectProgramSource(event, call.arguments, recorded, origins, call.provenShell === true);
+    const relationships = this.relateLocalCall(state, call, event.sessionId);
+    const candidates = unprotectedCandidates(
+      event,
+      call.arguments,
+      relationships.candidates,
+      recorded,
+      origins,
+    );
+    const origin = origins[program.argument];
+    return this.withDialectUpgrade(event, {
+      callId: call.callId,
+      argument: program.argument,
+      dialect: proven.dialect,
+      ...(origin?.type === "program" ? { source: recorded.source, origin } : {}),
+      ...(candidates.length === 0 ? {} : { candidates }),
+    });
+  }
+
+  private withDialectUpgrade(
+    event: Extract<NormalizedSessionEvent, { type: "command_exec" }>,
+    upgrade: WorkflowDialectUpgrade,
+  ): NormalizedSessionEvent {
+    return {
+      ...event,
+      metadata: { ...event.metadata, [RESIN_WORKFLOW_DIALECT_METADATA_KEY]: upgrade },
+    };
+  }
+
+  /**
    * Records a call the model made with an ordinary tool.
    *
    * Ordinary argument values and the complete executable program stay on this machine behind
@@ -1301,6 +1489,9 @@ export class WorkflowCallRecorder {
       KNOWN_SHELL_COMMANDS.some((known) => known.proves(event))
         ? { provenShell: true as const }
         : {}),
+      ...("metadata" in event && codexThreadOf(event) !== undefined
+        ? { codexThread: codexThreadOf(event) }
+        : {}),
       executionIndex: execution.index,
       executionPosition: execution.calls.length,
       arguments: parameters,
@@ -1327,6 +1518,8 @@ export class WorkflowCallRecorder {
               ...(program.sourceInterface === undefined
                 ? {}
                 : { sourceInterface: program.sourceInterface }),
+              ...(program.dialect === undefined ? {} : { dialect: program.dialect }),
+              ...(program.unprovenDialect === true ? { unprovenDialect: true as const } : {}),
             },
           }),
       ...(flow === undefined
@@ -1344,7 +1537,14 @@ export class WorkflowCallRecorder {
         ...(call.connection === undefined ? {} : { connection: call.connection }),
         ...(call.program === undefined
           ? {}
-          : { program: { kind: call.program.kind, argument: call.program.argument } }),
+          : {
+              program: {
+                kind: call.program.kind,
+                argument: call.program.argument,
+                ...(call.program.dialect === undefined ? {} : { dialect: call.program.dialect }),
+                ...(call.program.unprovenDialect === true ? { unprovenDialect: true } : {}),
+              },
+            }),
         ...(shellProven && call.program?.kind === "shell" ? { builtinShell: true } : {}),
         arguments: Object.keys(parameters),
       },
@@ -1435,7 +1635,9 @@ export class WorkflowCallRecorder {
             mine.connection === theirs.connection &&
             mine.program?.kind === theirs.program?.kind &&
             mine.program?.argument === theirs.program?.argument &&
-            mine.program?.sourceInterface === theirs.program?.sourceInterface
+            mine.program?.sourceInterface === theirs.program?.sourceInterface &&
+            mine.program?.dialect === theirs.program?.dialect &&
+            mine.program?.unprovenDialect === theirs.program?.unprovenDialect
           );
         }),
     );
@@ -1512,7 +1714,9 @@ export class WorkflowCallRecorder {
         runtime: RESIN_TOOL_PROTOCOL_RUNTIME,
         arguments: entry.arguments,
         ...(entry.result === undefined ? {} : { result: entry.result }),
-        ...(entry.program === undefined ? {} : { program: entry.program }),
+        ...(entry.program === undefined
+          ? {}
+          : { program: derivationProgram(entry.program, entry.provenDialect) }),
       })),
       execution?.requestWords,
       execution?.inputNames,
@@ -1594,13 +1798,14 @@ export class WorkflowCallRecorder {
   ): WorkflowRecordedProgram | undefined {
     const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
     if (codex?.kind === "call" && typeof parameters.cmd === "string") {
-      return { kind: "shell", source: "", argument: "cmd" };
+      return { kind: "shell", source: "", argument: "cmd", ...recordedDialectOf(event, "cmd") };
     }
     const command = extractRawCommandStringFromEvent(event);
     if (command !== null) {
       const program: WorkflowRecordedProgram = { kind: "shell", source: "" };
       const argument = this.argumentHolding(parameters, command);
       if (argument !== undefined) program.argument = argument;
+      Object.assign(program, recordedDialectOf(event, argument));
       return program;
     }
     const language =
@@ -1668,11 +1873,15 @@ export class WorkflowCallRecorder {
     const original = parameters[program.argument];
     const origin = origins[program.argument];
     if (typeof original !== "string" || origin?.type !== "private") return;
+    // A program in a dialect Resin never tokenizes (cmd.exe, or one the record did not prove) keeps
+    // its text private: there is no parser-aligned view of it to share.
+    const language = recordedProgramLanguage(program);
+    if (language === undefined) return;
     const scrubbed = redactLocalWorkflowProgramSource(event, original);
     if (scrubbed === undefined) return;
 
     try {
-      const sourceTokens = tokenizeProgram(program.kind, scrubbed.redactedText);
+      const sourceTokens = tokenizeProgram(language, scrubbed.redactedText);
       let replacements: Map<number, string> | undefined;
       for (const [index, token] of sourceTokens.entries()) {
         if (token.kind !== "string" || typeof token.value !== "string") continue;
@@ -1688,16 +1897,11 @@ export class WorkflowCallRecorder {
       const source =
         replacements === undefined
           ? scrubbed.redactedText
-          : applyProgramTokenValues(
-              scrubbed.redactedText,
-              sourceTokens,
-              replacements,
-              program.kind,
-            );
-      const projection = analyzeProgramSourceProjection(program.kind, original, source);
+          : applyProgramTokenValues(scrubbed.redactedText, sourceTokens, replacements, language);
+      const projection = analyzeProgramSourceProjection(language, original, source);
       origins[program.argument] = {
         type: "program",
-        language: program.kind,
+        language,
         source: { type: "literal", value: source },
         sourceReference: origin.reference,
         protectedTokens: projection.protectedTokens,
@@ -1936,7 +2140,11 @@ function unprotectedCandidates(
     const known = safeEmbedded.get(anchor);
     if (known !== undefined) return known;
     let safe = false;
-    if (program?.kind === "shell" && typeof original === "string") {
+    if (
+      program !== undefined &&
+      recordedProgramLanguage(program) === "shell" &&
+      typeof original === "string"
+    ) {
       const embedded = embeddedPrograms(original).find((each) => each.anchor === anchor);
       const scrubbed =
         embedded === undefined
@@ -1961,9 +2169,11 @@ function unprotectedCandidates(
   // redaction placeholder) is never split, whatever the projection says about the whole token.
   const spanTokenIsSafe = (address: { token: number; embedded?: number }): boolean => {
     if (program === undefined || typeof original !== "string") return false;
+    const language = recordedProgramLanguage(program);
+    if (language === undefined) return false;
     let value: unknown;
     try {
-      value = programTokenValueAt(program.kind, original, address);
+      value = programTokenValueAt(language, original, address);
     } catch {
       return false;
     }
@@ -2053,4 +2263,45 @@ function uploadedPrivatePositions(
   };
   for (const [argument, origin] of Object.entries(origins)) walk(argument, origin, []);
   return positions;
+}
+
+/**
+ * The program a derivation reads a call's text as: its language, or for a shell program its
+ * recorded dialect's grammar. A program Resin never tokenizes (cmd.exe, an unproven dialect) is
+ * opaque: nothing is proposed inside it or for it.
+ */
+function derivationProgram(
+  program: NonNullable<LocalCall["program"]>,
+  provenDialect?: LocalCall["provenDialect"],
+): {
+  kind: ProgramLanguage;
+  argument: string;
+  opaque?: true;
+} {
+  const language = recordedProgramLanguage(
+    provenDialect === undefined ? program : { kind: program.kind, dialect: provenDialect },
+  );
+  return language === undefined
+    ? { kind: program.kind, argument: program.argument, opaque: true }
+    : { kind: language, argument: program.argument };
+}
+
+/** A Codex shell tool call this session recorded under `callId`, whose end event this may be. */
+function codexShellToolCall(state: SessionDerivationState, callId: string): LocalCall | undefined {
+  for (let index = state.executions.length - 1; index >= 0; index -= 1) {
+    const call = state.executions[index]!.calls.find(
+      (entry) =>
+        entry.callId === callId &&
+        (entry.toolName === "exec_command" || entry.toolName === "shell_command"),
+    );
+    if (call !== undefined) return call;
+  }
+  return undefined;
+}
+
+/** The Codex thread an event's native record names. */
+function codexThreadOf(event: { metadata?: Record<string, unknown> }): string | undefined {
+  const native = event.metadata?.codexNative;
+  if (typeof native !== "object" || native === null || !("threadId" in native)) return undefined;
+  return typeof native.threadId === "string" ? native.threadId : undefined;
 }

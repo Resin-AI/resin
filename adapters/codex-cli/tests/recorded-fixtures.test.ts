@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CodexHarnessAdapter } from "../src/adapter.js";
 import { decodeCodexTranscript } from "../src/decoder.js";
 import { CODEX_TESTED_VERSIONS } from "../src/discovery.js";
+import { rebindRecordedProject } from "./qualification-fixtures.js";
 
 const RECORDED = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "recorded");
 
@@ -156,7 +157,7 @@ describe("recorded headless rollouts under discovery", () => {
       await fs.mkdir(sessions, { recursive: true });
       const names: Record<string, string> = {};
       for (const scenario of SCENARIOS) {
-        const jsonl = (await recorded(version, scenario)).replaceAll("/workspace/project", project);
+        const jsonl = rebindRecordedProject(await recorded(version, scenario), project);
         const id = String(sessionMeta(jsonl).id);
         names[scenario] = `rollout-2026-09-26T00-00-00-${id}`;
         await fs.writeFile(path.join(sessions, `${names[scenario]}.jsonl`), jsonl);

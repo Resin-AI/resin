@@ -59,6 +59,9 @@
     },
     {
       "path": "../../adapters/pi"
+    },
+    {
+      "path": "../../packages/windows-security"
     }
   ]
 }

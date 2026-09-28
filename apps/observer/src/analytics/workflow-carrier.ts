@@ -1,6 +1,7 @@
 /** Frozen workflow carrier vocabulary shared by live capture, projection, and import reconstruction. */
 
 import {
+  isShellDialect,
   readCodexCommandMetadata,
   validateWorkflowProgramProjection,
   validateWorkflowProgramSourceInterface,
@@ -18,6 +19,11 @@ import type { WorkflowObservedOutput } from "@resin/contracts";
 
 export const RESIN_WORKFLOW_CALL_METADATA_KEY = "workflowCall";
 export const RESIN_WORKFLOW_RESULT_METADATA_KEY = "workflowResult";
+/**
+ * The shell dialect a later record of a call proved, for a call recorded with an unproven one: a
+ * Codex command's end event names the executable that ran it. Carried on that end event.
+ */
+export const RESIN_WORKFLOW_DIALECT_METADATA_KEY = "workflowShellDialect";
 
 /** The runtime family every invoke_tool-routed callable belongs to. */
 export const RESIN_INVOKE_TOOL_RUNTIME = "resin-invoke-tool";
@@ -323,6 +329,15 @@ function readProgram(value: unknown): WorkflowRecordedProgram | undefined {
   if (value.cwd !== undefined) {
     if (typeof value.cwd !== "string") return undefined;
     program.cwd = value.cwd;
+  }
+  if (value.dialect !== undefined) {
+    if (program.kind !== "shell" || !isShellDialect(value.dialect)) return undefined;
+    program.dialect = value.dialect;
+  }
+  if (value.unprovenDialect !== undefined) {
+    if (program.kind !== "shell" || value.unprovenDialect !== true || program.dialect !== undefined)
+      return undefined;
+    program.unprovenDialect = true;
   }
   if (value.pythonState !== undefined) {
     const pythonState = readPythonState(value.pythonState);
@@ -651,4 +666,160 @@ export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier
     carrier.output === undefined
     ? undefined
     : carrier;
+}
+
+/**
+ * A call's shell program, recorded with an unproven dialect, proved by a later record of the same
+ * call: the dialect, and the program as that dialect's grammar reads it — its scrubbed source view
+ * and projected template (absent when it does not project, and always for cmd.exe) and the
+ * bindings it suggests. Nothing here is more than the call's own carrier would have held.
+ */
+export type WorkflowDialectUpgrade =
+  | {
+      callId: string;
+      /** The argument carrying the program. */
+      argument: string;
+      dialect: "powershell" | "pwsh" | "cmd";
+      source?: string;
+      origin?: Extract<WorkflowValueTemplate, { type: "program" }>;
+      candidates?: WorkflowCallCandidate[];
+    }
+  /** Records of the call disagreed about its shell: it stays unproven, whatever else says. */
+  | { callId: string; argument: string; conflict: true };
+
+type ProvenDialectUpgrade = Extract<WorkflowDialectUpgrade, { dialect: string }>;
+
+/** The carrier a call has once `upgrade` applies to it, validated; undefined when it does not apply. */
+function upgradedCarrier(
+  carrier: WorkflowCallCarrier,
+  upgrade: Omit<ProvenDialectUpgrade, "callId">,
+): WorkflowCallCarrier | undefined {
+  const program = carrier.program;
+  if (
+    program?.kind !== "shell" ||
+    program.unprovenDialect !== true ||
+    program.argument !== upgrade.argument
+  ) {
+    return undefined;
+  }
+  const { unprovenDialect: _, ...proven } = program;
+  const next = {
+    ...carrier,
+    program: {
+      ...proven,
+      dialect: upgrade.dialect,
+      ...(upgrade.source === undefined ? {} : { source: upgrade.source }),
+    },
+    origins: {
+      ...carrier.origins,
+      ...(upgrade.origin === undefined ? {} : { [upgrade.argument]: upgrade.origin }),
+    },
+    ...(upgrade.candidates === undefined || upgrade.candidates.length === 0
+      ? {}
+      : { candidates: [...(carrier.candidates ?? []), ...upgrade.candidates] }),
+  };
+  return readWorkflowCallCarrier(next);
+}
+
+/** Re-reads a dialect upgrade through the frozen carrier vocabulary, dropping anything else. */
+export function readWorkflowDialectUpgrade(value: unknown): WorkflowDialectUpgrade | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const { callId, argument, dialect, source } = value;
+  if (typeof callId !== "string" || callId.length === 0 || typeof argument !== "string") {
+    return undefined;
+  }
+  if (value.conflict !== undefined) {
+    return value.conflict === true && Object.keys(value).length === 3
+      ? { callId, argument, conflict: true }
+      : undefined;
+  }
+  if (dialect !== "powershell" && dialect !== "pwsh" && dialect !== "cmd") return undefined;
+  if (source !== undefined && typeof source !== "string") return undefined;
+  if (value.candidates !== undefined && !Array.isArray(value.candidates)) return undefined;
+  // Validated as the carrier of an unproven program it would upgrade.
+  const probe = upgradedCarrier(
+    {
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "shell",
+      origins: {},
+      inputs: [],
+      program: { kind: "shell", source: "", argument, unprovenDialect: true },
+    },
+    {
+      argument,
+      dialect,
+      ...(source === undefined ? {} : { source }),
+      ...(value.origin === undefined
+        ? {}
+        : { origin: value.origin as Extract<WorkflowValueTemplate, { type: "program" }> }),
+      ...(value.candidates === undefined
+        ? {}
+        : { candidates: value.candidates as WorkflowCallCandidate[] }),
+    },
+  );
+  if (probe === undefined) return undefined;
+  if (value.origin !== undefined && probe.origins[argument]?.type !== "program") return undefined;
+  if (
+    value.candidates !== undefined &&
+    (probe.candidates?.length ?? 0) !== (value.candidates as unknown[]).length
+  ) {
+    return undefined;
+  }
+  const origin = probe.origins[argument];
+  return {
+    callId,
+    argument,
+    dialect,
+    ...(source === undefined ? {} : { source }),
+    ...(origin?.type === "program" ? { origin } : {}),
+    ...(probe.candidates === undefined || probe.candidates.length === 0
+      ? {}
+      : { candidates: probe.candidates }),
+  };
+}
+
+/**
+ * The events with every dialect upgrade applied to the call it proves: a tool call's carrier whose
+ * shell program was recorded with an unproven dialect takes the dialect, source view, template and
+ * candidates a later record of the same call (same session, same call id) proved. A call no record
+ * upgrades, or two records upgrade differently, keeps its unproven program.
+ */
+export function applyWorkflowDialectUpgrades<
+  Event extends { sessionId: string; type: string; metadata?: Record<string, unknown> },
+>(
+  events: readonly Event[],
+  /** Where upgrades are read from; by default the events themselves. */
+  sources: readonly { sessionId: string; metadata?: Record<string, unknown> }[] = events,
+): Event[] {
+  const upgrades = new Map<string, ProvenDialectUpgrade | null>();
+  for (const event of sources) {
+    const upgrade = readWorkflowDialectUpgrade(
+      event.metadata?.[RESIN_WORKFLOW_DIALECT_METADATA_KEY],
+    );
+    if (upgrade === undefined) continue;
+    const key = `${event.sessionId}\u0000${upgrade.callId}`;
+    const known = upgrades.get(key);
+    // A conflict, or two upgrades that differ, leave the call unproven for good.
+    upgrades.set(
+      key,
+      "conflict" in upgrade
+        ? null
+        : known === undefined || JSON.stringify(known) === JSON.stringify(upgrade)
+          ? upgrade
+          : null,
+    );
+  }
+  if (upgrades.size === 0) return [...events];
+  return events.map((event) => {
+    if (event.type !== "tool_call") return event;
+    const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+    const callId = (event as { callId?: unknown }).callId;
+    if (carrier === undefined || typeof callId !== "string") return event;
+    const upgrade = upgrades.get(`${event.sessionId}\u0000${callId}`);
+    if (upgrade === undefined || upgrade === null) return event;
+    const next = upgradedCarrier(carrier, upgrade);
+    return next === undefined
+      ? event
+      : { ...event, metadata: { ...event.metadata, [RESIN_WORKFLOW_CALL_METADATA_KEY]: next } };
+  });
 }

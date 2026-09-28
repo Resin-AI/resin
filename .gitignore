@@ -5,6 +5,8 @@ node_modules/
 # Build artifacts
 dist/
 build/
+# Native Windows helpers are produced by packages/windows-security/scripts/build-native.mjs in CI
+packages/windows-security/prebuilds/
 *.tsbuildinfo
 .turbo/
 

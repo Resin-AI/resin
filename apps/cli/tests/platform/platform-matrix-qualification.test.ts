@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { windowsDaemonPipeName } from "@resin/windows-security";
 import { describe, expect, it } from "vitest";
 import {
   ALL_QUALIFICATION_LANES,
@@ -24,6 +25,14 @@ import {
   resolveWslToWindowsPath,
   validatePlatform,
 } from "../../src/platform/index.js";
+
+/**
+ * Path resolution runs on the host's path module even when a POSIX platform is simulated, so a
+ * POSIX fixture path resolves to a drive-rooted path on a Windows host.
+ */
+function hostPath(posixPath: string): string {
+  return path.resolve(posixPath);
+}
 
 describe("Platform Matrix Qualification Suite", () => {
   describe("Machine-Readable V1 Support Matrix Contract", () => {
@@ -56,9 +65,27 @@ describe("Platform Matrix Qualification Suite", () => {
         "darwin-x64",
         "darwin-arm64",
         "wsl",
+        "windows-x64",
+        "windows-arm64",
       ]);
       expect(REQUIRED_QUALIFICATION_LANES).toEqual(V1_SUPPORT_MATRIX.qualificationLanes);
-      expect(V1_SUPPORT_MATRIX.platforms).toHaveLength(5);
+      expect(V1_SUPPORT_MATRIX.platforms).toHaveLength(7);
+      expect(V1_SUPPORT_MATRIX.platforms.filter((platform) => platform.os === "win32")).toEqual([
+        expect.objectContaining({
+          id: "windows-x64",
+          arch: "x64",
+          isWsl: false,
+          serviceManager: "windows-task",
+          tarball: "resin-v1.0.0-windows-x64.tar.gz",
+        }),
+        expect.objectContaining({
+          id: "windows-arm64",
+          arch: "arm64",
+          isWsl: false,
+          serviceManager: "windows-task",
+          tarball: "resin-v1.0.0-windows-arm64.tar.gz",
+        }),
+      ]);
 
       // Qualified AI Coding Harnesses
       expect(V1_SUPPORT_MATRIX.harnesses["codex-cli"]?.transports).toEqual(["stdio", "sse"]);
@@ -75,12 +102,15 @@ describe("Platform Matrix Qualification Suite", () => {
         "zsh",
         "sh",
       ]);
+      expect(V1_SUPPORT_MATRIX.environmentAssumptions.shells.windows).toEqual({
+        learnable: ["powershell", "pwsh"],
+        capturedNotLearnable: ["cmd"],
+      });
       expect(V1_SUPPORT_MATRIX.environmentAssumptions.packageManagers.pnpm.supported).toBe(true);
       expect(V1_SUPPORT_MATRIX.environmentAssumptions.packageManagers.pnpm.version).toBe("10.24.0");
 
       // Explicit Limitations
-      expect(V1_SUPPORT_MATRIX.limitations.nativeWindows.supported).toBe(false);
-      expect(V1_SUPPORT_MATRIX.limitations.nativeWindows.impliedByWsl2).toBe(false);
+      expect("nativeWindows" in V1_SUPPORT_MATRIX.limitations).toBe(false);
       expect(V1_SUPPORT_MATRIX.limitations.wsl1.supported).toBe(false);
       expect(V1_SUPPORT_MATRIX.limitations.nodeUnder22.supported).toBe(false);
       expect(V1_SUPPORT_MATRIX.limitations.unsupportedArchitectures.supported).toBe(false);
@@ -96,7 +126,7 @@ describe("Platform Matrix Qualification Suite", () => {
   });
 
   describe("Qualification Lanes Detection & Classification", () => {
-    it("recognizes all 6 required qualification lanes", () => {
+    it("recognizes all 8 runtime qualification lanes", () => {
       expect(ALL_QUALIFICATION_LANES).toEqual([
         "linux-x64",
         "linux-arm64",
@@ -104,8 +134,19 @@ describe("Platform Matrix Qualification Suite", () => {
         "darwin-arm64",
         "wsl-systemd",
         "wsl-fallback",
+        "windows-x64",
+        "windows-arm64",
       ]);
-      expect(ALL_QUALIFICATION_LANES).toHaveLength(6);
+      expect(ALL_QUALIFICATION_LANES).toHaveLength(8);
+    });
+
+    it("identifies native Windows lanes and display names", () => {
+      const x64 = detectPlatform({ platform: "win32", arch: "x64", env: {} });
+      const arm64 = detectPlatform({ platform: "win32", arch: "arm64", env: {} });
+      expect(getQualificationLane(x64)).toBe("windows-x64");
+      expect(getQualificationLane(arm64)).toBe("windows-arm64");
+      expect(getPlatformDisplayName(x64)).toBe("Windows x64 (native, PowerShell)");
+      expect(getPlatformDisplayName("windows-arm64")).toBe("Windows ARM64 (native, PowerShell)");
     });
 
     it("correctly identifies Linux x64 lane", () => {
@@ -220,15 +261,15 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(paths.homeDir).toBe("/Users/testuser/.resin");
-      expect(paths.configDir).toBe("/Users/testuser/.resin/config");
-      expect(paths.dataDir).toBe("/Users/testuser/.resin/data");
-      expect(paths.stateDir).toBe("/Users/testuser/.resin/state");
-      expect(paths.logDir).toBe("/Users/testuser/.resin/logs");
-      expect(paths.socketPath).toBe("/Users/testuser/.resin/state/daemon.sock");
-      expect(paths.lockFilePath).toBe("/Users/testuser/.resin/state/daemon.lock");
-      expect(paths.pidFilePath).toBe("/Users/testuser/.resin/state/daemon.pid");
-      expect(paths.configFile).toBe("/Users/testuser/.resin/config/config.json");
+      expect(paths.homeDir).toBe(hostPath("/Users/testuser/.resin"));
+      expect(paths.configDir).toBe(hostPath("/Users/testuser/.resin/config"));
+      expect(paths.dataDir).toBe(hostPath("/Users/testuser/.resin/data"));
+      expect(paths.stateDir).toBe(hostPath("/Users/testuser/.resin/state"));
+      expect(paths.logDir).toBe(hostPath("/Users/testuser/.resin/logs"));
+      expect(paths.socketPath).toBe(hostPath("/Users/testuser/.resin/state/daemon.sock"));
+      expect(paths.lockFilePath).toBe(hostPath("/Users/testuser/.resin/state/daemon.lock"));
+      expect(paths.pidFilePath).toBe(hostPath("/Users/testuser/.resin/state/daemon.pid"));
+      expect(paths.configFile).toBe(hostPath("/Users/testuser/.resin/config/config.json"));
     });
 
     it("resolves default canonical ~/.resin paths on Linux when XDG environment variables are unset", () => {
@@ -245,15 +286,15 @@ describe("Platform Matrix Qualification Suite", () => {
         env: {},
       });
 
-      expect(paths.homeDir).toBe("/home/testuser/.resin");
-      expect(paths.configDir).toBe("/home/testuser/.resin/config");
-      expect(paths.dataDir).toBe("/home/testuser/.resin/data");
-      expect(paths.stateDir).toBe("/home/testuser/.resin/state");
-      expect(paths.logDir).toBe("/home/testuser/.resin/logs");
-      expect(paths.socketPath).toBe("/home/testuser/.resin/state/daemon.sock");
-      expect(paths.lockFilePath).toBe("/home/testuser/.resin/state/daemon.lock");
-      expect(paths.pidFilePath).toBe("/home/testuser/.resin/state/daemon.pid");
-      expect(paths.configFile).toBe("/home/testuser/.resin/config/config.json");
+      expect(paths.homeDir).toBe(hostPath("/home/testuser/.resin"));
+      expect(paths.configDir).toBe(hostPath("/home/testuser/.resin/config"));
+      expect(paths.dataDir).toBe(hostPath("/home/testuser/.resin/data"));
+      expect(paths.stateDir).toBe(hostPath("/home/testuser/.resin/state"));
+      expect(paths.logDir).toBe(hostPath("/home/testuser/.resin/logs"));
+      expect(paths.socketPath).toBe(hostPath("/home/testuser/.resin/state/daemon.sock"));
+      expect(paths.lockFilePath).toBe(hostPath("/home/testuser/.resin/state/daemon.lock"));
+      expect(paths.pidFilePath).toBe(hostPath("/home/testuser/.resin/state/daemon.pid"));
+      expect(paths.configFile).toBe(hostPath("/home/testuser/.resin/config/config.json"));
     });
 
     it("XDG environment variables alone do not displace canonical ~/.resin default paths", () => {
@@ -275,14 +316,14 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(paths.homeDir).toBe("/home/testuser/.resin");
-      expect(paths.configDir).toBe("/home/testuser/.resin/config");
-      expect(paths.dataDir).toBe("/home/testuser/.resin/data");
-      expect(paths.stateDir).toBe("/home/testuser/.resin/state");
-      expect(paths.logDir).toBe("/home/testuser/.resin/logs");
-      expect(paths.socketPath).toBe("/home/testuser/.resin/state/daemon.sock");
-      expect(paths.lockFilePath).toBe("/home/testuser/.resin/state/daemon.lock");
-      expect(paths.pidFilePath).toBe("/home/testuser/.resin/state/daemon.pid");
+      expect(paths.homeDir).toBe(hostPath("/home/testuser/.resin"));
+      expect(paths.configDir).toBe(hostPath("/home/testuser/.resin/config"));
+      expect(paths.dataDir).toBe(hostPath("/home/testuser/.resin/data"));
+      expect(paths.stateDir).toBe(hostPath("/home/testuser/.resin/state"));
+      expect(paths.logDir).toBe(hostPath("/home/testuser/.resin/logs"));
+      expect(paths.socketPath).toBe(hostPath("/home/testuser/.resin/state/daemon.sock"));
+      expect(paths.lockFilePath).toBe(hostPath("/home/testuser/.resin/state/daemon.lock"));
+      expect(paths.pidFilePath).toBe(hostPath("/home/testuser/.resin/state/daemon.pid"));
     });
 
     it("relocates all paths under explicit resinHome option or RESIN_HOME", () => {
@@ -298,15 +339,15 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(pathsFromOption.homeDir).toBe("/opt/custom-resin");
-      expect(pathsFromOption.configDir).toBe("/opt/custom-resin/config");
-      expect(pathsFromOption.dataDir).toBe("/opt/custom-resin/data");
-      expect(pathsFromOption.stateDir).toBe("/opt/custom-resin/state");
-      expect(pathsFromOption.logDir).toBe("/opt/custom-resin/logs");
-      expect(pathsFromOption.socketPath).toBe("/opt/custom-resin/state/daemon.sock");
-      expect(pathsFromOption.lockFilePath).toBe("/opt/custom-resin/state/daemon.lock");
-      expect(pathsFromOption.pidFilePath).toBe("/opt/custom-resin/state/daemon.pid");
-      expect(pathsFromOption.configFile).toBe("/opt/custom-resin/config/config.json");
+      expect(pathsFromOption.homeDir).toBe(hostPath("/opt/custom-resin"));
+      expect(pathsFromOption.configDir).toBe(hostPath("/opt/custom-resin/config"));
+      expect(pathsFromOption.dataDir).toBe(hostPath("/opt/custom-resin/data"));
+      expect(pathsFromOption.stateDir).toBe(hostPath("/opt/custom-resin/state"));
+      expect(pathsFromOption.logDir).toBe(hostPath("/opt/custom-resin/logs"));
+      expect(pathsFromOption.socketPath).toBe(hostPath("/opt/custom-resin/state/daemon.sock"));
+      expect(pathsFromOption.lockFilePath).toBe(hostPath("/opt/custom-resin/state/daemon.lock"));
+      expect(pathsFromOption.pidFilePath).toBe(hostPath("/opt/custom-resin/state/daemon.pid"));
+      expect(pathsFromOption.configFile).toBe(hostPath("/opt/custom-resin/config/config.json"));
 
       const pathsFromEnv = resolvePlatformPaths({
         home: "/home/testuser",
@@ -322,14 +363,14 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(pathsFromEnv.homeDir).toBe("/srv/resin-data");
-      expect(pathsFromEnv.configDir).toBe("/srv/resin-data/config");
-      expect(pathsFromEnv.dataDir).toBe("/srv/resin-data/data");
-      expect(pathsFromEnv.stateDir).toBe("/srv/resin-data/state");
-      expect(pathsFromEnv.logDir).toBe("/srv/resin-data/logs");
-      expect(pathsFromEnv.socketPath).toBe("/srv/resin-data/state/daemon.sock");
-      expect(pathsFromEnv.lockFilePath).toBe("/srv/resin-data/state/daemon.lock");
-      expect(pathsFromEnv.pidFilePath).toBe("/srv/resin-data/state/daemon.pid");
+      expect(pathsFromEnv.homeDir).toBe(hostPath("/srv/resin-data"));
+      expect(pathsFromEnv.configDir).toBe(hostPath("/srv/resin-data/config"));
+      expect(pathsFromEnv.dataDir).toBe(hostPath("/srv/resin-data/data"));
+      expect(pathsFromEnv.stateDir).toBe(hostPath("/srv/resin-data/state"));
+      expect(pathsFromEnv.logDir).toBe(hostPath("/srv/resin-data/logs"));
+      expect(pathsFromEnv.socketPath).toBe(hostPath("/srv/resin-data/state/daemon.sock"));
+      expect(pathsFromEnv.lockFilePath).toBe(hostPath("/srv/resin-data/state/daemon.lock"));
+      expect(pathsFromEnv.pidFilePath).toBe(hostPath("/srv/resin-data/state/daemon.pid"));
     });
 
     it("falls back to canonical ~/.resin paths when resinHome option or RESIN_HOME is empty or whitespace-only", () => {
@@ -347,12 +388,12 @@ describe("Platform Matrix Qualification Suite", () => {
         resinHome: "",
         platformInfo,
       });
-      expect(pathsEmptyOption.homeDir).toBe("/home/testuser/.resin");
-      expect(pathsEmptyOption.configDir).toBe("/home/testuser/.resin/config");
-      expect(pathsEmptyOption.dataDir).toBe("/home/testuser/.resin/data");
-      expect(pathsEmptyOption.stateDir).toBe("/home/testuser/.resin/state");
-      expect(pathsEmptyOption.logDir).toBe("/home/testuser/.resin/logs");
-      expect(pathsEmptyOption.socketPath).toBe("/home/testuser/.resin/state/daemon.sock");
+      expect(pathsEmptyOption.homeDir).toBe(hostPath("/home/testuser/.resin"));
+      expect(pathsEmptyOption.configDir).toBe(hostPath("/home/testuser/.resin/config"));
+      expect(pathsEmptyOption.dataDir).toBe(hostPath("/home/testuser/.resin/data"));
+      expect(pathsEmptyOption.stateDir).toBe(hostPath("/home/testuser/.resin/state"));
+      expect(pathsEmptyOption.logDir).toBe(hostPath("/home/testuser/.resin/logs"));
+      expect(pathsEmptyOption.socketPath).toBe(hostPath("/home/testuser/.resin/state/daemon.sock"));
 
       // Whitespace-only resinHome option falls back to ~/.resin
       const pathsWhitespaceOption = resolvePlatformPaths({
@@ -360,7 +401,7 @@ describe("Platform Matrix Qualification Suite", () => {
         resinHome: "   \t\n  ",
         platformInfo,
       });
-      expect(pathsWhitespaceOption.homeDir).toBe("/home/testuser/.resin");
+      expect(pathsWhitespaceOption.homeDir).toBe(hostPath("/home/testuser/.resin"));
 
       // Empty string RESIN_HOME env falls back to ~/.resin
       const pathsEmptyEnv = resolvePlatformPaths({
@@ -370,7 +411,7 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsEmptyEnv.homeDir).toBe("/home/testuser/.resin");
+      expect(pathsEmptyEnv.homeDir).toBe(hostPath("/home/testuser/.resin"));
 
       // Whitespace-only RESIN_HOME env falls back to ~/.resin
       const pathsWhitespaceEnv = resolvePlatformPaths({
@@ -380,7 +421,7 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsWhitespaceEnv.homeDir).toBe("/home/testuser/.resin");
+      expect(pathsWhitespaceEnv.homeDir).toBe(hostPath("/home/testuser/.resin"));
 
       // Both empty/whitespace fall back to ~/.resin
       const pathsBothEmpty = resolvePlatformPaths({
@@ -391,7 +432,7 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsBothEmpty.homeDir).toBe("/home/testuser/.resin");
+      expect(pathsBothEmpty.homeDir).toBe(hostPath("/home/testuser/.resin"));
 
       // Empty resinHome option falls back to non-empty RESIN_HOME env
       const pathsEmptyOptionWithEnv = resolvePlatformPaths({
@@ -402,8 +443,8 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsEmptyOptionWithEnv.homeDir).toBe("/srv/resin-from-env");
-      expect(pathsEmptyOptionWithEnv.configDir).toBe("/srv/resin-from-env/config");
+      expect(pathsEmptyOptionWithEnv.homeDir).toBe(hostPath("/srv/resin-from-env"));
+      expect(pathsEmptyOptionWithEnv.configDir).toBe(hostPath("/srv/resin-from-env/config"));
 
       // Non-empty resinHome option still overrides non-empty RESIN_HOME env
       const pathsNonEmptyOptionWithEnv = resolvePlatformPaths({
@@ -414,8 +455,8 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsNonEmptyOptionWithEnv.homeDir).toBe("/opt/resin-from-opt");
-      expect(pathsNonEmptyOptionWithEnv.configDir).toBe("/opt/resin-from-opt/config");
+      expect(pathsNonEmptyOptionWithEnv.homeDir).toBe(hostPath("/opt/resin-from-opt"));
+      expect(pathsNonEmptyOptionWithEnv.configDir).toBe(hostPath("/opt/resin-from-opt/config"));
 
       // Empty options.home falls back to env.HOME
       const pathsEmptyHomeOption = resolvePlatformPaths({
@@ -425,7 +466,7 @@ describe("Platform Matrix Qualification Suite", () => {
         },
         platformInfo,
       });
-      expect(pathsEmptyHomeOption.homeDir).toBe("/home/envuser/.resin");
+      expect(pathsEmptyHomeOption.homeDir).toBe(hostPath("/home/envuser/.resin"));
     });
 
     it("respects granular directory and socket overrides over canonical root", () => {
@@ -447,15 +488,15 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(paths.homeDir).toBe("/opt/resin");
-      expect(paths.configDir).toBe("/etc/resin");
-      expect(paths.dataDir).toBe("/var/lib/resin");
-      expect(paths.stateDir).toBe("/run/resin");
-      expect(paths.logDir).toBe("/var/log/resin");
-      expect(paths.socketPath).toBe("/run/resin/custom.sock");
-      expect(paths.lockFilePath).toBe("/run/resin/daemon.lock");
-      expect(paths.pidFilePath).toBe("/run/resin/daemon.pid");
-      expect(paths.configFile).toBe("/etc/resin/override.json");
+      expect(paths.homeDir).toBe(hostPath("/opt/resin"));
+      expect(paths.configDir).toBe(hostPath("/etc/resin"));
+      expect(paths.dataDir).toBe(hostPath("/var/lib/resin"));
+      expect(paths.stateDir).toBe(hostPath("/run/resin"));
+      expect(paths.logDir).toBe(hostPath("/var/log/resin"));
+      expect(paths.socketPath).toBe(hostPath("/run/resin/custom.sock"));
+      expect(paths.lockFilePath).toBe(hostPath("/run/resin/daemon.lock"));
+      expect(paths.pidFilePath).toBe(hostPath("/run/resin/daemon.pid"));
+      expect(paths.configFile).toBe(hostPath("/etc/resin/override.json"));
 
       const pathsEnv = resolvePlatformPaths({
         home: "/home/testuser",
@@ -478,14 +519,14 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(pathsEnv.configDir).toBe("/env/config");
-      expect(pathsEnv.dataDir).toBe("/env/data");
-      expect(pathsEnv.stateDir).toBe("/env/state");
-      expect(pathsEnv.logDir).toBe("/env/logs");
-      expect(pathsEnv.socketPath).toBe("/env/socket.sock");
-      expect(pathsEnv.lockFilePath).toBe("/env/lock.lck");
-      expect(pathsEnv.pidFilePath).toBe("/env/pid.pid");
-      expect(pathsEnv.configFile).toBe("/env/config.json");
+      expect(pathsEnv.configDir).toBe(hostPath("/env/config"));
+      expect(pathsEnv.dataDir).toBe(hostPath("/env/data"));
+      expect(pathsEnv.stateDir).toBe(hostPath("/env/state"));
+      expect(pathsEnv.logDir).toBe(hostPath("/env/logs"));
+      expect(pathsEnv.socketPath).toBe(hostPath("/env/socket.sock"));
+      expect(pathsEnv.lockFilePath).toBe(hostPath("/env/lock.lck"));
+      expect(pathsEnv.pidFilePath).toBe(hostPath("/env/pid.pid"));
+      expect(pathsEnv.configFile).toBe(hostPath("/env/config.json"));
     });
 
     it("resolves WSL paths with Windows host interop paths", () => {
@@ -504,10 +545,10 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(paths.homeDir).toBe("/home/wsluser/.resin");
-      expect(paths.stateDir).toBe("/home/wsluser/.resin/state");
-      expect(paths.socketPath).toBe("/home/wsluser/.resin/state/daemon.sock");
-      expect(paths.lockFilePath).toBe("/home/wsluser/.resin/state/daemon.lock");
+      expect(paths.homeDir).toBe(hostPath("/home/wsluser/.resin"));
+      expect(paths.stateDir).toBe(hostPath("/home/wsluser/.resin/state"));
+      expect(paths.socketPath).toBe(hostPath("/home/wsluser/.resin/state/daemon.sock"));
+      expect(paths.lockFilePath).toBe(hostPath("/home/wsluser/.resin/state/daemon.lock"));
       expect(paths.wslHostConfig).toBeDefined();
       expect(paths.wslHostConfig?.windowsAppDataDir).toBe(
         "/mnt/c/Users/WindowsUser/AppData/Roaming/Resin",
@@ -520,8 +561,10 @@ describe("Platform Matrix Qualification Suite", () => {
 
     it("resolves Windows native named pipe default socket", () => {
       const customHome = "C:\\Users\\testuser";
+      const windowsUserSid = "S-1-5-21-1111111111-2222222222-3333333333-1001";
       const paths = resolvePlatformPaths({
         home: customHome,
+        windowsUserSid,
         platformInfo: {
           os: "windows",
           isWsl: false,
@@ -531,7 +574,9 @@ describe("Platform Matrix Qualification Suite", () => {
         },
       });
 
-      expect(paths.socketPath).toBe("\\\\.\\pipe\\resin-daemon");
+      // The per-user, per-home pipe the daemon serves (hash of SID + resolved Resin home).
+      expect(paths.socketPath).toBe(windowsDaemonPipeName(paths.homeDir, windowsUserSid));
+      expect(paths.socketPath).toMatch(/^\\\\\.\\pipe\\resin-daemon-[0-9a-f]{16}$/);
     });
   });
 
@@ -560,14 +605,14 @@ describe("Platform Matrix Qualification Suite", () => {
   describe("Path Canonicalization & Security Traversal Checks", () => {
     it("canonicalizes relative paths and verifies traversal safety", () => {
       const res = canonicalizePlatformPath("src/platform/paths.ts", { cwd: "/app" });
-      expect(res.canonicalPath).toBe("/app/src/platform/paths.ts");
+      expect(res.canonicalPath).toBe(hostPath("/app/src/platform/paths.ts"));
       expect(res.isTraversalSafe).toBe(true);
       expect(res.isWindowsDrive).toBe(false);
     });
 
     it("canonicalizes Windows paths in WSL format", () => {
       const res = canonicalizePlatformPath("C:\\Users\\Alice\\project", { cwd: "/app" });
-      expect(res.canonicalPath).toBe("/mnt/c/Users/Alice/project");
+      expect(res.canonicalPath).toBe(path.normalize("/mnt/c/Users/Alice/project"));
       expect(res.isWindowsDrive).toBe(true);
       expect(res.isTraversalSafe).toBe(true);
     });
@@ -600,27 +645,17 @@ describe("Platform Matrix Qualification Suite", () => {
       expect(info.os).toBe("darwin");
     });
 
-    it("rejects native Windows with actionable WSL2 guidance", () => {
-      expect(() => {
-        validatePlatform(detectPlatform({ platform: "win32" }));
-      }).toThrow(UnsupportedPlatformError);
-
-      try {
-        validatePlatform(detectPlatform({ platform: "win32" }));
-      } catch (err) {
-        expect(err).toBeInstanceOf(UnsupportedPlatformError);
-        if (err instanceof UnsupportedPlatformError) {
-          expect(err.message).toContain("wsl --install");
-          expect(err.platform).toBe("win32");
-        }
-      }
+    it("accepts native Windows", () => {
+      const info = validatePlatform(detectPlatform({ platform: "win32", arch: "x64", env: {} }));
+      expect(info.os).toBe("windows");
+      expect(info.isSupported).toBe(true);
     });
 
     it("rejects unsupported OSes such as AIX or FreeBSD", () => {
       expect(() => {
         // SAFETY: Testing platform validation rejection for aix platform.
         validatePlatform(detectPlatform({ platform: "aix" as NodeJS.Platform }));
-      }).toThrow(UnsupportedPlatformError);
+      }).toThrow(/Windows 10\/11/);
 
       expect(() => {
         // SAFETY: Testing platform validation rejection for freebsd platform.

@@ -22,7 +22,8 @@ let env: NodeJS.ProcessEnv;
 
 beforeEach(async () => {
   home = await mkdtemp(path.join(os.tmpdir(), "resin-harness-presence-"));
-  env = { HOME: home };
+  // Windows harnesses resolve the profile folder from USERPROFILE, never HOME.
+  env = { HOME: home, USERPROFILE: home };
 });
 
 afterEach(async () => {

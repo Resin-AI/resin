@@ -1,7 +1,12 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { BrokerSecurityError } from "./base.js";
+
+/**
+ * Git's spelling of the null device. Git for Windows maps `/dev/null` to `NUL` itself but fails
+ * with "unable to access '\\.\nul'" on `os.devNull` as GIT_CONFIG_GLOBAL.
+ */
+const GIT_NULL_DEVICE = "/dev/null";
 
 /** Additional confinement, never a substitute for the invocation's command grant. */
 export function prepareReadOnlyGit(
@@ -99,9 +104,9 @@ export function prepareReadOnlyGit(
     fail();
   const overrides: Record<string, string> = {
     "core.fsmonitor": "false",
-    "core.hooksPath": os.devNull,
-    "core.attributesFile": os.devNull,
-    "core.excludesFile": os.devNull,
+    "core.hooksPath": GIT_NULL_DEVICE,
+    "core.attributesFile": GIT_NULL_DEVICE,
+    "core.excludesFile": GIT_NULL_DEVICE,
     "core.untrackedCache": "false",
     "core.pager": "",
     "core.bare": "false",
@@ -117,8 +122,8 @@ export function prepareReadOnlyGit(
     GIT_OBJECT_DIRECTORY: path.join(gitDir, "objects"),
     GIT_ALTERNATE_OBJECT_DIRECTORIES: "",
     GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_SYSTEM: os.devNull,
-    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_CONFIG_SYSTEM: GIT_NULL_DEVICE,
+    GIT_CONFIG_GLOBAL: GIT_NULL_DEVICE,
     GIT_ATTR_NOSYSTEM: "1",
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",

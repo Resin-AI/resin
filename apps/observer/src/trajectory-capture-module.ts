@@ -32,6 +32,7 @@ import type {
 } from "./lifecycle.js";
 import { NormalizationPipeline } from "./normalization/pipeline.js";
 import type { JsonObject } from "./normalization/redaction.js";
+import { ensurePrivateDirectorySync } from "./private-fs.js";
 import { ObserverCoordinator } from "./tailing/coordinator.js";
 import { SourceCursorManager } from "./tailing/cursor-manager.js";
 
@@ -499,10 +500,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
     const temporaryPath = `${this.privacyCheckpointPath}.${process.pid}.tmp`;
     try {
-      fs.mkdirSync(path.dirname(this.privacyCheckpointPath), {
-        recursive: true,
-        mode: 0o700,
-      });
+      ensurePrivateDirectorySync(path.dirname(this.privacyCheckpointPath));
       fs.writeFileSync(
         temporaryPath,
         `${JSON.stringify({

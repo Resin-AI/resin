@@ -51,6 +51,8 @@ This authoritative release evidence reference document defines the specification
 | **darwin-x64**   |  darwin   |     x64      | `launchd`       |     ✅ QUALIFIED     | `scripts/platform-qualification.test.mjs` |
 | **darwin-arm64** |  darwin   |    arm64     | `launchd`       |     ✅ QUALIFIED     | `scripts/platform-qualification.test.mjs` |
 | **wsl**          |   linux   |     x64      | `wsl-systemd`   |     ✅ QUALIFIED     | `scripts/platform-qualification.test.mjs` |
+| **windows-x64**  |   win32   |     x64      | `windows-task`  |     ✅ QUALIFIED     | `scripts/platform-qualification.test.mjs` |
+| **windows-arm64** |  win32   |    arm64     | `windows-task`  |     ✅ QUALIFIED     | `scripts/platform-qualification.test.mjs` |
 
 ---
 

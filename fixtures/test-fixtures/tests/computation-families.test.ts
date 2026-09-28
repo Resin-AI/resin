@@ -122,7 +122,9 @@ const allVariants = families.flatMap((family) => family.variants);
  * program to launch, so the runner refuses instead of executing an unvetted binary.
  */
 const ALLOWED_INTERPRETERS: Record<ComputationFixtureLanguage, string> = {
-  python: "python3",
+  // Windows' Python installers ship `python.exe`, never `python3.exe` (that name is at most the
+  // Microsoft Store alias, which runs nothing), so the declared `python3` runs as `python` there.
+  python: process.platform === "win32" ? "python" : "python3",
   javascript: process.execPath,
 };
 
@@ -214,6 +216,7 @@ function runFixtureProgram(
       allowed,
       path.basename(allowed),
       path.basename(path.parse(allowed).name),
+      ...(language === "python" ? ["python3"] : []),
     ];
     expect(allowedTokens).toContain(declared);
     const entries = Object.entries(runnable.files);

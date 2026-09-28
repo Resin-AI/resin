@@ -23,6 +23,7 @@ import {
   WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
+  programNotLearnableReason,
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
@@ -30,6 +31,7 @@ import { runDerivation } from "./derivation-sandbox.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
+import { resolveWindowsPowerShell, shellProgramInvocation } from "./shell-invocation.js";
 
 export interface RecordedProgramRun {
   exitCode: number;
@@ -61,6 +63,8 @@ export interface ProgramRunnerOptions {
   access?: { workspaceId?: string };
   /** Overridable for tests. */
   platform?: NodeJS.Platform;
+  /** Whether an executable exists at a path, for resolving a shell; overridable for tests. */
+  executableExists?: (candidate: string) => boolean;
 }
 
 /** Long enough for a real build or install, short enough that a hung program cannot pin a run. */
@@ -289,6 +293,10 @@ interface ChildInvocation {
   args: string[];
   input?: string;
   privateResultFd?: number;
+  /** Environment variables the child must not inherit. */
+  unsetEnv?: string[];
+  /** Environment variables the child runs with, replacing any inherited spelling of each name. */
+  setEnv?: Record<string, string>;
 }
 
 interface PreparedJavaScriptEval {
@@ -660,15 +668,24 @@ function invocationFor(
   const source = program.source;
   switch (program.kind) {
     case "shell":
-      // The platform shell runs the whole text: `&&`, `||`, pipes and redirections are what the
-      // recorded call did, and exit status is the program's exit status.
-      return options.shellInvocation === "bash-login"
-        ? { command: "/bin/bash", args: ["-lc", `${CODEX_SHELL_PRELUDE}${source}`] }
-        : platform === "win32"
-          ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", source] }
-          : { command: "/bin/sh", args: ["-c", source] };
+      // The shell the recording proved runs the whole text: `&&`, `||`, pipes and redirections are
+      // what the recorded call did, and exit status is the program's exit status.
+      return shellProgramInvocation(program, source, {
+        platform,
+        env,
+        bashLogin: options.shellInvocation === "bash-login",
+        bashLoginPrelude: CODEX_SHELL_PRELUDE,
+        ...(options.executableExists === undefined
+          ? {}
+          : { executableExists: options.executableExists }),
+      });
     case "python": {
-      const interpreter = resolveInterpreter(["python3", "python"], env, platform);
+      // On Windows `python3` is usually only the Microsoft Store's installer alias.
+      const interpreter = resolveInterpreter(
+        platform === "win32" ? ["python", "python3"] : ["python3", "python"],
+        env,
+        platform,
+      );
       if (!interpreter) {
         throw new Error("no python interpreter is resolvable on PATH (looked for python3, python)");
       }
@@ -1059,15 +1076,76 @@ async function preparePythonReplaySource(
   return composed;
 }
 
-function killProcessTree(child: ChildProcess): void {
+/** What the runner knows about a child when it has to end it. */
+interface ChildLifetime {
+  startedAtMs: number;
+  /** When the child itself exited, if it has; its descendants may still hold its output pipes. */
+  exitedAtMs?: number;
+}
+
+/**
+ * Stops every descendant of a Windows child, found by the parent process id Windows records for each
+ * process — which a process keeps after its parent exits, so a background child of a shell that has
+ * already exited (Git Bash's `sleep 600 &`) is found too. Only processes created after the child
+ * started are considered, and the child's own children only up to when it exited, so a reused
+ * process id never names another program's processes.
+ */
+function windowsDescendantKillScript(pid: number, lifetime: ChildLifetime): string {
+  const since = lifetime.startedAtMs - 1_000;
+  const until = (lifetime.exitedAtMs ?? Date.now()) + 1_000;
+  return [
+    `$root = ${pid}`,
+    `$since = [DateTimeOffset]::FromUnixTimeMilliseconds(${since}).LocalDateTime`,
+    `$until = [DateTimeOffset]::FromUnixTimeMilliseconds(${until}).LocalDateTime`,
+    "$all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate)",
+    "$found = New-Object 'System.Collections.Generic.List[int]'",
+    "$queue = New-Object 'System.Collections.Generic.Queue[int]'",
+    "$queue.Enqueue($root)",
+    "while ($queue.Count -gt 0) {",
+    "  $parent = $queue.Dequeue()",
+    "  foreach ($process in $all) {",
+    "    $id = [int]$process.ProcessId",
+    "    if ($process.ParentProcessId -ne $parent -or $id -eq $parent -or $found.Contains($id)) { continue }",
+    "    if ($process.CreationDate -lt $since) { continue }",
+    "    if ($parent -eq $root -and $process.CreationDate -gt $until) { continue }",
+    "    $found.Add($id); $queue.Enqueue($id)",
+    "  }",
+    "}",
+    "foreach ($id in $found) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }",
+  ].join("\n");
+}
+
+function killProcessTree(child: ChildProcess, lifetime: ChildLifetime): void {
   if (child.pid === undefined) return;
   if (process.platform === "win32") {
-    // A cmd.exe child is not the root of a process group, so walk the tree explicitly first.
-    spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    child.kill("SIGKILL");
+    // A Windows child is not the root of a process group: its descendants are found and stopped by
+    // parent process id, and the child itself once that walk is done.
+    const walk = spawn(
+      resolveWindowsPowerShell({ platform: "win32", env: process.env }) ?? "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        Buffer.from(windowsDescendantKillScript(child.pid, lifetime), "utf16le").toString("base64"),
+      ],
+      { stdio: "ignore", windowsHide: true },
+    );
+    const killChild = (): void => {
+      if (lifetime.exitedAtMs === undefined) child.kill("SIGKILL");
+    };
+    walk.once("exit", killChild);
+    walk.once("error", killChild);
+    // A descendant may still hold the output pipes: once the child is gone, stop reading them so the
+    // run ends now, not when that descendant does.
+    const release = (): void => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    };
+    if (lifetime.exitedAtMs !== undefined) release();
+    else child.once("exit", release);
     return;
   }
   try {
@@ -1100,20 +1178,39 @@ function runChild(
             "pipe",
             invocation.privateResultFd,
           ];
+    // Windows reads environment names case-insensitively: a removed or replaced name goes in every
+    // spelling it was inherited under.
+    const replaced = [...(invocation.unsetEnv ?? []), ...Object.keys(invocation.setEnv ?? {})].map(
+      (name) => name.toLowerCase(),
+    );
+    const childEnv =
+      replaced.length === 0
+        ? env
+        : {
+            ...Object.fromEntries(
+              Object.entries(env).filter(([key]) => !replaced.includes(key.toLowerCase())),
+            ),
+            ...invocation.setEnv,
+          };
+    const lifetime: ChildLifetime = { startedAtMs: Date.now() };
     const child = spawn(invocation.command, invocation.args, {
       cwd,
-      env,
+      env: childEnv,
       stdio,
       windowsHide: true,
       // Own process group on POSIX, so the time budget can end the whole tree, not just the shell.
       detached: process.platform !== "win32",
+    });
+    // Tracked from the start: the child may exit long before its output pipes close.
+    child.once("exit", () => {
+      lifetime.exitedAtMs = Date.now();
     });
     let settled = false;
     let termination: string | undefined;
     const terminate = (reason: string): void => {
       if (settled || termination !== undefined) return;
       termination = reason;
-      killProcessTree(child);
+      killProcessTree(child, lifetime);
     };
     const onAbort = (): void => terminate("recorded program replay was cancelled");
     options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -1418,8 +1515,8 @@ export async function runRecordedProgram(
     const bashLogin = runnable.kind === "shell" && options.shellInvocation === "bash-login";
     const childEnv = isCodexExec
       ? { ...env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1" }
-      : bashLogin && env.PATH !== undefined
-        ? { ...env, [INHERITED_PATH_VARIABLE]: env.PATH }
+      : bashLogin && (env.PATH ?? env.Path) !== undefined
+        ? { ...env, [INHERITED_PATH_VARIABLE]: (env.PATH ?? env.Path)! }
         : env;
     const invocation = invocationFor(
       runnable,
@@ -1596,13 +1693,22 @@ export async function runRecordedCall(
     }
   }
   if (program.kind === "patch") return runRecordedPatchCall(request, source, options);
+  // A cmd.exe program, or one whose shell the recording did not prove, is captured but never run.
+  const notLearnable = programNotLearnableReason(program);
+  if (notLearnable !== undefined) {
+    throw new Error(`step '${step.id}' cannot run: ${notLearnable}`);
+  }
   const requestedWorkdir = request.arguments.workdir;
   const shellProfile = request.arguments.resinCodexShellProfile;
   const nativeCodexShell = shellProfile === "bash-login-native-v1";
-  if (
-    (shellProfile === "bash-login-v1" || nativeCodexShell) &&
-    typeof requestedWorkdir !== "string"
-  ) {
+  // A PowerShell program Codex recorded running natively on Windows, under the dialect its
+  // executable proved; it runs in that same edition, in the directory Codex recorded.
+  const nativeCodexPowerShell =
+    (shellProfile === "powershell-native-v1" && program.dialect === "powershell") ||
+    (shellProfile === "pwsh-native-v1" && program.dialect === "pwsh");
+  const workdirProfile =
+    shellProfile === "bash-login-v1" || nativeCodexShell || nativeCodexPowerShell;
+  if (workdirProfile && typeof requestedWorkdir !== "string") {
     throw new Error(`step '${step.id}' cannot run: workdir must be a string`);
   }
   if (
@@ -1611,7 +1717,7 @@ export async function runRecordedCall(
       ((shellProfile === "bash-login-v1" &&
         step.callable.name === "exec" &&
         typeof request.arguments.raw === "string") ||
-        (nativeCodexShell && step.callable.name === "command_exec")) &&
+        ((nativeCodexShell || nativeCodexPowerShell) && step.callable.name === "command_exec")) &&
       program.kind === "shell" &&
       program.argument === "cmd" &&
       typeof requestedWorkdir === "string"
@@ -1621,10 +1727,7 @@ export async function runRecordedCall(
   }
   const replayOptions: ProgramRunnerOptions = {
     ...options,
-    ...((shellProfile === "bash-login-v1" || nativeCodexShell) &&
-    typeof requestedWorkdir === "string"
-      ? { cwd: requestedWorkdir }
-      : {}),
+    ...(workdirProfile && typeof requestedWorkdir === "string" ? { cwd: requestedWorkdir } : {}),
     ...(shellProfile === "bash-login-v1" || nativeCodexShell
       ? { shellInvocation: "bash-login" as const }
       : {}),

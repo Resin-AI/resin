@@ -334,16 +334,21 @@ export type PendingClaudeToolCalls = Map<string, PendingClaudeToolCall>;
 /** Canonical call id for a Claude `tool_use` id (`toolu_…`), constrained to identifier characters. */
 /**
  * Claude Code names every MCP tool `mcp__<server>__<tool>`, so a call named exactly `Bash` with a
- * command is its built-in shell tool. Only this decoder proves that, with the local-only marker the
- * recorder trusts to share the command as a scrubbed program view.
+ * command is its built-in shell tool (bash; Git Bash on native Windows), and one named exactly
+ * `PowerShell` with a command is its built-in PowerShell tool. Only this decoder proves that, with
+ * the local-only marker the recorder trusts. The PowerShell tool runs `pwsh` when it is installed and
+ * Windows PowerShell 5.1 otherwise, and the transcript does not say which.
  */
 function claudeSourceInterface(
   toolName: string,
   input: ClaudeTranscriptPayload,
 ): { metadata: DecoderMetadataRecord } | Record<string, never> {
-  return toolName === "Bash" && typeof input.command === "string"
+  if (typeof input.command !== "string") return {};
+  return toolName === "Bash"
     ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "claude-bash" } }
-    : {};
+    : toolName === "PowerShell"
+      ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "claude-powershell" } }
+      : {};
 }
 
 export function claudeCallId(toolCallId: string): string {
@@ -924,7 +929,8 @@ function decodeLineEvents(
             pendingCalls.set(toolCallId, {
               toolName,
               timestamp: recordTime,
-              ...("metadata" in claudeSourceInterface(toolName, inputRecord) &&
+              ...(toolName === "Bash" &&
+              "metadata" in claudeSourceInterface(toolName, inputRecord) &&
               inputRecord.run_in_background !== true
                 ? { foregroundShell: true as const }
                 : {}),

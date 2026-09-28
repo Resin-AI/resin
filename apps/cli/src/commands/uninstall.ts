@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -10,6 +9,7 @@ import {
   applyManagedBlock,
   defaultFsBridge,
   isRecognizedResinMcpEntry,
+  resolveHarnessUserHome,
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
@@ -19,7 +19,20 @@ import {
   HarnessReconciler,
   ReconciliationNodeFsBridge,
 } from "../installer/harness-reconciler.js";
-import { createUserServiceManager } from "../service/manager.js";
+import {
+  type WindowsUserPathOptions,
+  type WindowsUserPathResult,
+  removeWindowsUserPath,
+} from "../installer/windows-install.js";
+import { type UserServiceManager, createUserServiceManager } from "../service/manager.js";
+import {
+  type WindowsPurgeResult,
+  purgeWindowsTree,
+  removeTreeWithRetries,
+  scheduleWindowsDeferredRemoval,
+} from "./windows-purge.js";
+
+export { scheduleWindowsDeferredRemoval };
 export type McpServerConfigValue =
   | string
   | number
@@ -88,7 +101,36 @@ export interface UninstallResult {
   purgedSecrets: boolean;
   purgedAll: boolean;
   removedPaths: string[];
+  /** Why the service could not be fully removed (e.g. the task could not be ended). */
+  serviceError?: string;
+  /** Paths that could not be purged (on Windows usually a file in use). */
+  purgeFailures?: { path: string; error: string }[];
+  /** Locked Windows paths scheduled for removal right after this process exits. */
+  deferredRemoval?: string[];
+  /** Failure removing Resin's bin directory from the Windows user PATH. */
+  pathCleanupError?: string;
   error?: string;
+}
+
+export interface UninstallCommandOptions {
+  env?: NodeJS.ProcessEnv;
+  fsBridge?: ConfigFsBridge;
+  platform?: NodeJS.Platform;
+  serviceManager?: UserServiceManager;
+  /** Removes a path recursively; rejects when it cannot (e.g. a file is in use). */
+  removePath?: (target: string) => Promise<void>;
+  removeWindowsUserPath?: (options: WindowsUserPathOptions) => Promise<WindowsUserPathResult>;
+  /** Removes still-locked Windows paths after this process exits. */
+  scheduleDeferredRemoval?: (paths: readonly string[]) => void;
+  /** Deletes the Resin home on Windows, moving files that are in use out of it. */
+  purgeWindowsTree?: (
+    target: string,
+    options: { keep: readonly string[] },
+  ) => Promise<WindowsPurgeResult>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function parseUninstallFlags(args: string[]): UninstallCommandFlags {
@@ -176,7 +218,9 @@ export async function removeHarnessMcpConfigurations(options: {
   fsBridge?: HarnessReconcileFsBridge;
 }): Promise<string[]> {
   const fsBridge = options.fsBridge ?? new ReconciliationNodeFsBridge();
-  const home = path.resolve(options.customHome ?? options.env?.HOME ?? os.homedir());
+  const home = path.resolve(
+    options.customHome ?? resolveHarnessUserHome({ env: options.env ?? process.env }),
+  );
   const env = options.env ?? (options.customHome === undefined ? process.env : { HOME: home });
   const reconciler = new HarnessReconciler();
   const cleaned: string[] = [];
@@ -317,10 +361,7 @@ function removeResinFromCodexToml(content: string): TomlRemovalResult {
 
 export async function uninstallCommand(
   args: string[],
-  options: {
-    env?: NodeJS.ProcessEnv;
-    fsBridge?: ConfigFsBridge;
-  } = {},
+  options: UninstallCommandOptions = {},
 ): Promise<number> {
   const flags = parseUninstallFlags(args);
 
@@ -331,13 +372,24 @@ export async function uninstallCommand(
 
   const customHome = flags.home
     ? path.resolve(flags.home)
-    : path.resolve(options.env?.HOME ?? os.homedir());
+    : path.resolve(resolveHarnessUserHome({ env: options.env ?? process.env }));
   const env = { ...(options.env ?? process.env), HOME: customHome };
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
 
   const removedPaths: string[] = [];
+  const purgeFailures: { path: string; error: string }[] = [];
+  const platform = options.platform ?? process.platform;
+  const removePath = options.removePath ?? ((target: string) => removeTreeWithRetries(target));
+  const purge = async (target: string): Promise<void> => {
+    try {
+      await removePath(target);
+      removedPaths.push(target);
+    } catch (error: unknown) {
+      purgeFailures.push({ path: target, error: errorMessage(error) });
+    }
+  };
 
   if (flags.dryRun) {
     const dryRunResult: UninstallResult = {
@@ -367,12 +419,24 @@ export async function uninstallCommand(
 
   try {
     // 1. Stop and uninstall user background service
-    const serviceManager = createUserServiceManager({
-      homeDir: customHome,
-      resinHome,
-      fsBridge,
-    });
-    const svcUninstallResult = await serviceManager.uninstall();
+    const serviceManager =
+      options.serviceManager ??
+      createUserServiceManager({
+        homeDir: customHome,
+        resinHome,
+        fsBridge,
+      });
+    const svcUninstallResult = await serviceManager.uninstall().catch((error: unknown) => ({
+      success: false,
+      error: errorMessage(error),
+    }));
+
+    // Nothing to remove (no definition under this home) is not a failure; a service
+    // that is still registered, or whose state cannot be read, is.
+    const serviceRemoved =
+      svcUninstallResult.success ||
+      serviceManager.platform === "external" ||
+      !(await serviceManager.isInstalled().catch(() => true));
 
     // 2. Remove Resin MCP configuration from all agent harnesses
     const cleanedHarnesses = await removeHarnessMcpConfigurations({
@@ -387,10 +451,57 @@ export async function uninstallCommand(
     const purgeSecrets = Boolean(flags.purgeSecrets || purgeAll);
 
     let cleanedProfiles: string[] = [];
+    let deferredRemoval: string[] = [];
+    let pathCleanupError: string | undefined;
     if (purgeAll) {
-      if (await fsBridge.exists(resinHome)) {
-        await fs.rm(resinHome, { recursive: true, force: true }).catch(() => {});
-        removedPaths.push(resinHome);
+      if (platform === "win32") {
+        const removeUserPath = options.removeWindowsUserPath ?? removeWindowsUserPath;
+        try {
+          const pathResult = await removeUserPath({ resinHome, platform });
+          if (pathResult.error !== undefined) {
+            pathCleanupError = pathResult.error;
+          } else if (pathResult.present) {
+            pathCleanupError = `${pathResult.binDir} is still on the user PATH`;
+          }
+        } catch (error: unknown) {
+          pathCleanupError = errorMessage(error);
+        }
+      }
+      if (platform === "win32") {
+        // This process runs from the Resin home (the security addon is mapped from
+        // versions\, and resin.cmd's shell holds bin\): files in use are moved out and
+        // removed, with anything unmovable, once this process has exited.
+        const deferred: string[] = [];
+        try {
+          // bin\ holds the resin.cmd that cmd.exe is still running; the cleanup removes it
+          // (and with it the Resin home) right after this process exits.
+          const purged = await (options.purgeWindowsTree ?? purgeWindowsTree)(resinHome, {
+            keep: [path.join(resinHome, "bin")],
+          });
+          if (purged.removed) {
+            removedPaths.push(resinHome);
+          } else {
+            deferred.push(resinHome);
+          }
+          if (purged.stagingDir !== undefined) deferred.push(purged.stagingDir);
+        } catch (error: unknown) {
+          purgeFailures.push({ path: resinHome, error: errorMessage(error) });
+        }
+        if (deferred.length > 0) {
+          try {
+            (options.scheduleDeferredRemoval ?? scheduleWindowsDeferredRemoval)(deferred);
+            deferredRemoval = deferred;
+          } catch (error: unknown) {
+            for (const target of deferred) {
+              purgeFailures.push({
+                path: target,
+                error: `in use; deferred removal failed: ${errorMessage(error)}`,
+              });
+            }
+          }
+        }
+      } else if (await fsBridge.exists(resinHome)) {
+        await purge(resinHome);
       }
       cleanedProfiles = await removeShellPath({ resinHome, homeDir: customHome, fsBridge });
     } else {
@@ -402,8 +513,7 @@ export async function uninstallCommand(
         ];
         for (const dir of dataDirs) {
           if (await fsBridge.exists(dir)) {
-            await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-            removedPaths.push(dir);
+            await purge(dir);
           }
         }
       }
@@ -414,15 +524,15 @@ export async function uninstallCommand(
         ];
         for (const target of secretDirs) {
           if (await fsBridge.exists(target)) {
-            await fs.rm(target, { recursive: true, force: true }).catch(() => {});
-            removedPaths.push(target);
+            await purge(target);
           }
         }
       }
     }
 
     const result: UninstallResult = {
-      success: true,
+      // A service left registered (and running from the Resin home) is a failed uninstall.
+      success: serviceRemoved && purgeFailures.length === 0 && pathCleanupError === undefined,
       dryRun: false,
       serviceUninstalled: svcUninstallResult.success,
       harnessesCleaned: cleanedHarnesses,
@@ -431,12 +541,49 @@ export async function uninstallCommand(
       purgedAll: purgeAll,
       removedPaths,
     };
+    if (!svcUninstallResult.success && svcUninstallResult.error !== undefined) {
+      result.serviceError = svcUninstallResult.error;
+    }
+    if (purgeFailures.length > 0) {
+      result.purgeFailures = purgeFailures;
+      result.error = `Could not remove: ${purgeFailures.map((failure) => failure.path).join(", ")}`;
+    }
+    if (deferredRemoval.length > 0) {
+      result.deferredRemoval = deferredRemoval;
+    }
+    if (pathCleanupError !== undefined) {
+      result.pathCleanupError = pathCleanupError;
+      result.error = result.error
+        ? `${result.error}; PATH cleanup failed: ${pathCleanupError}`
+        : `PATH cleanup failed: ${pathCleanupError}`;
+    }
 
     if (flags.json) {
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
-      process.stdout.write("\n✓ Resin uninstalled successfully.\n");
-      process.stdout.write("  • Service stopped and unit removed.\n");
+      process.stdout.write(
+        result.success
+          ? "\n✓ Resin uninstalled successfully.\n"
+          : "\n✗ Resin uninstall finished with errors.\n",
+      );
+      if (svcUninstallResult.success) {
+        process.stdout.write("  • Service stopped and unit removed.\n");
+      } else {
+        process.stdout.write(
+          `  • Background service was not fully removed: ${result.serviceError ?? "unknown error"}\n`,
+        );
+      }
+      for (const failure of purgeFailures) {
+        process.stdout.write(`  • Could not remove ${failure.path}: ${failure.error}\n`);
+      }
+      for (const target of deferredRemoval) {
+        process.stdout.write(
+          `  • ${target} is in use; it will be removed a few seconds after this command exits.\n`,
+        );
+      }
+      if (pathCleanupError !== undefined) {
+        process.stdout.write(`  • Could not remove Resin from your PATH: ${pathCleanupError}\n`);
+      }
       if (cleanedHarnesses.length > 0) {
         process.stdout.write(
           `  • Removed MCP configurations for: ${cleanedHarnesses.join(", ")}\n`,
@@ -457,7 +604,7 @@ export async function uninstallCommand(
       process.stdout.write("\n");
     }
 
-    return 0;
+    return result.success ? 0 : 1;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (flags.json) {

@@ -7,7 +7,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { V1_SUPPORT_MATRIX } from "../apps/cli/dist/platform/platform.js";
 
 export { V1_SUPPORT_MATRIX };
@@ -23,6 +23,13 @@ const LANE_ASSET = Object.freeze(
     V1_SUPPORT_MATRIX.platforms.map((p) => [p.id, p.id === "wsl" ? "wsl-x64" : p.id]),
   ),
 );
+
+/** Native Windows (win32) qualification lanes, qualified on Windows runners in PowerShell. */
+export const WINDOWS_QUALIFICATION_LANES = Object.freeze(["windows-x64", "windows-arm64"]);
+
+export function isWindowsLane(lane) {
+  return WINDOWS_QUALIFICATION_LANES.includes(lane);
+}
 
 export function emitSupportMatrix(options = {}) {
   if (options.format === "json") {
@@ -59,6 +66,10 @@ export function detectHostLane(options = {}) {
         /microsoft|wsl/i.test(String(procVersion ?? "")),
     );
   if (isWsl) return "wsl";
+  if (platform === "win32") {
+    const windowsLane = `windows-${arch}`;
+    return REQUIRED_QUALIFICATION_LANES.includes(windowsLane) ? windowsLane : null;
+  }
   const lane = `${platform}-${arch}`;
   return REQUIRED_QUALIFICATION_LANES.includes(lane) ? lane : null;
 }
@@ -96,8 +107,12 @@ function runNode(entrypoint, args = [], options = {}) {
   };
 }
 
-function createQualificationCliDriver(installedRoot, sandboxDir) {
-  const driverPath = path.join(sandboxDir, "qualification-cli.mjs");
+function createQualificationCliDriver(installedRoot, sandboxDir, options = {}) {
+  const withService = options.service === true;
+  const driverPath = path.join(
+    sandboxDir,
+    withService ? "qualification-service-cli.mjs" : "qualification-cli.mjs",
+  );
   const cliModuleUrl = pathToFileURL(
     path.join(installedRoot, "apps", "cli", "dist", "index.js"),
   ).href;
@@ -108,8 +123,8 @@ function createQualificationCliDriver(installedRoot, sandboxDir) {
       "const exitCode = await main(process.argv.slice(2), {",
       "  initOptions: {",
       '    releaseMode: "local-test",',
-      "    setupService: false,",
-      "    autoStartService: false,",
+      `    setupService: ${withService},`,
+      `    autoStartService: ${withService},`,
       "  },",
       "});",
       "process.exitCode = exitCode;",
@@ -118,6 +133,64 @@ function createQualificationCliDriver(installedRoot, sandboxDir) {
     "utf8",
   );
   return driverPath;
+}
+
+/**
+ * Run a script under a Windows PowerShell dialect. `dialect` is "powershell" (Windows
+ * PowerShell 5.1, powershell.exe) or "pwsh" (PowerShell 7+); the two are never mixed.
+ */
+export function runPowerShell(script, options = {}) {
+  const executable = options.dialect === "pwsh" ? "pwsh" : "powershell.exe";
+  const result = spawnSync(
+    executable,
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? 60_000,
+      maxBuffer: 20 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message ?? result.error) : null,
+  };
+}
+
+/** Single-quoted PowerShell string literal. */
+export function psQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+/** Which Windows shells this host can run; PowerShell 5.1 is required, pwsh is optional. */
+export function probeWindowsShells() {
+  const versionScript = "$PSVersionTable.PSVersion.ToString(); $PSVersionTable.PSEdition";
+  const describe = (dialect) => {
+    const result = runPowerShell(versionScript, { dialect, timeoutMs: 30_000 });
+    if (result.status !== 0) return null;
+    const [version, edition] = result.stdout.trim().split(/\r?\n/);
+    return { version: version?.trim() ?? null, edition: edition?.trim() ?? null };
+  };
+  const powershell = describe("powershell");
+  if (!powershell || !powershell.version?.startsWith("5.")) {
+    throw new Error(
+      `Windows PowerShell 5.1 (powershell.exe) is required on native Windows lanes, found ${JSON.stringify(powershell)}`,
+    );
+  }
+  const cmd = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/c", "ver"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
+  });
+  return {
+    powershell,
+    pwsh: describe("pwsh"),
+    cmd: cmd.status === 0 ? (cmd.stdout ?? "").trim() : null,
+  };
 }
 
 async function waitFor(check, { timeoutMs = 10_000, intervalMs = 100 } = {}) {
@@ -189,14 +262,26 @@ function resolveAsset(releaseDir, lane, manifest) {
   return { assetId, asset, archivePath, actualDigest };
 }
 
+/**
+ * Windows 10 1803+/11 ship bsdtar as %SystemRoot%\System32\tar.exe. Use it explicitly so a
+ * GNU tar from Git for Windows on PATH (which misreads `C:` as a remote host) is never used.
+ */
+function tarExecutable() {
+  if (process.platform !== "win32") return "tar";
+  return path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+}
+
 function extractRelease(archivePath, targetDir) {
   fs.mkdirSync(targetDir, { recursive: true });
-  const result = spawnSync("tar", ["-xzf", archivePath, "-C", targetDir], {
+  const result = spawnSync(tarExecutable(), ["-xzf", archivePath, "-C", targetDir], {
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: 120_000,
+    windowsHide: true,
   });
   if (result.status !== 0) {
-    throw new Error(`Failed to extract release artifact: ${result.stderr || result.stdout}`);
+    throw new Error(
+      `Failed to extract release artifact: ${result.stderr || result.stdout || result.error?.message}`,
+    );
   }
   const installedRoot = path.join(targetDir, "resin");
   if (!fs.existsSync(installedRoot)) {
@@ -231,14 +316,52 @@ function validatePlatformMetadata(installedRoot, lane, manifest) {
 
 const REQUIRED_ARTIFACT_FILES = Object.freeze(["platform.json", "bin/resin", "bin/resin-daemon"]);
 
+/** Windows launchers plus the lane's own native security helper and windowless service host. */
+export function windowsArtifactFiles(arch) {
+  const prebuilds = `node_modules/@resin/windows-security/prebuilds/win32-${arch}`;
+  return Object.freeze([
+    "bin/resin.cmd",
+    "bin/resin-daemon.cmd",
+    "bin/resin-gateway.cmd",
+    `${prebuilds}/resin_windows_security.node`,
+    `${prebuilds}/resin-service-host.exe`,
+  ]);
+}
+
+export function requiredArtifactFiles(lane) {
+  if (!isWindowsLane(lane)) return REQUIRED_ARTIFACT_FILES;
+  const arch = lane.slice("windows-".length);
+  return Object.freeze([...REQUIRED_ARTIFACT_FILES, ...windowsArtifactFiles(arch)]);
+}
+
 const PROPRIETARY_ARTIFACT_PATHS = Object.freeze([
   "apps/cloud",
   "apps/web",
   "packages/cloud-contracts",
 ]);
 
-function validateArtifactLayout(installedRoot) {
-  const missingFiles = REQUIRED_ARTIFACT_FILES.filter((relativePath) => {
+const PE_MACHINE_ARCH = Object.freeze({ 34404: "x64", 43620: "arm64" });
+
+/**
+ * The architecture a PE/COFF image targets ("x64" / "arm64"), or null when the file is not a
+ * PE image (test-only packaging substitutes marked placeholder text for missing prebuilds).
+ */
+export function peImageArch(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.length < 0x40 || buffer.toString("latin1", 0, 2) !== "MZ") return null;
+  const peOffset = buffer.readUInt32LE(0x3c);
+  if (
+    peOffset + 6 > buffer.length ||
+    buffer.toString("latin1", peOffset, peOffset + 4) !== "PE\0\0"
+  ) {
+    return null;
+  }
+  return PE_MACHINE_ARCH[buffer.readUInt16LE(peOffset + 4)] ?? "unknown";
+}
+
+function validateArtifactLayout(installedRoot, lane) {
+  const requiredFiles = requiredArtifactFiles(lane);
+  const missingFiles = requiredFiles.filter((relativePath) => {
     const candidatePath = path.join(installedRoot, relativePath);
     return !fs.existsSync(candidatePath) || !fs.statSync(candidatePath).isFile();
   });
@@ -253,11 +376,152 @@ function validateArtifactLayout(installedRoot) {
       `Release artifact contains proprietary cloud paths: ${proprietaryArtifacts.join(", ")}`,
     );
   }
-  return {
-    requiredFiles: [...REQUIRED_ARTIFACT_FILES],
-    verifiedFiles: REQUIRED_ARTIFACT_FILES.length,
+  const layout = {
+    requiredFiles: [...requiredFiles],
+    verifiedFiles: requiredFiles.length,
     proprietaryArtifactsAbsent: true,
   };
+  if (isWindowsLane(lane)) {
+    // Record the native binaries' digests so the signing job can prove the prebuilds it
+    // packages are byte-identical to the ones qualified here.
+    const nativePrebuilds = {};
+    for (const relativePath of requiredFiles.filter((file) => file.includes("/prebuilds/"))) {
+      const filePath = path.join(installedRoot, relativePath);
+      nativePrebuilds[path.posix.basename(relativePath)] = {
+        path: relativePath,
+        sha256: sha256File(filePath),
+        sizeBytes: fs.statSync(filePath).size,
+        peArch: peImageArch(filePath),
+      };
+    }
+    layout.nativePrebuilds = nativePrebuilds;
+  }
+  return layout;
+}
+
+/**
+ * Native lanes must ship real PE binaries for their own architecture. Artifact validation on
+ * other hosts tolerates test-only placeholders, which the signing job never packages.
+ */
+function requireRealNativePrebuilds(layout, arch) {
+  const wrong = Object.entries(layout.nativePrebuilds ?? {})
+    .filter(([, record]) => record.peArch !== arch)
+    .map(([name, record]) => `${name}: ${record.peArch ?? "placeholder"}`);
+  if (wrong.length > 0) {
+    throw new Error(
+      `Release artifact ships native prebuilds that are not ${arch} PE images (${wrong.join(", ")}); run packages/windows-security/scripts/build-native.mjs --arch ${arch} before packaging`,
+    );
+  }
+}
+
+async function loadPackagedWindowsSecurity(installedRoot) {
+  const entry = path.join(
+    installedRoot,
+    "node_modules",
+    "@resin",
+    "windows-security",
+    "dist",
+    "index.js",
+  );
+  if (!fs.existsSync(entry)) {
+    throw new Error(`Packaged @resin/windows-security entry is missing: ${entry}`);
+  }
+  // The module lives inside the extracted artifact, so its path is only known at run time.
+  const security = await import(pathToFileURL(entry).href);
+  if (!security.isWindowsSecurityAvailable()) {
+    throw new Error("Packaged @resin/windows-security native helper failed to load");
+  }
+  return security;
+}
+
+/**
+ * Prove the running daemon's named pipe belongs to this user and this server, and that the
+ * private Resin directories carry an owner-only DACL.
+ */
+async function verifyWindowsDaemonIsolationInProcess({ installedRoot, resinHome }) {
+  const security = await loadPackagedWindowsSecurity(installedRoot);
+  const pipeName = security.windowsDaemonPipeName(resinHome);
+  const pipe = security.verifyPipeServer(pipeName);
+  if (!pipe.ok) {
+    throw new Error(`Daemon named pipe ${pipeName} failed verification: ${pipe.reason}`);
+  }
+  const privatePaths = [
+    resinHome,
+    path.join(resinHome, "state"),
+    path.join(resinHome, "config"),
+  ].filter((candidate) => fs.existsSync(candidate));
+  const problems = privatePaths.flatMap((candidate) => {
+    const acl = security.checkOwnerOnly(candidate);
+    return acl.ok ? [] : acl.problems.map((problem) => `${candidate}: ${problem}`);
+  });
+  if (problems.length > 0) {
+    throw new Error(`Private Resin paths are not owner-only: ${problems.join("; ")}`);
+  }
+  return {
+    endpoint: "named-pipe",
+    pipeName,
+    pipeOwnerVerified: true,
+    ownerOnlyPaths: privatePaths.length,
+  };
+}
+
+/**
+ * On POSIX the daemon listens on an explicit Unix socket path. On Windows every client and
+ * the daemon derive the same `\\.\pipe\resin-daemon-<hash>` from the Resin home, so no
+ * endpoint flag is passed.
+ */
+function daemonEndpointArgs(socketPath) {
+  return process.platform === "win32" ? [] : ["--socket", socketPath];
+}
+
+/** Pin RESIN_HOME on Windows so the pipe name the daemon hashes is the one we verify. */
+function daemonEnv(baseEnv, resinHome) {
+  return process.platform === "win32" ? { ...baseEnv, RESIN_HOME: resinHome } : baseEnv;
+}
+
+/**
+ * Invoke the packaged `.cmd` launchers through each Windows shell dialect present on the
+ * host: Windows PowerShell 5.1 always, PowerShell 7+ when installed, and cmd.exe.
+ */
+function qualifyWindowsLaunchers(installedRoot, sandboxDir, manifest, shells) {
+  const launcher = path.join(installedRoot, "bin", "resin.cmd");
+  const env = { ...process.env, NODE_ENV: "production" };
+  delete env.NODE_PATH;
+  const results = {};
+  for (const dialect of ["powershell", "pwsh"]) {
+    if (dialect === "pwsh" && !shells.pwsh) continue;
+    const result = runPowerShell(`& ${psQuote(launcher)} --version; exit $LASTEXITCODE`, {
+      dialect,
+      cwd: sandboxDir,
+      env,
+    });
+    if (result.status !== 0 || !result.stdout.includes(manifest.version)) {
+      throw new Error(
+        `Packaged resin.cmd --version failed under ${dialect}: ${result.stderr || result.stdout || result.error}`,
+      );
+    }
+    results[dialect] = true;
+  }
+  const cmd = spawnSync(
+    process.env.ComSpec || "cmd.exe",
+    // `/s` strips the outermost quote pair, so the quoted launcher path survives spaces.
+    ["/d", "/s", "/c", `""${launcher}" --version"`],
+    {
+      cwd: sandboxDir,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    },
+  );
+  if (cmd.status !== 0 || !(cmd.stdout ?? "").includes(manifest.version)) {
+    throw new Error(
+      `Packaged resin.cmd --version failed under cmd.exe: ${cmd.stderr || cmd.stdout}`,
+    );
+  }
+  results.cmd = true;
+  return results;
 }
 
 function qualifyCli(installedRoot, sandboxDir, manifest) {
@@ -308,20 +572,28 @@ async function qualifyDaemon(installedRoot, sandboxDir) {
   const daemonBin = path.join(installedRoot, "bin", "resin-daemon");
   const daemonHome = path.join(sandboxDir, "daemon-home");
   const socketPath = path.join(sandboxDir, "daemon.sock");
+  const endpoint = daemonEndpointArgs(socketPath);
   fs.mkdirSync(daemonHome, { recursive: true });
-  const env = {
-    ...process.env,
-    NODE_ENV: "production",
-    RESIN_LOG_LEVEL: "silent",
-    RESIN_CLOUD_SYNC_ENABLED: "false",
-    RESIN_TELEMETRY_ENABLED: "false",
-  };
+  // HOME/USERPROFILE point at the sandbox too: the private-value store's default location
+  // follows the user's profile, not RESIN_HOME/--home, so the real user's data stays untouched.
+  const env = daemonEnv(
+    {
+      ...process.env,
+      HOME: daemonHome,
+      USERPROFILE: daemonHome,
+      NODE_ENV: "production",
+      RESIN_LOG_LEVEL: "silent",
+      RESIN_CLOUD_SYNC_ENABLED: "false",
+      RESIN_TELEMETRY_ENABLED: "false",
+    },
+    path.join(daemonHome, ".resin"),
+  );
   delete env.NODE_PATH;
 
   const child = spawn(
     process.execPath,
-    [daemonBin, "--foreground", "--home", daemonHome, "--socket", socketPath],
-    { cwd: sandboxDir, env, stdio: ["ignore", "pipe", "pipe"] },
+    [daemonBin, "--foreground", "--home", daemonHome, ...endpoint],
+    { cwd: sandboxDir, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
   );
   let stdout = "";
   let stderr = "";
@@ -335,26 +607,30 @@ async function qualifyDaemon(installedRoot, sandboxDir) {
   try {
     const statusResult = await waitFor(
       () => {
-        const result = runNode(
-          daemonBin,
-          ["--status", "--home", daemonHome, "--socket", socketPath],
-          { cwd: sandboxDir, env, timeoutMs: 3000 },
-        );
+        const result = runNode(daemonBin, ["--status", "--home", daemonHome, ...endpoint], {
+          cwd: sandboxDir,
+          env,
+          timeoutMs: 3000,
+        });
         return result.status === 0 ? result : false;
       },
       { timeoutMs: 15_000, intervalMs: 200 },
     );
-    const diagnostics = runNode(
-      daemonBin,
-      ["--diagnostics", "--home", daemonHome, "--socket", socketPath],
-      { cwd: sandboxDir, env, timeoutMs: 5000 },
-    );
+    const diagnostics = runNode(daemonBin, ["--diagnostics", "--home", daemonHome, ...endpoint], {
+      cwd: sandboxDir,
+      env,
+      timeoutMs: 5000,
+    });
     if (diagnostics.status !== 0) {
       throw new Error(
         `Packaged daemon diagnostics failed: ${diagnostics.stderr || diagnostics.stdout}`,
       );
     }
-    const stop = runNode(daemonBin, ["--stop", "--home", daemonHome, "--socket", socketPath], {
+    const windowsIsolation =
+      process.platform === "win32"
+        ? await verifyWindowsDaemonIsolation(installedRoot, path.join(daemonHome, ".resin"))
+        : undefined;
+    const stop = runNode(daemonBin, ["--stop", "--home", daemonHome, ...endpoint], {
       cwd: sandboxDir,
       env,
       timeoutMs: 5000,
@@ -371,6 +647,8 @@ async function qualifyDaemon(installedRoot, sandboxDir) {
       authenticatedStatus: true,
       diagnostics: true,
       stopped: true,
+      endpoint: process.platform === "win32" ? "named-pipe" : "unix-socket",
+      ...(windowsIsolation ? { windowsIsolation } : {}),
       statusOutput: statusResult.stdout.trim(),
     };
   } catch (error) {
@@ -428,8 +706,18 @@ function createRpcClient(child) {
 async function qualifyMcp(installedRoot, sandboxDir) {
   const resinBin = path.join(installedRoot, "bin", "resin");
   const workspace = path.join(sandboxDir, "mcp-workspace");
+  const mcpHome = path.join(sandboxDir, "mcp-home");
   fs.mkdirSync(workspace, { recursive: true });
-  const env = { ...process.env, NODE_ENV: "production" };
+  fs.mkdirSync(mcpHome, { recursive: true });
+  // The standalone gateway opens its state under the user's Resin home; keep it in the sandbox
+  // so qualifying never touches (or reads) the real user's Resin data on any platform.
+  const env = {
+    ...process.env,
+    NODE_ENV: "production",
+    HOME: mcpHome,
+    USERPROFILE: mcpHome,
+    RESIN_HOME: path.join(mcpHome, ".resin"),
+  };
   delete env.NODE_PATH;
   const child = spawn(
     process.execPath,
@@ -561,7 +849,12 @@ const OMP_QUALIFICATION_FIXTURE_LINES = `${[
   }),
 ].join("\n")}\n`;
 
-async function ingestPackagedOmpFixture({ installedRoot, stateDbPath, transcriptPath, cloudUrl }) {
+async function ingestPackagedOmpFixtureInProcess({
+  installedRoot,
+  stateDbPath,
+  transcriptPath,
+  cloudUrl,
+}) {
   const cacheBust = `qualification=${Date.now()}`;
   const [
     { TrajectoryCaptureRuntimeModule },
@@ -680,6 +973,62 @@ async function ingestPackagedOmpFixture({ installedRoot, stateDbPath, transcript
   }
 }
 
+/**
+ * The MCP launch `resin init` writes into harness configs. POSIX installs launch the
+ * `<resinHome>/bin/resin` shim; no native Windows harness can spawn a shebang shim or a
+ * `.cmd` without a shell, so Windows registrations run `node.exe <resinHome>\bin\resin.mjs`.
+ */
+export function expectedMcpLaunch(
+  resinHome,
+  platform = process.platform,
+  nodePath = process.execPath,
+) {
+  if (platform !== "win32") {
+    return { command: path.posix.join(resinHome, "bin", "resin"), args: ["mcp"] };
+  }
+  return { command: nodePath, args: [path.win32.join(resinHome, "bin", "resin.mjs"), "mcp"] };
+}
+
+/** Windows paths compare case-insensitively; POSIX paths exactly. */
+function samePath(a, b, platform) {
+  return platform === "win32" ? String(a).toLowerCase() === String(b).toLowerCase() : a === b;
+}
+
+/** Does a JSON `mcpServers` entry launch `expected` (every expected arg present, in order)? */
+export function jsonLaunchMatches(server, expected, platform = process.platform) {
+  if (!server || !samePath(server.command, expected.command, platform)) return false;
+  if (!Array.isArray(server.args)) return false;
+  let from = 0;
+  for (const arg of expected.args) {
+    const index = server.args.findIndex(
+      (candidate, position) => position >= from && samePath(candidate, arg, platform),
+    );
+    if (index < 0) return false;
+    from = index + 1;
+  }
+  return true;
+}
+
+/** True when a TOML document holds `value` as a basic ("…") or literal ('…') string. */
+function tomlHasString(toml, value) {
+  return toml.includes(JSON.stringify(value)) || toml.includes(`'${value}'`);
+}
+
+/** True when a TOML document sets `command` to `command` as a basic or literal string. */
+export function tomlDeclaresCommand(toml, command) {
+  return (
+    toml.includes(`command = ${JSON.stringify(command)}`) || toml.includes(`command = '${command}'`)
+  );
+}
+
+/** Does a Codex TOML config launch `expected`? */
+export function tomlLaunchMatches(toml, expected) {
+  return (
+    tomlDeclaresCommand(toml, expected.command) &&
+    expected.args.every((arg) => tomlHasString(toml, arg))
+  );
+}
+
 export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
   const cleanHome = path.join(sandboxDir, "clean-home");
   const cleanWorkspace = path.join(sandboxDir, "clean-workspace");
@@ -783,6 +1132,13 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
   delete cleanEnv.CODEX_HOME;
   delete cleanEnv.OMP_HOME;
   delete cleanEnv.RESIN_OMP_HOME;
+  if (process.platform === "win32") {
+    // Windows harnesses and Resin resolve per-user state from the profile folders too.
+    cleanEnv.APPDATA = path.join(cleanHome, "AppData", "Roaming");
+    cleanEnv.LOCALAPPDATA = path.join(cleanHome, "AppData", "Local");
+    fs.mkdirSync(cleanEnv.APPDATA, { recursive: true });
+    fs.mkdirSync(cleanEnv.LOCALAPPDATA, { recursive: true });
+  }
 
   let daemonChild = null;
 
@@ -838,7 +1194,8 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     }
 
     // Invariant 4: Generated OMP and Codex configs each contain one canonical stdio resin entry and no legacy localhost SSE
-    const expectedMcpCommand = path.join(resinHome, "bin", "resin");
+    const expectedLaunch = expectedMcpLaunch(resinHome);
+    const expectedMcpCommand = [expectedLaunch.command, ...expectedLaunch.args].join(" ");
     const ompConfigCandidates = [
       path.join(cleanWorkspace, ".omp", "agent", "mcp.json"),
       path.join(cleanWorkspace, ".omp", "mcp.json"),
@@ -859,13 +1216,9 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
         `OMP config at ${ompConfigFile} missing 'resin' mcpServers entry: ${ompConfigRaw}`,
       );
     }
-    if (
-      ompServer.command !== expectedMcpCommand ||
-      !Array.isArray(ompServer.args) ||
-      !ompServer.args.includes("mcp")
-    ) {
+    if (!jsonLaunchMatches(ompServer, expectedLaunch)) {
       throw new Error(
-        `OMP mcpServers entry does not use installed command '${expectedMcpCommand}' with 'mcp' arg: ${JSON.stringify(ompServer)}`,
+        `OMP mcpServers entry does not launch the installed '${expectedMcpCommand}': ${JSON.stringify(ompServer)}`,
       );
     }
     if (
@@ -900,12 +1253,9 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
         `Codex config at ${codexConfigFile} missing [mcp_servers.resin] section: ${codexConfigRaw}`,
       );
     }
-    if (
-      !codexConfigRaw.includes(`command = "${expectedMcpCommand}"`) ||
-      !codexConfigRaw.includes('"mcp"')
-    ) {
+    if (!tomlLaunchMatches(codexConfigRaw, expectedLaunch)) {
       throw new Error(
-        `Codex config at ${codexConfigFile} does not contain installed command '${expectedMcpCommand}' with args ['mcp']: ${codexConfigRaw}`,
+        `Codex config at ${codexConfigFile} does not launch the installed '${expectedMcpCommand}': ${codexConfigRaw}`,
       );
     }
     if (
@@ -979,16 +1329,19 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       "utf8",
     );
 
-    // Invariant 3: Daemon readiness works through local socket
+    // Invariant 3: Daemon readiness works through the local endpoint (Unix socket on POSIX,
+    // owner-only named pipe on Windows).
     const daemonBin = path.join(installedRoot, "bin", "resin-daemon");
     const socketPath = path.join(stateDir, "daemon.sock");
+    const endpoint = daemonEndpointArgs(socketPath);
     daemonChild = spawn(
       process.execPath,
-      [daemonBin, "--foreground", "--home", cleanHome, "--socket", socketPath],
+      [daemonBin, "--foreground", "--home", cleanHome, ...endpoint],
       {
         cwd: cleanWorkspace,
         env: cleanEnv,
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
       },
     );
     daemonChild.stdout.resume();
@@ -996,7 +1349,7 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
 
     const statusResult = await waitFor(
       () => {
-        const res = runNode(daemonBin, ["--status", "--home", cleanHome, "--socket", socketPath], {
+        const res = runNode(daemonBin, ["--status", "--home", cleanHome, ...endpoint], {
           cwd: cleanWorkspace,
           env: cleanEnv,
           timeoutMs: 3000,
@@ -1007,31 +1360,40 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     );
     if (!statusResult) {
       throw new Error(
-        `Packaged daemon in clean home did not respond over local socket ${socketPath}`,
+        `Packaged daemon in clean home did not respond over its local endpoint (${endpoint.length > 0 ? socketPath : "named pipe"})`,
       );
     }
 
-    const diagResult = runNode(
-      daemonBin,
-      ["--diagnostics", "--home", cleanHome, "--socket", socketPath],
-      { cwd: cleanWorkspace, env: cleanEnv, timeoutMs: 5000 },
-    );
+    const diagResult = runNode(daemonBin, ["--diagnostics", "--home", cleanHome, ...endpoint], {
+      cwd: cleanWorkspace,
+      env: cleanEnv,
+      timeoutMs: 5000,
+    });
     if (diagResult.status !== 0) {
       throw new Error(
         `Packaged daemon diagnostics failed: ${diagResult.stderr || diagResult.stdout}`,
       );
     }
+    const windowsIsolation =
+      process.platform === "win32"
+        ? await verifyWindowsDaemonIsolation(installedRoot, resinHome)
+        : undefined;
     fs.appendFileSync(workspaceTranscriptPath, OMP_QUALIFICATION_FIXTURE_LINES, "utf8");
 
     // Invariant 5: the packaged capture runtime normalizes OMP JSONL into SQLite and
     // receives an acknowledgment from the existing mock-cloud batch endpoint.
     const stateDbPath = path.join(resinHome, "data", "qualification-state.db");
-    await ingestPackagedOmpFixture({
-      installedRoot,
-      stateDbPath,
-      transcriptPath: workspaceTranscriptPath,
-      cloudUrl,
-    });
+    // Runs with the clean home's environment: the capture runtime keeps its private values
+    // (redaction key) under the user's Resin home, which must be the sandbox, not the real one.
+    await ingestPackagedOmpFixture(
+      {
+        installedRoot,
+        stateDbPath,
+        transcriptPath: workspaceTranscriptPath,
+        cloudUrl,
+      },
+      { env: cleanEnv },
+    );
     if (receivedObservationBatches.length === 0 && receivedTrajectoryBatches.length === 0) {
       throw new Error("Packaged OMP capture did not reach the mock-cloud batch endpoint");
     }
@@ -1043,7 +1405,7 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       throw new Error(`SQLite state database at ${stateDbPath} is empty`);
     }
 
-    const stopResult = runNode(daemonBin, ["--stop", "--home", cleanHome, "--socket", socketPath], {
+    const stopResult = runNode(daemonBin, ["--stop", "--home", cleanHome, ...endpoint], {
       cwd: cleanWorkspace,
       env: cleanEnv,
       timeoutMs: 5000,
@@ -1065,6 +1427,7 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       canonicalHarnessConfigs: true,
       ompBatchAcknowledged: true,
       sqliteStored: true,
+      ...(windowsIsolation ? { windowsIsolation } : {}),
     };
   } finally {
     if (daemonChild) {
@@ -1074,6 +1437,381 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
       mockServer.close();
     } catch {}
   }
+}
+
+export const DEFAULT_WINDOWS_TASK_NAME = "\\Resin\\ResinDaemon";
+
+/** Split `\Folder\Name` into Get-ScheduledTask's `-TaskPath '\Folder\'` and `-TaskName`. */
+export function splitScheduledTaskName(fullName) {
+  const normalized = fullName.startsWith("\\") ? fullName : `\\${fullName}`;
+  const index = normalized.lastIndexOf("\\");
+  return { taskPath: normalized.slice(0, index + 1), taskName: normalized.slice(index + 1) };
+}
+
+/** Read the per-user Scheduled Task through Windows PowerShell 5.1's ScheduledTasks module. */
+function queryScheduledTask(fullName, env) {
+  const { taskPath, taskName } = splitScheduledTaskName(fullName);
+  const script = [
+    `$task = Get-ScheduledTask -TaskPath ${psQuote(taskPath)} -TaskName ${psQuote(taskName)} -ErrorAction SilentlyContinue`,
+    "if ($null -eq $task) { 'null'; exit 0 }",
+    "[pscustomobject]@{",
+    "  state = [string]$task.State",
+    "  userId = [string]$task.Principal.UserId",
+    "  logonType = [string]$task.Principal.LogonType",
+    "  runLevel = [string]$task.Principal.RunLevel",
+    "  triggers = @($task.Triggers | ForEach-Object { [string]$_.CimClass.CimClassName })",
+    "  executionTimeLimit = [string]$task.Settings.ExecutionTimeLimit",
+    "  actions = @($task.Actions | ForEach-Object { [string]$_.Execute })",
+    "} | ConvertTo-Json -Compress -Depth 4",
+  ].join("\n");
+  const result = runPowerShell(script, { env });
+  if (result.status !== 0) {
+    throw new Error(`Get-ScheduledTask ${fullName} failed: ${result.stderr || result.error}`);
+  }
+  return JSON.parse(result.stdout.trim() || "null");
+}
+
+function unregisterScheduledTask(fullName, env) {
+  const { taskPath, taskName } = splitScheduledTaskName(fullName);
+  runPowerShell(
+    `Unregister-ScheduledTask -TaskPath ${psQuote(taskPath)} -TaskName ${psQuote(taskName)} -Confirm:$false -ErrorAction SilentlyContinue`,
+    { env },
+  );
+}
+
+function parseJsonOutput(result, label) {
+  const text = result.stdout.trim();
+  const start = text.indexOf("{");
+  if (start < 0) {
+    throw new Error(`${label} printed no JSON: ${result.stderr || text}`);
+  }
+  return JSON.parse(text.slice(start));
+}
+
+function readDaemonPid(resinHome) {
+  try {
+    const pid = Number.parseInt(
+      fs.readFileSync(path.join(resinHome, "state", "daemon.pid"), "utf8").trim(),
+      10,
+    );
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Native Windows service lifecycle, run against a Resin home that install.ps1 installed
+ * (the Scheduled Task launches the installed `bin\resin-daemon.mjs`, which an extracted
+ * artifact does not have): `resin init` registers the per-user logon Scheduled Task and
+ * starts it; the daemon answers on its owner-only pipe; a killed daemon is respawned by the
+ * supervisor; `resin service stop|start` toggle it. The service is left running so the caller
+ * can probe it and then prove `resin uninstall` removes it. Refuses to touch a task that
+ * already exists.
+ */
+export async function qualifyWindowsService(options) {
+  const resinHome = path.resolve(options.resinHome);
+  const userHome = path.resolve(
+    options.userHome ??
+      (path.basename(resinHome) === ".resin" ? path.dirname(resinHome) : os.homedir()),
+  );
+  const installedRoot = path.join(resinHome, "current");
+  const taskName =
+    options.taskName ?? process.env.RESIN_WINDOWS_TASK_NAME ?? DEFAULT_WINDOWS_TASK_NAME;
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-windows-service-"));
+  const env = {
+    ...process.env,
+    HOME: userHome,
+    USERPROFILE: userHome,
+    RESIN_HOME: resinHome,
+    RESIN_WINDOWS_TASK_NAME: taskName,
+    NODE_ENV: "production",
+    RESIN_CLOUD_SYNC_ENABLED: "false",
+    RESIN_TELEMETRY_ENABLED: "false",
+  };
+  delete env.NODE_PATH;
+  delete env.VITEST;
+  delete env.RESIN_RELEASE_MODE;
+  delete env.RESIN_LOCAL_SOURCE_ROOT;
+
+  if (!fs.existsSync(path.join(installedRoot, "apps", "cli", "dist", "index.js"))) {
+    throw new Error(`No installed Resin release at ${installedRoot}; run install.ps1 first`);
+  }
+  if (queryScheduledTask(taskName, env) !== null) {
+    throw new Error(
+      `Scheduled Task ${taskName} already exists; refusing to replace it (set RESIN_WINDOWS_TASK_NAME to a test task name)`,
+    );
+  }
+
+  const cli = path.join(installedRoot, "bin", "resin");
+  const run = (args, timeoutMs = 30_000) =>
+    runNode(cli, [...args], { cwd: workDir, env, timeoutMs });
+  const status = () =>
+    parseJsonOutput(run(["status", "--json", "--home", userHome]), "resin status");
+  const healthy = (summary) =>
+    summary.service?.installed === true &&
+    summary.service?.active === true &&
+    summary.ipc?.responsive === true;
+
+  try {
+    // The candidate is test-signed, which production-mode init rejects; local-test release
+    // mode runs the same init with service setup against the installed release.
+    const initCli = createQualificationCliDriver(installedRoot, workDir, { service: true });
+    const init = runNode(
+      initCli,
+      [
+        "init",
+        "--non-interactive",
+        "--auto-approve",
+        "--local-only",
+        `--home=${userHome}`,
+        `--workspace=${workDir}`,
+        "--json",
+      ],
+      { cwd: workDir, env, timeoutMs: 120_000 },
+    );
+    if (init.status !== 0) {
+      throw new Error(
+        `resin init with service setup failed (exit ${init.status}): ${init.stdout}\n${init.stderr}`,
+      );
+    }
+
+    const task = queryScheduledTask(taskName, env);
+    if (!task) throw new Error(`resin init did not register Scheduled Task ${taskName}`);
+    const username = os.userInfo().username.toLowerCase();
+    const taskProblems = [
+      !task.userId.toLowerCase().endsWith(username) && `runs as ${task.userId}, not ${username}`,
+      task.logonType !== "Interactive" && `logon type ${task.logonType} (expected Interactive)`,
+      task.runLevel !== "Limited" && `run level ${task.runLevel} (expected Limited)`,
+      !task.triggers.includes("MSFT_TaskLogonTrigger") &&
+        `triggers ${task.triggers.join(",")} lack a logon trigger`,
+      task.executionTimeLimit !== "PT0S" &&
+        `execution time limit ${task.executionTimeLimit} (expected PT0S)`,
+      !task.actions.some((action) => /resin-service-host\.exe$/i.test(action)) &&
+        `actions ${task.actions.join(",")} do not launch resin-service-host.exe`,
+    ].filter(Boolean);
+    if (taskProblems.length > 0) {
+      throw new Error(`Scheduled Task ${taskName} is misconfigured: ${taskProblems.join("; ")}`);
+    }
+
+    const started = await waitFor(
+      () => {
+        const summary = status();
+        return healthy(summary) ? summary : false;
+      },
+      { timeoutMs: 60_000, intervalMs: 500 },
+    );
+    if (started.service.platform !== "windows-task") {
+      throw new Error(`resin status reports service platform ${started.service.platform}`);
+    }
+    // A local-only install has no cloud consent for the default-on metadata telemetry, which
+    // `resin status` counts as degraded on every platform; turn it off (the daemon reloads over
+    // IPC), then require an overall healthy status before the deliberate crash below, whose
+    // recovery record keeps the status degraded for the crash window.
+    const privacy = run(["privacy", "telemetry", "disable", "--json", "--home", userHome]);
+    if (privacy.status !== 0) {
+      throw new Error(
+        `resin privacy telemetry disable failed: ${privacy.stderr || privacy.stdout}`,
+      );
+    }
+    await waitFor(() => status().status === "healthy", { timeoutMs: 60_000, intervalMs: 1000 });
+    const isolation = await verifyWindowsDaemonIsolation(installedRoot, resinHome);
+
+    // Crash: kill the daemon process outright; the supervisor must bring a new one up.
+    const crashedPid = await waitFor(() => readDaemonPid(resinHome), { timeoutMs: 15_000 });
+    const kill = runPowerShell(`Stop-Process -Id ${crashedPid} -Force -ErrorAction Stop`, { env });
+    if (kill.status !== 0) {
+      throw new Error(`Stop-Process ${crashedPid} failed: ${kill.stderr || kill.error}`);
+    }
+    const restartedPid = await waitFor(
+      () => {
+        const pid = readDaemonPid(resinHome);
+        return pid && pid !== crashedPid && processAlive(pid) && healthy(status()) ? pid : false;
+      },
+      { timeoutMs: 90_000, intervalMs: 1000 },
+    );
+
+    const stop = run(["service", "stop", "--json", "--home", userHome]);
+    if (stop.status !== 0) {
+      throw new Error(`resin service stop failed: ${stop.stderr || stop.stdout}`);
+    }
+    await waitFor(
+      () => {
+        const summary = status();
+        return summary.service?.active === false && summary.ipc?.responsive !== true;
+      },
+      { timeoutMs: 30_000, intervalMs: 500 },
+    );
+    const start = run(["service", "start", "--json", "--home", userHome]);
+    if (start.status !== 0) {
+      throw new Error(`resin service start failed: ${start.stderr || start.stdout}`);
+    }
+    await waitFor(() => healthy(status()), { timeoutMs: 60_000, intervalMs: 500 });
+
+    return {
+      backend: "windows-task",
+      taskName,
+      taskRegistered: true,
+      logonTrigger: true,
+      leastPrivilege: true,
+      noExecutionTimeLimit: true,
+      started: true,
+      statusHealthy: true,
+      pipeIsolation: isolation,
+      crashRestart: true,
+      crashedPid,
+      restartedPid,
+      stopStart: true,
+    };
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+}
+
+/**
+ * Add the installed-product service lifecycle to a Windows lane's native evidence. The lane
+ * evidence must already have passed, and the installed release must be the qualified one.
+ */
+export async function recordWindowsServiceQualification(lane, options) {
+  const outputDir = path.resolve(options.outputDir);
+  const evidencePath = path.join(outputDir, `${lane}.json`);
+  const write = (evidence) => {
+    fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+    return evidence;
+  };
+  if (!isWindowsLane(lane)) {
+    throw new Error(`--windows-service applies to windows lanes only, not '${lane}'`);
+  }
+  const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+  if (evidence.passed !== true || evidence.status !== "QUALIFIED") {
+    throw new Error(`${lane} evidence at ${evidencePath} is ${evidence.status}; qualify it first`);
+  }
+  try {
+    const installed = JSON.parse(
+      fs.readFileSync(
+        path.join(path.resolve(options.resinHome), "current", "platform.json"),
+        "utf8",
+      ),
+    );
+    const qualified = evidence.release?.platformMetadata ?? {};
+    if (
+      installed.releaseVersion !== qualified.releaseVersion ||
+      installed.platform !== qualified.platform ||
+      installed.arch !== qualified.arch
+    ) {
+      throw new Error(
+        `Installed release ${JSON.stringify(installed)} is not the qualified artifact ${JSON.stringify(qualified)}`,
+      );
+    }
+    const windowsService = await qualifyWindowsService(options);
+    return write({
+      ...evidence,
+      endedAt: new Date().toISOString(),
+      checks: { ...evidence.checks, windowsService },
+    });
+  } catch (error) {
+    return write({
+      ...evidence,
+      endedAt: new Date().toISOString(),
+      status: "FAILED",
+      passed: false,
+      error: `Windows service lifecycle: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
+/**
+ * Steps that import code from the packaged artifact. They never run in the qualification
+ * process: on Windows a loaded `.node` addon (and any module that pulls it in) stays mapped
+ * until its process exits, and a mapped image cannot be deleted, so sandbox cleanup (and
+ * `resin uninstall` of an installed home) would fail. Each step runs in a child process that
+ * exits before anything is removed.
+ */
+const PACKAGED_TASKS = Object.freeze({
+  "verify-windows-isolation": (args) => verifyWindowsDaemonIsolationInProcess(args),
+  "ingest-omp-fixture": (args) => ingestPackagedOmpFixtureInProcess(args),
+  "probe-harnesses": (args) => probeHarnessesInProcess(args),
+});
+
+const CHILD_RESULT_MARKER = "@@RESIN_PACKAGED_TASK_RESULT@@";
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+
+/**
+ * Run a PACKAGED_TASKS step in a child node process and resolve with its result. Async on
+ * purpose: steps such as the OMP ingest talk to this process's mock cloud server.
+ */
+export function runPackagedTask(task, args, options = {}) {
+  if (!(task in PACKAGED_TASKS)) throw new Error(`Unknown packaged task '${task}'`);
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [SCRIPT_PATH, "--packaged-task", task, "--packaged-task-args", JSON.stringify(args)],
+      {
+        cwd: options.cwd,
+        env: options.env ?? process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    const timer = setTimeout(() => child.kill(), options.timeoutMs ?? 120_000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      const line = stdout.split(/\r?\n/).find((entry) => entry.startsWith(CHILD_RESULT_MARKER));
+      if (!line) {
+        reject(
+          new Error(`Packaged task ${task} exited ${code} without a result: ${stderr || stdout}`),
+        );
+        return;
+      }
+      const outcome = JSON.parse(line.slice(CHILD_RESULT_MARKER.length));
+      if (outcome.ok) resolve(outcome.value);
+      else reject(new Error(outcome.error));
+    });
+  });
+}
+
+async function runPackagedTaskInThisProcess(task, rawArgs) {
+  let outcome;
+  try {
+    outcome = { ok: true, value: (await PACKAGED_TASKS[task](JSON.parse(rawArgs))) ?? null };
+  } catch (error) {
+    outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  process.stdout.write(`\n${CHILD_RESULT_MARKER}${JSON.stringify(outcome)}\n`);
+  return outcome.ok;
+}
+
+function verifyWindowsDaemonIsolation(installedRoot, resinHome) {
+  return runPackagedTask("verify-windows-isolation", { installedRoot, resinHome });
+}
+
+function ingestPackagedOmpFixture(args, options = {}) {
+  return runPackagedTask("ingest-omp-fixture", args, options);
+}
+
+function probeHarnesses(installedRoot, env) {
+  return runPackagedTask("probe-harnesses", { installedRoot }, { env });
 }
 
 async function reservePort() {
@@ -1093,7 +1831,7 @@ async function reservePort() {
   });
 }
 
-async function probeHarnesses(installedRoot) {
+async function probeHarnessesInProcess({ installedRoot }) {
   const registryModule = path.join(installedRoot, "apps", "cli", "dist", "harness-registry.js");
   const contractsModule = path.join(
     installedRoot,
@@ -1218,7 +1956,7 @@ export async function qualifyPlatformLane(lane, options = {}) {
     const resolved = resolveAsset(releaseDir, lane, manifest);
     const installedRoot = extractRelease(resolved.archivePath, path.join(sandboxDir, "extracted"));
     const platformMetadata = validatePlatformMetadata(installedRoot, lane, manifest);
-    const artifactLayout = validateArtifactLayout(installedRoot);
+    const artifactLayout = validateArtifactLayout(installedRoot, lane);
     let status = "ARTIFACT_VALIDATED";
     let checks = {
       artifactDigest: true,
@@ -1228,7 +1966,16 @@ export async function qualifyPlatformLane(lane, options = {}) {
     let harnesses = [];
     if (mode === "native") {
       baseEvidence.execution.runtimeExercised = true;
+      const windows = isWindowsLane(lane);
+      let windowsHost;
+      if (windows) {
+        requireRealNativePrebuilds(artifactLayout, lane.slice("windows-".length));
+        windowsHost = probeWindowsShells();
+      }
       const cli = qualifyCli(installedRoot, sandboxDir, manifest);
+      const windowsLaunchers = windows
+        ? qualifyWindowsLaunchers(installedRoot, sandboxDir, manifest, windowsHost)
+        : undefined;
       const daemon = await qualifyDaemon(installedRoot, sandboxDir);
       const mcp = await qualifyMcp(installedRoot, sandboxDir);
       const cleanHome = await qualifyCleanHome(installedRoot, sandboxDir, manifest);
@@ -1240,6 +1987,7 @@ export async function qualifyPlatformLane(lane, options = {}) {
         daemon,
         mcp,
         cleanHome,
+        ...(windows ? { windowsHost, windowsLaunchers } : {}),
       };
     }
 
@@ -1284,8 +2032,49 @@ export async function qualifyPlatformLane(lane, options = {}) {
     );
     return evidence;
   } finally {
-    fs.rmSync(sandboxDir, { recursive: true, force: true });
+    if (process.env.RESIN_QUALIFICATION_KEEP_SANDBOX === "1") {
+      process.stderr.write(`Keeping qualification sandbox ${sandboxDir}\n`);
+    } else {
+      // Windows may still hold handles from just-exited daemon processes for a moment.
+      fs.rmSync(sandboxDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    }
   }
+}
+
+/**
+ * What a qualification run on this host would do, without extracting or running anything.
+ * `node scripts/platform-qualification.mjs --detect` prints it.
+ */
+export function describeQualificationPlan(options = {}) {
+  const host = hostEnvironment();
+  const lane = options.lane ?? host.lane;
+  const mode = options.mode ?? "native";
+  const windows = lane !== null && isWindowsLane(lane);
+  const native = mode === "native" && lane !== null && lane === host.lane;
+  const plannedChecks = ["artifactDigest", "platformMetadata", "artifactLayout"];
+  if (native) {
+    if (windows) plannedChecks.push("windowsHost", "nativePrebuilds", "windowsLaunchers");
+    plannedChecks.push("packagedCli", "daemon", "mcp", "cleanHome");
+  }
+  return {
+    schemaVersion: "2.0.0",
+    host,
+    lane,
+    supported: lane !== null && REQUIRED_QUALIFICATION_LANES.includes(lane),
+    mode,
+    native,
+    daemonEndpoint: windows ? "named-pipe" : "unix-socket",
+    requiredArtifactFiles: lane ? [...requiredArtifactFiles(lane)] : [],
+    windowsShells: process.platform === "win32" ? probeWindowsShells() : null,
+    // After install.ps1: `--windows-service --resin-home=<home>` adds checks.windowsService.
+    followUpChecks: windows ? ["windowsService"] : [],
+    windowsTaskName: windows
+      ? (options.windowsTaskName ??
+        process.env.RESIN_WINDOWS_TASK_NAME ??
+        DEFAULT_WINDOWS_TASK_NAME)
+      : null,
+    plannedChecks,
+  };
 }
 
 export async function runPlatformQualification(options = {}) {
@@ -1330,19 +2119,42 @@ function parseArgs(argv) {
     } else if (arg === "--mode") options.mode = argv[++index];
     else if (arg.startsWith("--mode=")) {
       options.mode = arg.slice("--mode=".length);
-    }
+    } else if (arg === "--packaged-task") options.packagedTask = argv[++index];
+    else if (arg === "--packaged-task-args") options.packagedTaskArgs = argv[++index];
+    else if (arg === "--windows-service") options.windowsService = true;
+    else if (arg.startsWith("--resin-home=")) options.resinHome = arg.slice("--resin-home=".length);
+    else if (arg.startsWith("--user-home=")) options.userHome = arg.slice("--user-home=".length);
+    else if (arg.startsWith("--windows-task-name=")) {
+      options.windowsTaskName = arg.slice("--windows-task-name=".length);
+    } else if (arg === "--detect" || arg === "--dry-run") options.detect = true;
   }
   return options;
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
-) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const parsed = parseArgs(process.argv.slice(2));
-  if (parsed.emitMatrix) {
+  if (parsed.packagedTask) {
+    const ok = await runPackagedTaskInThisProcess(parsed.packagedTask, parsed.packagedTaskArgs);
+    process.exitCode = ok ? 0 : 1;
+  } else if (parsed.emitMatrix) {
     process.stdout.write(`${emitSupportMatrix({ format: "json" })}\n`);
     process.exitCode = 0;
+  } else if (parsed.windowsService) {
+    const lane = parsed.lane ?? detectHostLane();
+    const evidence = await recordWindowsServiceQualification(lane, {
+      outputDir: parsed.outputDir ?? "dist/qualification",
+      resinHome: parsed.resinHome ?? process.env.RESIN_HOME ?? path.join(os.homedir(), ".resin"),
+      userHome: parsed.userHome,
+      taskName: parsed.windowsTaskName,
+    });
+    process.stdout.write(
+      `${JSON.stringify(evidence.checks.windowsService ?? evidence.error, null, 2)}\n`,
+    );
+    process.exitCode = evidence.passed ? 0 : 1;
+  } else if (parsed.detect) {
+    const plan = describeQualificationPlan(parsed);
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+    process.exitCode = plan.supported ? 0 : 1;
   } else {
     const result = await runPlatformQualification(parsed);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

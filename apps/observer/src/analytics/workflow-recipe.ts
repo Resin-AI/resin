@@ -9,6 +9,7 @@ import { compareRecordedEvents } from "./recorded-event-order.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  applyWorkflowDialectUpgrades,
   isWorkflowCallEvent,
   isWorkflowResultEvent,
   readWorkflowCallCarrier,
@@ -40,9 +41,19 @@ const callIdOf = (event: RecordableEvent): string | undefined =>
 
 export function recordCallsFromEvents(
   workflowId: string,
-  events: readonly RecordableEvent[],
-  options: CaptureOptions = {},
+  recordedEvents: readonly RecordableEvent[],
+  recordedOptions: CaptureOptions = {},
 ): RecordedRecipe | undefined {
+  // A call whose shell dialect a later record proved is read as proven everywhere below.
+  const sources = [...recordedEvents, ...(recordedOptions.supportingEvents ?? [])];
+  const events = applyWorkflowDialectUpgrades(recordedEvents, sources);
+  const options: CaptureOptions =
+    recordedOptions.supportingEvents === undefined
+      ? recordedOptions
+      : {
+          ...recordedOptions,
+          supportingEvents: applyWorkflowDialectUpgrades(recordedOptions.supportingEvents, sources),
+        };
   const ordered = [...events].sort(compareRecordedEvents);
   const first = ordered.find(
     (event) =>
@@ -93,6 +104,8 @@ export function recordCallsFromEvents(
           carrier.connection ?? discovered?.connection ?? event.metadata?.connection ?? null,
           carrier.program?.kind ?? null,
           carrier.program?.argument ?? null,
+          // Runs in two shell dialects are never one job's repetitions.
+          carrier.program?.dialect ?? (carrier.program?.unprovenDialect ? "unproven" : null),
           Object.keys(carrier.origins).sort(),
         ]),
       });

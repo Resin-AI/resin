@@ -16,6 +16,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
+import {
+  ensurePrivateDirectoryBoundary,
+  useWindowsSecurityPrebuildDirectory,
+} from "@resin/windows-security";
 
 import {
   type PlatformInfo,
@@ -55,6 +59,14 @@ import {
   parseTrustedKeysJsonOverride,
   resolveProductionRelease,
 } from "./release-client.js";
+import {
+  type WindowsPathRunner,
+  type WindowsUserPathResult,
+  addWindowsUserPath,
+  removeWindowsUserPath,
+  resolveLauncherInvocation,
+  windowsLauncherPaths,
+} from "./windows-install.js";
 export { PRODUCTION_RELEASE_TRUST_RECORD } from "../release-trust.js";
 
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 15_000;
@@ -174,6 +186,8 @@ export interface BootstrapInstallOptions {
   readonly readinessVerifier?: DaemonReadinessVerifier;
   readonly daemonReadinessTimeoutMs?: number;
   readonly daemonReadinessRetryIntervalMs?: number;
+  /** Runs the PowerShell that edits the per-user PATH on native Windows (tests inject one). */
+  readonly windowsPathRunner?: WindowsPathRunner;
 }
 
 export interface BootstrapInstallResult {
@@ -214,7 +228,8 @@ export async function defaultHealthCheckRunner(
 
   let child: child_process.ChildProcess;
   try {
-    child = child_process.spawn(cliPath, args, {
+    const invocation = resolveLauncherInvocation(cliPath, args);
+    child = child_process.spawn(invocation.command, invocation.args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, ...(options.env || {}) },
     });
@@ -449,7 +464,8 @@ export async function defaultOnboardingRunner(
 
   let child: child_process.ChildProcess;
   try {
-    child = child_process.spawn(cliPath, args, {
+    const invocation = resolveLauncherInvocation(cliPath, args);
+    child = child_process.spawn(invocation.command, invocation.args, {
       stdio,
       env: { ...process.env, ...(options.env || {}) },
     });
@@ -691,6 +707,7 @@ async function rollbackBootstrapActivation(options: {
       path.join(resinHome, "bin", "resin"),
       path.join(resinHome, "bin", "resin-daemon"),
       path.join(resinHome, "bin", "resin-mcp"),
+      ...windowsLauncherPaths(resinHome),
     ]) {
       if (await fsBridge.exists(candidate)) {
         await fsBridge.unlink(candidate);
@@ -800,7 +817,7 @@ export async function configureShellPath(
           ? path.dirname(options.resinHome)
           : options.resinHome
         : undefined) ??
-      env.HOME ??
+      posixHome(env) ??
       os.homedir(),
   );
 
@@ -930,6 +947,45 @@ export async function configureShellPath(
 }
 
 /**
+ * Points the bundled `@resin/windows-security` loader at the verified release's own prebuild
+ * (the standalone helper has no prebuilds next to it) and makes the Resin home a private
+ * directory boundary: owner-only protected DACL, validated or repaired, and refused when another
+ * account owns it. Runs before activation, so a failure leaves the previous release active.
+ */
+export function secureWindowsResinHome(resinHome: string, versionDir: string): void {
+  const prebuildDir = path.join(
+    versionDir,
+    "node_modules",
+    "@resin",
+    "windows-security",
+    "prebuilds",
+    `win32-${process.arch}`,
+  );
+  try {
+    useWindowsSecurityPrebuildDirectory(prebuildDir);
+  } catch {
+    // Already loaded from this CLI's own package; otherwise the boundary call below reports the
+    // missing helper.
+  }
+  try {
+    ensurePrivateDirectoryBoundary(resinHome);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? String(error.code) : undefined;
+    throw new Error(
+      `Cannot make ${resinHome} private to the current user${code ? ` (${code})` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
+ * `HOME` locates the POSIX home. On Windows it is often a Git-Bash/MSYS value that differs from
+ * the profile directory, so native installs always use %USERPROFILE% (os.homedir()).
+ */
+function posixHome(env: Record<string, string | undefined>): string | undefined {
+  return process.platform === "win32" ? undefined : env.HOME;
+}
+
+/**
  * Executes standalone bootstrap installation.
  */
 export async function bootstrapInstall(
@@ -965,9 +1021,11 @@ export async function bootstrapInstall(
     const targetPlatform: NodeJS.Platform =
       p.os === "wsl"
         ? "linux"
-        : p.os === "darwin" || p.os === "linux" || p.os === "win32"
-          ? p.os
-          : "linux";
+        : p.os === "windows"
+          ? "win32"
+          : p.os === "darwin" || p.os === "linux" || p.os === "win32"
+            ? p.os
+            : "linux";
     platformInfo = detectPlatform({
       platform: targetPlatform,
       arch: normalizedArch,
@@ -998,7 +1056,7 @@ export async function bootstrapInstall(
         ? path.dirname(options.resinHome)
         : options.resinHome
       : undefined) ??
-    env.HOME ??
+    posixHome(env) ??
     os.homedir();
   const resinHome = options.resinHome ?? env.RESIN_HOME ?? path.join(homeDir, ".resin");
   const downloadsDir = path.join(resinHome, "downloads");
@@ -1016,7 +1074,13 @@ export async function bootstrapInstall(
     createUserServiceManager({
       homeDir,
       platform:
-        platformInfo.os === "darwin" ? "launchd" : platformInfo.os === "wsl" ? "wsl" : "systemd",
+        platformInfo.os === "darwin"
+          ? "launchd"
+          : platformInfo.os === "wsl"
+            ? "wsl"
+            : platformInfo.os === "windows"
+              ? "windows-task"
+              : "systemd",
       resinHome,
       fsBridge,
       runner: serviceRunner,
@@ -1187,6 +1251,12 @@ export async function bootstrapInstall(
     fsBridge,
     logger: isVerbose ? log : undefined,
   });
+  // Step 6.5 (native Windows): load the Windows security helper from the release just verified
+  // and extracted, then make the Resin home owner-only (inherited by everything inside it).
+  if (process.platform === "win32") {
+    secureWindowsResinHome(resinHome, installResult.versionDir);
+  }
+
   // Step 7: Atomic version switch
   logVerbose(`==> Activating version v${release.version}...`);
   const switchResult = await switchActiveVersion({
@@ -1197,7 +1267,12 @@ export async function bootstrapInstall(
   });
   // Step 8: Run health check on newly installed version via public bin path
   logVerbose("==> Running health check on active version via public bin path...");
-  const publicBinPath = path.join(resinHome, "bin", "resin");
+  // Windows activation publishes `bin\resin.mjs` (run through node) next to `bin\resin.cmd`.
+  const publicBinPath = path.join(
+    resinHome,
+    "bin",
+    process.platform === "win32" ? "resin.mjs" : "resin",
+  );
   const checkPath = (await fsBridge.exists(publicBinPath))
     ? publicBinPath
     : installResult.entryPoints.cli;
@@ -1247,9 +1322,29 @@ export async function bootstrapInstall(
   log(`✔ Verified Resin v${release.version} for ${platformInfo.platform}`);
   log(`✔ Installed Resin v${release.version} (${checkPath})`);
 
-  // Step 9.5: Shell PATH configuration for POSIX environments
+  // Step 9.5: PATH configuration (POSIX shell profiles; per-user PATH on native Windows)
   let pathConfig: ShellPathConfigResult | undefined;
-  if (!options.skipPathSetup) {
+  if (!options.skipPathSetup && process.platform === "win32") {
+    const windowsPath: WindowsUserPathResult = await addWindowsUserPath({
+      resinHome,
+      runner: options.windowsPathRunner,
+    });
+    pathConfig = {
+      attempted: windowsPath.attempted,
+      updated: windowsPath.changed,
+      alreadyConfigured: windowsPath.present && !windowsPath.changed,
+      binDir: windowsPath.binDir,
+      profileName: "user PATH (HKCU\\Environment)",
+      error: windowsPath.error,
+    };
+    if (windowsPath.changed) {
+      log(`✔ Added ${windowsPath.binDir} to your user PATH (new terminals pick it up)`);
+    } else if (windowsPath.error) {
+      log(`⚠ Could not add ${windowsPath.binDir} to your user PATH: ${windowsPath.error}`);
+    } else if (isVerbose) {
+      log("ℹ PATH is already configured (user PATH)");
+    }
+  } else if (!options.skipPathSetup) {
     pathConfig = await configureShellPath({
       resinHome,
       homeDir: options.customHome,
@@ -1266,7 +1361,7 @@ export async function bootstrapInstall(
               ? path.dirname(options.resinHome)
               : options.resinHome
             : undefined) ??
-          env.HOME ??
+          posixHome(env) ??
           os.homedir(),
       );
       const displayBin =
@@ -1456,6 +1551,15 @@ export async function bootstrapInstall(
         fsBridge,
         logger: log,
       });
+      if (
+        process.platform === "win32" &&
+        pathConfig?.updated &&
+        rollback.restoredVersion === null &&
+        !rollback.error
+      ) {
+        // A fresh install that rolled back entirely must not leave its PATH entry behind.
+        await removeWindowsUserPath({ resinHome, runner: options.windowsPathRunner });
+      }
       const rollbackDetail = rollback.error ? ` Rollback error: ${rollback.error}.` : "";
       throw new Error(
         `Automatic onboarding failed: ${detail}. Active version restored to ${rollback.restoredVersion ?? "none"}.${rollbackDetail} Rerun the same installer to resume; no separate Resin command is required.`,
@@ -1511,6 +1615,35 @@ export function isMainModule(metaUrl: string = import.meta.url, argv1?: string):
 }
 
 /**
+ * Reads a test trust file for `--trusted-keys-file`: either a key-record array or a
+ * `release-trust.json` written by package-release (`signingKey`) / a trust record
+ * (`trustedKeys`). Returns the key-array JSON `parseTrustedKeysJsonOverride` accepts.
+ */
+export function readTrustedKeysFile(filePath: string): string {
+  const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const toRecord = (value: unknown): { keyId: unknown; publicKeyHex: unknown } => ({
+    keyId: value instanceof Object && "keyId" in value ? value.keyId : undefined,
+    publicKeyHex:
+      value instanceof Object && "publicKeyHex" in value ? value.publicKeyHex : undefined,
+  });
+  let keys: unknown[];
+  if (Array.isArray(parsed)) {
+    keys = parsed;
+  } else if (parsed instanceof Object && "signingKey" in parsed) {
+    keys = [parsed.signingKey];
+  } else if (
+    parsed instanceof Object &&
+    "trustedKeys" in parsed &&
+    Array.isArray(parsed.trustedKeys)
+  ) {
+    keys = parsed.trustedKeys;
+  } else {
+    throw new Error(`Trusted keys file '${filePath}' has no signingKey or trustedKeys.`);
+  }
+  return JSON.stringify(keys.map(toRecord));
+}
+
+/**
  * CLI Runner for standalone invocation.
  */
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -1524,6 +1657,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
   let isInteractive: boolean | undefined;
   let verbose = false;
   let skipPathSetup = false;
+  let trustedKeysFile: string | undefined;
   let json = false;
   let help = false;
 
@@ -1578,6 +1712,15 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
       isInteractive = false;
     } else if (arg === "--allow-insecure-loopback") {
       allowInsecureLoopback = true;
+    } else if (arg === "--trusted-keys-file") {
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("-")) {
+        throw new Error("Missing value for argument: --trusted-keys-file");
+      }
+      trustedKeysFile = argv[++i];
+    } else if (arg.startsWith("--trusted-keys-file=")) {
+      const val = arg.slice("--trusted-keys-file=".length);
+      if (!val) throw new Error("Missing value for argument: --trusted-keys-file");
+      trustedKeysFile = val;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -1600,13 +1743,23 @@ Options:
   --local-only               Skip cloud pairing and configure local-only MCP
   --non-interactive          Disable interactive prompts and onboarding
   --allow-insecure-loopback  Allow HTTP on loopback for testing
+  --trusted-keys-file <path> Trust a test release key (release-trust.json or key array);
+                             only with --allow-insecure-loopback
   --help, -h                 Show this help message
 `);
     process.exit(0);
   }
 
+  if (trustedKeysFile !== undefined && !allowInsecureLoopback) {
+    throw new Error(
+      "--trusted-keys-file is a test-only override and requires --allow-insecure-loopback.",
+    );
+  }
+
   try {
     const result = await bootstrapInstall({
+      trustedKeysJson:
+        trustedKeysFile === undefined ? undefined : readTrustedKeysFile(trustedKeysFile),
       channel,
       channelUrl,
       resinHome,

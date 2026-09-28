@@ -1,6 +1,9 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { checkOwnerOnly } from "@resin/windows-security";
+import { PROBE_ACCESS, probeOpenWithUserSidDisabled } from "@resin/windows-security/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EncryptedVaultSecretStore } from "../src/vault.js";
 
@@ -56,9 +59,15 @@ describe("EncryptedVaultSecretStore", () => {
     });
 
     expect(fs.existsSync(vaultPath)).toBe(true);
-    const stat = fs.statSync(vaultPath);
-    // 0o600 in octal is (stat.mode & 0o777)
-    expect(stat.mode & 0o777).toBe(0o600);
+    if (process.platform === "win32") {
+      // Windows: an owner-only DACL that every other principal is denied by.
+      expect(checkOwnerOnly(vaultPath)).toMatchObject({ ok: true, problems: [] });
+      expect(probeOpenWithUserSidDisabled(vaultPath, PROBE_ACCESS.read).win32Error).toBe(5);
+    } else {
+      const stat = fs.statSync(vaultPath);
+      // 0o600 in octal is (stat.mode & 0o777)
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
 
     // Verify plaintext is not stored raw in the file
     const rawContent = fs.readFileSync(vaultPath, "utf-8");
@@ -133,5 +142,61 @@ describe("EncryptedVaultSecretStore", () => {
     const purgedAll = await store.purgeSecrets();
     expect(purgedAll).toBe(1);
     expect(await store.listMetadata()).toHaveLength(0);
+  });
+});
+
+describe.runIf(process.platform === "win32")("EncryptedVaultSecretStore on Windows", () => {
+  const EVERYONE = "S-1-1-0";
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vault_win_"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function exposeToEveryone(target: string, directory: boolean): void {
+    const grant = directory ? `*${EVERYONE}:(OI)(CI)(F)` : `*${EVERYONE}:(R)`;
+    execFileSync("icacls", [target, "/grant", grant], { stdio: "ignore" });
+  }
+
+  it("hardens an existing exposed vault directory before storing anything in it", async () => {
+    const vaultDir = path.join(tmpDir, "exposed");
+    fs.mkdirSync(vaultDir);
+    exposeToEveryone(vaultDir, true);
+    expect(checkOwnerOnly(vaultDir).ok).toBe(false);
+
+    const vaultPath = path.join(vaultDir, "vault.enc");
+    const store = new EncryptedVaultSecretStore({ vaultPath, passphrase: "p" });
+    await store.setSecret("TOKEN", "secret-value");
+
+    expect(checkOwnerOnly(vaultDir, { requireProtected: true })).toMatchObject({ ok: true });
+    // The vault file carries its own protected owner-only DACL from its creation.
+    expect(checkOwnerOnly(vaultPath, { requireProtected: true })).toMatchObject({ ok: true });
+    expect(probeOpenWithUserSidDisabled(vaultPath, PROBE_ACCESS.read).win32Error).toBe(5);
+    expect(fs.readdirSync(vaultDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(await store.getSecret("TOKEN")).toBe("secret-value");
+  });
+
+  it("repairs an exposed vault file this user owns before reading secrets from it", async () => {
+    const vaultPath = path.join(tmpDir, "vault.enc");
+    const writer = new EncryptedVaultSecretStore({ vaultPath, passphrase: "p" });
+    await writer.setSecret("TOKEN", "secret-value");
+    exposeToEveryone(vaultPath, false);
+    expect(probeOpenWithUserSidDisabled(vaultPath, PROBE_ACCESS.read).ok).toBe(true);
+
+    const reader = new EncryptedVaultSecretStore({ vaultPath, passphrase: "p" });
+    expect(await reader.getSecret("TOKEN")).toBe("secret-value");
+    expect(checkOwnerOnly(vaultPath)).toMatchObject({ ok: true });
+    expect(probeOpenWithUserSidDisabled(vaultPath, PROBE_ACCESS.read).win32Error).toBe(5);
+  });
+
+  it("refuses a vault path that is not a regular file", async () => {
+    const vaultPath = path.join(tmpDir, "vault.enc");
+    fs.mkdirSync(vaultPath);
+    const store = new EncryptedVaultSecretStore({ vaultPath, passphrase: "p" });
+    await expect(store.getSecret("TOKEN")).rejects.toThrow(/not a regular file/);
   });
 });

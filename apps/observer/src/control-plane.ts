@@ -32,6 +32,7 @@ import type {
   ModuleLifecycleState,
 } from "./lifecycle.js";
 import type { JsonObject } from "./normalization/redaction.js";
+import { ensurePrivateDirectory } from "./private-fs.js";
 
 /** Legacy cadence until the effective-state server advertises adaptive support. */
 export const DEFAULT_CONTROL_PLANE_POLL_INTERVAL_MS = CONTROL_PLANE_FAST_POLL_INTERVAL_MS;
@@ -219,7 +220,7 @@ function sameJson<L, R>(left: L, right: R): boolean {
 
 async function writePrivateJsonAtomically<V>(filePath: string, value: V): Promise<void> {
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(path.dirname(filePath));
   try {
     await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     await fs.rename(tempPath, filePath);

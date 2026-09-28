@@ -23,10 +23,15 @@ export async function materializeRecordedHomes(
   for (const name of await fs.readdir(path.join(RECORDED, version))) {
     if (!name.endsWith(".jsonl")) continue;
     const content = (await fs.readFile(path.join(RECORDED, version, name), "utf8"))
-      .replaceAll("<pi-session-dir>", dir)
-      .replaceAll("/workspace/project", project);
+      // Placeholders sit inside JSON strings, so substitute the escaped form (Windows backslashes).
+      .replaceAll("<pi-session-dir>", jsonStringBody(dir))
+      .replaceAll("/workspace/project", jsonStringBody(project));
     const header = JSON.parse(content.split("\n", 1)[0]!) as { id: string; timestamp: string };
     const stamp = header.timestamp.replace(/[:.]/g, "-");
     await fs.writeFile(path.join(dir, `${stamp}_${header.id}.jsonl`), content);
   }
+}
+
+function jsonStringBody(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
 }

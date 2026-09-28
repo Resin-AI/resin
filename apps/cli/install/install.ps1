@@ -1,7 +1,12 @@
 # Resin Standalone Bootstrap Installer for Windows / PowerShell
 # Cryptographically verified, standalone bootstrap installer.
 # Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
-# Helper SHA-256: 67b1b9e9ed2372de268217a9c29383add3ce0bcd2cd742207deaab74fe33a329
+# Helper SHA-256: f4bfc17319e0a1c636559b59ee9caf6a6478e4a367bf74e8238c9eb28071c682
+#
+# Native Windows (Windows PowerShell 5.1 or PowerShell 7+, Node.js >= 22):
+#   irm https://resin.sh/install.ps1 | iex
+# With options (e.g. the legacy WSL2 install):
+#   & ([scriptblock]::Create((irm https://resin.sh/install.ps1))) -UseWsl
 
 [CmdletBinding()]
 param(
@@ -23,6 +28,21 @@ param(
     [Parameter()]
     [switch]$Force,
 
+    [Parameter()]
+    [switch]$UseWsl,
+
+    [Parameter()]
+    [switch]$NoPathUpdate,
+
+    [Parameter()]
+    [switch]$NoOnboarding,
+
+    [Parameter()]
+    [switch]$NonInteractive,
+
+    [Parameter()]
+    [switch]$LocalOnly,
+
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$RemainingArgs
 )
@@ -31,28 +51,41 @@ $ErrorActionPreference = 'Stop'
 
 # Pinned security constants
 $PINNED_HELPER_URL = "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
-$PINNED_HELPER_SHA256 = "67b1b9e9ed2372de268217a9c29383add3ce0bcd2cd742207deaab74fe33a329"
+$PINNED_HELPER_SHA256 = "f4bfc17319e0a1c636559b59ee9caf6a6478e4a367bf74e8238c9eb28071c682"
 $MIN_NODE_VERSION = 22
 
 function Show-ResinHelp {
     Write-Host @"
 Resin Standalone Installer Bootstrap (PowerShell)
 
-Installs the Resin CLI binary and runtime environment.
-On Windows, installation requires WSL2 (Ubuntu or Debian recommended).
+Installs the Resin CLI and its background service for the current user.
+On Windows, Resin installs natively (no WSL2 needed) and requires Node.js >= 22
+(https://nodejs.org or: winget install OpenJS.NodeJS.LTS). Windows x64 and arm64.
+Runs under Windows PowerShell 5.1 and PowerShell 7+. Use -UseWsl for the WSL2 install.
 On Linux/macOS pwsh, installation runs locally with Node.js >= 22.
 
 Usage:
   irm https://resin.sh/install.ps1 | iex
+  & ([scriptblock]::Create((irm https://resin.sh/install.ps1))) [options]
   install.ps1 [options]
 
 Options:
   -Channel <name>              Release channel (e.g. stable, default: stable)
   -ChannelUrl <url>            Override channel manifest URL (testing/enterprise)
-  -ResinHome <path>            Destination directory (default: ~/.resin)
+  -ResinHome <path>            Destination directory (default: %USERPROFILE%\.resin or RESIN_HOME)
+  -NoPathUpdate                Do not add <ResinHome>\bin to the user PATH
+  -NoOnboarding                Install only; skip 'resin init' (device authorization, harness setup)
+  -NonInteractive              Disable interactive prompts and onboarding
+  -LocalOnly                   Skip cloud pairing and configure local-only MCP
+  -UseWsl                      Install into the default WSL2 distribution instead (legacy)
   -DownloadOnly <path>         Download and verify helper script without executing
   -Help, -h, --help            Show this help text and exit
   -Force                       Bypass non-security warnings
+
+Environment:
+  RESIN_HOME                   Resin home directory (same as -ResinHome)
+  RESIN_INSTALL_USE_WSL=1      Same as -UseWsl (for irm | iex)
+  RESIN_NO_PATH_UPDATE=1       Same as -NoPathUpdate (for irm | iex)
 
 Inspect-First Alternative:
   1. Download helper:
@@ -110,38 +143,26 @@ if ($allArgs.Count -gt 0) {
         elseif ($arg -eq '--force' -or $arg -eq '-force') {
             $Force = $true
         }
+        elseif ($arg -eq '--use-wsl') {
+            $UseWsl = $true
+        }
+        elseif ($arg -eq '--no-path-update' -or $arg -eq '--skip-path-setup') {
+            $NoPathUpdate = $true
+        }
+        elseif ($arg -eq '--no-onboarding' -or $arg -eq '--skip-onboarding') {
+            $NoOnboarding = $true
+        }
+        elseif ($arg -eq '--non-interactive') {
+            $NonInteractive = $true
+        }
+        elseif ($arg -eq '--local-only') {
+            $LocalOnly = $true
+        }
     }
 }
 
-if ($Help) {
-    Show-ResinHelp
-    return
-}
-
-# Check operating system platform
-$runningOnWindows = $false
-if ($PSVersionTable.PSVersion.Major -ge 6) {
-    $runningOnWindows = $IsWindows
-} else {
-    $runningOnWindows = ($env:OS -eq 'Windows_NT') -or ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
-}
-
-# Check test mode
-$isTestMode = ($env:RESIN_INSTALL_TEST_ONLY -eq '1')
-
-# Determine helper URL
-$helperUrl = $PINNED_HELPER_URL
-if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_HELPER_URL)) {
-    $helperUrl = $env:RESIN_INSTALL_HELPER_URL
-}
-
-$helperUri = [System.Uri]::new($helperUrl)
-
-# Scheme verification
-if (-not $isTestMode -and $helperUri.Scheme -ne 'https') {
-    Write-Error "Security Error: Helper URL must use HTTPS. Insecure scheme '$($helperUri.Scheme)' is rejected."
-    exit 1
-}
+if ($env:RESIN_INSTALL_USE_WSL -eq '1') { $UseWsl = $true }
+if ($env:RESIN_NO_PATH_UPDATE -eq '1') { $NoPathUpdate = $true }
 
 # SSRF Protection: validate IP address against forbidden/private ranges
 function Test-IsRestrictedIPAddress {
@@ -522,298 +543,392 @@ function Download-HelperBytes {
     }
 }
 
-# Resolve DNS and validate host IPs
-Write-Host "Resolving helper endpoint $($helperUri.Host)..."
-$hostAddresses = [System.Net.Dns]::GetHostAddresses($helperUri.Host)
-if ($null -eq $hostAddresses -or $hostAddresses.Length -eq 0) {
-    Write-Error "DNS resolution failed: no IP addresses found for $($helperUri.Host)"
-    exit 1
-}
-
-$validAddresses = [System.Collections.Generic.List[System.Net.IPAddress]]::new()
-foreach ($addr in $hostAddresses) {
-    $isRestricted = Test-IsRestrictedIPAddress -IP $addr
-    if ($isRestricted) {
-        if ($isTestMode) {
-            $validAddresses.Add($addr)
-        } else {
-            Write-Error "Security Error: Host $($helperUri.Host) resolved to forbidden IP address $($addr.ToString()). Helper acquisition aborted."
-            exit 1
-        }
-    } else {
-        $validAddresses.Add($addr)
-    }
-}
-
-if ($validAddresses.Count -eq 0) {
-    Write-Error "Security Error: No valid public IP addresses found for $($helperUri.Host)."
-    exit 1
-}
-
-$chosenIP = $validAddresses[0]
-
-# Download helper payload
-Write-Host "Downloading verified installer helper from $helperUrl..."
-try {
-    $helperBytes = Download-HelperBytes -Uri $helperUri -TargetIP $chosenIP -IsTest $isTestMode
-} catch {
-    Write-Error "Failed to download installer helper: $_"
-    exit 1
-}
-
-# Compute and verify SHA-256
-$sha256Provider = [System.Security.Cryptography.SHA256]::Create()
-$computedHashBytes = $sha256Provider.ComputeHash($helperBytes)
-$computedHashHex = [System.BitConverter]::ToString($computedHashBytes).Replace('-', '').ToLowerInvariant()
-
-if ($computedHashHex -ne $PINNED_HELPER_SHA256) {
-    Write-Error "Security Error: Helper SHA-256 mismatch!`nExpected: $PINNED_HELPER_SHA256`nActual:   $computedHashHex`nHelper acquisition aborted."
-    exit 1
-}
-
-Write-Host "Helper integrity verified (SHA-256: $computedHashHex)."
-
-# Handle -DownloadOnly inspect flow
-if (-not [string]::IsNullOrWhiteSpace($DownloadOnly)) {
-    $destPath = [System.IO.Path]::GetFullPath($DownloadOnly)
-    $destDir = [System.IO.Path]::GetDirectoryName($destPath)
-    if (-not [string]::IsNullOrWhiteSpace($destDir) -and -not (Test-Path -Path $destDir)) {
-        $null = [System.IO.Directory]::CreateDirectory($destDir)
-    }
-    [System.IO.File]::WriteAllBytes($destPath, $helperBytes)
-    Write-Host "✔ Successfully downloaded and verified Resin install helper."
-    Write-Host "  Location: $destPath"
-    Write-Host "  SHA-256:  $computedHashHex"
-    Write-Host ""
-    Write-Host "To inspect the script before running:"
-    Write-Host "  cat `"$destPath`""
-    Write-Host ""
-    Write-Host "To execute the verified installer:"
-    Write-Host "  node `"$destPath`""
-    exit 0
-}
-
-# Execution flow: Preflight checks
-if ($runningOnWindows) {
-    # Check WSL2 availability
-    $wslCmd = Get-Command wsl.exe -ErrorAction SilentlyContinue
-    if (-not $wslCmd) {
-        Write-Error "Resin requires WSL2 on Windows, but 'wsl.exe' was not found.`nPlease install WSL2 (wsl --install) and try again."
-        exit 1
-    }
-
-    # Verify WSL is responsive and running
+# Node.js major version, or $null when 'node' is missing or unusable.
+function Get-ResinNodeVersion {
+    $nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) { return $null }
     try {
-        $wslStatus = & wsl.exe --status 2>&1
-        $exitCode = $LASTEXITCODE
+        $raw = (& node -v 2>$null | Out-String).Trim()
+    } catch {
+        return $null
+    }
+    $match = [regex]::Match($raw, 'v?(\d+)\.(\d+)\.(\d+)')
+    if (-not $match.Success) { return $null }
+    return [pscustomobject]@{ Major = [int]$match.Groups[1].Value; Raw = $raw }
+}
+
+# Windows processor architecture (x64 / arm64), independent of an emulated PowerShell process.
+function Get-ResinWindowsArchitecture {
+    $machine = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($machine)) { $machine = $env:PROCESSOR_ARCHITECTURE }
+    switch -Regex ($machine) {
+        '^(AMD64|x64)$' { return 'x64' }
+        '^ARM64$' { return 'arm64' }
+        default { return $null }
+    }
+}
+
+# Runs the verified helper and returns its parsed success JSON (throws on any failure).
+function Invoke-ResinHelper {
+    param(
+        [Parameter(Mandatory=$true)][string]$Command,
+        [Parameter(Mandatory=$true)][string[]]$Arguments
+    )
+    # The helper reports progress on stderr. Windows PowerShell 5.1 turns redirected native stderr
+    # into error records, which the script-wide 'Stop' preference would make terminating, so the
+    # call runs under 'Continue': stderr lines are shown as host output (so `*>` logs keep them)
+    # and only stdout (the success JSON) is captured. The exit code decides success.
+    $helperOutput = & {
+        $ErrorActionPreference = 'Continue'
+        & $Command @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                Write-Host $_.ToString()
+            } else {
+                $_
+            }
+        }
+    }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "Installer helper failed with exit code $exitCode."
+    }
+
+    $stdoutStr = if ($helperOutput -is [array]) { ($helperOutput -join "`n").Trim() } else { "$helperOutput".Trim() }
+    if ([string]::IsNullOrWhiteSpace($stdoutStr)) {
+        Write-Error "Installer helper exited with code 0 but emitted no output. Expected success JSON payload."
+    }
+
+    try {
+        $parsedJson = $stdoutStr | ConvertFrom-Json
+    } catch {
+        Write-Error "Installer helper output is not valid JSON: $_`nRaw output:`n$stdoutStr"
+    }
+
+    if ($null -eq $parsedJson -or $parsedJson.success -ne $true -or [string]::IsNullOrWhiteSpace($parsedJson.version)) {
+        Write-Error "Installer helper did not report successful installation. Payload: $stdoutStr"
+    }
+    return $parsedJson
+}
+
+function Invoke-ResinInstall {
+    # Check operating system platform
+    $runningOnWindows = $false
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $runningOnWindows = $IsWindows
+    } else {
+        $runningOnWindows = ($env:OS -eq 'Windows_NT') -or ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+    }
+    $useWslInstall = $runningOnWindows -and $UseWsl
+
+    # Check test mode
+    $isTestMode = ($env:RESIN_INSTALL_TEST_ONLY -eq '1')
+
+    # Expected helper digest: the pin, or (test mode only) an explicit override
+    $expectedHelperSha256 = $PINNED_HELPER_SHA256
+    if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_TEST_HELPER_SHA256)) {
+        $expectedHelperSha256 = $env:RESIN_TEST_HELPER_SHA256.Trim().ToLowerInvariant()
+    }
+
+    # Determine helper URL
+    $helperUrl = $PINNED_HELPER_URL
+    if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_HELPER_URL)) {
+        $helperUrl = $env:RESIN_INSTALL_HELPER_URL
+    }
+    $localHelperPath = $null
+    if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_HELPER_PATH)) {
+        $localHelperPath = [System.IO.Path]::GetFullPath($env:RESIN_INSTALL_HELPER_PATH)
+    }
+
+    $helperUri = [System.Uri]::new($helperUrl)
+
+    # Scheme verification
+    if (-not $isTestMode -and $helperUri.Scheme -ne 'https') {
+        Write-Error "Security Error: Helper URL must use HTTPS. Insecure scheme '$($helperUri.Scheme)' is rejected."
+    }
+
+    if ($null -ne $localHelperPath) {
+        # Test/CI mode: a local helper file (e.g. the repository build) instead of the download
+        Write-Host "Using local installer helper $localHelperPath (test mode)..."
+        $helperBytes = [System.IO.File]::ReadAllBytes($localHelperPath)
+    } else {
+        # Resolve DNS and validate host IPs
+        Write-Host "Resolving helper endpoint $($helperUri.Host)..."
+        $hostAddresses = [System.Net.Dns]::GetHostAddresses($helperUri.Host)
+        if ($null -eq $hostAddresses -or $hostAddresses.Length -eq 0) {
+            Write-Error "DNS resolution failed: no IP addresses found for $($helperUri.Host)"
+        }
+
+        $validAddresses = [System.Collections.Generic.List[System.Net.IPAddress]]::new()
+        foreach ($addr in $hostAddresses) {
+            $isRestricted = Test-IsRestrictedIPAddress -IP $addr
+            if ($isRestricted) {
+                if ($isTestMode) {
+                    $validAddresses.Add($addr)
+                } else {
+                    Write-Error "Security Error: Host $($helperUri.Host) resolved to forbidden IP address $($addr.ToString()). Helper acquisition aborted."
+                }
+            } else {
+                $validAddresses.Add($addr)
+            }
+        }
+
+        if ($validAddresses.Count -eq 0) {
+            Write-Error "Security Error: No valid public IP addresses found for $($helperUri.Host)."
+        }
+
+        $chosenIP = $validAddresses[0]
+
+        # Download helper payload
+        Write-Host "Downloading verified installer helper from $helperUrl..."
+        try {
+            $helperBytes = Download-HelperBytes -Uri $helperUri -TargetIP $chosenIP -IsTest $isTestMode
+        } catch {
+            Write-Error "Failed to download installer helper: $_"
+        }
+    }
+
+    # Compute and verify SHA-256
+    $sha256Provider = [System.Security.Cryptography.SHA256]::Create()
+    $computedHashBytes = $sha256Provider.ComputeHash($helperBytes)
+    $computedHashHex = [System.BitConverter]::ToString($computedHashBytes).Replace('-', '').ToLowerInvariant()
+
+    if ($computedHashHex -ne $expectedHelperSha256) {
+        Write-Error "Security Error: Helper SHA-256 mismatch!`nExpected: $expectedHelperSha256`nActual:   $computedHashHex`nHelper acquisition aborted."
+    }
+
+    Write-Host "Helper integrity verified (SHA-256: $computedHashHex)."
+
+    # Handle -DownloadOnly inspect flow
+    if (-not [string]::IsNullOrWhiteSpace($DownloadOnly)) {
+        $destPath = [System.IO.Path]::GetFullPath($DownloadOnly)
+        $destDir = [System.IO.Path]::GetDirectoryName($destPath)
+        if (-not [string]::IsNullOrWhiteSpace($destDir) -and -not (Test-Path -LiteralPath $destDir)) {
+            $null = [System.IO.Directory]::CreateDirectory($destDir)
+        }
+        [System.IO.File]::WriteAllBytes($destPath, $helperBytes)
+        Write-Host "Successfully downloaded and verified Resin install helper."
+        Write-Host "  Location: $destPath"
+        Write-Host "  SHA-256:  $computedHashHex"
+        Write-Host ""
+        Write-Host "To inspect the script before running:"
+        Write-Host "  Get-Content `"$destPath`""
+        Write-Host ""
+        Write-Host "To execute the verified installer:"
+        Write-Host "  node `"$destPath`""
+        return
+    }
+
+    # Execution flow: Preflight checks
+    if ($useWslInstall) {
+        # Check WSL2 availability
+        $wslCmd = Get-Command wsl.exe -ErrorAction SilentlyContinue
+        if (-not $wslCmd) {
+            Write-Error "Resin -UseWsl requires WSL2, but 'wsl.exe' was not found.`nPlease install WSL2 (wsl --install) and try again, or omit -UseWsl for the native Windows install."
+        }
+
+        # Verify WSL is responsive and running
+        try {
+            $wslStatus = & wsl.exe --status 2>&1
+            $exitCode = $LASTEXITCODE
+        } catch {
+            Write-Error "Failed to execute wsl.exe: $_"
+        }
         if ($exitCode -ne 0) {
             Write-Error "WSL is not properly configured. Please run 'wsl --install' or 'wsl --update'.`n$wslStatus"
-            exit 1
-        }
-    } catch {
-        Write-Error "Failed to execute wsl.exe: $_"
-        exit 1
-    }
-
-    # Check Node.js inside WSL
-    $wslNodeCheck = & wsl.exe --exec node -v 2>&1
-    $wslNodeExit = $LASTEXITCODE
-    if ($wslNodeExit -ne 0) {
-        Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later inside WSL, but 'node' was not found or failed to execute.`nPlease install Node.js >= $MIN_NODE_VERSION inside your default WSL distribution.`nDetails: $wslNodeCheck"
-        exit 1
-    }
-
-    $wslNodeVersionMatch = [regex]::Match($wslNodeCheck.ToString(), 'v?(\d+)\.(\d+)\.(\d+)')
-    if (-not $wslNodeVersionMatch.Success -or [int]$wslNodeVersionMatch.Groups[1].Value -lt $MIN_NODE_VERSION) {
-        Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later inside WSL. Detected: $($wslNodeCheck.ToString().Trim())`nPlease upgrade Node.js inside WSL."
-        exit 1
-    }
-} else {
-    # Non-Windows pwsh: check local Node.js >= 22
-    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $nodeCmd) {
-        Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later, but 'node' was not found in PATH.`nPlease install Node.js >= $MIN_NODE_VERSION and try again."
-        exit 1
-    }
-
-    $nodeVersionRaw = & node -v 2>&1
-    $nodeVersionMatch = [regex]::Match($nodeVersionRaw.ToString(), 'v?(\d+)\.(\d+)\.(\d+)')
-    if (-not $nodeVersionMatch.Success -or [int]$nodeVersionMatch.Groups[1].Value -lt $MIN_NODE_VERSION) {
-        Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later. Detected: $($nodeVersionRaw.ToString().Trim())`nPlease upgrade Node.js."
-        exit 1
-    }
-}
-
-# Create secure temporary directory (fail-closed ACL / permission enforcement)
-$tempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "resin-install-$([System.Guid]::NewGuid().ToString('N'))")
-$null = [System.IO.Directory]::CreateDirectory($tempDir)
-
-if ($runningOnWindows) {
-    try {
-        $acl = Get-Acl -Path $tempDir
-        $acl.SetAccessRuleProtection($true, $false)
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        if ($null -eq $currentUser) {
-            throw "Unable to determine current user SID for ACL enforcement."
-        }
-        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-            $currentUser,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
-            [System.Security.AccessControl.PropagationFlags]::None,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $acl.AddAccessRule($rule)
-        Set-Acl -Path $tempDir -AclObject $acl
-    } catch {
-        Write-Error "Security Error: Failed to enforce owner-only ACLs on temporary directory '$tempDir': $_"
-        exit 1
-    }
-} else {
-    try {
-        $chmodCmd = Get-Command chmod -ErrorAction SilentlyContinue
-        if ($chmodCmd) {
-            & chmod 0700 $tempDir
-        }
-    } catch {
-        Write-Error "Security Error: Failed to set owner-only permissions on temporary directory '$tempDir': $_"
-        exit 1
-    }
-}
-
-$tempHelperFile = [System.IO.Path]::Combine($tempDir, "install-helper-v1.mjs")
-[System.IO.File]::WriteAllBytes($tempHelperFile, $helperBytes)
-
-$wslStagingDir = $null
-try {
-    if ($runningOnWindows) {
-        # Step 1: Create owner-only 0700 staging directory inside WSL native Linux filesystem
-        $wslStagingDir = (& wsl.exe --exec sh -c 'd=$(mktemp -d /tmp/resin-install.XXXXXX) && chmod 0700 "$d" && printf "%s" "$d"').ToString().Trim()
-        $wslExit = $LASTEXITCODE
-        if ($wslExit -ne 0 -or [string]::IsNullOrWhiteSpace($wslStagingDir)) {
-            Write-Error "Security Error: Failed to create owner-only staging directory inside WSL (exit code $wslExit)."
-            exit 1
         }
 
-        # Step 2: Convert Windows path to WSL path
-        $wslSrcPath = (& wsl.exe --exec wslpath -u $tempHelperFile).ToString().Trim()
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslSrcPath)) {
-            Write-Error "Security Error: Failed to resolve WSL path for '$tempHelperFile'."
-            exit 1
+        # Check Node.js inside WSL
+        $wslNodeCheck = & wsl.exe --exec node -v 2>&1
+        $wslNodeExit = $LASTEXITCODE
+        if ($wslNodeExit -ne 0) {
+            Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later inside WSL, but 'node' was not found or failed to execute.`nPlease install Node.js >= $MIN_NODE_VERSION inside your default WSL distribution.`nDetails: $wslNodeCheck"
         }
 
-        # Step 3: Copy verified helper into the WSL 0700 staging directory and protect permissions
-        $wslDestHelper = "$wslStagingDir/install-helper-v1.mjs"
-        & wsl.exe --exec cp $wslSrcPath $wslDestHelper
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Security Error: Failed to copy verified helper into WSL staging directory."
-            exit 1
-        }
-        & wsl.exe --exec chmod 0600 $wslDestHelper
-
-        # Step 4: Build argument list for WSL node execution
-        $wslArgs = [System.Collections.Generic.List[string]]::new()
-        $wslArgs.Add('node')
-        $wslArgs.Add($wslDestHelper)
-
-        if (-not [string]::IsNullOrWhiteSpace($Channel)) {
-            $wslArgs.Add('--channel')
-            $wslArgs.Add($Channel)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($ChannelUrl)) {
-            $wslArgs.Add('--channel-url')
-            $wslArgs.Add($ChannelUrl)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($ResinHome)) {
-            $wslArgs.Add('--resin-home')
-            $wslArgs.Add($ResinHome)
-        }
-        if ($isTestMode) {
-            $wslArgs.Add('--allow-insecure-loopback')
-        }
-
-        Write-Host "Running Resin installer helper inside WSL2..."
-        $helperOutput = & wsl.exe --exec @wslArgs
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -ne 0) {
-            exit $exitCode
-        }
-
-        # Step 5: Validate success JSON output
-        $stdoutStr = if ($helperOutput -is [array]) { ($helperOutput -join "`n").Trim() } else { "$helperOutput".Trim() }
-        if ([string]::IsNullOrWhiteSpace($stdoutStr)) {
-            Write-Error "Installer helper exited with code 0 but emitted no output. Expected success JSON payload."
-            exit 1
-        }
-
-        try {
-            $parsedJson = $stdoutStr | ConvertFrom-Json
-        } catch {
-            Write-Error "Installer helper output is not valid JSON: $_`nRaw output:`n$stdoutStr"
-            exit 1
-        }
-
-        if ($null -eq $parsedJson -or $parsedJson.success -ne $true -or [string]::IsNullOrWhiteSpace($parsedJson.version)) {
-            Write-Error "Installer helper did not report successful installation. Payload: $stdoutStr"
-            exit 1
+        $wslNodeVersionMatch = [regex]::Match($wslNodeCheck.ToString(), 'v?(\d+)\.(\d+)\.(\d+)')
+        if (-not $wslNodeVersionMatch.Success -or [int]$wslNodeVersionMatch.Groups[1].Value -lt $MIN_NODE_VERSION) {
+            Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later inside WSL. Detected: $($wslNodeCheck.ToString().Trim())`nPlease upgrade Node.js inside WSL."
         }
     } else {
-        $nodeArgs = [System.Collections.Generic.List[string]]::new()
-        $nodeArgs.Add($tempHelperFile)
+        if ($runningOnWindows) {
+            $windowsArch = Get-ResinWindowsArchitecture
+            if ($null -eq $windowsArch) {
+                Write-Error "Resin supports Windows on x64 and arm64 only (detected processor architecture '$env:PROCESSOR_ARCHITECTURE')."
+            }
+        }
+        # Local Node.js >= 22 (native Windows and non-Windows pwsh)
+        $nodeVersion = Get-ResinNodeVersion
+        if ($null -eq $nodeVersion) {
+            if ($runningOnWindows) {
+                Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later, but 'node' was not found in PATH.`nInstall Node.js $MIN_NODE_VERSION LTS or newer (https://nodejs.org/ or: winget install OpenJS.NodeJS.LTS), open a new terminal, and run this installer again."
+            }
+            Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later, but 'node' was not found in PATH.`nPlease install Node.js >= $MIN_NODE_VERSION and try again."
+        }
+        if ($nodeVersion.Major -lt $MIN_NODE_VERSION) {
+            Write-Error "Resin requires Node.js v$MIN_NODE_VERSION or later. Detected: $($nodeVersion.Raw)`nPlease upgrade Node.js (https://nodejs.org/) and run this installer again."
+        }
+        if ($runningOnWindows) {
+            $nodeArch = (& node -p "process.arch" 2>$null | Out-String).Trim()
+            if ($nodeArch -ne 'x64' -and $nodeArch -ne 'arm64') {
+                Write-Error "Resin needs a 64-bit Node.js (x64 or arm64) on Windows; detected '$nodeArch'."
+            }
+            if ($nodeArch -ne $windowsArch) {
+                Write-Warning "Node.js is $nodeArch but Windows is $windowsArch; Resin installs the $nodeArch build to match Node.js."
+            }
+        }
+    }
 
+    # Create secure temporary directory (fail-closed ACL / permission enforcement)
+    $tempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "resin-install-$([System.Guid]::NewGuid().ToString('N'))")
+    $null = [System.IO.Directory]::CreateDirectory($tempDir)
+
+    $wslStagingDir = $null
+    try {
+        if ($runningOnWindows) {
+            try {
+                $acl = Get-Acl -Path $tempDir
+                $acl.SetAccessRuleProtection($true, $false)
+                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                if ($null -eq $currentUser) {
+                    throw "Unable to determine current user SID for ACL enforcement."
+                }
+                $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $currentUser,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+                $acl.AddAccessRule($rule)
+                Set-Acl -Path $tempDir -AclObject $acl
+            } catch {
+                Write-Error "Security Error: Failed to enforce owner-only ACLs on temporary directory '$tempDir': $_"
+            }
+        } else {
+            try {
+                $chmodCmd = Get-Command chmod -ErrorAction SilentlyContinue
+                if ($chmodCmd) {
+                    & chmod 0700 $tempDir
+                }
+            } catch {
+                Write-Error "Security Error: Failed to set owner-only permissions on temporary directory '$tempDir': $_"
+            }
+        }
+
+        $tempHelperFile = [System.IO.Path]::Combine($tempDir, "install-helper-v1.mjs")
+        [System.IO.File]::WriteAllBytes($tempHelperFile, $helperBytes)
+
+        # Options shared by the WSL and native helper runs
+        $helperOptions = [System.Collections.Generic.List[string]]::new()
         if (-not [string]::IsNullOrWhiteSpace($Channel)) {
-            $nodeArgs.Add('--channel')
-            $nodeArgs.Add($Channel)
+            $helperOptions.Add('--channel')
+            $helperOptions.Add($Channel)
         }
         if (-not [string]::IsNullOrWhiteSpace($ChannelUrl)) {
-            $nodeArgs.Add('--channel-url')
-            $nodeArgs.Add($ChannelUrl)
+            $helperOptions.Add('--channel-url')
+            $helperOptions.Add($ChannelUrl)
         }
         if (-not [string]::IsNullOrWhiteSpace($ResinHome)) {
-            $nodeArgs.Add('--resin-home')
-            $nodeArgs.Add($ResinHome)
+            $helperOptions.Add('--resin-home')
+            $helperOptions.Add($ResinHome)
         }
+        if ($NoPathUpdate) { $helperOptions.Add('--no-path-update') }
+        if ($NoOnboarding) { $helperOptions.Add('--no-onboarding') }
+        if ($NonInteractive) { $helperOptions.Add('--non-interactive') }
+        if ($LocalOnly) { $helperOptions.Add('--local-only') }
         if ($isTestMode) {
-            $nodeArgs.Add('--allow-insecure-loopback')
+            $helperOptions.Add('--allow-insecure-loopback')
+        }
+
+        if ($useWslInstall) {
+            # Step 1: Create owner-only 0700 staging directory inside WSL native Linux filesystem
+            $wslStagingDir = (& wsl.exe --exec sh -c 'd=$(mktemp -d /tmp/resin-install.XXXXXX) && chmod 0700 "$d" && printf "%s" "$d"').ToString().Trim()
+            $wslExit = $LASTEXITCODE
+            if ($wslExit -ne 0 -or [string]::IsNullOrWhiteSpace($wslStagingDir)) {
+                Write-Error "Security Error: Failed to create owner-only staging directory inside WSL (exit code $wslExit)."
+            }
+
+            # Step 2: Convert Windows path to WSL path
+            $wslSrcPath = (& wsl.exe --exec wslpath -u $tempHelperFile).ToString().Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslSrcPath)) {
+                Write-Error "Security Error: Failed to resolve WSL path for '$tempHelperFile'."
+            }
+
+            # Step 3: Copy verified helper into the WSL 0700 staging directory and protect permissions
+            $wslDestHelper = "$wslStagingDir/install-helper-v1.mjs"
+            & wsl.exe --exec cp $wslSrcPath $wslDestHelper
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Security Error: Failed to copy verified helper into WSL staging directory."
+            }
+            & wsl.exe --exec chmod 0600 $wslDestHelper
+
+            # Step 4: Run the helper with WSL's node (Windows PATH changes do not apply to WSL)
+            $wslArgs = [System.Collections.Generic.List[string]]::new()
+            $wslArgs.Add('--exec')
+            $wslArgs.Add('node')
+            $wslArgs.Add($wslDestHelper)
+            foreach ($option in $helperOptions) { $wslArgs.Add($option) }
+
+            Write-Host "Running Resin installer helper inside WSL2..."
+            $parsedJson = Invoke-ResinHelper -Command 'wsl.exe' -Arguments $wslArgs.ToArray()
+            Write-Host "Resin v$($parsedJson.version) installed inside WSL2."
+            return
+        }
+
+        $nodeArgs = [System.Collections.Generic.List[string]]::new()
+        $nodeArgs.Add($tempHelperFile)
+        foreach ($option in $helperOptions) { $nodeArgs.Add($option) }
+        if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_TRUSTED_KEYS_JSON)) {
+            # Test/CI only: trust the test-domain key that signed a locally packaged release
+            $nodeArgs.Add('--trusted-keys-file')
+            $nodeArgs.Add([System.IO.Path]::GetFullPath($env:RESIN_INSTALL_TRUSTED_KEYS_JSON))
         }
 
         Write-Host "Running Resin installer helper..."
-        $helperOutput = & node @nodeArgs
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -ne 0) {
-            exit $exitCode
+        $parsedJson = Invoke-ResinHelper -Command 'node' -Arguments $nodeArgs.ToArray()
+
+        if ($runningOnWindows) {
+            $binDir = [System.IO.Path]::Combine([string]$parsedJson.resinHome, 'bin')
+            if (-not $NoPathUpdate) {
+                # The helper updated the user PATH for new terminals; make 'resin' work here too.
+                $sessionEntries = @($env:Path -split ';' | ForEach-Object { $_.Trim().TrimEnd('\') })
+                if ($sessionEntries -notcontains $binDir.TrimEnd('\')) {
+                    $env:Path = "$env:Path;$binDir"
+                }
+                Write-Host "Resin v$($parsedJson.version) installed. Run 'resin' to get started (new terminals find it on PATH)."
+            } else {
+                Write-Host "Resin v$($parsedJson.version) installed. PATH was not changed; run '$binDir\resin.cmd'."
+            }
+        }
+    }
+    finally {
+        # Ensure complete cleanup of WSL staging directory on all exits
+        if ($useWslInstall -and -not [string]::IsNullOrWhiteSpace($wslStagingDir)) {
+            try {
+                & wsl.exe --exec rm -rf $wslStagingDir 2>$null
+            } catch {}
         }
 
-        # Validate success JSON output
-        $stdoutStr = if ($helperOutput -is [array]) { ($helperOutput -join "`n").Trim() } else { "$helperOutput".Trim() }
-        if ([string]::IsNullOrWhiteSpace($stdoutStr)) {
-            Write-Error "Installer helper exited with code 0 but emitted no output. Expected success JSON payload."
-            exit 1
-        }
-
-        try {
-            $parsedJson = $stdoutStr | ConvertFrom-Json
-        } catch {
-            Write-Error "Installer helper output is not valid JSON: $_`nRaw output:`n$stdoutStr"
-            exit 1
-        }
-
-        if ($null -eq $parsedJson -or $parsedJson.success -ne $true -or [string]::IsNullOrWhiteSpace($parsedJson.version)) {
-            Write-Error "Installer helper did not report successful installation. Payload: $stdoutStr"
-            exit 1
+        # Ensure complete cleanup of temporary directory on all exits
+        if (Test-Path -Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
-finally {
-    # Ensure complete cleanup of WSL staging directory on all exits
-    if ($runningOnWindows -and -not [string]::IsNullOrWhiteSpace($wslStagingDir)) {
-        try {
-            & wsl.exe --exec rm -rf $wslStagingDir 2>$null
-        } catch {}
-    }
 
-    # Ensure complete cleanup of temporary directory on all exits
-    if (Test-Path -Path $tempDir) {
-        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+if ($Help) {
+    Show-ResinHelp
+    return
+}
+
+# Errors end this script without closing the caller's window when run through 'irm | iex';
+# a script file run (powershell -File install.ps1) exits with a non-zero code instead.
+$resinInstallRunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
+try {
+    Invoke-ResinInstall
+} catch {
+    if ($resinInstallRunAsFile) {
+        [Console]::Error.WriteLine("Resin installation failed: $($_.Exception.Message)")
+        exit 1
     }
+    throw
 }

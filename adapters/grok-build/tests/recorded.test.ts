@@ -198,8 +198,12 @@ describe("recorded grok 1.0.13 sessions", () => {
     const full = await fs.readFile(updatesPath, "utf8");
     const [workspace] = await adapter.listWorkspaces();
     if (!workspace) throw new Error("no workspace");
+    // A fresh adapter per check: Windows' CopyFile keeps the fixtures' old mtimes, so the shared
+    // adapter's cache treats them as settled and would re-stat them only after a minute.
     const status = async () =>
-      (await adapter.listSessions(workspace)).find((s) => s.sessionId === HEADLESS)?.status;
+      (await new GrokHarnessAdapter({ home, env: {} }).listSessions(workspace)).find(
+        (s) => s.sessionId === HEADLESS,
+      )?.status;
     try {
       // Mid-run: the last prompt has no `turn_completed` yet, and nothing lists it as active.
       await fs.writeFile(

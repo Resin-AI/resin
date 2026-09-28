@@ -129,7 +129,12 @@ describe("Asset Acquisition & Verification", () => {
     const bridge = new InMemoryConfigFsBridge();
     await bridge.writeFile("/home/developer/.deno/bin/deno", "not-an-executable-deno");
 
-    const found = await findDenoExecutable(undefined, { HOME: "/home/developer" }, bridge);
+    // An empty PATH: on Windows a child env without PATH is still searched with the parent's.
+    const found = await findDenoExecutable(
+      undefined,
+      { HOME: "/home/developer", PATH: "" },
+      bridge,
+    );
 
     expect(found).toBeNull();
   });

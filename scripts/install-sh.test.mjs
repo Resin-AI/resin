@@ -82,7 +82,9 @@ function runInstallShViaStdin(args = [], options = {}) {
   });
 }
 
-describe("install.sh bootstrap script", () => {
+// install.sh is the POSIX installer and refuses native Windows shells (Git Bash/MSYS) by design;
+// Windows installs through install.ps1 (scripts/install-ps1.test.mjs).
+describe.skipIf(process.platform === "win32")("install.sh bootstrap script", () => {
   let tempDir;
   let mockServer;
   let serverPort;

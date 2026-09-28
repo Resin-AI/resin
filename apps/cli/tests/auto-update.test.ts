@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
+import { windowsPrivacyProblem } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { formatStaleMcpGateways } from "../src/commands/status.js";
@@ -441,7 +442,12 @@ describe("resident service entrypoint", () => {
       const versionEntry = path.join(resinHome, "versions", "v1.0.0", "apps", "cli", "dist");
       await fs.mkdir(versionEntry, { recursive: true });
       await fs.writeFile(path.join(versionEntry, "index.js"), "");
-      await fs.symlink(path.join(resinHome, "versions", "v1.0.0"), path.join(resinHome, "current"));
+      // A junction on Windows (no symlink privilege needed); the type is ignored elsewhere.
+      await fs.symlink(
+        path.join(resinHome, "versions", "v1.0.0"),
+        path.join(resinHome, "current"),
+        "junction",
+      );
       const checkout = path.join(root, "checkout", "apps", "cli", "dist");
       await fs.mkdir(checkout, { recursive: true });
       await fs.writeFile(path.join(checkout, "index.js"), "");
@@ -648,8 +654,13 @@ describe("auto-update state persistence", () => {
       };
       await writeAutoUpdateState(resinHome, state);
       await expect(readAutoUpdateState({ resinHome })).resolves.toEqual(state);
-      const stats = await fs.stat(path.join(resinHome, "updates", "auto-update-state.json"));
-      expect(stats.mode & 0o777).toBe(0o600);
+      const statePath = path.join(resinHome, "updates", "auto-update-state.json");
+      if (process.platform === "win32") {
+        // NTFS has no mode bits; privacy is the owner-only DACL.
+        expect(windowsPrivacyProblem(statePath)).toBeUndefined();
+      } else {
+        expect((await fs.stat(statePath)).mode & 0o777).toBe(0o600);
+      }
     } finally {
       await fs.rm(resinHome, { recursive: true, force: true });
     }

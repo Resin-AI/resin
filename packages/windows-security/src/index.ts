@@ -1,0 +1,37 @@
+export {
+  type AclDescription,
+  type AclEntry,
+  isWindowsSecurityAvailable,
+  serviceHostExecutablePath,
+  useWindowsSecurityPrebuildDirectory,
+} from "./native.js";
+export {
+  checkOwnerOnly,
+  createPrivateDirectory,
+  currentUserSid,
+  ensureOwnerOnly,
+  ensurePrivateDirectoryBoundary,
+  type OwnerOnlyCheck,
+  type OwnerOnlyOptions,
+  ownerOnlyProblems,
+  readAcl,
+  readPipeAcl,
+  writePrivateFileExclusive,
+} from "./acl.js";
+export {
+  canonicalLocalPipeName,
+  type ConnectVerifiedPipeOptions,
+  connectVerifiedPipe,
+  createSecurePipeServer,
+  isLocalPipeName,
+  type PipeVerification,
+  type PipeConnectError,
+  type PipeVerificationFailure,
+  SecurePipeSocket,
+  type SecurePipeServer,
+  type SecurePipeServerOptions,
+  VerifiedPipeSocket,
+  verifyPipeServer,
+  WINDOWS_PIPE_PREFIX,
+  windowsDaemonPipeName,
+} from "./pipe.js";

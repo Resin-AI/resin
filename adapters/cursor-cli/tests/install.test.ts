@@ -4,7 +4,9 @@ import { applyConfigMutation, applyManagedBlock } from "@resin/harness-contracts
 import { describe, expect, it } from "vitest";
 import {
   CURSOR_CAPTURE_HOOK_EVENTS,
+  CURSOR_HOOK_TIMEOUT_SECONDS,
   cursorHarness,
+  editCursorHooksDocument,
   installCursorCaptureHooks,
   renderCursorHookCommand,
   resolveCursorHookScriptPath,
@@ -57,6 +59,31 @@ describe("capture hooks install", () => {
       "unchanged",
       "unchanged",
     ]);
+  });
+
+  it("quotes the script path for the shell cursor-agent runs hooks in", () => {
+    expect(renderCursorHookCommand("/home/o'neil/.resin/hooks/cursor-capture.mjs", "linux")).toBe(
+      "node '/home/o'\\''neil/.resin/hooks/cursor-capture.mjs'",
+    );
+    // PowerShell on Windows: a single-quoted string doubles an embedded quote.
+    expect(
+      renderCursorHookCommand("C:\\Users\\O'Neil\\.resin\\hooks\\cursor-capture.mjs", "win32"),
+    ).toBe("node 'C:\\Users\\O''Neil\\.resin\\hooks\\cursor-capture.mjs'");
+  });
+
+  it("recognizes its entry when the script path uses Windows separators", () => {
+    const command = renderCursorHookCommand("C:\\Users\\dev\\.resin\\hooks\\cursor-capture.mjs");
+    const doc = { version: 1, hooks: { stop: [FOREIGN_HOOK, { command, timeout: 10 }] } };
+    expect(editCursorHooksDocument(doc, command, true)).toEqual({
+      version: 1,
+      hooks: expect.objectContaining({
+        stop: [FOREIGN_HOOK, { command, timeout: CURSOR_HOOK_TIMEOUT_SECONDS }],
+      }),
+    });
+    expect(editCursorHooksDocument(doc, command, false)).toEqual({
+      version: 1,
+      hooks: { stop: [FOREIGN_HOOK] },
+    });
   });
 
   it("deletes a hooks file that only held Resin's entries", async () => {

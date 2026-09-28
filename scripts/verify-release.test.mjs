@@ -579,7 +579,7 @@ describe("Release Packaging & Verification Suite", () => {
 
       expect(verifyResult.valid).toBe(true);
       expect(verifyResult.violations).toHaveLength(0);
-      expect(verifyResult.stats.platformsCount).toBe(5);
+      expect(verifyResult.stats.platformsCount).toBe(PLATFORMS.length);
       expect(verifyResult.stats.packagesCount).toBe(
         loadBoundaryManifest(rootDir).publicReleasePackages.length,
       );

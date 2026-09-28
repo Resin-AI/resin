@@ -76,4 +76,6 @@ export const IPC_ERROR_CODES = {
   SHUTDOWN_IN_PROGRESS: "SHUTDOWN_IN_PROGRESS",
   TIMEOUT: "TIMEOUT",
   CONNECTION_CLOSED: "CONNECTION_CLOSED",
+  /** Windows: the daemon pipe is not owned and served by the current user. */
+  UNTRUSTED_SERVER: "UNTRUSTED_SERVER",
 } as const;

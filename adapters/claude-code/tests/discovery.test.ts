@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -21,20 +22,23 @@ describe("Claude Code Discovery & Installation Probing", () => {
   });
 
   it("resolves platform candidates for Linux, macOS, WSL", () => {
+    // Candidates are joined with the host's separator.
     const linuxHomes = resolveClaudeHomeCandidates("linux", "/home/testuser");
-    expect(linuxHomes).toContain("/home/testuser/.claude");
+    expect(linuxHomes).toContain(path.normalize("/home/testuser/.claude"));
 
     const darwinHomes = resolveClaudeHomeCandidates("darwin", "/Users/testuser");
-    expect(darwinHomes).toContain("/Users/testuser/Library/Application Support/Claude");
-    expect(darwinHomes).toContain("/Users/testuser/.claude");
+    expect(darwinHomes).toContain(
+      path.normalize("/Users/testuser/Library/Application Support/Claude"),
+    );
+    expect(darwinHomes).toContain(path.normalize("/Users/testuser/.claude"));
 
     const wslHomes = resolveClaudeHomeCandidates("wsl", "/home/testuser");
-    expect(wslHomes).toContain("/home/testuser/.claude");
+    expect(wslHomes).toContain(path.normalize("/home/testuser/.claude"));
 
     const configFiles = resolveClaudeConfigFileCandidates("/home/testuser", "linux");
-    expect(configFiles).toContain("/home/testuser/.claude.json");
-    expect(configFiles).toContain("/home/testuser/.claude/claude.json");
-    expect(configFiles).toContain("/home/testuser/.claude/mcp_settings.json");
+    expect(configFiles).toContain(path.normalize("/home/testuser/.claude.json"));
+    expect(configFiles).toContain(path.normalize("/home/testuser/.claude/claude.json"));
+    expect(configFiles).toContain(path.normalize("/home/testuser/.claude/mcp_settings.json"));
 
     const execCandidates = resolveClaudeExecutableCandidates("/home/testuser", "linux");
     expect(execCandidates).toContain("/usr/local/bin/claude");
@@ -267,6 +271,6 @@ describe("Claude Code Discovery & Installation Probing", () => {
     const workspaces = await detectClaudeWorkspaces("/home/testuser", fsBridge);
 
     expect(workspaces).toHaveLength(1);
-    expect(workspaces[0].metadata?.projectDir).toBe(projectDir);
+    expect(workspaces[0].metadata?.projectDir).toBe(path.normalize(projectDir));
   });
 });

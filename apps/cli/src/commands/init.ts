@@ -1,7 +1,10 @@
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import {
+  type ConfigFsBridge,
+  defaultFsBridge,
+  resolveHarnessUserHome,
+} from "@resin/harness-contracts";
 import type { LocalSafetyCertificationOptions } from "@resin/runtime";
 import { SUPPORTED_HARNESS_IDS } from "../harness-registry.js";
 import { resolveInstalledResinMcpCommand } from "../installer/harness-config.js";
@@ -269,7 +272,7 @@ export async function initCommand(
   const env = options.env ?? process.env;
   const harnessHome = flags.home
     ? path.resolve(flags.home)
-    : path.resolve(env.HOME ?? os.homedir());
+    : path.resolve(resolveHarnessUserHome({ env }));
   const harnessEnv = { ...env, HOME: harnessHome };
   const verbosity =
     options.verbosity ??

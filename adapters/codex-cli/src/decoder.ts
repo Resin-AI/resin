@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
-import { type CodexCommandAssociation, RESIN_CODEX_COMMAND_METADATA_KEY } from "@resin/contracts";
+import {
+  type CodexCommandAssociation,
+  RESIN_CODEX_COMMAND_METADATA_KEY,
+  shellDialectOfExecutable,
+} from "@resin/contracts";
 import type {
   CausalRef,
   DiscoveredToolEntry,
@@ -27,6 +30,7 @@ import { NormalizedSessionEventSchema, ProviderReportedUsageSchema } from "@resi
 import {
   type HarnessRecordDecoder,
   type IntermediateSessionEvent,
+  RESIN_LOCAL_SOURCE_INTERFACE_KEY,
   type RawHarnessRecord,
   RawHarnessRecordSchema,
   type RecordDecoderContext,
@@ -40,8 +44,41 @@ import {
   settlesBeforeCompletion,
 } from "./code-command.js";
 import { codexFileEdits } from "./file-change.js";
+import { recordedFileUrlPath } from "./recorded-file-url.js";
 
 export const DEFAULT_SCHEMA_VERSION = "1.0.0";
+
+/**
+ * A Windows drive or UNC path, or a file URL of a drive path, as a Codex session records its working
+ * directory on Windows.
+ */
+const WINDOWS_PATH = /^(?:[A-Za-z]:[\\/]|\\\\|file:\/\/\/[A-Za-z]:[\\/])/iu;
+
+/**
+ * Whether a Codex shell tool call's recording shows it ran in PowerShell or cmd without proving
+ * which: Codex runs `exec_command` and `shell_command` in the session's shell, which on Windows is
+ * `pwsh` when installed, else Windows PowerShell 5.1, else cmd; a `shell` argument only selects the
+ * family. The evidence is the session's own recorded working directory, the call's `workdir`/`cwd`,
+ * or its `shell` argument — never the host this decoder runs on.
+ *
+ * A Windows session stays a Windows session whatever the model passed: a relative `workdir` resolves
+ * inside the session's directory, and a `shell` naming bash may fall back to the session's shell, so
+ * neither turns the call into a POSIX one. Such a call is captured but never learned, until its end
+ * event proves the shell (see the recorder).
+ */
+function codexShellDialectUnproven(
+  parameters: CodexTranscriptPayload,
+  sessionCwd: string | undefined,
+): boolean {
+  if (sessionCwd !== undefined && WINDOWS_PATH.test(sessionCwd)) return true;
+  for (const key of ["workdir", "cwd"] as const) {
+    const directory = parameters[key];
+    if (typeof directory === "string" && WINDOWS_PATH.test(directory)) return true;
+  }
+  const shell = typeof parameters.shell === "string" ? parameters.shell : undefined;
+  const dialect = shell === undefined ? undefined : shellDialectOfExecutable(shell);
+  return dialect === "powershell" || dialect === "pwsh" || dialect === "cmd";
+}
 
 export const CodexTranscriptValueSchema: z.ZodType<CodexTranscriptValue> = z.lazy(() =>
   z.union([
@@ -1087,6 +1124,8 @@ export class CodexSessionDecoder {
     string,
     { command: string; args: string[]; cwd?: string; completed?: boolean }
   >();
+  /** The argv and directory each tracked command's first completion recorded. */
+  private nativeCompletions = new Map<string, string>();
   private wrappers = new Map<
     string,
     {
@@ -1173,7 +1212,7 @@ export class CodexSessionDecoder {
     }
     let normalizedCwd: string;
     try {
-      normalizedCwd = cwd.startsWith("file:") ? fileURLToPath(cwd) : cwd;
+      normalizedCwd = cwd.startsWith("file:") ? recordedFileUrlPath(cwd) : cwd;
     } catch {
       wrapper.blocked = true;
       return undefined;
@@ -2531,6 +2570,7 @@ export class CodexSessionDecoder {
       if (nativeType === "task_started") return [];
       if (nativeType === "task_complete") {
         this.nativeCommands.clear();
+        this.nativeCompletions.clear();
         return this.normalizePayload({ type: "session_end", timestamp: p.timestamp });
       }
       if (nativeType === "token_count") {
@@ -2572,8 +2612,20 @@ export class CodexSessionDecoder {
         const cwd = asString(item?.cwd);
         const nativeId = asString(item?.id) ?? asString(item?.call_id);
         const tracked = nativeId ? this.nativeCommands.get(nativeId) : undefined;
-        if (tracked?.completed) return [];
-        if (tracked) tracked.completed = true;
+        // A repeat of the same completion is dropped; one that disagrees (another executable, argv
+        // or directory) is kept, so the recorder sees conflicting evidence rather than the first word.
+        const completion = JSON.stringify([command, asString(item?.cwd) ?? null]);
+        const firstCompletion = nativeId ? this.nativeCompletions.get(nativeId) : undefined;
+        if (tracked?.completed && (firstCompletion === undefined || firstCompletion === completion))
+          return [];
+        if (tracked && nativeId) {
+          tracked.completed = true;
+          if (firstCompletion === undefined) {
+            if (this.nativeCompletions.size >= 1024)
+              this.nativeCompletions.delete(this.nativeCompletions.keys().next().value!);
+            this.nativeCompletions.set(nativeId, completion);
+          }
+        }
         const duration = asObject(item?.duration);
         const seconds = asNumber(duration?.secs);
         const nanoseconds = asNumber(duration?.nanos);
@@ -3078,6 +3130,14 @@ export class CodexSessionDecoder {
         codexNative?.type === "response_item" &&
         codexNative?.itemType === "function_call" &&
         hasNoNativeConnectionOrForeignNamespace(p, codexNative);
+      // Codex's string shell tool: its `command` is the program the session's shell ran.
+      const nativeShellCommand =
+        nativeResponseItem &&
+        rawType === "function_call" &&
+        toolName === "shell_command" &&
+        codexNative?.type === "response_item" &&
+        codexNative?.itemType === "function_call" &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative);
       const nativeCallId = asString(p.callId) ?? asString(p.call_id) ?? asString(p.tool_call_id);
       if (codexNative && !nativeCallId) {
         events.push({
@@ -3111,7 +3171,10 @@ export class CodexSessionDecoder {
       const header = this.emitHeader("tool_call", timestamp, rawEventId);
       if (
         codexNative &&
-        (Object.keys(nativeFields).length > 0 || rawExecSource !== undefined || nativeExecCommand)
+        (Object.keys(nativeFields).length > 0 ||
+          rawExecSource !== undefined ||
+          nativeExecCommand ||
+          nativeShellCommand)
       ) {
         const metadata = { ...(header.metadata ?? {}) };
         metadata.codexNative = {
@@ -3121,9 +3184,23 @@ export class CodexSessionDecoder {
             ? { sourceInterface: "codex-exec" }
             : nativeExecCommand
               ? { sourceInterface: "codex-exec-command" }
-              : {}),
+              : nativeShellCommand
+                ? { sourceInterface: "codex-shell-command" }
+                : {}),
         };
         header.metadata = metadata;
+      }
+      if (
+        codexNative?.type === "response_item" &&
+        rawType === "function_call" &&
+        (toolName === "exec_command" || toolName === "shell_command") &&
+        hasNoNativeConnectionOrForeignNamespace(p, codexNative) &&
+        codexShellDialectUnproven(parameters, this.currentCwd)
+      ) {
+        header.metadata = {
+          ...(header.metadata ?? {}),
+          [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "codex-unproven-shell",
+        };
       }
       const candidateRef = asString(p.candidateRef);
       const callEvt: NormalizedToolCallEvent = {

@@ -959,6 +959,16 @@ export function containsShellMetacharacters(commandStr: string): boolean {
 }
 
 /**
+ * Shell metacharacter check for an executable path. Binaries are spawned without a shell. On
+ * Windows, `\` is the path separator, `~` appears in 8.3 short names (`C:\Users\RUNNER~1`) and
+ * parentheses in `C:\Program Files (x86)`, so those are ordinary path characters there.
+ */
+function binaryPathContainsShellMetacharacters(binaryPath: string): boolean {
+  if (process.platform !== "win32") return containsShellMetacharacters(binaryPath);
+  return containsShellMetacharacters(binaryPath.replace(/[\\~()]/g, "/"));
+}
+
+/**
  * Detects forbidden characters or control characters in argument strings.
  */
 export function containsForbiddenArgMetacharacters(arg: string): boolean {
@@ -1269,7 +1279,7 @@ export function resolveCanonicalBinary(
     );
   }
 
-  if (containsShellMetacharacters(clean)) {
+  if (binaryPathContainsShellMetacharacters(clean)) {
     throw new PolicyCanonicalizationError(
       "SHELL_METACHARACTERS_DETECTED",
       `Binary path contains forbidden shell metacharacters: ${clean}`,

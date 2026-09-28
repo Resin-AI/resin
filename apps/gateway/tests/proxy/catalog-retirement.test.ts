@@ -32,12 +32,16 @@ const keptOnly = () => [catalogTool(KEPT, "kept")];
 
 let root: string;
 let artifactCache: ArtifactCache;
+/** Closed after each test: an open tool-access.db pins the temp dir on Windows. */
+const openedAccess = new Set<ManagedToolAccess>();
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "resin-retire-"));
   artifactCache = new ArtifactCache({ cacheDir: path.join(root, "artifacts") });
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  for (const access of openedAccess) access.close();
+  openedAccess.clear();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -55,6 +59,7 @@ function gateway(cloud: FakeCatalogCloud, options: GatewayOptions) {
   const cache = new CloudCatalogCache();
   const registry = options.registry ?? new ToolRegistry({ autoHydrate: false });
   const access = new ManagedToolAccess(path.join(root, "access"), artifactCache, identity);
+  openedAccess.add(access);
   registry.setManagedToolAccess(access);
   const lockManager = options.locked
     ? new ProjectLockManager({
@@ -210,10 +215,12 @@ describe("catalog retirement boundaries", () => {
 
   it("hides pre-existing unrecorded entries without rewriting the lock", async () => {
     const cloud = new FakeCatalogCloud(catalogSnapshot("v1", both()));
-    const { lockManager, coordinator } = gateway(cloud, { locked: true });
+    const { lockManager, coordinator, access } = gateway(cloud, { locked: true });
     await coordinator.sync();
     if (!lockManager) throw new Error("no lock");
-    // Receipts from before this release never named their lock.
+    // Receipts from before this release never named their lock. The first gateway is gone, and
+    // with it its handle on the receipts database (Windows cannot delete an open file).
+    access.close();
     fs.rmSync(path.join(root, "access"), { recursive: true, force: true });
     const before = fs.readFileSync(lockManager.lockPath);
 

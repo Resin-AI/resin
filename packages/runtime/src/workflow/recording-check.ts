@@ -12,6 +12,7 @@
 
 import path from "node:path";
 import {
+  type ShellDialect,
   type WorkflowJsonValue,
   type WorkflowStep,
   type WorkflowValuePath,
@@ -35,7 +36,14 @@ export interface RecordedCall {
   callable: {
     name: string;
     connection?: string;
-    program?: { kind: string; argument: string };
+    program?: {
+      kind: string;
+      argument: string;
+      /** The shell dialect the recording proved the program ran in. */
+      dialect?: ShellDialect;
+      /** A shell program whose dialect the recording did not prove. */
+      unprovenDialect?: true;
+    };
   };
   arguments: Record<string, WorkflowJsonValue>;
   result: WorkflowJsonValue;
@@ -329,7 +337,14 @@ function mismatch(
     callable.name !== recorded.callable.name ||
     callable.connection !== recorded.callable.connection ||
     callable.program?.kind !== recorded.callable.program?.kind ||
-    callable.program?.argument !== recorded.callable.program?.argument
+    callable.program?.argument !== recorded.callable.program?.argument ||
+    // A program recorded in one shell dialect is never checked against a run in another; a record
+    // made before dialects were recorded names none, and its callable decides it.
+    (callable.program?.dialect !== undefined &&
+      recorded.callable.program?.dialect !== undefined &&
+      callable.program.dialect !== recorded.callable.program.dialect) ||
+    callable.program?.unprovenDialect === true ||
+    recorded.callable.program?.unprovenDialect === true
   ) {
     return "names a different callable than the recording";
   }

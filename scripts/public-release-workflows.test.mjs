@@ -47,7 +47,11 @@ describe("Public Release Workflows Contract", () => {
     });
 
     it("signs on the ARM64 self-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
-      const qualificationJobs = ["platform-qualification", "system-qualification"];
+      const qualificationJobs = [
+        "platform-qualification",
+        "windows-qualification",
+        "system-qualification",
+      ];
       for (const [jobId, job] of Object.entries(candidate.doc.jobs)) {
         if (qualificationJobs.includes(jobId)) {
           expect(job.environment, `${jobId} must not use a protected environment`).toBeUndefined();
@@ -59,7 +63,9 @@ describe("Public Release Workflows Contract", () => {
             job["runs-on"],
           ];
           for (const runner of runners) {
-            expect(runner, `${jobId} must run on a GitHub-hosted runner`).toMatch(/^ubuntu-/);
+            expect(runner, `${jobId} must run on a GitHub-hosted runner`).toMatch(
+              /^(?:ubuntu-|windows-latest$|windows-11-arm$)/,
+            );
           }
         } else {
           expect(job["runs-on"], `Job ${jobId} must run on resin-vm-linux-arm64`).toBe(
@@ -203,8 +209,13 @@ describe("Public Release Workflows Contract", () => {
         "build-and-sign",
         "platform-qualification",
         "system-qualification",
+        "windows-qualification",
       ]);
-      expect(buildJob.needs).toEqual(["platform-qualification", "system-qualification"]);
+      expect(buildJob.needs).toEqual([
+        "platform-qualification",
+        "windows-qualification",
+        "system-qualification",
+      ]);
       const uploads = buildJob.steps.filter((s) => s.uses?.startsWith("actions/upload-artifact"));
       expect(uploads).toHaveLength(1);
       expect(uploads[0].with?.["retention-days"]).toBe(30);
@@ -218,62 +229,66 @@ describe("Public Release Workflows Contract", () => {
       expect(checkoutStep.with?.["fetch-depth"]).toBe(0);
     });
 
-    it("rejects an upstream run from another repository even when every other qualification matches", () => {
-      const script = jobs["build-and-sign"].steps.find((step) => step.id === "gates").run;
-      const start = script.indexOf("validate_run() {");
-      const end = script.indexOf('\nvalidate_run "$CI_RUN_ID"', start);
-      expect(start).toBeGreaterThan(-1);
-      expect(end).toBeGreaterThan(start);
-      const gate = script.slice(start, end);
-      const run = (repository, overrides = {}) =>
-        spawnSync(
-          "bash",
-          [
-            "-c",
-            `
+    // Runs the step as its Linux runner does, which needs bash + jq (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "rejects an upstream run from another repository even when every other qualification matches",
+      () => {
+        const script = jobs["build-and-sign"].steps.find((step) => step.id === "gates").run;
+        const start = script.indexOf("validate_run() {");
+        const end = script.indexOf('\nvalidate_run "$CI_RUN_ID"', start);
+        expect(start).toBeGreaterThan(-1);
+        expect(end).toBeGreaterThan(start);
+        const gate = script.slice(start, end);
+        const run = (repository, overrides = {}) =>
+          spawnSync(
+            "bash",
+            [
+              "-c",
+              `
         set -euo pipefail
         gh() { printf '%s' "$RUN_INFO"; }
         ${gate}
         validate_run 123 .github/workflows/ci.yml "CI suite"
         printf '\\nQUALIFIED\\n'
       `,
-          ],
-          {
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              GITHUB_REPOSITORY: "Resin-AI/resin",
-              RELEASE_SHA: "a".repeat(40),
-              RUN_INFO: JSON.stringify({
-                head_repository: { full_name: repository },
-                path: ".github/workflows/ci.yml",
-                head_sha: "a".repeat(40),
-                event: "push",
-                head_branch: "main",
-                status: "completed",
-                conclusion: "success",
-                ...overrides,
-              }),
+            ],
+            {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                GITHUB_REPOSITORY: "Resin-AI/resin",
+                RELEASE_SHA: "a".repeat(40),
+                RUN_INFO: JSON.stringify({
+                  head_repository: { full_name: repository },
+                  path: ".github/workflows/ci.yml",
+                  head_sha: "a".repeat(40),
+                  event: "push",
+                  head_branch: "main",
+                  status: "completed",
+                  conclusion: "success",
+                  ...overrides,
+                }),
+              },
             },
-          },
-        );
-      const accepted = run("Resin-AI/resin");
-      expect(accepted.status, accepted.stderr).toBe(0);
-      expect(accepted.stdout).toContain("QUALIFIED");
-      const rejected = run("untrusted/fork");
-      expect(rejected.status).not.toBe(0);
-      expect(rejected.stdout).not.toContain("QUALIFIED");
-      for (const overrides of [
-        { event: "pull_request" },
-        { head_branch: "feature" },
-        { head_sha: "b".repeat(40) },
-        { conclusion: "failure" },
-      ]) {
-        const result = run("Resin-AI/resin", overrides);
-        expect(result.status, JSON.stringify(overrides)).not.toBe(0);
-        expect(result.stdout).not.toContain("QUALIFIED");
-      }
-    });
+          );
+        const accepted = run("Resin-AI/resin");
+        expect(accepted.status, accepted.stderr).toBe(0);
+        expect(accepted.stdout).toContain("QUALIFIED");
+        const rejected = run("untrusted/fork");
+        expect(rejected.status).not.toBe(0);
+        expect(rejected.stdout).not.toContain("QUALIFIED");
+        for (const overrides of [
+          { event: "pull_request" },
+          { head_branch: "feature" },
+          { head_sha: "b".repeat(40) },
+          { conclusion: "failure" },
+        ]) {
+          const result = run("Resin-AI/resin", overrides);
+          expect(result.status, JSON.stringify(overrides)).not.toBe(0);
+          expect(result.stdout).not.toContain("QUALIFIED");
+        }
+      },
+    );
 
     it("validates every supplied upstream run via actions/runs/<id> without polling fallbacks", () => {
       const steps = jobs["build-and-sign"].steps;
@@ -318,10 +333,10 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("SECONDS + 900");
     });
 
-    it("downloads qualification evidence only from this run and requires all five lanes", () => {
+    it("downloads qualification evidence only from this run and requires all seven lanes", () => {
       const steps = jobs["build-and-sign"].steps;
       const downloads = steps.filter((s) => s.uses?.startsWith("actions/download-artifact"));
-      expect(downloads).toHaveLength(2);
+      expect(downloads).toHaveLength(3);
       for (const step of downloads) {
         expect(step.with?.["run-id"]).toBeUndefined();
         expect(step.with?.repository).toBeUndefined();
@@ -331,12 +346,16 @@ describe("Public Release Workflows Contract", () => {
         (s) => s.name === "Require evidence for every qualification lane",
       );
       expect(laneCheck.run).toContain(
-        "test \"$(find dist/upstream-qualification/platform -name '*.json' -type f | wc -l)\" -eq 5",
+        "for lane in linux-x64 linux-arm64 darwin-x64 darwin-arm64 wsl windows-x64 windows-arm64; do",
+      );
+      expect(laneCheck.run).toContain('test -s "dist/upstream-qualification/platform/$lane.json"');
+      expect(laneCheck.run).toContain(
+        'test -s "dist/upstream-qualification/platform/$lane-second-user-isolation.json"',
       );
       expect(laneCheck.run).toContain("test -s dist/upstream-qualification/system/system-e2e.json");
     });
 
-    it("requires qualification for all four production platforms", () => {
+    it("requires qualification for all six production platforms, native-only on Windows", () => {
       const steps = jobs["build-and-sign"].steps;
       const platStep = steps.find(
         (s) => s.name === "Require qualification for every production platform",
@@ -347,6 +366,31 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("darwin-x64");
       expect(script).toContain("linux-arm64");
       expect(script).toContain("linux-x64");
+      expect(script).toContain('"windows-arm64": ["QUALIFIED"]');
+      expect(script).toContain('"windows-x64": ["QUALIFIED"]');
+    });
+
+    it("signs only Windows prebuilds that are byte-identical to the qualified ones", () => {
+      const steps = jobs["build-and-sign"].steps;
+      const download = steps.findIndex(
+        (s) => s.name === "Download qualified Windows native prebuilds",
+      );
+      const verify = steps.findIndex(
+        (s) =>
+          s.name === "Verify staged Windows prebuilds are the bytes the Windows lanes qualified",
+      );
+      const packageIndex = steps.findIndex((s) =>
+        s.run?.includes("node scripts/package-release.mjs"),
+      );
+      expect(download).toBeGreaterThan(-1);
+      expect(steps[download].with).toMatchObject({
+        pattern: "windows-prebuilds-*",
+        "merge-multiple": true,
+        path: "packages/windows-security/prebuilds",
+      });
+      expect(verify).toBeGreaterThan(download);
+      expect(verify).toBeLessThan(packageIndex);
+      expect(steps[verify].run).toContain("node scripts/windows-lane.mjs verify-prebuilds");
     });
 
     it("executes single upstream package call", () => {
@@ -370,7 +414,7 @@ describe("Public Release Workflows Contract", () => {
         '"https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"',
       );
       expect(steps[packageStepIndex].run).toContain('--output-dir "$package_dir"');
-      expect(steps[packageStepIndex].run).toContain('"${#package_tarballs[@]}" -ne 19');
+      expect(steps[packageStepIndex].run).toContain('"${#package_tarballs[@]}" -ne 20');
     });
 
     it("mirrors runtime sources and verifies candidate before tar assembly", () => {
@@ -386,7 +430,7 @@ describe("Public Release Workflows Contract", () => {
       expect(mirrorStepIndex).toBeLessThan(verifyStepIndex);
       expect(verifyStepIndex).toBeLessThan(assembleStepIndex);
     });
-    it("stages exactly four pinned runtime archives before candidate verification", () => {
+    it("stages exactly six pinned runtime archives before candidate verification", () => {
       const steps = jobs["build-and-sign"].steps;
       const stageIndex = steps.findIndex(
         (s) => s.name === "Stage and verify all pinned runtime archives",
@@ -394,7 +438,7 @@ describe("Public Release Workflows Contract", () => {
       const verifyIndex = steps.findIndex((s) => s.run?.includes("verify-candidate"));
       expect(stageIndex).toBeGreaterThan(-1);
       expect(stageIndex).toBeLessThan(verifyIndex);
-      expect(steps[stageIndex].run).toContain('"${#runtimes[@]}" -ne 4');
+      expect(steps[stageIndex].run).toContain('"${#runtimes[@]}" -ne 6');
       expect(steps[stageIndex].run).toContain('cp "${runtimes[@]}" "$release_dir/"');
     });
 
@@ -846,7 +890,7 @@ describe("Public Release Workflows Contract", () => {
       expect(freezeStep.run).toContain('--key-prefix "$KEY_PREFIX"');
     });
 
-    it("uses the 19 package tarballs from the trusted candidate without rebuilding from source", () => {
+    it("uses the 20 package tarballs from the trusted candidate without rebuilding from source", () => {
       const packageStep = job.steps.find(
         (s) => s.id === "package_fallback" || s.name?.includes("fallback package"),
       );
@@ -855,13 +899,13 @@ describe("Public Release Workflows Contract", () => {
 
       const script = packageStep.run;
       expect(script).toContain('cp -a packages/. "$staging_dir/"');
-      expect(script).toContain('"${#package_tarballs[@]}" -ne 19');
+      expect(script).toContain('"${#package_tarballs[@]}" -ne 20');
       expect(script).toContain('"$staging_dir/packages-manifest.json"');
       expect(script).not.toContain("pnpm run release:packages");
       expect(script).not.toMatch(/\$\{\{\s*inputs\./);
     });
 
-    it("uploads all 19 package fallback tarballs and machine-readable manifest to GitHub release alongside public artifacts", () => {
+    it("uploads all 20 package fallback tarballs and machine-readable manifest to GitHub release alongside public artifacts", () => {
       const uploadStep = job.steps.find(
         (s) => s.id === "upload_github_release" || s.name?.includes("Upload fallback package"),
       );
@@ -875,11 +919,11 @@ describe("Public Release Workflows Contract", () => {
       expect(script).toContain("--clobber");
     });
 
-    it("verifies package fallback covers exactly the 19 public packages without private/cloud artifacts", () => {
+    it("verifies package fallback covers exactly the 20 public packages without private/cloud artifacts", () => {
       const splitConfigPath = path.join(ROOT_DIR, "repository-split.json");
       const splitConfig = JSON.parse(fs.readFileSync(splitConfigPath, "utf-8"));
-      expect(splitConfig.publicPackageManifests).toHaveLength(19);
-      expect(splitConfig.publicPackages).toHaveLength(19);
+      expect(splitConfig.publicPackageManifests).toHaveLength(20);
+      expect(splitConfig.publicPackages).toHaveLength(20);
 
       const EXPECTED_PUBLIC_TARBALLS = [
         "resin-1.0.0.tgz",
@@ -887,6 +931,7 @@ describe("Public Release Workflows Contract", () => {
         "resin-observer-0.1.0.tgz",
         "resin-runtime-0.1.0.tgz",
         "resin-crypto-0.1.0.tgz",
+        "resin-windows-security-0.1.0.tgz",
         "resin-protocol-0.1.0.tgz",
         "resin-contracts-0.1.0.tgz",
         "resin-harness-contracts-0.1.0.tgz",
@@ -1311,89 +1356,101 @@ with patch("subprocess.run", side_effect=publish):
       }
     }
 
-    it("records only SNS submission evidence with distinct drill and incident labels", () => {
-      for (const drill of [true, false]) {
-        const result = runSubmission(
-          drill ? { OPERATION: "notification-drill", CONFIRMATION: confirmation } : {},
-        );
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.receipt).toMatchObject({
-          classification: drill ? "drill" : "incident",
-          repository: "example/public",
-          runId: "123",
-          runAttempt: "2",
-          commit: "a".repeat(40),
-          runUrl: "https://github.com/example/public/actions/runs/123",
-          submissionStatus: "submitted",
-          snsMessageId: "12345678-1234-1234-1234-123456789abc",
-          humanDelivery: "not_verified",
-          humanAcknowledgment: "not_verified",
-        });
-        for (const field of ["startedAt", "submittedAt", "completedAt"]) {
-          expect(Number.isNaN(Date.parse(result.receipt[field]))).toBe(false);
+    // Runs the step as its Linux runner does, which needs python3 (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "records only SNS submission evidence with distinct drill and incident labels",
+      () => {
+        for (const drill of [true, false]) {
+          const result = runSubmission(
+            drill ? { OPERATION: "notification-drill", CONFIRMATION: confirmation } : {},
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.receipt).toMatchObject({
+            classification: drill ? "drill" : "incident",
+            repository: "example/public",
+            runId: "123",
+            runAttempt: "2",
+            commit: "a".repeat(40),
+            runUrl: "https://github.com/example/public/actions/runs/123",
+            submissionStatus: "submitted",
+            snsMessageId: "12345678-1234-1234-1234-123456789abc",
+            humanDelivery: "not_verified",
+            humanAcknowledgment: "not_verified",
+          });
+          for (const field of ["startedAt", "submittedAt", "completedAt"]) {
+            expect(Number.isNaN(Date.parse(result.receipt[field]))).toBe(false);
+          }
+          expect(result.call.slice(0, 3)).toEqual(["aws", "sns", "publish"]);
+          const message = JSON.parse(result.call[result.call.indexOf("--message") + 1]);
+          expect(message).toEqual({
+            type: "resin.channel.notification.v1",
+            classification: drill ? "drill" : "incident",
+            summary: drill
+              ? "DRILL: intentional channel monitor failure; no metadata changed."
+              : "INCIDENT: channel freshness verification or renewal failed; operator action required.",
+            runUrl: result.receipt.runUrl,
+            runId: result.receipt.runId,
+            runAttempt: result.receipt.runAttempt,
+            jobResults: result.receipt.jobResults,
+            startedAt: result.receipt.startedAt,
+          });
+          expect(message.classification).toBe(drill ? "drill" : "incident");
+          expect(message.summary).toContain(drill ? "DRILL:" : "INCIDENT:");
+          expect(JSON.stringify(result.receipt)).not.toContain("private-topic-placeholder");
+          expect(result.summary).toContain("human delivery and acknowledgment NOT VERIFIED");
         }
-        expect(result.call.slice(0, 3)).toEqual(["aws", "sns", "publish"]);
-        const message = JSON.parse(result.call[result.call.indexOf("--message") + 1]);
-        expect(message).toEqual({
-          type: "resin.channel.notification.v1",
-          classification: drill ? "drill" : "incident",
-          summary: drill
-            ? "DRILL: intentional channel monitor failure; no metadata changed."
-            : "INCIDENT: channel freshness verification or renewal failed; operator action required.",
-          runUrl: result.receipt.runUrl,
-          runId: result.receipt.runId,
-          runAttempt: result.receipt.runAttempt,
-          jobResults: result.receipt.jobResults,
-          startedAt: result.receipt.startedAt,
-        });
-        expect(message.classification).toBe(drill ? "drill" : "incident");
-        expect(message.summary).toContain(drill ? "DRILL:" : "INCIDENT:");
-        expect(JSON.stringify(result.receipt)).not.toContain("private-topic-placeholder");
-        expect(result.summary).toContain("human delivery and acknowledgment NOT VERIFIED");
-      }
-    });
+      },
+    );
 
-    it("propagates provider and malformed-response failures without leaking provider details", () => {
-      for (const [response, fail] of [
-        [{}, true],
-        [{}, false],
-        [{ MessageId: "private-provider-error" }, false],
-      ]) {
-        const result = runSubmission({}, response, fail);
-        expect(result.status).toBe(1);
-        expect(result.receipt).toMatchObject({
-          submissionStatus: "failed",
-          snsMessageId: null,
-          submittedAt: null,
-        });
-        expect(result.stdout + result.stderr + JSON.stringify(result.receipt)).not.toMatch(
-          /private-provider-error|private-topic-placeholder/,
-        );
-      }
-    });
+    // Runs the step as its Linux runner does, which needs python3 (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "propagates provider and malformed-response failures without leaking provider details",
+      () => {
+        for (const [response, fail] of [
+          [{}, true],
+          [{}, false],
+          [{ MessageId: "private-provider-error" }, false],
+        ]) {
+          const result = runSubmission({}, response, fail);
+          expect(result.status).toBe(1);
+          expect(result.receipt).toMatchObject({
+            submissionStatus: "failed",
+            snsMessageId: null,
+            submittedAt: null,
+          });
+          expect(result.stdout + result.stderr + JSON.stringify(result.receipt)).not.toMatch(
+            /private-provider-error|private-topic-placeholder/,
+          );
+        }
+      },
+    );
 
-    it("cannot submit even if a rejected drill reaches the submission step", () => {
-      for (const overrides of [
-        { OPERATION: "notification-drill", CONFIRMATION: "" },
-        {
-          OPERATION: "notification-drill",
-          CONFIRMATION: confirmation,
-          GITHUB_EVENT_NAME: "schedule",
-        },
-        { GITHUB_REF: "refs/heads/untrusted" },
-        { REF_PROTECTED: "false" },
-        { MONITOR_RESULT: "success", RENEW_RESULT: "skipped" },
-      ]) {
-        const result = runSubmission(overrides);
-        expect(result.status).toBe(1);
-        expect(result.call).toBeNull();
-        expect(result.receipt).toBeNull();
-      }
-      const missingTopic = runSubmission({ NOTIFICATION_TOPIC: "" });
-      expect(missingTopic.status).toBe(1);
-      expect(missingTopic.call).toBeNull();
-      expect(missingTopic.receipt.submissionStatus).toBe("failed");
-    });
+    // Runs the step as its Linux runner does, which needs python3 (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "cannot submit even if a rejected drill reaches the submission step",
+      () => {
+        for (const overrides of [
+          { OPERATION: "notification-drill", CONFIRMATION: "" },
+          {
+            OPERATION: "notification-drill",
+            CONFIRMATION: confirmation,
+            GITHUB_EVENT_NAME: "schedule",
+          },
+          { GITHUB_REF: "refs/heads/untrusted" },
+          { REF_PROTECTED: "false" },
+          { MONITOR_RESULT: "success", RENEW_RESULT: "skipped" },
+        ]) {
+          const result = runSubmission(overrides);
+          expect(result.status).toBe(1);
+          expect(result.call).toBeNull();
+          expect(result.receipt).toBeNull();
+        }
+        const missingTopic = runSubmission({ NOTIFICATION_TOPIC: "" });
+        expect(missingTopic.status).toBe(1);
+        expect(missingTopic.call).toBeNull();
+        expect(missingTopic.receipt.submissionStatus).toBe("failed");
+      },
+    );
   });
 
   describe("Static Security Regression: No Run-Script ${{ inputs.* }} Interpolation & Strict Shell Validation", () => {
@@ -1768,7 +1825,7 @@ with patch("subprocess.run", side_effect=publish):
       }
     });
 
-    it("retains 5-lane platform qualification coverage in the release candidate on GitHub-hosted runners", () => {
+    it("retains 5-lane POSIX platform qualification coverage in the release candidate on GitHub-hosted runners", () => {
       const platformJob = candidate.doc.jobs["platform-qualification"];
       expect(platformJob["runs-on"]).toBe("${{ matrix.runner }}");
       const matrix = platformJob.strategy?.matrix?.include;
@@ -1787,6 +1844,66 @@ with patch("subprocess.run", side_effect=publish):
           .some((l) => l.startsWith("darwin") || l === "wsl");
         expect(entry.mode).toBe(artifactOnly ? "artifact" : "native");
       }
+    });
+
+    it("qualifies native Windows x64 and arm64 in PowerShell on GitHub-hosted Windows runners", () => {
+      const job = candidate.doc.jobs["windows-qualification"];
+      expect(job["runs-on"]).toBe("${{ matrix.runner }}");
+      expect(job.defaults?.run?.shell).toBe("pwsh");
+      expect(job.strategy.matrix.include).toEqual([
+        {
+          lane: "windows-x64",
+          arch: "x64",
+          check_name: "Qualify windows-x64",
+          runner: "windows-latest",
+        },
+        {
+          lane: "windows-arm64",
+          arch: "arm64",
+          check_name: "Qualify windows-arm64",
+          runner: "windows-11-arm",
+        },
+      ]);
+      for (const step of job.steps.filter((s) => s.run)) {
+        expect(["pwsh", "powershell", undefined], step.name).toContain(step.shell);
+      }
+      const names = job.steps.map((s) => s.name);
+      const order = [
+        "Build native Windows prebuilds for this architecture",
+        "Package signed test-domain release candidate",
+        "Qualify the packaged artifact natively (launchers, named pipe, ACLs, capture)",
+        "Run native Windows qualification suites",
+        "Install with install.ps1 (Windows PowerShell 5.1)",
+        "resin init registers the Scheduled Task service; crash restart and stop/start",
+        "resin status reports healthy",
+        "A second local user cannot open the daemon pipe or read private files",
+        "resin uninstall leaves nothing behind",
+        "Upload qualified native prebuilds for signing",
+      ];
+      const indexes = order.map((name) => names.indexOf(name));
+      expect(
+        indexes.every((index) => index > -1),
+        JSON.stringify(indexes),
+      ).toBe(true);
+      expect([...indexes].sort((a, b) => a - b)).toEqual(indexes);
+      const install = job.steps.find((s) => s.name === order[4]);
+      expect(install.shell).toBe("powershell");
+      expect(install.run).toContain("./apps/cli/install/install.ps1");
+      const qualify = job.steps.find((s) => s.name === order[2]);
+      expect(qualify.run).toContain("--mode=native");
+      const service = job.steps.find((s) => s.name === order[5]);
+      expect(service.run).toContain("--windows-service");
+      const suites = job.env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
+      expect(suites.length).toBeGreaterThan(10);
+      const evidenceUpload = job.steps.find((s) => s.name === "Upload qualification evidence");
+      expect(evidenceUpload.with.name).toBe("platform-qualification-${{ matrix.lane }}");
+    });
+
+    it("lists only Windows qualification suites that exist", () => {
+      const suites =
+        candidate.doc.jobs["windows-qualification"].env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
+      const missing = suites.filter((suite) => !fs.existsSync(path.join(ROOT_DIR, suite)));
+      expect(missing).toEqual([]);
     });
 
     it("runs system qualification against the exact candidate in the release candidate", () => {

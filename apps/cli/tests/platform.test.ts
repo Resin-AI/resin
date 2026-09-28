@@ -65,19 +65,33 @@ describe("Platform Detection and Validation", () => {
     expect(isWsl).toBe(true);
   });
 
-  it("rejects native Windows (win32 without WSL)", () => {
+  it("supports native Windows (win32 without WSL) on x64 and arm64", () => {
+    const x64 = detectPlatform({ platform: "win32", env: {}, arch: "x64" });
+    expect(x64).toMatchObject({
+      os: "windows",
+      platform: "win32",
+      isSupported: true,
+      isWsl: false,
+      distro: "Windows",
+      lane: "windows-x64",
+    });
+    expect(x64.rejectionReason).toBeUndefined();
+    expect(validatePlatform(x64)).toBe(x64);
+
+    const arm64 = detectPlatform({ platform: "win32", env: {}, arch: "arm64" });
+    expect(arm64.lane).toBe("windows-arm64");
+  });
+
+  it("never treats native Windows as WSL, even with WSL interop variables set", () => {
     const info = detectPlatform({
       platform: "win32",
-      env: {},
       arch: "x64",
+      env: { WSLENV: "USERPROFILE/p", WSL_INTEROP: "/run/WSL/1_interop" },
+      release: "10.0.26100",
     });
-
-    expect(info.isSupported).toBe(false);
-    expect(info.platform).toBe("win32");
-    expect(info.rejectionReason).toContain("Native Windows is not supported");
-
-    expect(() => validatePlatform(info)).toThrow(UnsupportedPlatformError);
-    expect(() => validatePlatform(info)).toThrow(/Native Windows is not supported/i);
+    expect(info.isWsl).toBe(false);
+    expect(info.os).toBe("windows");
+    expect(info.lane).toBe("windows-x64");
   });
 
   it("rejects other unsupported platforms (e.g. aix, freebsd)", () => {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ServiceCommandResult,
   type ServiceCommandRunner,
@@ -18,6 +18,23 @@ import {
   WslUserServiceManager,
   isStaleSupervisorUnitContent,
 } from "../../src/service/manager.js";
+import type * as ServiceManagerModule from "../../src/service/manager.js";
+
+// The orchestration contract below is driven through the systemd manager and a systemctl mock
+// runner. A Windows host would otherwise pick the scheduled-task manager, which that runner
+// cannot drive (its own suite covers it), so there the default lane is pinned to systemd.
+vi.mock("../../src/service/manager.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ServiceManagerModule>();
+  return {
+    ...actual,
+    createUserServiceManager: (options: ServiceManagerModule.UserServiceManagerOptions = {}) =>
+      actual.createUserServiceManager(
+        process.platform === "win32" && options.platform === undefined
+          ? { ...options, platform: "linux" }
+          : options,
+      ),
+  };
+});
 
 /**
  * Mock Service Command Runner that records executed commands and returns configured responses.
@@ -110,27 +127,31 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
   });
 
   describe("SystemdUserServiceManager", () => {
-    it("generates user-level systemd unit file in ~/.config/systemd/user/ without root", async () => {
-      const manager = new SystemdUserServiceManager({
-        homeDir: fakeHome,
-        resinHome,
-        runner: mockRunner,
-      });
+    // POSIX-only: systemd unit generation (ExecStart/Environment escaping) targets Linux hosts.
+    it.skipIf(process.platform === "win32")(
+      "generates user-level systemd unit file in ~/.config/systemd/user/ without root",
+      async () => {
+        const manager = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        });
 
-      expect(manager.name).toBe("systemd");
-      const unitPath = manager.getUnitPath();
-      expect(unitPath).toBe(path.join(fakeHome, ".config", "systemd", "user", "resin.service"));
+        expect(manager.name).toBe("systemd");
+        const unitPath = manager.getUnitPath();
+        expect(unitPath).toBe(path.join(fakeHome, ".config", "systemd", "user", "resin.service"));
 
-      const unitDef = manager.getUnitDefinition();
-      expect(unitDef).toContain("[Unit]");
-      expect(unitDef).toContain("Description=Resin Daemon");
-      expect(unitDef).toContain("[Service]");
-      expect(unitDef).toContain("ExecStart=");
-      expect(unitDef).toContain(`Environment=RESIN_HOME=${resinHome}`);
-      expect(unitDef).toContain("Restart=on-failure");
-      expect(unitDef).toContain("[Install]");
-      expect(unitDef).toContain("WantedBy=default.target");
-    });
+        const unitDef = manager.getUnitDefinition();
+        expect(unitDef).toContain("[Unit]");
+        expect(unitDef).toContain("Description=Resin Daemon");
+        expect(unitDef).toContain("[Service]");
+        expect(unitDef).toContain("ExecStart=");
+        expect(unitDef).toContain(`Environment=RESIN_HOME=${resinHome}`);
+        expect(unitDef).toContain("Restart=on-failure");
+        expect(unitDef).toContain("[Install]");
+        expect(unitDef).toContain("WantedBy=default.target");
+      },
+    );
 
     it("installs, starts, and queries status through systemctl --user", async () => {
       const manager = new SystemdUserServiceManager({
@@ -237,21 +258,25 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(plistContent).toContain("<key>StandardErrorPath</key>");
     });
 
-    it("gives the launch agent a PATH that reaches the installing Node, and treats older plists as stale", () => {
-      const nodePath = "/opt/homebrew/bin/node";
-      const manager = new LaunchdUserServiceManager({
-        homeDir: fakeHome,
-        resinHome,
-        runner: mockRunner,
-      });
-      const plist = manager.getUnitDefinition({ nodePath });
-      const pathValue = plist.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
-      expect(pathValue?.split(":")[0]).toBe("/opt/homebrew/bin");
+    // POSIX-only: a launchd PATH is ':'-joined for macOS; a Windows host joins with ';'.
+    it.skipIf(process.platform === "win32")(
+      "gives the launch agent a PATH that reaches the installing Node, and treats older plists as stale",
+      () => {
+        const nodePath = "/opt/homebrew/bin/node";
+        const manager = new LaunchdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        });
+        const plist = manager.getUnitDefinition({ nodePath });
+        const pathValue = plist.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+        expect(pathValue?.split(":")[0]).toBe("/opt/homebrew/bin");
 
-      const plistWithoutPath = plist.replace(/\s*<key>PATH<\/key>\s*<string>[^<]*<\/string>/, "");
-      expect(isStaleSupervisorUnitContent(plistWithoutPath, plist)).toBe(true);
-      expect(isStaleSupervisorUnitContent(plist, plist)).toBe(false);
-    });
+        const plistWithoutPath = plist.replace(/\s*<key>PATH<\/key>\s*<string>[^<]*<\/string>/, "");
+        expect(isStaleSupervisorUnitContent(plistWithoutPath, plist)).toBe(true);
+        expect(isStaleSupervisorUnitContent(plist, plist)).toBe(false);
+      },
+    );
 
     it("installs, starts, and manages launchd service", async () => {
       const manager = new LaunchdUserServiceManager({
@@ -704,7 +729,7 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       fs.mkdirSync(path.join(v22Dir, "apps", "cli", "dist"), { recursive: true });
       fs.writeFileSync(path.join(v20Dir, "apps", "cli", "dist", "index.js"), "// v1.0.20");
       fs.writeFileSync(path.join(v22Dir, "apps", "cli", "dist", "index.js"), "// v1.0.22");
-      fs.symlinkSync(v22Dir, currentLink, "dir");
+      fs.symlinkSync(v22Dir, currentLink, "junction");
 
       // Write stale v1.0.20 unit file to disk
       const manager = createUserServiceManager({
@@ -756,9 +781,9 @@ WantedBy=default.target
       // Unit file must now contain unversioned stable launcher under current/
       const updatedUnitContent = fs.readFileSync(unitPath, "utf8");
       expect(updatedUnitContent).not.toContain("v1.0.20");
-      expect(updatedUnitContent).toContain(
-        path.join(resinHome, "current", "apps", "cli", "dist", "index.js"),
-      );
+      // Quoted unit values escape backslashes (a no-op for POSIX paths).
+      const stableLauncher = path.join(resinHome, "current", "apps", "cli", "dist", "index.js");
+      expect(updatedUnitContent).toContain(JSON.stringify(stableLauncher).slice(1, -1));
 
       // Systemctl daemon-reload and restart must have been called
       const daemonReloadCmd = mockRunner.commands.find(

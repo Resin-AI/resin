@@ -211,25 +211,36 @@ describe("install.ps1 static and security invariants", () => {
   });
 });
 
+/** `*>` files are UTF-16LE with a BOM in Windows PowerShell 5.1 and UTF-8 in PowerShell 7. */
+function decodePowerShellLog(buffer) {
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) return buffer.subarray(2).toString("utf16le");
+  return buffer.toString("utf8");
+}
+
 describe("install.ps1 execution and behavioral security tests", () => {
   // The pwsh child gets 15 s; vitest's 5 s default expired first on a loaded runner.
   const PWSH_TEST_TIMEOUT_MS = 30_000;
-  const pwshAvailable = (() => {
-    try {
-      const res = spawnSync("pwsh", ["-NoProfile", "-Command", "Write-Output 'OK'"], {
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      return res.status === 0 && res.stdout.includes("OK");
-    } catch {
-      return false;
+  // PowerShell 7 where present; Windows PowerShell 5.1 (always present on Windows) otherwise.
+  const psExecutable = (() => {
+    const candidates = process.platform === "win32" ? ["pwsh", "powershell"] : ["pwsh"];
+    for (const candidate of candidates) {
+      try {
+        const res = spawnSync(candidate, ["-NoProfile", "-Command", "Write-Output 'OK'"], {
+          encoding: "utf8",
+          timeout: 10000,
+        });
+        if (res.status === 0 && res.stdout.includes("OK")) return candidate;
+      } catch {}
     }
+    return null;
   })();
+  const pwshAvailable = psExecutable !== null;
 
   function runPwshAsync(args, options = {}) {
     return new Promise((resolve, reject) => {
       const timeoutMs = options.timeout ?? 30000;
-      const proc = spawn("pwsh", args, {
+      // -ExecutionPolicy Bypass: Windows PowerShell's default policy refuses `-File` scripts.
+      const proc = spawn(psExecutable, ["-ExecutionPolicy", "Bypass", ...args], {
         ...options,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -551,6 +562,65 @@ describe("install.ps1 execution and behavioral security tests", () => {
     PWSH_TEST_TIMEOUT_MS,
   );
 
+  it("runs a helper that writes progress to stderr with stdio redirected, keeping its exit code", async () => {
+    if (!pwshAvailable) {
+      const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+      expect(content).toContain("$ErrorActionPreference = 'Continue'");
+      return;
+    }
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-ps1-stderr-"));
+    const runWithHelper = async (source) => {
+      const helperPath = path.join(tmpDir, `helper-${crypto.randomUUID()}.mjs`);
+      fs.writeFileSync(helperPath, source);
+      const helperSha = crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(helperPath))
+        .digest("hex");
+      // In-session redirection (`*>`) is what makes Windows PowerShell 5.1 wrap native stderr
+      // into error records; a plain `-File` run with piped stdio passes stderr through.
+      const logPath = path.join(tmpDir, `install-${crypto.randomUUID()}.log`);
+      const quote = (value) => `'${value.replace(/'/g, "''")}'`;
+      const res = await runPwshAsync(
+        [
+          "-NoProfile",
+          "-Command",
+          `& ${quote(SCRIPT_PATH)} -NoPathUpdate -NonInteractive -NoOnboarding *> ${quote(logPath)}; exit $LASTEXITCODE`,
+        ],
+        {
+          timeout: 30000,
+          env: {
+            ...process.env,
+            RESIN_INSTALL_TEST_ONLY: "1",
+            RESIN_INSTALL_HELPER_PATH: helperPath,
+            RESIN_TEST_HELPER_SHA256: helperSha,
+          },
+        },
+      );
+      const log = fs.existsSync(logPath) ? decodePowerShellLog(fs.readFileSync(logPath)) : "";
+      return { ...res, log };
+    };
+    try {
+      const ok = await runWithHelper(
+        [
+          'process.stderr.write("\\u2714 Verified Resin v9.9.9 for test\\n");',
+          'process.stderr.write("progress line two\\n");',
+          'process.stdout.write(JSON.stringify({ success: true, version: "9.9.9", resinHome: process.cwd() }) + "\\n");',
+        ].join("\n"),
+      );
+      expect(ok.status, ok.log).toBe(0);
+      expect(ok.log).toContain("progress line two");
+      expect(ok.log).not.toContain("Resin installation failed");
+
+      const failing = await runWithHelper('process.stderr.write("boom\\n"); process.exit(3);');
+      expect(failing.status).not.toBe(0);
+      expect(`${failing.log}${failing.stderr}`).toContain(
+        "Installer helper failed with exit code 3.",
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("rejects zero-exit helper that produces empty output", () => {
     const content = fs.readFileSync(SCRIPT_PATH, "utf8");
     expect(content).toContain("if ([string]::IsNullOrWhiteSpace($stdoutStr))");
@@ -566,6 +636,45 @@ describe("install.ps1 execution and behavioral security tests", () => {
       "if ($null -eq $parsedJson -or $parsedJson.success -ne $true -or [string]::IsNullOrWhiteSpace($parsedJson.version))",
     );
     expect(content).toContain("Installer helper did not report successful installation.");
+  });
+
+  it("installs natively on Windows and keeps WSL2 behind -UseWsl", () => {
+    const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+    expect(content).toContain("[switch]$UseWsl");
+    expect(content).toContain("$useWslInstall = $runningOnWindows -and $UseWsl");
+    expect(content).toContain("if ($env:RESIN_INSTALL_USE_WSL -eq '1') { $UseWsl = $true }");
+    // Native Windows needs local Node.js >= 22 on x64/arm64, never wsl.exe
+    expect(content).toContain("winget install OpenJS.NodeJS.LTS");
+    expect(content).toContain("Resin supports Windows on x64 and arm64 only");
+    expect(content).toContain("$machine = $env:PROCESSOR_ARCHITEW6432");
+    expect(content).toContain("Invoke-ResinHelper -Command 'node'");
+    expect(content).toContain("Invoke-ResinHelper -Command 'wsl.exe'");
+  });
+
+  it("forwards PATH/onboarding switches and keeps test overrides test-only", () => {
+    const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+    expect(content).toContain("if ($NoPathUpdate) { $helperOptions.Add('--no-path-update') }");
+    expect(content).toContain("if ($NoOnboarding) { $helperOptions.Add('--no-onboarding') }");
+    expect(content).toContain(
+      "if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_TRUSTED_KEYS_JSON))",
+    );
+    expect(content).toContain(
+      "if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_INSTALL_HELPER_PATH))",
+    );
+    expect(content).toContain(
+      "if ($isTestMode -and -not [string]::IsNullOrWhiteSpace($env:RESIN_TEST_HELPER_SHA256))",
+    );
+  });
+
+  it("never closes an 'irm | iex' session: only a script-file run calls exit", () => {
+    const content = fs.readFileSync(SCRIPT_PATH, "utf8");
+    const exits = content.split("\n").filter((line) => /^\s*exit\b/.test(line));
+    expect(exits).toEqual(["        exit 1"]);
+    expect(content).toContain(
+      "$resinInstallRunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)",
+    );
+    // Windows PowerShell 5.1 reads BOM-less scripts as ANSI: keep the script ASCII-only.
+    expect(/[^\x00-\x7f]/.test(content)).toBe(false);
   });
 
   it("ensures WSL staging directory cleanup on exit", () => {

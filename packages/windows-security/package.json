@@ -1,0 +1,47 @@
+{
+  "name": "@resin/windows-security",
+  "version": "0.1.0",
+  "description": "Native Windows security primitives for Resin: owner-only named pipes and private-file DACLs.",
+  "private": false,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Resin-AI/resin.git",
+    "directory": "packages/windows-security"
+  },
+  "homepage": "https://github.com/Resin-AI/resin#readme",
+  "bugs": {
+    "url": "https://github.com/Resin-AI/resin/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": ["dist", "prebuilds", "native", "README.md", "LICENSE", "NOTICE"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:native": "node scripts/build-native.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "devDependencies": {
+    "node-api-headers": "1.9.0"
+  }
+}

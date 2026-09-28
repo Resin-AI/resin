@@ -47,7 +47,7 @@ Checks actually evaluated:
 
 | id | Category | What is verified |
 |----|----------|------------------|
-| `platform_supported` | platform | OS (Linux, macOS, WSL2) and Node.js `>= 22` |
+| `platform_supported` | platform | OS (Linux, macOS, WSL2, native Windows) and Node.js `>= 22` |
 | `fs_directories` | filesystem | Resin home, config, data, logs, state, and `bin` directories |
 | `service_installed` | service | Non-root user autostart unit installed and active |
 | `stale_lockfile` | ipc | Lockfile present while the daemon is not running |

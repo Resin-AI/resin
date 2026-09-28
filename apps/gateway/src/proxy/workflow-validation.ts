@@ -21,10 +21,15 @@ import {
   type WorkflowBindingCandidate,
   type WorkflowHeldOutDemonstration,
   type WorkflowJsonValue,
+  type WorkflowRecordedProgram,
   type WorkflowStep,
   type WorkflowValuePath,
+  isShellDialect,
   isSkippableSegment,
+  programNotLearnableReason,
   recordedPosixShell,
+  recordedProgramLanguage,
+  recordedShellDialect,
   shellAndChainSegmentText,
   workflowValidationPlanDigest,
 } from "@resin/contracts";
@@ -331,12 +336,7 @@ function iterationDemonstration(
         : { result: call.result.value }),
       ...(call.callable.program === undefined
         ? {}
-        : {
-            program: {
-              kind: call.callable.program.kind as ProgramLanguage,
-              argument: call.callable.program.argument,
-            },
-          }),
+        : { program: derivationProgram(call.callable.program) }),
     })),
   );
   const hidden = new Map<string, Array<{ argument: string; path: WorkflowValuePath }>>();
@@ -421,10 +421,14 @@ function asPlanShellCall(
   if (plan.builtinShell !== true || held.builtinShell !== true) return undefined;
   if (plan.program?.kind !== "shell" || held.program?.kind !== "shell") return undefined;
   if (step.callable.program?.argument !== plan.program.argument) return undefined;
-  // Every crossing needs one shell dialect: zsh neither word-splits an unquoted `$var` nor
-  // treats repeated redirections as bash does, so the same text is not the same program.
-  const planShell = recordedPosixShell(plan.name, own.arguments);
-  if (planShell === undefined || planShell !== recordedPosixShell(held.name, original.arguments)) {
+  // Every crossing needs one proven shell dialect: zsh neither word-splits an unquoted `$var` nor
+  // treats repeated redirections as bash does, and PowerShell 5.1, PowerShell 7 and POSIX shells
+  // read the same text differently, so the same text is not the same program.
+  const planShell = recordedShellDialect(plan.name, own.arguments, plan.program);
+  if (
+    planShell === undefined ||
+    planShell !== recordedShellDialect(held.name, original.arguments, held.program)
+  ) {
     return undefined;
   }
   // The working directory crosses too, under the plan's name for it; a harness naming it any
@@ -513,7 +517,7 @@ function segmentText(address: SegmentAddress, call: LocalRecordedCall): string |
   const program = call.callable.program;
   if (call.exitCode !== 0 || call.result === undefined || program?.kind !== "shell")
     return undefined;
-  const shell = recordedPosixShell(call.callable.name, call.arguments);
+  const shell = recordedPosixShell(call.callable.name, call.arguments, program);
   if (shell === undefined) return undefined;
   return shellAndChainSegmentText(shell, call.arguments[program.argument], address);
 }
@@ -831,7 +835,8 @@ export function createRecordingCheckValidator(
         return (
           recorded !== undefined &&
           (recorded.callable.name !== step.callable.name ||
-            recorded.callable.program?.argument !== step.callable.program?.argument)
+            recorded.callable.program?.argument !== step.callable.program?.argument ||
+            recordedDialectKey(recorded.callable, recorded.arguments) !== planDialectKey(step))
         );
       }),
     );
@@ -1055,7 +1060,14 @@ export function createRecordingCheckValidator(
           return { candidate, accepted: outcome?.accepted === true, reason: NOT_CONFIRMED };
         });
     return {
-      verdicts: outcomes.map((outcome) => {
+      verdicts: outcomes.map((unchecked) => {
+        // A binding inside a program Resin never learns (cmd.exe, an unproven shell dialect) is
+        // refused with that fixed, value-free reason, whatever the check decided.
+        const notLearnable = candidateNotLearnableReason(plan, unchecked.candidate);
+        const outcome =
+          notLearnable === undefined
+            ? unchecked
+            : { ...unchecked, accepted: false, reason: notLearnable };
         const confirmedType = outcome.accepted ? typeOf.get(outcome.candidate) : undefined;
         return {
           candidate: {
@@ -1072,4 +1084,65 @@ export function createRecordingCheckValidator(
       ...(verification === undefined ? {} : { verification }),
     };
   };
+}
+
+/**
+ * The shell dialect a recorded call's program ran in, as one comparable key: the proven dialect,
+ * `unproven`, or `none` (not a shell program, or a record that proves no shell). A demonstration in
+ * another dialect than the plan's step is another program, never checked against it.
+ */
+function recordedDialectKey(
+  callable: {
+    name: string;
+    program?: { kind: string; dialect?: unknown; unprovenDialect?: unknown };
+  },
+  args: Readonly<Record<string, unknown>>,
+): string {
+  const program = callable.program;
+  if (program?.kind !== "shell") return "none";
+  if (program.unprovenDialect === true) return "unproven";
+  return (
+    recordedShellDialect(callable.name, args, {
+      ...(isShellDialect(program.dialect) ? { dialect: program.dialect } : {}),
+    }) ?? (program.dialect === undefined ? "none" : "invalid")
+  );
+}
+
+/** {@link recordedDialectKey} for a plan's step, reading its recorded shell profile literal. */
+function planDialectKey(step: WorkflowStep): string {
+  const profile = step.arguments.find((argument) => argument.name === "resinCodexShellProfile");
+  return recordedDialectKey(
+    step.callable,
+    profile?.source.kind === "literal" ? { resinCodexShellProfile: profile.source.value } : {},
+  );
+}
+
+/**
+ * The program the recorder's derivation reads a recorded call's text as: its recorded dialect's
+ * grammar, or opaque when Resin never tokenizes it (cmd.exe, an unproven dialect).
+ */
+function derivationProgram(program: NonNullable<LocalRecordedCall["callable"]["program"]>): {
+  kind: ProgramLanguage;
+  argument: string;
+  opaque?: true;
+} {
+  const recorded = {
+    kind: program.kind as WorkflowRecordedProgram["kind"],
+    ...(program.dialect === undefined ? {} : { dialect: program.dialect }),
+    ...(program.unprovenDialect === true ? { unprovenDialect: true as const } : {}),
+  };
+  const language = recordedProgramLanguage(recorded);
+  return language === undefined || programNotLearnableReason(recorded) !== undefined
+    ? { kind: "shell", argument: program.argument, opaque: true }
+    : { kind: language, argument: program.argument };
+}
+
+/** Why a candidate's program is never learned; undefined when it may be (or is not a program's). */
+function candidateNotLearnableReason(
+  plan: RecordedWorkflow,
+  candidate: Pick<WorkflowBindingCandidate, "stepId" | "argument">,
+): string | undefined {
+  const program = plan.steps.find((step) => step.id === candidate.stepId)?.callable.program;
+  if (program === undefined || program.argument !== candidate.argument) return undefined;
+  return programNotLearnableReason(program);
 }

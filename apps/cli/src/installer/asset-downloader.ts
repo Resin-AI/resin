@@ -3,11 +3,22 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
 import type { ManifestAsset } from "./channel-verifier.js";
 import type { ReleaseProvenance } from "./release-client.js";
+import {
+  type WindowsLauncherTransaction,
+  publishWindowsLaunchers,
+  removeWindowsReleaseDirectory,
+  removeWindowsReleaseTrash,
+  restoreWindowsPointer,
+  setWindowsReleasePointer,
+  snapshotWindowsPointer,
+  windowsLauncherNamesForRelease,
+} from "./windows-install.js";
 
 export interface AssetDownloadOptions {
   readonly asset: ManifestAsset;
@@ -60,6 +71,11 @@ export interface VersionSwitchOptions {
   readonly targetVersion: string;
   readonly fsBridge?: ConfigFsBridge;
   readonly logger?: (message: string) => void;
+  /**
+   * Host platform whose activation layout to use (defaults to process.platform). Windows uses
+   * junctions plus pointer files and per-file `.cmd`/`.mjs` launchers instead of symlinks.
+   */
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface VersionSwitchResult {
@@ -74,6 +90,7 @@ export interface RollbackOptions {
   readonly targetVersion?: string;
   readonly fsBridge?: ConfigFsBridge;
   readonly logger?: (message: string) => void;
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface VersionRollbackResult {
@@ -1432,6 +1449,17 @@ export async function switchActiveVersion(
     );
   }
 
+  if ((options.platform ?? process.platform) === "win32") {
+    return switchActiveVersionWindows({
+      resinHome,
+      versionsDir,
+      cleanTarget,
+      targetVersionDir,
+      targetVersionJson,
+      log,
+    });
+  }
+
   const currentPointer = path.join(resinHome, "current");
   const previousPointer = path.join(resinHome, "previous");
   const versionStatePath = path.join(resinHome, "version-state.json");
@@ -1551,7 +1579,7 @@ export async function switchActiveVersion(
         } catch {
           fs.writeFileSync(
             stagedBinPath,
-            `#!/usr/bin/env node\nimport "${path.resolve(binTarget)}";\n`,
+            `#!/usr/bin/env node\nimport ${JSON.stringify(pathToFileURL(path.resolve(binTarget)).href)};\n`,
             { mode: 0o755 },
           );
           fs.chmodSync(stagedBinPath, 0o755);
@@ -1778,6 +1806,159 @@ export async function switchActiveVersion(
 }
 
 /**
+ * Windows activation. `current`/`previous` are directory junctions (no administrator rights or
+ * Developer Mode needed) backed by `current-version`/`previous-version` pointer files, and the
+ * global launchers are replaced file by file because a running `resin.cmd` keeps `bin` busy.
+ * Every pointer, pointer file, launcher and version-state.json is snapshotted first and
+ * restored if any step fails. Files held open by a running daemon live under `versions\v*`,
+ * which activation never renames or deletes.
+ */
+async function switchActiveVersionWindows(context: {
+  readonly resinHome: string;
+  readonly versionsDir: string;
+  readonly cleanTarget: string;
+  readonly targetVersionDir: string;
+  readonly targetVersionJson: string;
+  readonly log: (message: string) => void;
+}): Promise<VersionSwitchResult> {
+  const { resinHome, versionsDir, cleanTarget, targetVersionDir, targetVersionJson, log } = context;
+  const versionStatePath = path.join(resinHome, "version-state.json");
+  const snapshotPaths = [
+    path.join(resinHome, "current"),
+    path.join(resinHome, "current-version"),
+    path.join(resinHome, "previous"),
+    path.join(resinHome, "previous-version"),
+    versionStatePath,
+  ];
+
+  const priorActiveVersionRaw = getActiveVersion(resinHome);
+  const priorActiveVersion =
+    priorActiveVersionRaw === null ? null : normalizeReleaseVersion(priorActiveVersionRaw);
+  const snapshots = new Map(
+    snapshotPaths.map((snapshotPath) => [snapshotPath, snapshotWindowsPointer(snapshotPath)]),
+  );
+  const priorVersionStateSnapshot = snapshots.get(versionStatePath);
+  const priorVersionStateRaw =
+    priorVersionStateSnapshot?.kind === "file"
+      ? priorVersionStateSnapshot.content.toString("utf8")
+      : null;
+
+  let launchers: WindowsLauncherTransaction | null = null;
+  try {
+    if (priorActiveVersion && priorActiveVersion !== cleanTarget) {
+      const prevTargetDir = resolveVersionChildPath(
+        versionsDir,
+        `v${priorActiveVersion}`,
+        "previous release version directory",
+      );
+      if (fs.existsSync(prevTargetDir)) {
+        setWindowsReleasePointer({
+          resinHome,
+          name: "previous",
+          targetDir: prevTargetDir,
+          version: priorActiveVersion,
+        });
+      }
+    }
+
+    const current = setWindowsReleasePointer({
+      resinHome,
+      name: "current",
+      targetDir: targetVersionDir,
+      version: cleanTarget,
+    });
+    if (!current.junction) {
+      log(
+        `Directory junctions are unavailable in ${resinHome}; recorded the active version in current-version only.`,
+      );
+    }
+
+    launchers = publishWindowsLaunchers({
+      resinHome,
+      version: cleanTarget,
+      names: windowsLauncherNamesForRelease(targetVersionDir),
+    });
+
+    const installedList = fs
+      .readdirSync(versionsDir)
+      .filter((d) => d.startsWith("v") && !d.startsWith("."))
+      .map((d) => d.replace(/^v/, ""));
+    let provenanceByVersion: NonNullable<VersionStateRecord["provenanceByVersion"]> = {};
+    if (priorVersionStateRaw) {
+      try {
+        // SAFETY: Prior version state parsed from valid version-state.json structure.
+        const state = JSON.parse(priorVersionStateRaw) as VersionStateRecord;
+        if (state.provenanceByVersion) provenanceByVersion = { ...state.provenanceByVersion };
+      } catch {}
+    }
+    try {
+      // SAFETY: JSON parsed from version.json metadata adhering to InstalledVersionJson structure.
+      const versionMetadata = JSON.parse(
+        fs.readFileSync(targetVersionJson, "utf8"),
+      ) as InstalledVersionJson;
+      if (versionMetadata.provenance) provenanceByVersion[cleanTarget] = versionMetadata.provenance;
+    } catch {}
+    const newState: VersionStateRecord = {
+      activeVersion: cleanTarget,
+      previousVersion: priorActiveVersion,
+      updatedAt: new Date().toISOString(),
+      installedVersions: installedList,
+      provenanceByVersion,
+    };
+    const tmpStatePath = path.join(
+      resinHome,
+      `.version-state.json.tmp-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
+    );
+    await fsPromises.writeFile(tmpStatePath, JSON.stringify(newState, null, 2), "utf8");
+    await fsPromises.rename(tmpStatePath, versionStatePath);
+
+    const verifiedActive = getActiveVersion(resinHome);
+    if (verifiedActive !== cleanTarget) {
+      throw new Error(
+        `Atomic activation failed post-commit check: expected active version v${cleanTarget}, but resolved ${verifiedActive ? `v${verifiedActive}` : "none"}`,
+      );
+    }
+
+    log(
+      `Successfully switched active version to v${cleanTarget} (previous: ${priorActiveVersion ? `v${priorActiveVersion}` : "none"}).`,
+    );
+    return {
+      activeVersion: cleanTarget,
+      previousVersion: priorActiveVersion,
+      activePath: targetVersionDir,
+      rollbackRetained: Boolean(priorActiveVersion && priorActiveVersion !== cleanTarget),
+    };
+  } catch (error) {
+    launchers?.rollback();
+    for (const [snapshotPath, snapshot] of snapshots) {
+      try {
+        restoreWindowsPointer(snapshotPath, snapshot);
+      } catch (restoreError) {
+        log(
+          `Warning: could not restore '${snapshotPath}': ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+        );
+      }
+    }
+    for (const entry of fs.readdirSync(resinHome)) {
+      if (/^\.(?:current|previous)(?:-version)?\.tmp-|^\.version-state\.json\.tmp-/.test(entry)) {
+        try {
+          const leftover = path.join(resinHome, entry);
+          if (fs.lstatSync(leftover).isSymbolicLink()) fs.unlinkSync(leftover);
+          else fs.rmSync(leftover, { force: true });
+        } catch {}
+      }
+    }
+    const restoredActive = getActiveVersion(resinHome);
+    if (restoredActive !== priorActiveVersion) {
+      log(
+        `Warning: Post-rollback active version mismatch: expected ${priorActiveVersion ? `v${priorActiveVersion}` : "none"}, got ${restoredActive ? `v${restoredActive}` : "none"}`,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
  * Rolls back the active version pointer to the previous known good version.
  */
 export async function rollbackActiveVersion(
@@ -1843,6 +2024,7 @@ export async function rollbackActiveVersion(
     targetVersion: cleanTarget,
     fsBridge: options.fsBridge,
     logger: options.logger,
+    platform: options.platform,
   });
 
   log(`Rollback completed: active version restored to v${cleanTarget}.`);
@@ -1896,6 +2078,7 @@ export interface PruneInstalledVersionsOptions {
   readonly retainVersions: readonly (string | null | undefined)[];
   readonly removeDirectory?: (versionDir: string) => Promise<void>;
   readonly logger?: (message: string) => void;
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface PruneInstalledVersionsResult {
@@ -1938,10 +2121,16 @@ export async function pruneInstalledVersions(
 ): Promise<PruneInstalledVersionsResult> {
   const { resinHome } = options;
   const log = options.logger ?? (() => {});
+  const isWindows = (options.platform ?? process.platform) === "win32";
+  // On Windows a running daemon keeps files of its release open; moving the directory out of
+  // versions first means a busy release is either left intact or removed, never half-deleted.
   const removeDirectory =
     options.removeDirectory ??
-    ((versionDir: string) => fsPromises.rm(versionDir, { recursive: true, force: true }));
+    (isWindows
+      ? removeWindowsReleaseDirectory
+      : (versionDir: string) => fsPromises.rm(versionDir, { recursive: true, force: true }));
   const versionsDir = path.resolve(resinHome, "versions");
+  if (isWindows) await removeWindowsReleaseTrash(versionsDir);
   const versionStatePath = path.join(resinHome, "version-state.json");
   const removed: string[] = [];
   const failed: string[] = [];

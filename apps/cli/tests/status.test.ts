@@ -104,15 +104,26 @@ for (const definition of HARNESS_DEFINITIONS) {
 }
 
 const NOW = 1_800_000_000_000;
-const HOME = "/home/status-user";
+// Drive-qualified on Windows: status resolves every path it reads.
+const HOME = path.resolve("/home/status-user");
 const RESIN_HOME = path.join(HOME, ".resin");
-const RESIN_COMMAND = path.join(RESIN_HOME, "bin", "resin");
+const WORKSPACE_ROOT = path.resolve("/workspace");
+const APP_DIR = path.join(WORKSPACE_ROOT, "packages", "app");
+// Windows registers the installer's Node entry launched through node.exe (no shebang shims).
+const RESIN_LAUNCH =
+  process.platform === "win32"
+    ? { command: process.execPath, args: [path.join(RESIN_HOME, "bin", "resin.mjs"), "mcp"] }
+    : { command: path.join(RESIN_HOME, "bin", "resin"), args: ["mcp"] };
+const CODEX_RESIN_TOML = `[mcp_servers.resin]\ncommand = ${JSON.stringify(RESIN_LAUNCH.command)}\nargs = ${JSON.stringify(RESIN_LAUNCH.args)}\n`;
 const STATE_DIR = path.join(RESIN_HOME, "state");
 const CONFIG_FILE = path.join(RESIN_HOME, "config", "config.json");
 const SOCKET_FILE = path.join(STATE_DIR, "daemon.sock");
 const LOCK_FILE = path.join(STATE_DIR, "daemon.lock");
 const TOKEN_FILE = path.join(STATE_DIR, "device-token.json");
-const ENV = { RESIN_HOME };
+// Windows dials a named pipe; pointing the daemon endpoint at the fixture file lets the mocked
+// IpcClient stand in for a running daemon on every platform.
+const ENV: NodeJS.ProcessEnv =
+  process.platform === "win32" ? { RESIN_HOME, RESIN_SOCKET_PATH: SOCKET_FILE } : { RESIN_HOME };
 const PROFILE = {
   schemaVersion: "1.0.0",
   accountId: "acc_status_42",
@@ -241,14 +252,13 @@ function healthyFiles() {
     [path.join(STATE_DIR, "recovery-state.json")]: JSON.stringify(recoverySnapshot()),
     [path.join(STATE_DIR, "harness-health.json")]: JSON.stringify(harnessSnapshot()),
     [path.join(HOME, ".claude.json")]: JSON.stringify({
-      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
+      mcpServers: { resin: RESIN_LAUNCH },
     }),
-    [path.join(HOME, ".codex", "config.toml")]:
-      `[mcp_servers.resin]\ncommand = "${RESIN_COMMAND}"\nargs = ["mcp"]\n`,
+    [path.join(HOME, ".codex", "config.toml")]: CODEX_RESIN_TOML,
     [path.join(HOME, ".omp", "agent", "mcp.json")]: JSON.stringify({
-      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
+      mcpServers: { resin: RESIN_LAUNCH },
     }),
-    "/workspace/resin.json": JSON.stringify({
+    [path.join(WORKSPACE_ROOT, "resin.json")]: JSON.stringify({
       workspaceId: "ws_project_99",
       name: "status-project",
     }),
@@ -301,7 +311,7 @@ describe("unified status schema", () => {
       .mockImplementation((commandArgs, options) =>
         realStatusCommand(commandArgs, {
           ...options,
-          cwd: "/workspace/packages/app",
+          cwd: APP_DIR,
           env: ENV,
           now: () => NOW,
           fsBridge: createMockFsBridge(healthyFiles()),
@@ -312,7 +322,7 @@ describe("unified status schema", () => {
       expect(await main([...args, "--home", HOME], { isInitialized: false, env: ENV })).toBe(0);
       expect(chunks.join("")).toContain("[Service & IPC]");
       expect(chunks.join("")).toContain("[Tools & MCP Catalog]");
-      expect(chunks.join("")).toContain("/workspace/packages/app");
+      expect(chunks.join("")).toContain(APP_DIR);
     } finally {
       command.mockRestore();
       stdout.mockRestore();
@@ -333,7 +343,7 @@ describe("unified status schema", () => {
     try {
       const exitCode = await statusCommand([...args, "--home", HOME], {
         verbose,
-        cwd: "/workspace/packages/app",
+        cwd: APP_DIR,
         env: ENV,
         now: () => NOW,
         fsBridge: createMockFsBridge(healthyFiles()),
@@ -346,7 +356,7 @@ describe("unified status schema", () => {
         expect(output).toContain("[Service & IPC]");
         expect(output).toContain("[Tools & MCP Catalog]");
         expect(output).toContain("ws_project_99");
-        expect(output).toContain("/workspace/packages/app");
+        expect(output).toContain(APP_DIR);
       } else {
         expect(output).toContain("Resin: Running");
         expect(output).toContain("Details: resin status --verbose");
@@ -367,7 +377,7 @@ describe("unified status schema", () => {
       return true;
     });
     const options = {
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -398,7 +408,7 @@ describe("unified status schema", () => {
   it("collects a healthy workspace, daemon, identity, privacy, harness, recovery, and update snapshot", async () => {
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -408,10 +418,10 @@ describe("unified status schema", () => {
     expect(summary.generatedAt).toBe(new Date(NOW).toISOString());
     expect(summary.status).toBe("healthy");
     expect(summary.workspace).toEqual({
-      activeDirectory: "/workspace/packages/app",
+      activeDirectory: APP_DIR,
       workspaceId: "ws_project_99",
       projectConfigLoaded: true,
-      rootDir: "/workspace",
+      rootDir: WORKSPACE_ROOT,
     });
     expect(summary.daemon).toMatchObject({
       health: "healthy",
@@ -463,7 +473,7 @@ describe("unified status schema", () => {
   it("keeps healthy foreground status compact without hiding sharing or installed agents", async () => {
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -504,7 +514,7 @@ describe("unified status schema", () => {
       "dev_status_42",
       "acc_status_42",
       "user_status_42",
-      "/workspace",
+      WORKSPACE_ROOT,
       summary.generatedAt,
       "[Service & IPC]",
       "[Recovery]",
@@ -592,7 +602,7 @@ describe("unified status schema", () => {
     async (status) => {
       const summary = await collectStatus({
         home: HOME,
-        cwd: "/workspace/packages/app",
+        cwd: APP_DIR,
         env: ENV,
         now: () => NOW,
         fsBridge: createMockFsBridge(healthyFiles()),
@@ -617,7 +627,7 @@ describe("unified status schema", () => {
   it("distinguishes an offline cloud connection from a stopped local daemon", async () => {
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -634,14 +644,14 @@ describe("unified status schema", () => {
   });
 
   it("uses the active CODEX_HOME and does not accept a configured inactive default", async () => {
-    const activeCodexHome = "/profiles/status-codex";
+    const activeCodexHome = path.resolve("/profiles/status-codex");
     const activeCodexPath = path.join(activeCodexHome, "config.toml");
     const files = healthyFiles();
     const env = { ...ENV, HOME, CODEX_HOME: activeCodexHome };
 
     const inactiveOnly = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -653,12 +663,12 @@ describe("unified status schema", () => {
 
     const active = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env,
       now: () => NOW,
       fsBridge: createMockFsBridge({
         ...files,
-        [activeCodexPath]: `[mcp_servers.resin]\ncommand = "${RESIN_COMMAND}"\nargs = ["mcp"]\n`,
+        [activeCodexPath]: CODEX_RESIN_TOML,
       }),
     });
     expect(active.harnesses.find((harness) => harness.id === "codex-cli")).toMatchObject({
@@ -684,7 +694,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -716,7 +726,7 @@ describe("unified status schema", () => {
 
     try {
       const exitCode = await statusCommand(["--json", "--home", HOME], {
-        cwd: "/workspace/packages/app",
+        cwd: APP_DIR,
         env: ENV,
         now: () => NOW,
         fsBridge: createMockFsBridge(healthyFiles()),
@@ -747,7 +757,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -770,7 +780,7 @@ describe("unified status schema", () => {
     runtime.health = { ...runtime.health, telemetry: {} };
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -791,7 +801,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(healthyFiles()),
@@ -816,7 +826,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -861,7 +871,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -879,12 +889,12 @@ describe("unified status schema", () => {
     const files = healthyFiles();
     delete files[path.join(HOME, ".omp", "agent", "mcp.json")];
     files[path.join(HOME, ".omp", "config.json")] = JSON.stringify({
-      mcpServers: { resin: { command: RESIN_COMMAND, args: ["mcp"] } },
+      mcpServers: { resin: RESIN_LAUNCH },
     });
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -909,7 +919,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge,
@@ -996,7 +1006,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -1049,7 +1059,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -1092,7 +1102,7 @@ describe("unified status schema", () => {
     });
     try {
       const exitCode = await statusCommand(["--json", "--home", HOME], {
-        cwd: "/workspace/packages/app",
+        cwd: APP_DIR,
         env: ENV,
         now: () => NOW,
         fsBridge: createMockFsBridge(files),
@@ -1141,7 +1151,7 @@ describe("unified status schema", () => {
     runtime.serviceError = true;
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/app",
+      cwd: path.join(WORKSPACE_ROOT, "app"),
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge({}, true),
@@ -1172,10 +1182,10 @@ describe("unified status schema", () => {
   });
 
   it("escapes workspace path controls in terminal output without changing JSON values", async () => {
-    const unsafeRoot = "/workspace/\u001b[31mforged\nline\r\t\u007f\u009b";
+    const unsafeRoot = path.join(WORKSPACE_ROOT, "\u001b[31mforged\nline\r\t\u007f\u009b");
     const unsafeCwd = path.join(unsafeRoot, "app");
     const files = healthyFiles();
-    files[path.join(unsafeRoot, "resin.json")] = files["/workspace/resin.json"];
+    files[path.join(unsafeRoot, "resin.json")] = files[path.join(WORKSPACE_ROOT, "resin.json")];
 
     const summary = await collectStatus({
       home: HOME,
@@ -1186,13 +1196,13 @@ describe("unified status schema", () => {
     });
     const terminal = formatStatusForTerminal(summary, { verbose: true });
     const jsonRoundTrip = JSON.parse(JSON.stringify(summary));
-    const escapedRoot = "/workspace/\\u001b[31mforged\\u000aline\\u000d\\u0009\\u007f\\u009b";
+    const escapedRoot = `${WORKSPACE_ROOT}${path.sep}\\u001b[31mforged\\u000aline\\u000d\\u0009\\u007f\\u009b`;
 
     expect(summary.workspace.activeDirectory).toBe(unsafeCwd);
     expect(summary.workspace.rootDir).toBe(unsafeRoot);
     expect(jsonRoundTrip.workspace.activeDirectory).toBe(unsafeCwd);
     expect(jsonRoundTrip.workspace.rootDir).toBe(unsafeRoot);
-    expect(terminal).toContain(`  Active:     ${escapedRoot}/app`);
+    expect(terminal).toContain(`  Active:     ${escapedRoot}${path.sep}app`);
     expect(terminal).toContain(`  Root:       ${escapedRoot}`);
     expect(terminal).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
   });
@@ -1206,7 +1216,7 @@ describe("unified status schema", () => {
       privateKey: "CONFIG_PRIVATE_KEY_SECRET",
       password: "CONFIG_PASSWORD_SECRET",
     });
-    files["/workspace/resin.json"] = JSON.stringify({
+    files[path.join(WORKSPACE_ROOT, "resin.json")] = JSON.stringify({
       workspaceId: "ws_project_99",
       apiToken: "PROJECT_API_TOKEN_SECRET",
       secret: "PROJECT_MANIFEST_SECRET",
@@ -1218,7 +1228,7 @@ describe("unified status schema", () => {
 
     const summary = await collectStatus({
       home: HOME,
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge: createMockFsBridge(files),
@@ -1262,8 +1272,8 @@ describe("unified status schema", () => {
     ]) {
       expect(json).not.toContain(`\"${forbiddenKey}\"`);
     }
-    expect(summary.workspace.activeDirectory).toBe("/workspace/packages/app");
-    expect(summary.workspace.rootDir).toBe("/workspace");
+    expect(summary.workspace.activeDirectory).toBe(APP_DIR);
+    expect(summary.workspace.rootDir).toBe(WORKSPACE_ROOT);
   });
 
   it("uses a distinct nonzero exit for invalid flags without exposing parser details", async () => {
@@ -1448,7 +1458,7 @@ describe("automatic update status", () => {
     files[NOTICE_FILE] = JSON.stringify(NOTICE);
     const fsBridge = createMockFsBridge(files);
     const options = {
-      cwd: "/workspace/packages/app",
+      cwd: APP_DIR,
       env: ENV,
       now: () => NOW,
       fsBridge,

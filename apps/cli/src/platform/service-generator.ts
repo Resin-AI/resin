@@ -1,7 +1,17 @@
 import path from "node:path";
 import process from "node:process";
+import {
+  WINDOWS_SERVICE_HOST_FILE,
+  buildServiceHostArguments,
+  buildWindowsTaskXml,
+} from "../service/windows-task.js";
 
-export type ServiceManagerKind = "systemd" | "launchd" | "wsl-systemd" | "wsl-fallback";
+export type ServiceManagerKind =
+  | "systemd"
+  | "launchd"
+  | "wsl-systemd"
+  | "wsl-fallback"
+  | "windows-task";
 
 export interface ServiceGeneratorOptions {
   serviceName?: string;
@@ -320,6 +330,34 @@ esac
 }
 
 /**
+ * Generates the per-user Windows Scheduled Task XML for native Windows. The
+ * task runs the windowless service host, which runs Node with the daemon.
+ */
+export function generateWindowsTaskXml(
+  options: ServiceGeneratorOptions & { userSid: string; hostPath?: string },
+): string {
+  const homeDir = options.homeDir ?? process.env.USERPROFILE ?? process.env.HOME ?? "";
+  const resinHome = options.resinHome ?? path.win32.join(homeDir, ".resin");
+  const daemonPath = options.daemonPath ?? path.win32.join(resinHome, "bin", "resin-daemon.mjs");
+  const nodePath = options.nodePath ?? process.execPath;
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(options.env ?? {})) {
+    if (value !== undefined) env[key] = value;
+  }
+  return buildWindowsTaskXml({
+    userSid: options.userSid,
+    hostPath: options.hostPath ?? path.win32.join(resinHome, "services", WINDOWS_SERVICE_HOST_FILE),
+    workingDirectory: resinHome,
+    hostArguments: buildServiceHostArguments({
+      resinHome,
+      nodePath,
+      env,
+      supervisorArguments: [nodePath, daemonPath, ...(options.args ?? [])],
+    }),
+  });
+}
+
+/**
  * Validates generated service definitions for syntax and completeness.
  */
 export function validateServiceDefinition(
@@ -356,6 +394,21 @@ export function validateServiceDefinition(
       errors.push("Missing start_daemon function in WSL fallback script.");
     if (!content.includes("stop_daemon()"))
       errors.push("Missing stop_daemon function in WSL fallback script.");
+  } else if (type === "windows-task") {
+    if (!content.includes('xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"'))
+      errors.push("Missing Task Scheduler namespace in Windows task XML.");
+    if (!content.includes("<LogonTrigger>"))
+      errors.push("Missing <LogonTrigger> in Windows task XML.");
+    if (!content.includes("<LogonType>InteractiveToken</LogonType>"))
+      errors.push("Windows task must run with the interactive user's token.");
+    if (!content.includes("<RunLevel>LeastPrivilege</RunLevel>"))
+      errors.push("Windows task must run with least privilege.");
+    if (!content.includes("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"))
+      errors.push("Windows task must not have an execution time limit.");
+    if (!/<Exec>\s*<Command>[^<]+<\/Command>/.test(content))
+      errors.push("Missing <Exec><Command> action in Windows task XML.");
+    if (/[^\x09\x0a\x0d\x20-\x7e]/.test(content))
+      errors.push("Windows task XML must be ASCII (non-ASCII as character references).");
   }
 
   return {

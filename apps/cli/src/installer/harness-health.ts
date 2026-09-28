@@ -4,7 +4,7 @@ import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { HarnessId } from "@resin/contracts";
-import { NodeConfigFsBridge } from "@resin/harness-contracts";
+import { NodeConfigFsBridge, resolveHarnessUserHome } from "@resin/harness-contracts";
 import { z } from "zod";
 import {
   SUPPORTED_HARNESS_IDS,
@@ -591,7 +591,9 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   private inFlight: Promise<HarnessHealthRunResult> | null = null;
 
   constructor(options: HarnessHealthCoordinatorOptions = {}) {
-    this.home = path.resolve(options.home ?? options.env?.HOME ?? os.homedir());
+    this.home = path.resolve(
+      options.home ?? resolveHarnessUserHome({ env: options.env ?? process.env }),
+    );
     this.env = options.env ?? (options.home === undefined ? process.env : { HOME: this.home });
     this.resinCommand =
       options.resinCommand ??

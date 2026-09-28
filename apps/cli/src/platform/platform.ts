@@ -6,7 +6,7 @@ import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 /**
  * Supported target operating systems for Resin.
  */
-export type SupportedPlatform = "linux" | "darwin" | "wsl";
+export type SupportedPlatform = "linux" | "darwin" | "wsl" | "windows";
 
 export type PlatformType = SupportedPlatform | "win32" | "other";
 
@@ -16,14 +16,16 @@ export type PlatformType = SupportedPlatform | "win32" | "other";
 export type SupportedArch = "x64" | "arm64";
 
 /**
- * The 5 Required Platform Distribution & Qualification Lanes for V1.
+ * The Required Platform Distribution & Qualification Lanes for V1.
  */
 export type RequiredQualificationLane =
   | "linux-x64"
   | "linux-arm64"
   | "darwin-x64"
   | "darwin-arm64"
-  | "wsl";
+  | "wsl"
+  | "windows-x64"
+  | "windows-arm64";
 
 /**
  * Official Release Qualification & Runtime Lanes (including WSL supervisor variants).
@@ -34,7 +36,9 @@ export type PlatformQualificationLane =
   | "darwin-x64"
   | "darwin-arm64"
   | "wsl-systemd"
-  | "wsl-fallback";
+  | "wsl-fallback"
+  | "windows-x64"
+  | "windows-arm64";
 
 export const REQUIRED_QUALIFICATION_LANES: readonly RequiredQualificationLane[] = [
   "linux-x64",
@@ -42,6 +46,8 @@ export const REQUIRED_QUALIFICATION_LANES: readonly RequiredQualificationLane[] 
   "darwin-x64",
   "darwin-arm64",
   "wsl",
+  "windows-x64",
+  "windows-arm64",
 ] as const;
 
 export const ALL_QUALIFICATION_LANES: readonly PlatformQualificationLane[] = [
@@ -51,6 +57,8 @@ export const ALL_QUALIFICATION_LANES: readonly PlatformQualificationLane[] = [
   "darwin-arm64",
   "wsl-systemd",
   "wsl-fallback",
+  "windows-x64",
+  "windows-arm64",
 ] as const;
 
 export const PINNED_NODE_VERSION = "22";
@@ -102,13 +110,14 @@ export interface SupportMatrixToolchain {
  */
 export interface SupportMatrixPlatform {
   readonly id: RequiredQualificationLane;
-  readonly os: "linux" | "darwin";
+  /** Node's `process.platform` for the lane (WSL runs as "linux"). */
+  readonly os: "linux" | "darwin" | "win32";
   readonly arch: "x64" | "arm64";
   readonly isWsl: boolean;
   readonly wslVersion?: 2;
   readonly displayName: string;
   readonly tier: 1;
-  readonly serviceManager: "systemd" | "launchd" | "systemd | fallback";
+  readonly serviceManager: "systemd" | "launchd" | "systemd | fallback" | "windows-task";
   readonly tarball: string;
   readonly qualified: true;
   readonly minimumOsVersion: string;
@@ -135,6 +144,14 @@ export interface SupportMatrixEnvironmentAssumptions {
     readonly supported: readonly ["bash", "zsh", "sh"];
     readonly posixCompliant: true;
     readonly profileFiles: readonly [".bashrc", ".zshrc", ".profile"];
+    /**
+     * Native Windows shells. Windows PowerShell 5.1 (`powershell`) and PowerShell 7+ (`pwsh`)
+     * are separate dialects that are learned independently; cmd.exe is captured but never learned.
+     */
+    readonly windows: {
+      readonly learnable: readonly ["powershell", "pwsh"];
+      readonly capturedNotLearnable: readonly ["cmd"];
+    };
   };
   readonly packageManagers: {
     readonly pnpm: {
@@ -159,12 +176,6 @@ export interface SupportMatrixEnvironmentAssumptions {
  * Explicit limitations and unsupported environment specifications.
  */
 export interface SupportMatrixLimitations {
-  readonly nativeWindows: {
-    readonly supported: false;
-    readonly impliedByWsl2: false;
-    readonly reason: string;
-    readonly rejectionMessage: string;
-  };
   readonly wsl1: {
     readonly supported: false;
     readonly reason: string;
@@ -297,6 +308,30 @@ export const V1_SUPPORT_MATRIX: V1SupportMatrix = Object.freeze({
       qualified: true,
       minimumOsVersion: "WSL2 (Ubuntu 22.04+)",
     }),
+    Object.freeze({
+      id: "windows-x64",
+      os: "win32",
+      arch: "x64",
+      isWsl: false,
+      displayName: "Windows x64 (native, PowerShell)",
+      tier: 1,
+      serviceManager: "windows-task",
+      tarball: "resin-v1.0.0-windows-x64.tar.gz",
+      qualified: true,
+      minimumOsVersion: "Windows 10 (1809+) / Windows 11",
+    }),
+    Object.freeze({
+      id: "windows-arm64",
+      os: "win32",
+      arch: "arm64",
+      isWsl: false,
+      displayName: "Windows ARM64 (native, PowerShell)",
+      tier: 1,
+      serviceManager: "windows-task",
+      tarball: "resin-v1.0.0-windows-arm64.tar.gz",
+      qualified: true,
+      minimumOsVersion: "Windows 11 (ARM64)",
+    }),
   ]),
   qualificationLanes: REQUIRED_QUALIFICATION_LANES,
   runtimeLanes: ALL_QUALIFICATION_LANES,
@@ -320,6 +355,10 @@ export const V1_SUPPORT_MATRIX: V1SupportMatrix = Object.freeze({
       supported: Object.freeze(["bash", "zsh", "sh"] as const),
       posixCompliant: true,
       profileFiles: Object.freeze([".bashrc", ".zshrc", ".profile"] as const),
+      windows: Object.freeze({
+        learnable: Object.freeze(["powershell", "pwsh"] as const),
+        capturedNotLearnable: Object.freeze(["cmd"] as const),
+      }),
     }),
     packageManagers: Object.freeze({
       pnpm: Object.freeze({
@@ -340,14 +379,6 @@ export const V1_SUPPORT_MATRIX: V1SupportMatrix = Object.freeze({
     }),
   }),
   limitations: Object.freeze({
-    nativeWindows: Object.freeze({
-      supported: false,
-      impliedByWsl2: false,
-      reason:
-        "Native Windows (win32) is unsupported. Resin must run inside WSL2 (Windows Subsystem for Linux): `wsl --install`.",
-      rejectionMessage:
-        "Native Windows is not supported. Please run within Windows Subsystem for Linux (WSL2): `wsl --install`.",
-    }),
     wsl1: Object.freeze({
       supported: false,
       reason:
@@ -417,11 +448,9 @@ export class UnsupportedPlatformError extends Error {
     platform: NodeJS.Platform,
     details?: { arch?: string; nodeVersion?: string; isWsl?: boolean },
   ) {
-    const message =
-      platform === "win32"
-        ? V1_SUPPORT_MATRIX.limitations.nativeWindows.rejectionMessage
-        : `Unsupported platform: ${String(platform)}. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), or WSL2.`;
-    super(message);
+    super(
+      `Unsupported platform: ${String(platform)}. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), Windows 10/11 (x64/arm64), or WSL2.`,
+    );
     this.name = "UnsupportedPlatformError";
     this.platform = platform;
     this.arch = details?.arch ?? process.arch;
@@ -476,6 +505,9 @@ export function isAppleSilicon(
  * Determines the qualification lane for a given platform info.
  */
 export function getQualificationLane(info: PlatformInfo): PlatformQualificationLane {
+  if (info.os === "windows") {
+    return info.arch === "arm64" ? "windows-arm64" : "windows-x64";
+  }
   if (info.isWsl) {
     return info.hasSystemd ? "wsl-systemd" : "wsl-fallback";
   }
@@ -532,9 +564,23 @@ export function getPlatformDisplayName(
       return "WSL2 (systemd enabled)";
     case "wsl-fallback":
       return "WSL2 (supervisor fallback mode)";
+    case "windows-x64":
+      return "Windows x64 (native, PowerShell)";
+    case "windows-arm64":
+      return "Windows ARM64 (native, PowerShell)";
     default:
       return `Unknown platform (${laneOrInfo})`;
   }
+}
+
+/** Node platforms Resin runs on natively. */
+export function isSupportedNodePlatform(platform: NodeJS.Platform): boolean {
+  return platform === "linux" || platform === "darwin" || platform === "win32";
+}
+
+/** True when running natively on Windows (not WSL). */
+export function isNativeWindows(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
 }
 
 /**
@@ -555,7 +601,8 @@ export function detectPlatform(
   const env = options.env ?? process.env;
   const nodeVersion = options.nodeVersion ?? process.version;
 
-  const isWsl = isWslEnvironment(env, options.release);
+  // Windows itself can carry WSL interop variables such as WSLENV; only Linux can be WSL.
+  const isWsl = targetPlatform !== "win32" && isWslEnvironment(env, options.release);
   const appleSilicon = isAppleSilicon(targetPlatform, arch, env);
 
   let wslDistro: string | undefined;
@@ -575,6 +622,8 @@ export function detectPlatform(
     osType = "wsl";
   } else if (targetPlatform === "darwin") {
     osType = "darwin";
+  } else if (targetPlatform === "win32") {
+    osType = "windows";
   } else if (targetPlatform === "linux") {
     osType = "linux";
   }
@@ -586,17 +635,14 @@ export function detectPlatform(
     distro = env.ID ?? env.DISTRIB_ID ?? "linux-generic";
   } else if (targetPlatform === "darwin") {
     distro = "macOS";
+  } else if (targetPlatform === "win32") {
+    distro = "Windows";
   }
 
-  const isSupported = targetPlatform === "linux" || targetPlatform === "darwin";
-  let rejectionReason: string | undefined;
-  if (!isSupported) {
-    if (targetPlatform === "win32") {
-      rejectionReason = V1_SUPPORT_MATRIX.limitations.nativeWindows.rejectionMessage;
-    } else {
-      rejectionReason = `Operating system '${targetPlatform}' is not supported. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), or WSL2.`;
-    }
-  }
+  const isSupported = isSupportedNodePlatform(targetPlatform);
+  const rejectionReason = isSupported
+    ? undefined
+    : `Operating system '${targetPlatform}' is not supported. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), Windows 10/11 (x64/arm64), or WSL2.`;
 
   const info: PlatformInfo = {
     os: osType,
@@ -635,7 +681,7 @@ export function validatePlatform(info: PlatformInfo = detectPlatform()): Platfor
   }
 
   // Double-check platform against allowed list
-  if (info.platform !== "linux" && info.platform !== "darwin") {
+  if (!isSupportedNodePlatform(info.platform)) {
     throw new UnsupportedPlatformError(info.platform, {
       arch: info.arch,
       nodeVersion: info.nodeVersion,

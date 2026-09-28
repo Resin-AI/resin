@@ -45,10 +45,12 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
       }));
       const backend = new LocalMcpGateway({ router });
       const sockets = new Set<net.Socket>();
-      const socketPath = path.join(
-        os.tmpdir(),
-        `search-${process.pid}-${Math.random().toString(36).slice(2)}.sock`,
-      );
+      const socketName = `search-${process.pid}-${Math.random().toString(36).slice(2)}`;
+      // Windows reaches the daemon only through a local named pipe (verified before use).
+      const socketPath =
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\${socketName}`
+          : path.join(os.tmpdir(), `${socketName}.sock`);
       const server = net.createServer((socket) => {
         sockets.add(socket);
         socket.on("close", () => sockets.delete(socket));

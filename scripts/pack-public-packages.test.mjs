@@ -185,7 +185,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
             artifactBaseUrl: testBaseUrl,
             outputDir: tempOutputDir,
           }),
-        ).toThrow(/Unexpected public package count: expected 19, found 1/);
+        ).toThrow(/Unexpected public package count: expected 20, found 1/);
       } finally {
         fs.rmSync(fakeDir, { recursive: true, force: true });
       }
@@ -225,6 +225,7 @@ describe("Public Package Packager (pack-public-packages)", () => {
           "apps/observer/package.json",
           "packages/runtime/package.json",
           "packages/crypto/package.json",
+          "packages/windows-security/package.json",
           "packages/protocol/package.json",
           "packages/contracts/package.json",
           "packages/harness-contracts/package.json",

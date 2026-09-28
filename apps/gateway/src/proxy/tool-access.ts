@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type V1LockedToolEntry, V1LockedToolEntrySchema } from "@resin/contracts";
+import { ensurePrivateDirectorySync } from "@resin/observer";
 import { type AccountToolAccessResponse, AccountToolAccessResponseSchema } from "@resin/protocol";
 import type { ArtifactCache } from "@resin/runtime";
 import { z } from "zod";
@@ -97,7 +98,7 @@ export class ManagedToolAccess {
 
   private getDb(): DatabaseSync {
     if (!this.db) {
-      fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      ensurePrivateDirectorySync(this.stateDir);
     }
     if (fs.realpathSync(this.stateDir) !== path.resolve(this.stateDir)) {
       throw new Error("Refusing managed state access through a symlinked state directory");
@@ -568,7 +569,7 @@ export class ManagedToolAccess {
   }
 
   private write(file: string, value: unknown): void {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(path.dirname(file));
     if (fs.realpathSync(path.dirname(file)) !== path.resolve(path.dirname(file))) {
       throw new Error("Refusing managed metadata write through a symlink");
     }

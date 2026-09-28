@@ -83,6 +83,9 @@ describe("Command Broker Security & Isolation", () => {
     expect(res.durationMs).toBeGreaterThanOrEqual(0);
   });
 
+  // Windows Python installs `python.exe` (and `py.exe`), not `python3.exe`.
+  const python = process.platform === "win32" ? "python" : "python3";
+
   it("executes a fixed explicitly granted Python unittest module through canonical aliases", async () => {
     fs.writeFileSync(
       path.join(tempWorkspace, "resin_module_test.py"),
@@ -90,10 +93,10 @@ describe("Command Broker Security & Isolation", () => {
     );
     const grant = createGrant({
       allowedBinaries: [],
-      allowedCommands: ["python3 -m unittest $STR -v"],
+      allowedCommands: [`${python} -m unittest $STR -v`],
     });
     const result = await broker.execute(
-      { executable: "python3", args: ["-m", "unittest", "resin_module_test", "-v"] },
+      { executable: python, args: ["-m", "unittest", "resin_module_test", "-v"] },
       { invocationId: "inv_cmd_001", grant, workspaceRoot: tempWorkspace },
     );
     expect(result.exitCode).toBe(0);
@@ -102,15 +105,18 @@ describe("Command Broker Security & Isolation", () => {
 
   it.each([
     { profiles: [], args: ["-m", "unittest", "resin_module_test", "-v"] },
-    { profiles: ["python3 -m $STR $STR -v"], args: ["-m", "unittest", "resin_module_test", "-v"] },
-    { profiles: ["python3 -m http.server"], args: ["-m", "http.server"] },
-    { profiles: ["python3 -munittest"], args: ["-munittest"] },
-    { profiles: ["python3 -m unittest $STR -v"], args: ["-m", "unittest", "-c", "-v"] },
+    {
+      profiles: [`${python} -m $STR $STR -v`],
+      args: ["-m", "unittest", "resin_module_test", "-v"],
+    },
+    { profiles: [`${python} -m http.server`], args: ["-m", "http.server"] },
+    { profiles: [`${python} -munittest`], args: ["-munittest"] },
+    { profiles: [`${python} -m unittest $STR -v`], args: ["-m", "unittest", "-c", "-v"] },
   ])("retains interpreter escape guards for $profiles / $args", async ({ profiles, args }) => {
-    const grant = createGrant({ allowedBinaries: ["python3"], allowedCommands: profiles });
+    const grant = createGrant({ allowedBinaries: [python], allowedCommands: profiles });
     await expect(
       broker.execute(
-        { executable: "python3", args },
+        { executable: python, args },
         { invocationId: "inv_cmd_001", grant, workspaceRoot: tempWorkspace },
       ),
     ).rejects.toMatchObject({ code: "FORBIDDEN_ARGUMENT_PATTERN" });
@@ -299,7 +305,8 @@ describe("Command Broker Security & Isolation", () => {
         {
           executable: "node",
           args: [scriptPath],
-          cwd: "/etc",
+          // An existing directory outside the workspace (C:\etc does not exist on Windows).
+          cwd: process.platform === "win32" ? (process.env.SystemRoot ?? "C:\\Windows") : "/etc",
         },
         ctx,
       );
@@ -632,7 +639,8 @@ describe("Command Broker Security & Isolation", () => {
 
     it("exact argv authorization does not grant uncontained cwd authorization", async () => {
       const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "outside_exact_"));
-      const scriptPath = path.join(tempWorkspace, "exact_cmd.js");
+      // `/` separators: allowedCommands use the POSIX argv grammar, where `\` is an escape.
+      const scriptPath = path.join(tempWorkspace, "exact_cmd.js").replaceAll("\\", "/");
       fs.writeFileSync(scriptPath, "console.log('exact');");
 
       const grant = createGrant({

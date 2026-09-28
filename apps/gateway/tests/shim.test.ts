@@ -3,10 +3,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import stream from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/bin/mcp-shim.js";
 import type { LocalMcpGateway } from "../src/gateway.js";
 import { RESIN_LEARNED_TOOL_META } from "../src/protocol/types.js";
+import { ManagedToolAccess } from "../src/proxy/tool-access.js";
 import type { GatewayRouter } from "../src/router.js";
 import { McpStdioShim, checkDaemonReachable } from "../src/shim/stdio-bridge.js";
 
@@ -55,6 +56,35 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     } finally {
       await shim.stop();
       fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Windows refuses to delete a file some process still holds open: a database handle kept past
+  // stop() pins the user's home against `resin uninstall` for as long as the host lives.
+  it("releases the home's database handles on stop, so the home can be deleted", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-release-"));
+    const close = vi.spyOn(ManagedToolAccess.prototype, "close");
+    const shim = new McpStdioShim({
+      socketPath: path.join(os.tmpdir(), `test-absent-release-${Date.now()}.sock`),
+      standaloneFallback: true,
+      maxStartupAttempts: 0,
+      home,
+      resinHome: path.join(home, ".resin"),
+      stdin: new stream.PassThrough(),
+      stdout: new stream.PassThrough(),
+      stderr: new stream.PassThrough(),
+    });
+    try {
+      await shim.start();
+      const accessDb = path.join(home, ".resin", "state", "managed-tool-access", "tool-access.db");
+      expect(fs.existsSync(accessDb)).toBe(true);
+      await shim.stop();
+      fs.rmSync(home, { recursive: true });
+      expect(fs.existsSync(home)).toBe(false);
+      // POSIX deletes open files, so only the close itself shows the release there.
+      expect(close).toHaveBeenCalled();
+    } finally {
+      close.mockRestore();
     }
   });
 
@@ -302,10 +332,12 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
   });
 
   it("bridges to daemon socket when daemon is active", async () => {
-    const socketPath = path.join(
-      os.tmpdir(),
-      `test-daemon-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
-    );
+    const socketName = `test-daemon-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // Windows reaches the daemon only through a local named pipe (verified before use).
+    const socketPath =
+      process.platform === "win32"
+        ? `\\\\.\\pipe\\${socketName}`
+        : path.join(os.tmpdir(), `${socketName}.sock`);
 
     // Mock daemon server
     const server = net.createServer((sock) => {

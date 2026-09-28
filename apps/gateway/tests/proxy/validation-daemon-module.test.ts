@@ -4,6 +4,7 @@
  */
 
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -412,5 +413,44 @@ describe("the validation pass lease", () => {
 
     expect(taken.filter((held) => held !== undefined)).toHaveLength(1);
     expect(fs.readdirSync(tempDir)).toEqual([WORKFLOW_VALIDATION_LEASE_FILE_NAME]);
+  });
+
+  // Windows refuses to replace a file any process has open, so a renew racing another gateway or the
+  // daemon reading the lease used to fail the holder's whole pass with EPERM.
+  it("renews while another process is reading the lease", async () => {
+    const filePath = path.join(tempDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME);
+    const held = await new FileWorkflowValidationPassLease({ filePath }).tryAcquire();
+    if (held === undefined) throw new Error("the lease was not acquired");
+    const rename = fsPromises.rename;
+    const attempts: Array<NodeJS.ErrnoException | undefined> = [];
+    const spy = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+      try {
+        await rename(from, to);
+        attempts.push(undefined);
+      } catch (error) {
+        attempts.push(error as NodeJS.ErrnoException);
+        throw error;
+      }
+    });
+    vi.useFakeTimers();
+    let reader: number | undefined = fs.openSync(filePath, "r");
+    try {
+      const renewed = held.renew().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      // POSIX replaces the open file at once; Windows refuses while the reader holds it.
+      await vi.waitFor(() => expect(attempts.length).toBeGreaterThan(0));
+      fs.closeSync(reader);
+      reader = undefined;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await renewed).toBeUndefined();
+      expect(attempts.at(-1)).toBeUndefined();
+      expect(fs.readdirSync(tempDir)).toEqual([WORKFLOW_VALIDATION_LEASE_FILE_NAME]);
+    } finally {
+      if (reader !== undefined) fs.closeSync(reader);
+      vi.useRealTimers();
+      spy.mockRestore();
+    }
   });
 });

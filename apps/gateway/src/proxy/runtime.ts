@@ -632,6 +632,9 @@ export async function createProductionProxyRuntime(
           await Promise.allSettled([...backgroundTasks]);
           backgroundTasks.clear();
         }
+        // Releases the SQLite handle on the home's tool-access.db: on Windows an open handle stops
+        // anyone deleting the home (uninstall, a fresh reinstall) for as long as this process lives.
+        managedToolAccess.close();
       },
       async catalogSettled(timeoutMs: number): Promise<void> {
         if (backgroundTasks.size === 0) return;
@@ -706,7 +709,8 @@ export async function createProductionProxyRuntime(
     },
 
     async stop(): Promise<void> {
-      // Safe no-op
+      // Cleanup at creation opened the tool-access.db; an open handle pins the home on Windows.
+      managedToolAccess.close();
     },
 
     async whenCatalogLoaded(): Promise<void> {

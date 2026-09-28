@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { checkOwnerOnly, ensureOwnerOnly } from "@resin/windows-security";
 import { z } from "zod";
 
 /**
@@ -293,6 +294,11 @@ export class DeviceSyncStore {
       if (process.platform !== "win32") {
         if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
         if ((stat.mode & 0o077) !== 0) fs.chmodSync(this.dir, 0o700);
+      } else {
+        // Same policy through the DACL: refuse a foreign owner, repair a DACL open to others.
+        const check = checkOwnerOnly(this.dir, { requireProtected: true });
+        if (!check.ownedByCurrentUser) return false;
+        if (!check.ok) ensureOwnerOnly(this.dir, { directory: true });
       }
       return true;
     } catch {

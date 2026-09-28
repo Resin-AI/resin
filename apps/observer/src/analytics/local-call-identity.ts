@@ -1,4 +1,9 @@
-import type { WorkflowJsonValue, WorkflowValuePath } from "@resin/contracts";
+import {
+  type ShellDialect,
+  type WorkflowJsonValue,
+  type WorkflowValuePath,
+  isShellDialect,
+} from "@resin/contracts";
 import type { HarnessAdapter } from "@resin/harness-contracts";
 import { z } from "zod";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
@@ -8,6 +13,8 @@ import {
   resolvePrivateReference,
 } from "./private-value-store.js";
 import {
+  WORKFLOW_CALL_DIALECT_CONFLICT_SLOT,
+  WORKFLOW_CALL_DIALECT_SLOT,
   WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
@@ -35,7 +42,14 @@ export interface LocalRecordedCall {
   callable: {
     name: string;
     connection?: string;
-    program?: { kind: string; argument: string };
+    program?: {
+      kind: string;
+      argument: string;
+      /** The shell dialect the recording proved the program ran in. */
+      dialect?: ShellDialect;
+      /** A shell program whose dialect the recording did not prove. */
+      unprovenDialect?: true;
+    };
     /** The harness's own built-in shell ran it, as the recorder proved from the event. */
     builtinShell?: true;
   };
@@ -180,7 +194,17 @@ function everyStringLeaf(
 const RecordedCallIdentity = z.object({
   name: z.string(),
   connection: z.string().optional(),
-  program: z.object({ kind: z.string(), argument: z.string() }).optional(),
+  program: z
+    .object({
+      kind: z.string(),
+      argument: z.string(),
+      dialect: z
+        .string()
+        .refine((value): value is ShellDialect => isShellDialect(value))
+        .optional(),
+      unprovenDialect: z.literal(true).optional(),
+    })
+    .optional(),
   builtinShell: z.literal(true).optional(),
   arguments: z.array(z.string()),
 });
@@ -295,6 +319,27 @@ export function createLocalCallIdentity(options: {
           callId,
           slot,
         ]);
+      // A shell program recorded with an unproven dialect that a later record of the same call
+      // proved (the executable Codex recorded running it).
+      const conflicted =
+        ownedValue(
+          store,
+          referenceFor(WORKFLOW_CALL_DIALECT_CONFLICT_SLOT),
+          match.representation,
+          workspaceId,
+        ) !== undefined;
+      if (callable.program?.unprovenDialect === true && !conflicted) {
+        const proven = ownedValue(
+          store,
+          referenceFor(WORKFLOW_CALL_DIALECT_SLOT),
+          match.representation,
+          workspaceId,
+        )?.value;
+        if (proven === "powershell" || proven === "pwsh" || proven === "cmd") {
+          const { unprovenDialect: _, ...program } = callable.program;
+          callable.program = { ...program, dialect: proven };
+        }
+      }
       const args: Record<string, WorkflowJsonValue> = {};
       const argumentReferences: Record<string, string> = {};
       for (const name of argumentNames) {

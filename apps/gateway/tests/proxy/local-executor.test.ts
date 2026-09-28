@@ -183,7 +183,11 @@ describe("LocalArtifactExecutor", () => {
       try {
         fs.symlinkSync(targetSource, path.join(stagingDir, "symlink.ts"));
       } catch {
-        // ignore symlink creation failure on platforms where unprivileged symlinks are disabled
+        // Only elevated Windows users may create file symlinks; any user may create a directory
+        // junction, which the artifact walk refuses as a link just the same.
+        if (process.platform === "win32") {
+          fs.symlinkSync(workspaceDir, path.join(stagingDir, "linked-dir"), "junction");
+        }
       }
     }
 

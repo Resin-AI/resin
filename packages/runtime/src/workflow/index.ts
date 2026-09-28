@@ -5,6 +5,7 @@ export * from "./workflow-executor.js";
 export * from "./recorded-workflow.js";
 export * from "./runtime-families.js";
 export * from "./program-runner.js";
+export * from "./shell-invocation.js";
 export * from "./process-adapter.js";
 export * from "./program-adapter.js";
 export * from "./mcp-connection.js";

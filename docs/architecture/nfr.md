@@ -65,7 +65,7 @@ See [ADR 0009: Non-Functional Requirements and Performance Targets](../adr/0009-
 
 | ID | Dimension | Requirement | Verification Method |
 | :--- | :--- | :--- | :--- |
-| **NFR-PORT-01** | Operating Systems | Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), Windows WSL2 | Multi-OS CI matrix runners |
+| **NFR-PORT-01** | Operating Systems | Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), Windows WSL2, native Windows 10/11 (`x86_64`, `arm64`) | Multi-OS release-candidate qualification lanes |
 | **NFR-PORT-02** | AI Harnesses | Claude Code, Codex CLI, OMP | Harness adapter contract test suite |
 | **NFR-PORT-03** | Runtime Compatibility | Node.js (>=22 LTS), Pinned Deno (2.x) | Environment runtime check |
 | **NFR-PORT-04** | Dependency Boundary | Strict monorepo package isolation | `pnpm check:boundaries` in CI |

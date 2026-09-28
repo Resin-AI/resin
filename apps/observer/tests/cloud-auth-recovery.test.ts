@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { type AuthClaims, ProtocolError } from "@resin/protocol";
+import { checkOwnerOnly } from "@resin/windows-security";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrajectoryCaptureCoordinator } from "../src/analytics/capture-coordinator.js";
 import {
@@ -633,6 +634,8 @@ describe("cloud authentication recovery", () => {
     const pendingContents = await fs.readFile(pendingFilePath, "utf8");
     if (process.platform !== "win32") {
       expect((await fs.stat(pendingFilePath)).mode & 0o777).toBe(0o600);
+    } else {
+      expect(checkOwnerOnly(pendingFilePath)).toMatchObject({ ok: true, problems: [] });
     }
     expect(pendingContents).not.toContain(initialToken);
     expect(pendingContents).not.toContain("refresh-revoked-sensitive");

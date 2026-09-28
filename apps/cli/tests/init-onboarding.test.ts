@@ -13,6 +13,7 @@ import {
 } from "../src/commands/init.js";
 import { performPairing } from "../src/commands/login.js";
 import { logoutCommand } from "../src/commands/logout.js";
+import { resolveHarnessMcpLaunch } from "../src/installer/harness-config.js";
 import type { InstallerPairingMutation } from "../src/installer/installer.js";
 import { DEFAULT_DEVICE_AUTH_SCOPES } from "../src/service/auth-bootstrap.js";
 import * as serviceManagerModule from "../src/service/manager.js";
@@ -610,7 +611,8 @@ describe("init onboarding & pairing workflow", () => {
     const customFetch = vi.fn();
     const openBrowser = vi.fn();
     const codexHome = path.join(home, "active-codex");
-    const publicSourceRoot = "/work/resin";
+    // Drive-qualified on Windows: the installer resolves the source root it checks.
+    const publicSourceRoot = path.resolve("/work/resin");
     // Codex is present at its active home: its config already exists.
     await bridge.writeFile(path.join(codexHome, "config.toml"), 'model = "o3"\n');
 
@@ -661,9 +663,13 @@ describe("init onboarding & pairing workflow", () => {
     expect(result.exitCode).toBe(0);
     expect(customFetch).not.toHaveBeenCalled();
     expect(openBrowser).not.toHaveBeenCalled();
-    expect(await bridge.readFile(path.join(codexHome, "config.toml"))).toContain(
-      `command = "${path.join(publicSourceRoot, "apps", "cli", "bin", "resin.mjs")}"`,
-    );
+    // The platform launch: the entry itself on POSIX, `node.exe <resin.mjs> mcp` on Windows.
+    const launch = resolveHarnessMcpLaunch({
+      command: path.join(publicSourceRoot, "apps", "cli", "bin", "resin.mjs"),
+    });
+    const codexConfig = await bridge.readFile(path.join(codexHome, "config.toml"));
+    expect(codexConfig).toContain(`command = ${JSON.stringify(launch.command)}`);
+    for (const arg of launch.args) expect(codexConfig).toContain(JSON.stringify(arg));
     expect(await bridge.readFile(path.join(home, ".codex", "config.toml"))).toBeNull();
     expect(
       await bridge.readFile(path.join(home, ".resin", "versions", "v1.0.32", "LICENSE")),

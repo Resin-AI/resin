@@ -47,9 +47,14 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
 }
 
 describe("status command & collector", () => {
-  const homeDir = "/home/testuser";
+  // Drive-qualified on Windows: status resolves every path it reads.
+  const homeDir = path.resolve("/home/testuser");
   const resinHome = path.join(homeDir, ".resin");
-  const resinCommand = path.join(resinHome, "bin", "resin");
+  // Windows registers the installer's Node entry launched through node.exe (no shebang shims).
+  const resinLaunch =
+    process.platform === "win32"
+      ? { command: process.execPath, args: [path.join(resinHome, "bin", "resin.mjs"), "mcp"] }
+      : { command: path.join(resinHome, "bin", "resin"), args: ["mcp"] };
 
   it("parses CLI status flags correctly", () => {
     const flags1 = parseStatusFlags([
@@ -99,7 +104,7 @@ describe("status command & collector", () => {
 
     const fsBridge = createMockFsBridge({
       [claudePath]: JSON.stringify({
-        mcpServers: { resin: { command: resinCommand, args: ["mcp"] } },
+        mcpServers: { resin: resinLaunch },
       }),
       [codexPath]: "[mcp_servers.resin]\nurl = 'http://localhost:9400'\n",
       [ompPath]: JSON.stringify({
@@ -128,7 +133,12 @@ describe("status command & collector", () => {
     const claudePath = path.join(homeDir, ".claude.json");
     const fsBridge = createMockFsBridge({
       [claudePath]: JSON.stringify({
-        mcpServers: { resin: { command: sourceCommand, args: ["mcp"] } },
+        mcpServers: {
+          resin:
+            process.platform === "win32"
+              ? { command: process.execPath, args: [sourceCommand, "mcp"] }
+              : { command: sourceCommand, args: ["mcp"] },
+        },
       }),
     });
 
@@ -147,7 +157,11 @@ describe("status command & collector", () => {
     "collects live IPC status with external management=%s",
     async (external) => {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-status-ipc-"));
-      const socketPath = path.join(tempDir, "daemon.sock");
+      // Windows daemons listen only on a local named pipe.
+      const socketPath =
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\${path.basename(tempDir)}`
+          : path.join(tempDir, "daemon.sock");
 
       const server = net.createServer((socket) => {
         const decoder = new FrameDecoder();

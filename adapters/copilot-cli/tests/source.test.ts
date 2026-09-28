@@ -69,34 +69,58 @@ describe("CopilotSessionEventSource", () => {
 });
 
 describe("Copilot discovery parsing", () => {
-  it("resolves the version from the npm package owning the PATH executable, without running it", async () => {
-    const pkgDir = path.join(dir, "lib", "node_modules", "@github", "copilot");
-    const binDir = path.join(dir, "bin");
+  // POSIX npm links the bin to its package with a file symlink (needs privilege on Windows).
+  it.skipIf(process.platform === "win32")(
+    "resolves the version from the npm package owning the PATH executable, without running it",
+    async () => {
+      const pkgDir = path.join(dir, "lib", "node_modules", "@github", "copilot");
+      const binDir = path.join(dir, "bin");
+      await fs.mkdir(pkgDir, { recursive: true });
+      await fs.mkdir(binDir);
+      await fs.writeFile(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({ name: "@github/copilot", version: "1.0.88" }),
+      );
+      // Running this loader would fail the probe; only its location is read.
+      await fs.writeFile(path.join(pkgDir, "npm-loader.js"), "#!/bin/sh\nexit 1\n", {
+        mode: 0o755,
+      });
+      await fs.symlink(path.join(pkgDir, "npm-loader.js"), path.join(binDir, "copilot"));
+      const home = path.join(dir, "home");
+
+      const installation = await probeCopilotInstallation({ home, env: { PATH: binDir } });
+      expect(installation).toMatchObject({
+        version: "1.0.88",
+        executablePath: path.join(binDir, "copilot"),
+        status: "ready",
+      });
+      expect(await fs.stat(home).catch(() => null)).toBeNull();
+
+      await fs.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+      expect(await probeCopilotInstallation({ home, env: { PATH: binDir } })).toMatchObject({
+        version: UNKNOWN_HARNESS_VERSION,
+        status: "ready",
+      });
+      expect(await probeCopilotInstallation({ home, env: { PATH: "" } })).toBeNull();
+    },
+  );
+
+  it("resolves the version beside a Windows npm shim in the global prefix", async () => {
+    const prefix = path.join(dir, "npm");
+    const pkgDir = path.join(prefix, "node_modules", "@github", "copilot");
     await fs.mkdir(pkgDir, { recursive: true });
-    await fs.mkdir(binDir);
     await fs.writeFile(
       path.join(pkgDir, "package.json"),
       JSON.stringify({ name: "@github/copilot", version: "1.0.88" }),
     );
-    // Running this loader would fail the probe; only its location is read.
-    await fs.writeFile(path.join(pkgDir, "npm-loader.js"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    await fs.symlink(path.join(pkgDir, "npm-loader.js"), path.join(binDir, "copilot"));
+    await fs.writeFile(path.join(prefix, "copilot.cmd"), "@exit /b 1\r\n");
+    await fs.writeFile(path.join(prefix, "copilot"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const home = path.join(dir, "home");
-
-    const installation = await probeCopilotInstallation({ home, env: { PATH: binDir } });
-    expect(installation).toMatchObject({
+    expect(await probeCopilotInstallation({ home, env: { PATH: prefix } })).toMatchObject({
       version: "1.0.88",
-      executablePath: path.join(binDir, "copilot"),
+      executablePath: path.join(prefix, "copilot"),
       status: "ready",
     });
-    expect(await fs.stat(home).catch(() => null)).toBeNull();
-
-    await fs.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
-    expect(await probeCopilotInstallation({ home, env: { PATH: binDir } })).toMatchObject({
-      version: UNKNOWN_HARNESS_VERSION,
-      status: "ready",
-    });
-    expect(await probeCopilotInstallation({ home, env: { PATH: "" } })).toBeNull();
   });
 
   it("reads single-quoted workspace.yaml scalars", () => {

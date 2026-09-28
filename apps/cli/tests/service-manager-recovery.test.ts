@@ -474,43 +474,49 @@ describe("bounded service recovery", () => {
     expect(records[1]?.detail).toContain("[REDACTED_TOOL_OUTPUT]");
   });
 
-  it("routes systemd, launchd, and WSL fallback through the shared supervisor", () => {
-    const systemd = new SystemdUserServiceManager({
-      homeDir: "/home/testuser",
-      resinHome: "/home/testuser/.resin",
-      nodePath: "/usr/bin/node",
-    });
-    const launchd = new LaunchdUserServiceManager({
-      homeDir: "/Users/testuser",
-      resinHome: "/Users/testuser/.resin",
-      nodePath: "/usr/local/bin/node",
-    });
-    const wsl = new WslUserServiceManager({
-      homeDir: "/home/testuser",
-      resinHome: "/home/testuser/.resin",
-      nodePath: "/usr/bin/node",
-    });
+  // POSIX-only: systemd/launchd unit generation with POSIX paths; Windows uses a scheduled task.
+  it.skipIf(process.platform === "win32")(
+    "routes systemd, launchd, and WSL fallback through the shared supervisor",
+    () => {
+      const systemd = new SystemdUserServiceManager({
+        homeDir: "/home/testuser",
+        resinHome: "/home/testuser/.resin",
+        nodePath: "/usr/bin/node",
+      });
+      const launchd = new LaunchdUserServiceManager({
+        homeDir: "/Users/testuser",
+        resinHome: "/Users/testuser/.resin",
+        nodePath: "/usr/local/bin/node",
+      });
+      const wsl = new WslUserServiceManager({
+        homeDir: "/home/testuser",
+        resinHome: "/home/testuser/.resin",
+        nodePath: "/usr/bin/node",
+      });
 
-    const systemdDefinition = systemd.getUnitDefinition({
-      daemonPath: "/home/testuser/.resin/bin/resin-daemon",
-    });
-    const launchdDefinition = launchd.getUnitDefinition({
-      daemonPath: "/Users/testuser/.resin/bin/resin-daemon",
-    });
-    const wslDefinition = wsl.getUnitDefinition({
-      daemonPath: "/home/testuser/.resin/bin/resin-daemon",
-    });
+      const systemdDefinition = systemd.getUnitDefinition({
+        daemonPath: "/home/testuser/.resin/bin/resin-daemon",
+      });
+      const launchdDefinition = launchd.getUnitDefinition({
+        daemonPath: "/Users/testuser/.resin/bin/resin-daemon",
+      });
+      const wslDefinition = wsl.getUnitDefinition({
+        daemonPath: "/home/testuser/.resin/bin/resin-daemon",
+      });
 
-    expect(systemdDefinition).toMatch(
-      /ExecStart=.*index\.js __service-supervisor .* -- .*resin-daemon --foreground/,
-    );
-    expect(systemdDefinition).toContain("Restart=on-failure");
-    expect(systemdDefinition).toContain("StartLimitIntervalSec=300s");
-    expect(systemdDefinition).toContain("StartLimitBurst=6");
-    expect(launchdDefinition).toContain(`<string>${SERVICE_SUPERVISOR_COMMAND}</string>`);
-    expect(launchdDefinition).toContain("<string>/Users/testuser/.resin/bin/resin-daemon</string>");
-    expect(launchdDefinition).toContain("<key>KeepAlive</key>");
-    expect(wslDefinition).toContain(`'${SERVICE_SUPERVISOR_COMMAND}'`);
-    expect(wslDefinition).toContain("'/home/testuser/.resin/bin/resin-daemon' '--foreground'");
-  });
+      expect(systemdDefinition).toMatch(
+        /ExecStart=.*index\.js __service-supervisor .* -- .*resin-daemon --foreground/,
+      );
+      expect(systemdDefinition).toContain("Restart=on-failure");
+      expect(systemdDefinition).toContain("StartLimitIntervalSec=300s");
+      expect(systemdDefinition).toContain("StartLimitBurst=6");
+      expect(launchdDefinition).toContain(`<string>${SERVICE_SUPERVISOR_COMMAND}</string>`);
+      expect(launchdDefinition).toContain(
+        "<string>/Users/testuser/.resin/bin/resin-daemon</string>",
+      );
+      expect(launchdDefinition).toContain("<key>KeepAlive</key>");
+      expect(wslDefinition).toContain(`'${SERVICE_SUPERVISOR_COMMAND}'`);
+      expect(wslDefinition).toContain("'/home/testuser/.resin/bin/resin-daemon' '--foreground'");
+    },
+  );
 });

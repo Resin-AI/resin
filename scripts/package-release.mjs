@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { getGitCommitSha, writeReleaseEvidence } from "./generate-release-evidence.mjs";
 import {
@@ -70,7 +71,45 @@ export const PLATFORMS = [
     isWsl: true,
     filename: `resin-v${RELEASE_VERSION}-wsl.tar.gz`,
   },
+  {
+    id: "windows-x64",
+    os: "win32",
+    arch: "x64",
+    isWsl: false,
+    filename: `resin-v${RELEASE_VERSION}-windows-x64.tar.gz`,
+  },
+  {
+    id: "windows-arm64",
+    os: "win32",
+    arch: "arm64",
+    isWsl: false,
+    filename: `resin-v${RELEASE_VERSION}-windows-arm64.tar.gz`,
+  },
 ];
+
+/**
+ * Native Windows artifacts carry the `@resin/windows-security` prebuilds (the N-API ACL/pipe
+ * helper and the windowless service host) for exactly their own architecture.
+ */
+export const WINDOWS_PREBUILD_FILES = Object.freeze([
+  "resin_windows_security.node",
+  "resin-service-host.exe",
+]);
+export const WINDOWS_PREBUILDS_ARCHIVE_DIR = "resin/node_modules/@resin/windows-security/prebuilds";
+export const WINDOWS_PREBUILD_PLACEHOLDER_MARKER = "RESIN-TEST-ONLY-WINDOWS-PREBUILD-PLACEHOLDER";
+/** PE/COFF machine types for the Windows lanes. */
+export const WINDOWS_PE_MACHINE = Object.freeze({ x64: 0x8664, arm64: 0xaa64 });
+
+/**
+ * Windows launchers: batch files run `node` on the extensionless ESM entry that sits next to
+ * them. No `.ps1` launcher is shipped because the default Restricted execution policy of
+ * Windows PowerShell 5.1 blocks it, while `.cmd` files run from both cmd.exe and PowerShell.
+ * The launcher is one line that ends the batch itself (`call exit /b` keeps node's exit code),
+ * so cmd.exe never reads further from a launcher file that an update replaced mid-run.
+ */
+export function windowsCmdLauncher(entryName) {
+  return `@node "%~dp0${entryName}" %* & call exit /b %%errorlevel%%\r\n`;
+}
 
 export const PINNED_DENO_UPSTREAM_ASSETS = Object.freeze({
   "linux-x64": Object.freeze({
@@ -108,6 +147,26 @@ export const PINNED_DENO_UPSTREAM_ASSETS = Object.freeze({
     sizeBytes: 38511993,
     archive: "zip",
     executable: "deno",
+  }),
+  // Source: https://github.com/denoland/deno/releases/tag/v2.9.5 — the digests equal the
+  // release's `deno-*-pc-windows-msvc.zip.sha256sum` files and GitHub's asset digests.
+  "windows-x64": Object.freeze({
+    filename: "deno-x86_64-pc-windows-msvc.zip",
+    sourceUrl:
+      "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+    sha256: "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
+    sizeBytes: 42691248,
+    archive: "zip",
+    executable: "deno.exe",
+  }),
+  "windows-arm64": Object.freeze({
+    filename: "deno-aarch64-pc-windows-msvc.zip",
+    sourceUrl:
+      "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+    sha256: "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
+    sizeBytes: 40905829,
+    archive: "zip",
+    executable: "deno.exe",
   }),
 });
 
@@ -155,6 +214,26 @@ export const PINNED_DENO_RUNTIME = Object.freeze({
       archive: "zip",
       executable: "deno",
     }),
+    "windows-x64": Object.freeze({
+      filename: "deno-x86_64-pc-windows-msvc.zip",
+      url: "/releases/v1/runtimes/deno/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      sourceUrl:
+        "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+      sha256: "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
+      sizeBytes: 42691248,
+      archive: "zip",
+      executable: "deno.exe",
+    }),
+    "windows-arm64": Object.freeze({
+      filename: "deno-aarch64-pc-windows-msvc.zip",
+      url: "/releases/v1/runtimes/deno/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+      sourceUrl:
+        "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+      sha256: "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
+      sizeBytes: 40905829,
+      archive: "zip",
+      executable: "deno.exe",
+    }),
   }),
 });
 export const INTERNAL_WORKSPACE_REGISTRY = Object.freeze([
@@ -189,6 +268,13 @@ export const INTERNAL_WORKSPACE_REGISTRY = Object.freeze([
   {
     name: "@resin/protocol",
     path: "packages/protocol",
+    entry: "dist/index.js",
+    type: "package",
+    private: false,
+  },
+  {
+    name: "@resin/windows-security",
+    path: "packages/windows-security",
     entry: "dist/index.js",
     type: "package",
     private: false,
@@ -909,6 +995,137 @@ export function generatePackageDigests(rootDir = process.cwd(), options = {}) {
   return result;
 }
 
+const WINDOWS_SECURITY_ARCHIVE_ROOTS = Object.freeze([
+  "resin/node_modules/@resin/windows-security",
+  "resin/packages/windows-security",
+]);
+
+function isWindowsPrebuildEntry(entryPath) {
+  const normalized = String(entryPath).replace(/\\/g, "/");
+  return WINDOWS_SECURITY_ARCHIVE_ROOTS.some((root) => normalized.startsWith(`${root}/prebuilds/`));
+}
+
+/**
+ * Returns the PE/COFF machine type of a Windows executable or DLL, or null when the buffer is
+ * not a PE image.
+ */
+export function readPeMachine(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 0x40) return null;
+  if (buffer[0] !== 0x4d || buffer[1] !== 0x5a) return null; // "MZ"
+  const peOffset = buffer.readUInt32LE(0x3c);
+  if (peOffset + 6 > buffer.length) return null;
+  if (buffer.readUInt32LE(peOffset) !== 0x00004550) return null; // "PE\0\0"
+  return buffer.readUInt16LE(peOffset + 4);
+}
+
+export function windowsPrebuildPlaceholder(arch, fileName) {
+  return Buffer.from(
+    `${WINDOWS_PREBUILD_PLACEHOLDER_MARKER} win32-${arch}/${fileName}\nThis test-only release was packaged without real Windows prebuilds; it cannot run natively on Windows.\n`,
+  );
+}
+
+export function isWindowsPrebuildPlaceholder(buffer) {
+  return (
+    Buffer.isBuffer(buffer) &&
+    buffer.subarray(0, WINDOWS_PREBUILD_PLACEHOLDER_MARKER.length).toString("latin1") ===
+      WINDOWS_PREBUILD_PLACEHOLDER_MARKER
+  );
+}
+
+/**
+ * Loads the `@resin/windows-security` prebuilds for every Windows lane from
+ * `$RESIN_WINDOWS_PREBUILDS_DIR/win32-<arch>/` (default `packages/windows-security/prebuilds`).
+ * Missing or wrong-architecture binaries fail packaging; test-only packaging substitutes marked
+ * placeholders for a missing architecture so Linux runners can exercise the pipeline.
+ */
+export function resolveWindowsPrebuilds(rootDir, options = {}) {
+  const prebuildsDir = path.resolve(
+    rootDir,
+    options.prebuildsDir ||
+      process.env.RESIN_WINDOWS_PREBUILDS_DIR ||
+      "packages/windows-security/prebuilds",
+  );
+  const log = options.logger ?? ((message) => console.warn(message));
+  const result = new Map();
+  for (const platform of PLATFORMS) {
+    if (platform.os !== "win32" || result.has(platform.arch)) continue;
+    const archDir = path.join(prebuildsDir, `win32-${platform.arch}`);
+    const missing = WINDOWS_PREBUILD_FILES.filter(
+      (fileName) => !fs.existsSync(path.join(archDir, fileName)),
+    );
+    const files = new Map();
+    if (missing.length > 0) {
+      if (!options.testOnly) {
+        throw new Error(
+          `Windows release artifact ${platform.id} requires @resin/windows-security prebuilds, missing ${missing.map((fileName) => `win32-${platform.arch}/${fileName}`).join(", ")} in '${prebuildsDir}'. Build them on Windows with 'node packages/windows-security/scripts/build-native.mjs --arch ${platform.arch}' or set RESIN_WINDOWS_PREBUILDS_DIR.`,
+        );
+      }
+      log(
+        `⚠ Test-only packaging: using placeholder Windows prebuilds for win32-${platform.arch} (missing in '${prebuildsDir}').`,
+      );
+      for (const fileName of WINDOWS_PREBUILD_FILES) {
+        files.set(fileName, windowsPrebuildPlaceholder(platform.arch, fileName));
+      }
+      result.set(platform.arch, { files, placeholder: true });
+      continue;
+    }
+    for (const fileName of WINDOWS_PREBUILD_FILES) {
+      const filePath = path.join(archDir, fileName);
+      const stats = fs.lstatSync(filePath);
+      if (!stats.isFile()) {
+        throw new Error(`Windows prebuild '${filePath}' must be a regular file.`);
+      }
+      const content = fs.readFileSync(filePath);
+      const machine = readPeMachine(content);
+      if (machine !== WINDOWS_PE_MACHINE[platform.arch]) {
+        throw new Error(
+          `Windows prebuild '${filePath}' is not a win32-${platform.arch} PE image (machine ${machine === null ? "none" : `0x${machine.toString(16)}`}).`,
+        );
+      }
+      files.set(fileName, content);
+    }
+    result.set(platform.arch, { files, placeholder: false });
+  }
+  return result;
+}
+
+function windowsPlatformEntries(baseEntries, platform, windowsPrebuilds, options = {}) {
+  const prebuilds = windowsPrebuilds.get(platform.arch);
+  if (!prebuilds) {
+    throw new Error(`Windows prebuilds for win32-${platform.arch} were not resolved.`);
+  }
+  const basePaths = new Set(baseEntries.map((entry) => entry.path));
+  if (
+    !options.testOnly &&
+    !basePaths.has("resin/node_modules/@resin/windows-security/package.json")
+  ) {
+    throw new Error(
+      `Windows release artifact ${platform.id} does not contain @resin/windows-security in its runtime tree; the prebuilds would be unreachable.`,
+    );
+  }
+  const entries = [];
+  for (const name of ["resin", "resin-daemon", "resin-gateway"]) {
+    entries.push({
+      path: `resin/bin/${name}.cmd`,
+      content: windowsCmdLauncher(name),
+      mode: 0o755,
+    });
+  }
+  const roots = WINDOWS_SECURITY_ARCHIVE_ROOTS.filter(
+    (root, index) => index === 0 || basePaths.has(`${root}/package.json`),
+  );
+  for (const root of roots) {
+    for (const fileName of WINDOWS_PREBUILD_FILES) {
+      entries.push({
+        path: `${root}/prebuilds/win32-${platform.arch}/${fileName}`,
+        content: prebuilds.files.get(fileName),
+        mode: 0o755,
+      });
+    }
+  }
+  return entries;
+}
+
 export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) {
   fs.mkdirSync(outputDir, { recursive: true });
   const publicPackages = options.publicPackages || resolvePublicReleasePackages(rootDir);
@@ -994,17 +1211,32 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
 
   assertNoForbiddenReleaseArtifacts(baseEntries, "base release entries");
 
+  // Native prebuilds are per-architecture: never let a locally built prebuilds/ directory leak
+  // into every artifact through the runtime dependency tree.
+  const portableBaseEntries = baseEntries.filter((entry) => !isWindowsPrebuildEntry(entry.path));
+  const needsWindowsPrebuilds = PLATFORMS.some((platform) => platform.os === "win32");
+  const windowsPrebuilds = needsWindowsPrebuilds
+    ? resolveWindowsPrebuilds(rootDir, {
+        prebuildsDir: options.windowsPrebuildsDir,
+        testOnly: options.testOnly === true,
+        logger: options.logger,
+      })
+    : new Map();
+
   for (const platform of PLATFORMS) {
+    const platformSpecificEntries =
+      platform.os === "win32"
+        ? windowsPlatformEntries(portableBaseEntries, platform, windowsPrebuilds, options)
+        : [
+            {
+              path: `resin/bin/resin-${platform.os}-${platform.arch}`,
+              content: "#!/usr/bin/env node\nimport './resin';\n",
+              mode: 0o755,
+            },
+          ];
     const platformEntries = [
-      ...baseEntries,
-      {
-        path: `resin/bin/resin-${platform.os}-${platform.arch}${platform.os === "win32" ? ".exe" : ""}`,
-        content:
-          platform.os === "win32"
-            ? "@echo off\r\nnode %~dp0resin %*\r\n"
-            : "#!/usr/bin/env node\nimport './resin';\n",
-        mode: 0o755,
-      },
+      ...portableBaseEntries,
+      ...platformSpecificEntries,
       {
         path: "resin/release-metadata.json",
         content: JSON.stringify(
@@ -1583,6 +1815,8 @@ export function packageRelease(options = {}) {
     assetDigests = createPlatformReleaseTarballs(rootDir, distDir, {
       publicPackages,
       allowedGeneratedFilesByPackage,
+      testOnly,
+      windowsPrebuildsDir: options.windowsPrebuildsDir,
     });
   } finally {
     if (existingCliTrust !== null) {
@@ -1782,7 +2016,7 @@ export function createCandidateReleaseArtifact(options = {}) {
 
 if (
   process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
 ) {
   try {
     const testOnly =

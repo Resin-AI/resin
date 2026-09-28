@@ -234,7 +234,7 @@ describe("ClaudeHarnessAdapter", () => {
     const sessions = await adapter.listSessions(demoWs!);
     expect(sessions.length).toBe(1);
     expect(sessions[0].sessionId).toBe("session");
-    expect(sessions[0].transcriptPath).toBe(transcriptPath);
+    expect(sessions[0].transcriptPath).toBe(path.normalize(transcriptPath));
     expect(sessions[0].workspaceId).toBe(demoWs!.workspaceId);
   });
 });

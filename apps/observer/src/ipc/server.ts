@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import type { Duplex } from "node:stream";
+import {
+  type SecurePipeServer,
+  WINDOWS_PIPE_PREFIX,
+  createSecurePipeServer,
+  verifyPipeServer,
+} from "@resin/windows-security";
 import type { DaemonConfig } from "../config.js";
 import type { Logger } from "../lifecycle.js";
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
@@ -19,6 +26,30 @@ import {
   type ReloadConfigParams,
 } from "./protocol.js";
 import type { IpcTransport } from "./transport.js";
+
+/** Upper bound on waiting for a client to take the replies already written to its pipe. */
+const PIPE_REPLY_FLUSH_TIMEOUT_MS = 2_000;
+
+/**
+ * Ends `socket` once its pending writes complete: a graceful pipe close keeps what was written
+ * readable by the client. Resolves when it has, or after {@link PIPE_REPLY_FLUSH_TIMEOUT_MS} for a
+ * client that stopped reading (the caller then forces the close).
+ */
+function closeAfterPendingWrites(socket: Duplex): Promise<void> {
+  if (socket.destroyed || socket.writableFinished) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(resolve, PIPE_REPLY_FLUSH_TIMEOUT_MS);
+  timer.unref();
+  const done = (): void => {
+    clearTimeout(timer);
+    resolve();
+  };
+  socket.once("finish", done);
+  socket.once("close", done);
+  socket.once("error", done);
+  socket.end();
+  return promise;
+}
 
 export interface IpcServerOptions {
   supervisor: DaemonSupervisor;
@@ -68,7 +99,8 @@ export class IpcServer {
   readonly socketPath?: string;
   private logger?: Logger;
   private netServer: net.Server | null = null;
-  private activeSockets = new Set<net.Socket>();
+  private pipeServer: SecurePipeServer | null = null;
+  private activeSockets = new Set<Duplex>();
   private readonly reloadConfigHandler?: IpcServerOptions["reloadConfig"];
   private reloadQueue: Promise<void> = Promise.resolve();
   private activeTransports = new Set<IpcTransport>();
@@ -135,8 +167,14 @@ export class IpcServer {
     if (!this.isRunning) return;
     this.isRunning = false;
 
-    // Close all connected sockets
-    for (const socket of this.activeSockets) {
+    // Close all connected sockets. A forced named-pipe close disconnects the client and discards
+    // what it has not read yet (a Unix socket keeps written bytes readable), so on Windows the
+    // replies already sent, such as the answer to `gracefulShutdown`, are delivered first.
+    const sockets = [...this.activeSockets];
+    if (process.platform === "win32") {
+      await Promise.all(sockets.map((socket) => closeAfterPendingWrites(socket)));
+    }
+    for (const socket of sockets) {
       socket.destroy();
     }
     this.activeSockets.clear();
@@ -146,6 +184,12 @@ export class IpcServer {
       void transport.close();
     }
     this.activeTransports.clear();
+
+    const pipeServer = this.pipeServer;
+    if (pipeServer) {
+      this.pipeServer = null;
+      await pipeServer.close();
+    }
 
     // Close net server
     const server = this.netServer;
@@ -157,7 +201,7 @@ export class IpcServer {
     }
 
     // Unlink socket file if it exists and is a filesystem path
-    if (this.socketPath && !this.socketPath.startsWith("\\\\.\\pipe\\")) {
+    if (this.socketPath && !this.socketPath.startsWith(WINDOWS_PIPE_PREFIX)) {
       try {
         await fs.promises.unlink(this.socketPath);
       } catch {
@@ -169,9 +213,14 @@ export class IpcServer {
   }
 
   private async startNetServer(socketPath: string): Promise<void> {
+    if (process.platform === "win32") {
+      this.startWindowsPipeServer(socketPath);
+      return;
+    }
+
     assertUnixSocketPathFits(socketPath);
     // If socket file exists on filesystem, check if stale and unlink
-    if (!socketPath.startsWith("\\\\.\\pipe\\")) {
+    if (!socketPath.startsWith(WINDOWS_PIPE_PREFIX)) {
       const socketDir = path.dirname(socketPath);
       await fs.promises.mkdir(socketDir, { recursive: true, mode: 0o700 });
 
@@ -184,36 +233,7 @@ export class IpcServer {
       }
     }
 
-    this.netServer = net.createServer((socket) => {
-      this.activeSockets.add(socket);
-      const decoder = new FrameDecoder();
-
-      socket.on("data", (data) => {
-        try {
-          const frames = decoder.push(data);
-          for (const frame of frames) {
-            // SAFETY: Decoded socket frame matches IpcRequest envelope.
-            void this.handleRequest(frame as IpcRequest, (response) => {
-              if (!socket.destroyed) {
-                socket.write(encodeFrame(response));
-              }
-            });
-          }
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          this.logger?.error(`Error handling socket frame: ${errorMsg}`);
-        }
-      });
-
-      socket.on("error", (err) => {
-        this.logger?.debug(`Client socket error: ${err.message}`);
-        this.activeSockets.delete(socket);
-      });
-
-      socket.on("close", () => {
-        this.activeSockets.delete(socket);
-      });
-    });
+    this.netServer = net.createServer((socket) => this.serveConnection(socket));
 
     const serverInstance = this.netServer;
     if (!serverInstance) return;
@@ -223,7 +243,7 @@ export class IpcServer {
       serverInstance.listen(socketPath, () => {
         serverInstance.removeListener("error", reject);
         // Fix permissions on POSIX socket
-        if (!socketPath.startsWith("\\\\.\\pipe\\") && process.platform !== "win32") {
+        if (!socketPath.startsWith(WINDOWS_PIPE_PREFIX)) {
           try {
             fs.chmodSync(socketPath, 0o600);
           } catch {
@@ -232,6 +252,63 @@ export class IpcServer {
         }
         resolve();
       });
+    });
+  }
+
+  /**
+   * Windows: Node's `net` pipes get a default DACL that lets other users connect, so the daemon
+   * serves through an owner-only pipe that it claims exclusively. A name that is already taken is
+   * never shared: the daemon refuses to start instead of listening beside a squatter.
+   */
+  private startWindowsPipeServer(pipeName: string): void {
+    if (!pipeName.startsWith(WINDOWS_PIPE_PREFIX)) {
+      throw new Error(
+        `Refusing to serve IPC on '${pipeName}': on Windows the daemon socket must be a local named pipe (${WINDOWS_PIPE_PREFIX}...).`,
+      );
+    }
+    try {
+      this.pipeServer = createSecurePipeServer(pipeName, (socket) => this.serveConnection(socket), {
+        onError: (error) => this.logger?.error(`Named pipe server error: ${error.message}`),
+      });
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "EADDRINUSE") throw error;
+      const holder = verifyPipeServer(pipeName);
+      const message = holder.ok
+        ? `Another Resin daemon for this user is already serving ${pipeName}.`
+        : `Named pipe ${pipeName} is held by another principal (${holder.reason ?? "unverifiable"}); refusing to start the daemon IPC server. Stop the process that owns the pipe or choose a different RESIN_HOME.`;
+      throw Object.assign(new Error(message), { code: "EADDRINUSE", cause: error });
+    }
+  }
+
+  private serveConnection(socket: Duplex): void {
+    this.activeSockets.add(socket);
+    const decoder = new FrameDecoder();
+
+    socket.on("data", (data: Buffer) => {
+      try {
+        const frames = decoder.push(data);
+        for (const frame of frames) {
+          // SAFETY: Decoded socket frame matches IpcRequest envelope.
+          void this.handleRequest(frame as IpcRequest, (response) => {
+            if (!socket.destroyed && !socket.writableEnded) {
+              socket.write(encodeFrame(response));
+            }
+          });
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.logger?.error(`Error handling socket frame: ${errorMsg}`);
+      }
+    });
+
+    socket.on("error", (err: Error) => {
+      this.logger?.debug(`Client socket error: ${err.message}`);
+      this.activeSockets.delete(socket);
+    });
+
+    socket.on("close", () => {
+      this.activeSockets.delete(socket);
     });
   }
 

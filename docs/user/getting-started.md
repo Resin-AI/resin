@@ -13,6 +13,7 @@ Before installing Resin, ensure your environment meets the following requirement
   - Linux (x86_64, arm64)
   - macOS (Apple Silicon arm64, Intel x86_64)
   - Windows Subsystem for Linux (WSL2, Ubuntu 22.04+)
+  - Windows 10/11 natively (x86_64, arm64) with Windows PowerShell 5.1 or PowerShell 7+
 - **Coding Harnesses** (at least one installed):
   - [Claude Code CLI](https://claude.ai/code)
   - [Codex CLI](https://github.com/openai/codex)
@@ -30,11 +31,13 @@ Install Resin with the standalone bootstrap script:
 curl -fsSL https://resin.sh/install.sh | sh
 ```
 
-PowerShell:
+Windows (Windows PowerShell 5.1 or PowerShell 7+, no WSL2 or administrator rights needed):
 
 ```powershell
 irm https://resin.sh/install.ps1 | iex
 ```
+
+On native Windows, Resin lives in `%USERPROFILE%\.resin` (or `RESIN_HOME`), adds `resin` to your user `PATH`, and registers its service as a per-user Scheduled Task (`\Resin\ResinDaemon`) that starts at logon and restarts the daemon if it crashes. Only your Windows account can open the daemon's named pipe or read Resin's private files. Commands your agents run in PowerShell can become tools; Windows PowerShell 5.1 and PowerShell 7 recordings are kept apart, and cmd.exe commands are captured but reported as not learnable. `resin uninstall` removes the Scheduled Task, the `PATH` entry and (with `--purge-all`) everything under the Resin home. To install into WSL2 instead, run `& ([scriptblock]::Create((irm https://resin.sh/install.ps1))) -UseWsl` from PowerShell.
 
 During a fresh interactive installation, Resin automatically initiates **machine-level device linking** and completes global setup in a single step:
 

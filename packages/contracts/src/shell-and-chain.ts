@@ -36,7 +36,8 @@
  * none of its segments.
  */
 
-import type { WorkflowStep } from "./recorded-workflow.js";
+import type { WorkflowRecordedProgram, WorkflowStep } from "./recorded-workflow.js";
+import { type ShellDialect, isPosixShellDialect, isShellDialect } from "./shell-dialects.js";
 
 /** The version of these splitting rules; bump it whenever a program would split differently. */
 export const SHELL_AND_CHAIN_SPLITTER_VERSION = 3 as const;
@@ -568,7 +569,7 @@ export function isSkippableSegment(
  * splitting only when its decoder proved the callable is that built-in and shared its command as a
  * program view.
  */
-const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
+const HARNESS_SHELL_CALLABLES: Readonly<Record<string, ShellDialect>> = {
   bash: "bash",
   sh: "sh",
   dash: "dash",
@@ -578,19 +579,43 @@ const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
   run_terminal_command: ZSH_OR_SH,
 };
 
+/** What a call's recorded program says about the shell it ran in, when it says anything. */
+type RecordedShellProgram = Partial<Pick<WorkflowRecordedProgram, "dialect" | "unprovenDialect">>;
+
 /**
- * The POSIX shell a recorded shell-program call ran in, or undefined: a harness's built-in shell
- * callable, or a Codex command run under a bash shell profile. Any other shell never splits.
+ * The shell dialect a recorded shell-program call ran in, or undefined when the record does not
+ * prove one: the dialect its recorded program names, or — for a record made before dialects were
+ * recorded — the POSIX shell its callable proves (a harness's built-in shell callable, or a Codex
+ * command run under a bash shell profile). A program recorded with an unproven dialect has none.
  */
-export function recordedPosixShell(
+export function recordedShellDialect(
   callableName: string,
   args: Readonly<Record<string, unknown>>,
-): string | undefined {
+  program?: RecordedShellProgram,
+): ShellDialect | undefined {
+  if (program?.unprovenDialect === true) return undefined;
+  if (program?.dialect !== undefined) {
+    return isShellDialect(program.dialect) ? program.dialect : undefined;
+  }
   const profile = args.resinCodexShellProfile;
   if (typeof profile === "string") return profile.startsWith("bash-") ? "bash" : undefined;
   return Object.hasOwn(HARNESS_SHELL_CALLABLES, callableName)
     ? HARNESS_SHELL_CALLABLES[callableName]
     : undefined;
+}
+
+/**
+ * The POSIX shell a recorded shell-program call ran in, or undefined: its recorded dialect when
+ * that is a POSIX one (see {@link recordedShellDialect}). PowerShell, cmd and any other shell never
+ * split.
+ */
+export function recordedPosixShell(
+  callableName: string,
+  args: Readonly<Record<string, unknown>>,
+  program?: RecordedShellProgram,
+): string | undefined {
+  const dialect = recordedShellDialect(callableName, args, program);
+  return dialect !== undefined && isPosixShellDialect(dialect) ? dialect : undefined;
 }
 
 /**

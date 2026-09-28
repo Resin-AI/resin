@@ -131,14 +131,21 @@ describe("Filesystem Broker Security & Containment", () => {
       workspaceRoot: tempWorkspace,
     };
 
-    // Create a symlink pointing to an outside secret file
-    const symlinkPath = path.join(tempWorkspace, "malicious_symlink.txt");
-    try {
-      fs.symlinkSync(path.join(outsideDir, "outside_secret.txt"), symlinkPath);
-    } catch {}
+    // Create a symlink pointing to an outside secret file. Unprivileged Windows users cannot
+    // create file symlinks, so there the escape is a directory junction to the outside directory.
+    let escapePath = "malicious_symlink.txt";
+    if (process.platform === "win32") {
+      fs.symlinkSync(outsideDir, path.join(tempWorkspace, "malicious_junction"), "junction");
+      escapePath = "malicious_junction/outside_secret.txt";
+    } else {
+      const symlinkPath = path.join(tempWorkspace, "malicious_symlink.txt");
+      try {
+        fs.symlinkSync(path.join(outsideDir, "outside_secret.txt"), symlinkPath);
+      } catch {}
+    }
 
     // Reading through the symlink must be blocked
-    await expect(broker.readFile({ path: "malicious_symlink.txt" }, ctx)).rejects.toMatchObject({
+    await expect(broker.readFile({ path: escapePath }, ctx)).rejects.toMatchObject({
       code: "SYMLINK_ESCAPE",
     });
   });

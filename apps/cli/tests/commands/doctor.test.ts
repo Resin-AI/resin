@@ -39,8 +39,9 @@ import {
 import { runServiceSupervisor } from "../../src/service/manager.js";
 import type { RecoveryStateTracker } from "../../src/service/recovery-state.js";
 
-const HOME = "/home/harness-health";
-const WORKSPACE = "/workspaces/resin";
+// Drive-qualified on Windows: harness health resolves every path it touches.
+const HOME = path.resolve("/home/harness-health");
+const WORKSPACE = path.resolve("/workspaces/resin");
 const START_MS = Date.parse("2026-08-28T12:00:00.000Z");
 
 class MtimeMemoryBridge extends InMemoryConfigFsBridge implements HarnessReconcileFsBridge {
@@ -153,8 +154,9 @@ describe("HarnessHealthCoordinator", () => {
 
     const resinCommand = path.join(sourceRoot, "apps", "cli", "bin", "resin.mjs");
     expect(reconcileSpy).toHaveBeenCalledWith(expect.objectContaining({ resinCommand }));
+    // JSON-encoded, so Windows backslashes appear escaped in the file.
     expect(await bridge.readFile(resolveHarnessConfigPath("claude-code", HOME))).toContain(
-      resinCommand,
+      JSON.stringify(resinCommand),
     );
     expect(
       resolveLocalSourceResinCommand({ RESIN_LOCAL_SOURCE_ROOT: sourceRoot }, resinCommand),
@@ -172,10 +174,16 @@ describe("HarnessHealthCoordinator", () => {
     const attackerRoot = await fs.mkdtemp(path.join(os.tmpdir(), "resin-source-symlink-"));
     const fakeBin = path.join(attackerRoot, "apps", "cli", "bin");
     const fakeDist = path.join(attackerRoot, "apps", "cli", "dist");
-    await fs.mkdir(fakeBin, { recursive: true });
     await fs.mkdir(fakeDist, { recursive: true });
     const fakeEntry = path.join(fakeBin, "resin.mjs");
-    await fs.symlink(path.resolve("apps", "cli", "bin", "resin.mjs"), fakeEntry);
+    if (process.platform === "win32") {
+      // Unprivileged Windows users cannot create file symlinks; a directory junction is the
+      // link they can create, and it escapes the root the same way.
+      await fs.symlink(path.resolve("apps", "cli", "bin"), fakeBin, "junction");
+    } else {
+      await fs.mkdir(fakeBin, { recursive: true });
+      await fs.symlink(path.resolve("apps", "cli", "bin", "resin.mjs"), fakeEntry);
+    }
     await fs.writeFile(path.join(fakeDist, "index.js"), "export {};\n");
 
     try {

@@ -12,6 +12,10 @@ import {
 } from "../../src/brokers/index.js";
 import { createInvocationGrant } from "../../src/policy/grant.js";
 
+// Command strings use the broker's POSIX argv grammar, where `\` is an escape, so Windows
+// paths inside them are spelled with `/` (which Windows and Node accept as a separator).
+const argvPath = (filePath: string): string => filePath.replaceAll("\\", "/");
+
 describe("Canonical Command Broker & Process Group Isolation", () => {
   let tempWorkspace: string;
   let tempScratch: string;
@@ -125,34 +129,38 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
   });
 
   describe("Pre-spawn executable identity re-resolution", () => {
-    it("detects symlink swaps between resolution and execution", async () => {
-      const legitScript = path.join(tempWorkspace, "legit.js");
-      fs.writeFileSync(legitScript, "console.log('LEGIT_OK');");
+    // POSIX-only: runs a `#!/bin/sh` script as a binary through a file symlink.
+    it.skipIf(process.platform === "win32")(
+      "detects symlink swaps between resolution and execution",
+      async () => {
+        const legitScript = path.join(tempWorkspace, "legit.js");
+        fs.writeFileSync(legitScript, "console.log('LEGIT_OK');");
 
-      const legitBin = path.join(tempWorkspace, "legit_bin");
-      fs.writeFileSync(legitBin, `#!/bin/sh\n"${process.execPath}" "${legitScript}"\n`, {
-        mode: 0o755,
-      });
+        const legitBin = path.join(tempWorkspace, "legit_bin");
+        fs.writeFileSync(legitBin, `#!/bin/sh\n"${process.execPath}" "${legitScript}"\n`, {
+          mode: 0o755,
+        });
 
-      const evilBin = path.join(tempWorkspace, "evil_bin");
-      fs.writeFileSync(evilBin, "#!/bin/sh\necho 'EVIL_PWNED'\n", { mode: 0o755 });
+        const evilBin = path.join(tempWorkspace, "evil_bin");
+        fs.writeFileSync(evilBin, "#!/bin/sh\necho 'EVIL_PWNED'\n", { mode: 0o755 });
 
-      const symlinkBin = path.join(tempWorkspace, "dynamic_bin");
-      fs.symlinkSync(legitBin, symlinkBin);
+        const symlinkBin = path.join(tempWorkspace, "dynamic_bin");
+        fs.symlinkSync(legitBin, symlinkBin);
 
-      const grant = createGrant({ allowedBinaries: [symlinkBin] });
-      const ctx = {
-        invocationId: "inv_canon_cmd_001",
-        grant,
-        workspaceRoot: tempWorkspace,
-        scratchDir: tempScratch,
-      };
+        const grant = createGrant({ allowedBinaries: [symlinkBin] });
+        const ctx = {
+          invocationId: "inv_canon_cmd_001",
+          grant,
+          workspaceRoot: tempWorkspace,
+          scratchDir: tempScratch,
+        };
 
-      // First run with legit target
-      const res = await broker.execute({ executable: symlinkBin }, ctx);
-      expect(res.exitCode).toBe(0);
-      expect(res.stdout.trim()).toBe("LEGIT_OK");
-    });
+        // First run with legit target
+        const res = await broker.execute({ executable: symlinkBin }, ctx);
+        expect(res.exitCode).toBe(0);
+        expect(res.stdout.trim()).toBe("LEGIT_OK");
+      },
+    );
   });
 
   describe("Interpreter escape & argument policy enforcement", () => {
@@ -477,31 +485,35 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       });
     });
 
-    it("executes novel exact command tuple without global code changes", async () => {
-      const novelTool = path.join(tempWorkspace, "novel_tool.sh");
-      fs.writeFileSync(novelTool, '#!/bin/sh\necho "NOVEL_TOOL_SUCCESS $1"\n', { mode: 0o755 });
+    // POSIX-only: runs a `#!/bin/sh` script as the binary.
+    it.skipIf(process.platform === "win32")(
+      "executes novel exact command tuple without global code changes",
+      async () => {
+        const novelTool = path.join(tempWorkspace, "novel_tool.sh");
+        fs.writeFileSync(novelTool, '#!/bin/sh\necho "NOVEL_TOOL_SUCCESS $1"\n', { mode: 0o755 });
 
-      const grant = createGrant({
-        allowedCommands: [`${novelTool} --novel-flag`],
-        allowedBinaries: [],
-        allowEnvPassthrough: ["PATH"],
-      });
-      const ctx = {
-        invocationId: "inv_canon_cmd_001",
-        grant,
-        workspaceRoot: tempWorkspace,
-        scratchDir: tempScratch,
-      };
+        const grant = createGrant({
+          allowedCommands: [`${novelTool} --novel-flag`],
+          allowedBinaries: [],
+          allowEnvPassthrough: ["PATH"],
+        });
+        const ctx = {
+          invocationId: "inv_canon_cmd_001",
+          grant,
+          workspaceRoot: tempWorkspace,
+          scratchDir: tempScratch,
+        };
 
-      const res = await broker.execute({ executable: novelTool, args: ["--novel-flag"] }, ctx);
-      expect(res.exitCode).toBe(0);
-      expect(res.stdout).toContain("NOVEL_TOOL_SUCCESS --novel-flag");
+        const res = await broker.execute({ executable: novelTool, args: ["--novel-flag"] }, ctx);
+        expect(res.exitCode).toBe(0);
+        expect(res.stdout).toContain("NOVEL_TOOL_SUCCESS --novel-flag");
 
-      // Reject different flag
-      await expect(
-        broker.execute({ executable: novelTool, args: ["--other-flag"] }, ctx),
-      ).rejects.toThrow(BrokerSecurityError);
-    });
+        // Reject different flag
+        await expect(
+          broker.execute({ executable: novelTool, args: ["--other-flag"] }, ctx),
+        ).rejects.toThrow(BrokerSecurityError);
+      },
+    );
 
     it("maintains explicit broad binary execution when allowedCommands is empty", async () => {
       const scriptPath = path.join(tempWorkspace, "broad_test.js");
@@ -530,7 +542,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("handles quoted whitespace in single and double quotes without splitting tokens across executable+args and command-string APIs", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_quoted.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_quoted.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       // Double quotes with spaces
@@ -619,7 +631,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("preserves empty quoted arguments losslessly across executable+args and command-string APIs and rejects omitted/altered empty args", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_empty.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_empty.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const grant = createGrant({
@@ -686,7 +698,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("handles escaped spaces outside quotes and normalizes equivalent quotes losslessly", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_escaped.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_escaped.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const grant = createGrant({
@@ -756,7 +768,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("preserves Unicode text and Unicode whitespace without mangling or corruption", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_unicode.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_unicode.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const unicodeMsg = "🚀 release v2.0 (日本語 / 日本)";
@@ -819,7 +831,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("resolves canonical binary aliases (/usr/bin/git vs git, canonical path vs basename) after parsing before tuple comparison", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_alias.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_alias.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       // Profile specifies short alias 'node', invocation uses canonical full path process.execPath
@@ -865,7 +877,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
 
       const resCanon2 = await broker.execute(
         {
-          command: `"${process.execPath}" "${argvPrinter}" --alias-check`,
+          command: `"${argvPath(process.execPath)}" "${argvPrinter}" --alias-check`,
         },
         ctxShort,
       );
@@ -873,7 +885,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
 
       // Profile specifies canonical path, invocation uses short alias 'node'
       const grantCanon = createGrant({
-        allowedCommands: [`"${process.execPath}" "${argvPrinter}" --canon-profile`],
+        allowedCommands: [`"${argvPath(process.execPath)}" "${argvPrinter}" --canon-profile`],
         allowedBinaries: [],
         allowEnvPassthrough: ["PATH"],
       });
@@ -911,12 +923,15 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
         broker.execute({ executable: fakeNode, args: [argvPrinter, "--alias-check"] }, ctxShort),
       ).rejects.toThrow(BrokerSecurityError);
       await expect(
-        broker.execute({ command: `"${fakeNode}" "${argvPrinter}" --alias-check` }, ctxShort),
+        broker.execute(
+          { command: `"${argvPath(fakeNode)}" "${argvPrinter}" --alias-check` },
+          ctxShort,
+        ),
       ).rejects.toThrow(BrokerSecurityError);
     });
 
     it("rejects unterminated quotes and unterminated escapes in both command strings and allowedCommands profiles", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_unterminated.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_unterminated.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const grant = createGrant({
@@ -987,7 +1002,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     });
 
     it("rejects shell operators, expansions, subshells, and redirections without invoking a shell", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_shell_ops.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_shell_ops.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const grant = createGrant({
@@ -1051,7 +1066,7 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
     // This matrix performs 14 sequential broker calls with real process resolution.
     // Allow runner contention without weakening any tuple-security assertions.
     it("enforces strict tuple equality and rejects argument addition, removal, reordering, and prefix/substring mutations", async () => {
-      const argvPrinter = path.join(tempWorkspace, "print_argv_mismatch.js");
+      const argvPrinter = argvPath(path.join(tempWorkspace, "print_argv_mismatch.js"));
       fs.writeFileSync(argvPrinter, "console.log(JSON.stringify(process.argv.slice(2)));\n");
 
       const grant = createGrant({

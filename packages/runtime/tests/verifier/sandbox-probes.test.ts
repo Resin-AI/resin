@@ -125,8 +125,8 @@ describe("Platform Security Probes and Sandbox Isolation Verification", () => {
       manifest: safeManifest,
       sourceCode: safeSourceCode,
     });
-    expect(res.passed).toBe(true);
     expect(res.error).toBeUndefined();
+    expect(res.passed).toBe(true);
   });
 
   it("verifies PROBE_NET_BYPASS rejects unauthorized host and localhost connections", async () => {

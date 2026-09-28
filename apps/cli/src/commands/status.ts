@@ -1,4 +1,3 @@
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import {
@@ -12,11 +11,13 @@ import {
   type HarnessVersionClassification,
   classifyHarnessVersion,
   defaultFsBridge,
+  resolveHarnessUserHome,
 } from "@resin/harness-contracts";
 import {
   type DaemonHealthReport,
   IpcClient,
   StoredCloudCredentialsSchema,
+  daemonPipePresent,
   resolvePaths,
 } from "@resin/observer";
 
@@ -129,6 +130,8 @@ export interface DaemonStatusSummary {
     serviceName: string;
     status: "active" | "stopped" | "not_installed" | "externally_managed";
     pid: number | null;
+    /** Native Windows: the scheduled task's state (ready, running, disabled, queued, unknown). */
+    taskState?: string;
   };
   ipc: {
     connected: boolean;
@@ -368,7 +371,10 @@ export async function collectStatus(
     customHome?: string;
   } = {},
 ): Promise<DaemonStatusSummary> {
-  const home = options.home ?? options.customHome ?? options.env?.HOME ?? os.homedir();
+  const home =
+    options.home ??
+    options.customHome ??
+    resolveHarnessUserHome({ env: options.env ?? process.env });
   return fetchDaemonStatusSummary(home, options);
 }
 
@@ -419,12 +425,15 @@ export async function fetchDaemonStatusSummary(
               : "not_installed",
       pid: safePositiveInteger(rawStatus.pid),
     };
+    if (serviceManager.platform === "windows-task" && installed) {
+      service.taskState = sanitizeServiceIdentifier(rawStatus.state, "unknown");
+    }
   } catch {
     // Status is deliberately fail-safe; service defaults remain explicit.
   }
 
   const socketPath = options.socket ?? options.socketPath ?? daemonPaths.socketPath;
-  const socketPresent = await safeExists(fsBridge, socketPath);
+  const socketPresent = daemonPipePresent(socketPath) ?? (await safeExists(fsBridge, socketPath));
   let ipcConnected = false;
   let pingLatencyMs: number | null = null;
   let daemonVersion: string | null = null;
@@ -809,6 +818,7 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
           ? "STOPPED (inactive)"
           : "NOT INSTALLED";
   lines.push(`  State:      ${serviceState}`);
+  if (service.taskState !== undefined) lines.push(`  Task:       ${service.taskState}`);
   if (service.pid !== null && service.pid !== undefined) lines.push(`  PID:        ${service.pid}`);
 
   lines.push("  [IPC & Subsystems]");
@@ -988,7 +998,7 @@ export async function statusCommand(
 
   const customHome = flags.home
     ? path.resolve(flags.home)
-    : path.resolve(options.env?.HOME ?? os.homedir());
+    : path.resolve(resolveHarnessUserHome({ env: options.env ?? process.env }));
   const env = { ...(options.env ?? process.env), HOME: customHome };
   try {
     const now = options.now?.() ?? Date.now();

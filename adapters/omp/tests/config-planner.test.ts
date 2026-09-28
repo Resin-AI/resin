@@ -48,7 +48,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("plans MCP config mutation on a missing / empty config file creating valid shape", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
 
     const plan = await planOmpMcpConfig({
       gatewayUrl: "http://127.0.0.1:4000/mcp/sse",
@@ -155,7 +155,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("preserves existing extensions, user preferences, and other MCP servers", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
 
     const initialConfig = {
       $schema: "https://json.schemastore.org/mcp-server-config.json",
@@ -196,7 +196,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("is idempotent when re-planning against already mutated canonical config", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
     const initialConfig = {
       mcpServers: {
         resin: {
@@ -225,7 +225,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("migrates existing legacy SSE resin entry to canonical stdio using gatewayUrl as migration context", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
     const initialConfig = {
       mcpServers: {
         resin: {
@@ -253,7 +253,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("never adds url alongside command when both command and gatewayUrl or url are passed", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
 
     const plan = await planOmpMcpConfig({
       command: "resin",
@@ -275,7 +275,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("preserves explicit URL-only configuration when caller intentionally requests it via url", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
 
     const plan = await planOmpMcpConfig({
       url: "http://127.0.0.1:4000/mcp/sse",
@@ -321,7 +321,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
   it("throws ConfigPreconditionFailedError when current content changes before apply", async () => {
     const fsBridge = new InMemoryConfigFsBridge();
-    const configPath = "/test/home/.omp/agent/mcp.json";
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
 
     await fsBridge.writeFile(configPath, JSON.stringify({ version: 1 }));
 
@@ -340,7 +340,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
   describe("Canonical resin key and legacy alias migration", () => {
     it("migrates recognized legacy aliases resin-gateway and resin_gateway to resin", async () => {
       const fsBridge = new InMemoryConfigFsBridge();
-      const configPath = "/test/home/.omp/agent/mcp.json";
+      const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
       const initialConfig = {
         mcpServers: {
           "resin-gateway": {
@@ -376,7 +376,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
     it("resolves coexistence by keeping canonical resin and deleting recognized legacy alias", async () => {
       const fsBridge = new InMemoryConfigFsBridge();
-      const configPath = "/test/home/.omp/agent/mcp.json";
+      const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
       const initialConfig = {
         mcpServers: {
           resin: {
@@ -407,7 +407,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
 
     it("preserves unrecognized same-named legacy alias when not Resin-owned", async () => {
       const fsBridge = new InMemoryConfigFsBridge();
-      const configPath = "/test/home/.omp/agent/mcp.json";
+      const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
       const initialConfig = {
         mcpServers: {
           "resin-gateway": {

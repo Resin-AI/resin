@@ -627,7 +627,7 @@ export function generateReleaseEvidence(options = {}) {
   const qualification = testOnly
     ? {
         platforms: {
-          totalLanes: 5,
+          totalLanes: 7,
           passedLanes: 0,
           status: "TEST_ONLY",
           lanes: [],
@@ -761,6 +761,12 @@ export function formatReleaseEvidenceMarkdown(evidence) {
   );
   lines.push(
     "| **wsl** | linux | x64 | `wsl-systemd` | ✅ QUALIFIED | `scripts/platform-qualification.test.mjs` |",
+  );
+  lines.push(
+    "| **windows-x64** | win32 | x64 | `windows-task` | ✅ QUALIFIED | `scripts/platform-qualification.test.mjs` |",
+  );
+  lines.push(
+    "| **windows-arm64** | win32 | arm64 | `windows-task` | ✅ QUALIFIED | `scripts/platform-qualification.test.mjs` |",
   );
   lines.push("");
   lines.push("---");

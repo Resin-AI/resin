@@ -40,6 +40,7 @@ export const CANONICAL_PUBLIC_RELEASE_PACKAGES = Object.freeze([
   "@resin/observer",
   "@resin/runtime",
   "@resin/crypto",
+  "@resin/windows-security",
   "@resin/protocol",
   "@resin/contracts",
   "@resin/harness-contracts",

@@ -32,6 +32,8 @@ describe("check-boundaries", () => {
     expect(packages.has("@resin/protocol")).toBe(true);
     expect(packages.has("@resin/gateway")).toBe(true);
     expect(packages.has("@resin/observer")).toBe(true);
+    // Directories use the manifest's `/` separator on every host, so they match its path entries.
+    expect(packages.get("@resin/test-fixtures")?.dir).toBe("fixtures/test-fixtures");
     expect(packages.has("@resin/runtime")).toBe(true);
     expect(packages.has("@resin/crypto")).toBe(true);
     expect(packages.has("@resin/db")).toBe(true);
@@ -137,6 +139,7 @@ describe("check-boundaries", () => {
       "@resin/observer",
       "@resin/runtime",
       "@resin/crypto",
+      "@resin/windows-security",
       "@resin/protocol",
       "@resin/contracts",
       "@resin/harness-contracts",

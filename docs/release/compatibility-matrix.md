@@ -45,6 +45,33 @@ This document defines the naming, versioning, and compatibility matrix across al
 | **macOS arm64** (Apple Silicon) | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
 | **macOS x86_64** (Intel)        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
 | **WSL2** (Ubuntu 22.04+)        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
+| **Windows 10/11 x86_64**        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
+| **Windows 10/11 arm64**         | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
+
+Release qualification lanes and artifacts (see [ADR 0014](../adr/0014-native-windows-support.md)):
+
+| Lane            | Artifact                                | Service manager               | Daemon endpoint             | Release candidate check                       |
+| --------------- | --------------------------------------- | ----------------------------- | --------------------------- | --------------------------------------------- |
+| `linux-x64`     | `resin-v<version>-linux-x64.tar.gz`     | `systemd --user`              | Unix socket (`0600`)        | Native on `ubuntu-latest`                     |
+| `linux-arm64`   | `resin-v<version>-linux-arm64.tar.gz`   | `systemd --user`              | Unix socket (`0600`)        | Native on `ubuntu-24.04-arm`                  |
+| `darwin-x64`    | `resin-v<version>-darwin-x64.tar.gz`    | `launchd`                     | Unix socket (`0600`)        | Artifact validation                           |
+| `darwin-arm64`  | `resin-v<version>-darwin-arm64.tar.gz`  | `launchd`                     | Unix socket (`0600`)        | Artifact validation                           |
+| `wsl`           | `resin-v<version>-wsl.tar.gz`           | `systemd --user` / supervisor | Unix socket (`0600`)        | Artifact validation                           |
+| `windows-x64`   | `resin-v<version>-windows-x64.tar.gz`   | Per-user logon Scheduled Task | Named pipe, owner-only DACL | Native on `windows-latest`, second-user probe |
+| `windows-arm64` | `resin-v<version>-windows-arm64.tar.gz` | Per-user logon Scheduled Task | Named pipe, owner-only DACL | Native on `windows-11-arm`, second-user probe |
+
+Native Windows installs from Windows PowerShell 5.1 or PowerShell 7+ with `irm https://resin.sh/install.ps1 | iex`. Each Windows artifact carries its architecture's `@resin/windows-security` native helper and windowless service host.
+
+### Shell dialects
+
+| Shell                                     | Dialect id     | Captured | Learnable / replayable       |
+| ----------------------------------------- | -------------- | -------- | ---------------------------- |
+| bash, sh, dash, zsh                       | POSIX dialects | ✅       | ✅                           |
+| Windows PowerShell 5.1 (`powershell.exe`) | `powershell`   | ✅       | ✅ (only as `powershell`)    |
+| PowerShell 7+ (`pwsh`)                    | `pwsh`         | ✅       | ✅ (only as `pwsh`)          |
+| cmd.exe                                   | `cmd`          | ✅       | ❌ Reported as not learnable |
+
+A recording is checked and replayed only under the dialect it was recorded in. PowerShell is learnable only when the recording proves the edition (e.g. Codex's recorded argv names `powershell.exe` or `pwsh.exe`); Claude Code's PowerShell tool does not record its edition, so its calls are captured and reported as not learnable.
 
 ---
 

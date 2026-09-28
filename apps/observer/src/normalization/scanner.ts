@@ -53,19 +53,135 @@ export function calculateShannonEntropy(str: string): number {
 const MAX_PATH_RUN_LENGTH = 12;
 
 /**
- * Whether a high-entropy candidate is an ordinary file path (`backups/inventory-2025-06-01.sql`)
- * rather than a key. Standard base64 has `/` but none of `.`, `-`, `_`; URL-safe base64 has no `/`;
- * a random key has long runs between separators; URL userinfo, `key=value` pairs and base64 padding
- * carry `@`, `:`, `=` or `+`. Named-secret rules still scan every value.
+ * Whether a high-entropy candidate is an ordinary file path (`backups/inventory-2025-06-01.sql`,
+ * `D:\backups\inventory-2025-06-01.sql`) rather than a key. Standard base64 has `/` but none of `.`,
+ * `-`, `_` and never `\`; URL-safe base64 has no `/`; a random key has long runs between separators;
+ * URL userinfo, `key=value` pairs and base64 padding carry `@`, `:`, `=` or `+`. A leading drive
+ * (`C:`), `\\?\` long-path prefix or home reference (`$env:USERPROFILE`, `${env:X}`, `%X%`) is a
+ * path's own colon. Named-secret rules still scan every value.
  */
 function isPathShaped(candidate: string): boolean {
+  const path = candidate.replace(
+    /^(?:\$env:[A-Za-z_]\w*|\$\{env:[A-Za-z_]\w*\}|%[A-Za-z_]\w*%|(?:(?:\\\\|\\){2}[?.](?:\\\\|\\))?[A-Za-z]:)(?=[\\/])/i,
+    "",
+  );
   return (
-    candidate.includes("/") &&
-    /[._-]/.test(candidate) &&
-    !/[@:=+]/.test(candidate) &&
-    candidate.split(/[/._-]/).every((run) => run.length <= MAX_PATH_RUN_LENGTH)
+    /[/\\]/.test(path) &&
+    /[._-]/.test(path) &&
+    !/[@:=+]/.test(path) &&
+    path.split(/[/\\._-]/).every((run) => run.length <= MAX_PATH_RUN_LENGTH)
   );
 }
+
+/** A variable name that marks its value a credential (`DB_PASS`, `GH_TOKEN`, `apiKey`). */
+const SECRET_NAME =
+  "[A-Za-z0-9_]*(?:PASS|PASSWD|PASSWORD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)";
+
+/** A quoted PowerShell string: `'...'` (`''` escapes a quote) or `"..."` (backtick escapes). */
+const PS_QUOTED = String.raw`'((?:[^'\r\n]|''){1,1024})'|"((?:[^"\r\n${"`"}]|${"`"}.|""){1,1024})"`;
+/** A PowerShell here-string, `@'` or `@"` through a closing `'@` or `"@` at the start of a line. */
+const PS_HERE_STRING = String.raw`@'\r?\n([\s\S]*?)\r?\n'@|@"\r?\n([\s\S]*?)\r?\n"@`;
+/** A PowerShell value: a here-string, a quoted string, or one bare word. */
+const PS_VALUE = `${PS_HERE_STRING}|${PS_QUOTED}|([^\\s'"${"`"};|&(){}]+)`;
+/** A cmd.exe value: a double-quoted string or one bare word. */
+const CMD_VALUE = String.raw`"([^"\r\n]*)"|([^\s"&|<>]+)`;
+
+/** Windows PowerShell and cmd.exe spellings of a secret handed to a variable, command or parameter. */
+const WINDOWS_SECRET_RULES: ScannerRule[] = [
+  {
+    id: "powershell_secret_assignment",
+    name: "PowerShell Assignment to a Secret-Named Variable",
+    secretType: "CREDENTIAL",
+    // $env:GH_TOKEN = 'a b', ${env:DB_PASSWORD}="v", $apiKey = @'<lines>'@: the whole string value.
+    regex: new RegExp(
+      `(?:\\$(?:(?:env|global|script|local|private|using):)?${SECRET_NAME}|\\$\\{(?:(?:env|global|script|local|private):)?${SECRET_NAME}\\})\\s*=\\s*(?:${PS_VALUE})`,
+      "gi",
+    ),
+    confidence: "medium",
+  },
+  {
+    id: "powershell_env_item",
+    name: "Secret Written to the PowerShell Env: Drive",
+    secretType: "CREDENTIAL",
+    // Set-Item Env:GH_TOKEN 'v', Set-Item -Path Env:\GH_TOKEN -Value v, New-Item Env: -Name X_TOKEN -Value v.
+    regex: new RegExp(
+      `\\b(?:Set-Item|New-Item|Set-Content|si|ni)\\b(?=[^\\n;|]*\\benv:\\\\?(?:["']?\\s+-Name\\s+["']?)?${SECRET_NAME}\\b)[^\\n;|]*?(?:\\s-Value\\s+|env:\\\\?${SECRET_NAME}["']?\\s+(?!-))(?:${PS_VALUE})`,
+      "gi",
+    ),
+    confidence: "medium",
+  },
+  {
+    id: "dotnet_set_environment_variable",
+    name: "Secret Passed to Environment.SetEnvironmentVariable",
+    secretType: "CREDENTIAL",
+    // [Environment]::SetEnvironmentVariable('GH_TOKEN', 'v', 'User').
+    regex: new RegExp(
+      `\\[(?:System\\.)?Environment\\]::SetEnvironmentVariable\\(\\s*["']${SECRET_NAME}["']\\s*,\\s*(?:${PS_VALUE})`,
+      "gi",
+    ),
+    confidence: "medium",
+  },
+  {
+    id: "powershell_secure_string",
+    name: "Plain Text Converted to a SecureString",
+    secretType: "CREDENTIAL",
+    // ConvertTo-SecureString 'v' -AsPlainText -Force, ConvertTo-SecureString -AsPlainText -String v.
+    regex: new RegExp(
+      `\\bConvertTo-SecureString(?=[^\\n;|]*-AsPlainText)(?:\\s+-(?:AsPlainText|Force)\\b)*(?:\\s+-String)?\\s+(?:${PS_VALUE})`,
+      "gi",
+    ),
+    confidence: "high",
+  },
+  {
+    id: "powershell_piped_secret",
+    name: "String Piped Into a Password Reader",
+    secretType: "CREDENTIAL",
+    // 'v' | ConvertTo-SecureString -AsPlainText, @'<lines>'@ | docker login --password-stdin.
+    regex: new RegExp(
+      `(?:${PS_HERE_STRING}|${PS_QUOTED})\\s*\\|\\s*(?:ConvertTo-SecureString\\b(?=[^\\n;|]*-AsPlainText)|[^\\n|;]*?--password-stdin\\b)`,
+      "gi",
+    ),
+    confidence: "high",
+  },
+  {
+    id: "powershell_secret_parameter",
+    name: "Secret Passed to a PowerShell Parameter",
+    secretType: "CREDENTIAL",
+    // Publish-Module -NuGetApiKey v, Connect-X -Password 'a b', -Token:v. Single dash only.
+    regex: new RegExp(
+      `(?<![\\w-])-(?:Password|Passwd|Token|Secret|ApiKey|NuGetApiKey|AccessToken|AuthToken|ClientSecret|PersonalAccessToken)(?:\\s+|:)(?!-)(?:${PS_VALUE})`,
+      "gi",
+    ),
+    confidence: "medium",
+  },
+  {
+    id: "cmd_set_secret",
+    name: "cmd.exe set of a Secret-Named Variable",
+    secretType: "CREDENTIAL",
+    // set GH_TOKEN=a b (the rest of the command), set "GH_TOKEN=a b".
+    regex: new RegExp(
+      `\\bset\\s+"${SECRET_NAME}=([^"\\r\\n]+)"|\\bset\\s+${SECRET_NAME}=((?:\\^.|[^\\s&|^<>"])(?:(?:\\^.|[^\\r\\n&|^<>])*(?:\\^.|[^\\s&|^<>]))?)`,
+      "gi",
+    ),
+    confidence: "medium",
+  },
+  {
+    id: "cmd_setx_secret",
+    name: "setx of a Secret-Named Variable",
+    secretType: "CREDENTIAL",
+    // setx GH_TOKEN v, setx /M GH_TOKEN "a b".
+    regex: new RegExp(`\\bsetx(?:\\s+/m)?\\s+["']?${SECRET_NAME}["']?\\s+(?:${CMD_VALUE})`, "gi"),
+    confidence: "medium",
+  },
+  {
+    id: "cmd_password_switch",
+    name: "Password Switch of setx or schtasks",
+    secretType: "CREDENTIAL",
+    // setx /s host /u user /p V, schtasks /create ... /ru user /rp V.
+    regex: new RegExp(`\\b(?:setx|schtasks)\\b[^\\r\\n&|]*?\\s/r?p\\s+(?:${CMD_VALUE})`, "gi"),
+    confidence: "medium",
+  },
+];
 
 export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
   {
@@ -151,6 +267,7 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
       /\b[A-Za-z0-9_]*(?:PASS|PASSWD|PASSWORD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)\s*=\s*["']?([^"'\s;&|]{6,})["']?/gi,
     confidence: "medium",
   },
+  ...WINDOWS_SECRET_RULES,
   {
     id: "cli_password_argument",
     name: "Password Argument of a Known Client",
@@ -362,7 +479,9 @@ export class ContentScanner {
 
     // 1. Run regex-based rules
     for (const rule of this.rules) {
-      const regex = new RegExp(rule.regex.source, rule.regex.flags);
+      // `d` records each group's offsets, so a value is located exactly wherever the rule puts it.
+      const flags = rule.regex.flags.includes("d") ? rule.regex.flags : `${rule.regex.flags}d`;
+      const regex = new RegExp(rule.regex.source, flags);
       const minLength = rule.minLength ?? 6;
       let match: RegExpExecArray | null;
 
@@ -379,9 +498,10 @@ export class ContentScanner {
           continue;
         }
 
-        // Captures are suffixes of the match: the value slot is the last occurrence.
         const matchStart =
-          groupIndex > 0 ? match.index + match[0].lastIndexOf(matchedValue) : match.index;
+          groupIndex > 0
+            ? (match.indices?.[groupIndex]?.[0] ?? match.index + match[0].lastIndexOf(matchedValue))
+            : match.index;
         const matchEnd = matchStart + matchedValue.length;
         const entropy = calculateShannonEntropy(matchedValue);
 
@@ -430,7 +550,7 @@ export class ContentScanner {
         // unless a value slot (`key=`, `token:`) or a secret label (`token`, `/hooks/`) precedes it.
         const lineBefore = lineAround(text, start, end).before;
         const pathNeighbour =
-          (/[/._-]/.test(text[start - 1] ?? "") || /[/._-]/.test(text[end] ?? "")) &&
+          (/[/\\._-]/.test(text[start - 1] ?? "") || /[/\\._-]/.test(text[end] ?? "")) &&
           !/[=:]$/.test(lineBefore) &&
           !SECRET_CONTEXT.test(lineBefore.slice(-32)) &&
           !/hooks?\/$/i.test(lineBefore);
@@ -536,17 +656,22 @@ export class ContentScanner {
       (m) => !placeholders.some((span) => m.start < span.end && m.end > span.start),
     );
 
-    // Sort matches by start position ascending
-    outsidePlaceholders.sort((a, b) => a.start - b.start);
+    // Earliest first; of two matches starting together, the longer (a quoted value over its first word).
+    outsidePlaceholders.sort((a, b) => a.start - b.start || b.end - a.end);
 
-    // Filter out overlapping matches, keeping the longer / earlier match
+    // Overlapping matches become one: a later match reaching past the earlier one extends it, so no
+    // tail of a longer value (`set GH_TOKEN=a b`, a here-string body) survives the overlap.
     const nonOverlapping: SecretMatch[] = [];
-    let lastEnd = -1;
+    let previous: SecretMatch | undefined;
 
     for (const m of outsidePlaceholders) {
-      if (m.start >= lastEnd) {
-        nonOverlapping.push(m);
-        lastEnd = m.end;
+      if (previous === undefined || m.start >= previous.end) {
+        previous = { ...m };
+        nonOverlapping.push(previous);
+      } else if (m.end > previous.end) {
+        previous.end = m.end;
+        previous.match = text.slice(previous.start, m.end);
+        previous.entropy = calculateShannonEntropy(previous.match);
       }
     }
 

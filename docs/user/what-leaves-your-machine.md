@@ -22,6 +22,18 @@ Resin sends data at three moments. To stop collection, see [Security and Privacy
 - **Validation verdicts.** When the cloud asks your computer to check a proposed tool, the answer contains only step ids, pass/fail verdicts, fixed reason codes and a fingerprint of the plan that was checked. Your computer checks the plan against its own recordings; it does not re-run your commands to do so. A value Resin scrubbed as a secret before upload is only ever compared with a value your computer supplies itself, never with a value the plan supplies or a model-written step computes, and a failed check does not say which such step failed. A plan whose model-written step would read such a value, or the output of a command whose output had a secret scrubbed, is not checked at all. Two comparisons remain possible: a plan may point two positions at two private values your computer already holds and learn whether they are equal, and a plan may state a value that was withheld from upload without being a secret (such as a file name) and learn whether the recording used it. Each recorded call and each private value a plan names (including values withheld from upload without being secrets) is checked at most 12 times a day, and every check is logged in `~/.resin/state/workflow-validation-asks.jsonl`.
 - **Account and workspace details.** Your sign-in identity (for example your email address from Google or GitHub), workspace and project identifiers, and which tools are active.
 
+## On Windows
+
+Resin on Windows sends the same kinds of data listed above and nothing else; no Windows-only data leaves your computer. Before anything is uploaded, Resin also removes the ways Windows names you, your organization and your computer:
+
+- **Your home folder** in every spelling a Windows tool or transcript uses: `C:\Users\you`, `c:/users/YOU`, JSON-escaped `C:\\Users\\you`, `\\?\C:\Users\you`, a roaming home on a network share, and the Git Bash (`/c/Users/you`) and WSL (`/mnt/c/Users/you`) forms. It becomes `$HOME`. The same applies to the folder your `%USERPROFILE%` or `%HOMEDRIVE%%HOMEPATH%` points to, even outside `C:\Users`.
+- **Other people's home folders.** Any other `C:\Users\<name>` (on any drive or share) becomes a placeholder, so their name does not leave either. Shared folders such as `C:\Users\Public` stay as they are.
+- **Your organization's OneDrive name.** A folder like `OneDrive - Contoso` keeps `OneDrive - ` but the organization name becomes a placeholder.
+- **Your Windows user name, domain and computer name** (the values of `USERNAME`, `USERDOMAIN`, `USERDNSDOMAIN` and `COMPUTERNAME`) wherever they appear as a whole word, except generic names such as `admin` or `user`.
+- **Secrets written the Windows way.** The whole value, spaces included, given to a secret-named variable (`GH_TOKEN`, `DB_PASSWORD`, `$apiKey`, ...) with `$env:NAME = '...'`, `Set-Item Env:NAME`, `[Environment]::SetEnvironmentVariable(...)`, `set NAME=...`, `setx NAME ...` or a PowerShell here-string (`@' ... '@`); a quoted string or here-string piped to `ConvertTo-SecureString -AsPlainText` or `--password-stdin`; `ConvertTo-SecureString '...' -AsPlainText`; `-Password`/`-Token`/`-ApiKey`-style parameters; and the password switches of `setx` and `schtasks`. As on other systems, the values of secret-named environment variables (`*_TOKEN`, `*_PASSWORD`, ...) are removed wherever they show up; on Windows the variable name is matched without regard to case.
+
+A variable reference such as `%USERPROFILE%`, `$env:USERPROFILE` or `echo %GITHUB_TOKEN%` names a variable rather than its value, so it is left as written; the value it stands for is what gets removed.
+
 ## What is never sent
 
 - **Exact values.** The actual arguments your agent typed into tools, such as search terms, file contents it wrote or messages it passed. Only their shapes and placeholders leave.
@@ -33,4 +45,4 @@ Resin sends data at three moments. To stop collection, see [Security and Privacy
 
 ## Where your data stays
 
-Full session recordings, recorded values and outputs live only on your computer, under `~/.resin/`, readable only by your user account. To see or change what Resin collects, see [Security and Privacy](security-and-privacy.md).
+Full session recordings, recorded values and outputs live only on your computer, under `~/.resin/` (`%USERPROFILE%\.resin\` on Windows), readable only by your user account. To see or change what Resin collects, see [Security and Privacy](security-and-privacy.md).

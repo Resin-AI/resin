@@ -111,7 +111,8 @@ function resolveHomeDirs(options: { homeDir?: string; resinHome?: string }): {
         ? path.dirname(options.resinHome)
         : options.resinHome
       : undefined) ??
-    process.env.HOME ??
+    // Windows programs resolve the profile folder, not a HOME that shells like Git Bash may set.
+    (process.platform === "win32" ? undefined : process.env.HOME) ??
     os.homedir();
   const resinHome = options.resinHome ?? path.join(homeDir, ".resin");
   return { homeDir, resinHome };

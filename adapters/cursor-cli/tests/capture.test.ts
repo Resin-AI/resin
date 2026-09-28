@@ -247,36 +247,42 @@ describe("version pinning", () => {
 });
 
 describe("cursor-agent installation probe", () => {
-  it("reads the version from the versioned install directory without running the binary", async () => {
-    const home = await tempHome();
-    const versionDir = path.join(
-      home,
-      ".local",
-      "share",
-      "cursor-agent",
-      "versions",
-      "2026.09.26-dd393fe",
-    );
-    const bin = path.join(home, "bin");
-    fs.mkdirSync(versionDir, { recursive: true });
-    fs.mkdirSync(bin);
-    // A binary that fails if executed proves the probe read the layout instead.
-    fs.writeFileSync(path.join(versionDir, "cursor-agent"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    fs.symlinkSync(path.join(versionDir, "cursor-agent"), path.join(bin, "cursor-agent"));
-    const installation = await probeCursorInstallation({ home, env: { PATH: bin } });
-    expect(installation).toMatchObject({
-      version: "2026.9.26-dd393fe",
-      executablePath: path.join(bin, "cursor-agent"),
-      metadata: { rawVersion: "2026.09.26-dd393fe" },
-    });
+  // cursor-agent's POSIX installer links the binary into PATH with a file symlink (needs privilege on Windows).
+  it.skipIf(process.platform === "win32")(
+    "reads the version from the versioned install directory without running the binary",
+    async () => {
+      const home = await tempHome();
+      const versionDir = path.join(
+        home,
+        ".local",
+        "share",
+        "cursor-agent",
+        "versions",
+        "2026.09.26-dd393fe",
+      );
+      const bin = path.join(home, "bin");
+      fs.mkdirSync(versionDir, { recursive: true });
+      fs.mkdirSync(bin);
+      // A binary that fails if executed proves the probe read the layout instead.
+      fs.writeFileSync(path.join(versionDir, "cursor-agent"), "#!/bin/sh\nexit 1\n", {
+        mode: 0o755,
+      });
+      fs.symlinkSync(path.join(versionDir, "cursor-agent"), path.join(bin, "cursor-agent"));
+      const installation = await probeCursorInstallation({ home, env: { PATH: bin } });
+      expect(installation).toMatchObject({
+        version: "2026.9.26-dd393fe",
+        executablePath: path.join(bin, "cursor-agent"),
+        metadata: { rawVersion: "2026.09.26-dd393fe" },
+      });
 
-    fs.rmSync(path.join(bin, "cursor-agent"));
-    fs.writeFileSync(path.join(bin, "cursor-agent"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    expect(await probeCursorInstallation({ home, env: { PATH: bin } })).toMatchObject({
-      version: UNKNOWN_HARNESS_VERSION,
-      metadata: { rawVersion: null },
-    });
-  });
+      fs.rmSync(path.join(bin, "cursor-agent"));
+      fs.writeFileSync(path.join(bin, "cursor-agent"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      expect(await probeCursorInstallation({ home, env: { PATH: bin } })).toMatchObject({
+        version: UNKNOWN_HARNESS_VERSION,
+        metadata: { rawVersion: null },
+      });
+    },
+  );
 });
 
 describe("model identity", () => {

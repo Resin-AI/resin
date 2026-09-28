@@ -30,8 +30,8 @@ export const opencodeInstallHarness: HarnessInstallDefinition = {
     transports: ["stdio", "http"],
     planRegistration: ({ targetPath, command, args, fsBridge }) =>
       planOpencodeMcpConfig({ targetPath, command, args, fsBridge }),
-    verifyRegistration: ({ targetPath, command, fsBridge }) =>
-      verifyOpencodeMcpConfig({ targetPath, command, fsBridge }),
+    verifyRegistration: ({ targetPath, command, args, fsBridge }) =>
+      verifyOpencodeMcpConfig({ targetPath, command, args, fsBridge }),
     removeRegistration: ({ home, env, fsBridge, dryRun }) =>
       removeOpencodeMcpConfig({ home, env, fsBridge, dryRun }),
   },

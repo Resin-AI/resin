@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { ManagedBlockMarkers } from "@resin/harness-contracts";
+import { type ManagedBlockMarkers, readHostPathEnv } from "@resin/harness-contracts";
 
 export const CODEX_GUIDANCE_MARKERS: ManagedBlockMarkers = {
   start: "<!-- resin:codex-guidance:start -->",
@@ -23,10 +23,7 @@ Resin learned tools from earlier work in this workspace. They are MCP tools name
 
 /** Resolves Codex's home directory: `$CODEX_HOME`, else `<home>/.codex`. */
 export function resolveCodexHome(customHome: string, env: NodeJS.ProcessEnv = {}): string {
-  const codexHome = env.CODEX_HOME;
-  return codexHome && codexHome.trim().length > 0
-    ? path.resolve(codexHome)
-    : path.join(customHome, ".codex");
+  return readHostPathEnv(env, "CODEX_HOME") ?? path.join(customHome, ".codex");
 }
 
 /** Resolves Codex's global instructions file, `$CODEX_HOME/AGENTS.md`. */

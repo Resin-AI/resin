@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { type DaemonSupervisor, IpcServer } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
@@ -40,6 +41,15 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   };
   return bridge;
 }
+
+/**
+ * The Linux lane for engine logic. A Windows host serves the real daemon IPC only on its named
+ * pipe, so there the engine and test daemons use the host platform instead.
+ */
+const TEST_PLATFORM_INFO =
+  process.platform === "win32"
+    ? detectPlatform()
+    : detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
 
 const RELEASE_SHA = "a".repeat(64);
 const DENO_SHA = "b".repeat(64);
@@ -163,7 +173,7 @@ function createEngineFixture(
     logger?: UpdateEngineOptions["logger"];
   } = {},
 ) {
-  const homeDir = options.homeDir ?? "/home/update-test";
+  const homeDir = options.homeDir ?? path.resolve("/home/update-test");
   const resinHome = path.join(homeDir, ".resin");
   const versionPath = path.join(resinHome, "version.json");
   const configPath = path.join(resinHome, "config.json");
@@ -266,7 +276,7 @@ function createEngineFixture(
     resinHome,
     fsBridge,
     configPath,
-    platformInfo: detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" }),
+    platformInfo: TEST_PLATFORM_INFO,
     policy: options.policy,
     acquireLock:
       options.acquireLock ??
@@ -587,7 +597,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   describe("probation health gate against a real daemon IPC health response", () => {
     async function runAgainstCandidateReporting(daemonVersion: string) {
       const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-health-gate-"));
-      const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+      const platformInfo = TEST_PLATFORM_INFO;
       // SAFETY: Mock supervisor implements the subset of DaemonSupervisor the IPC health path reads.
       const supervisor = {
         getConfig() {
@@ -640,7 +650,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   });
 
   it("preserves and reports concurrent configuration changes during rollback", async () => {
-    const configPath = path.join("/home/update-test", ".resin", "config.json");
+    const configPath = path.join(path.resolve("/home/update-test"), ".resin", "config.json");
     interface BridgeHolder {
       current?: ConfigFsBridge;
     }
@@ -675,7 +685,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   });
 
   it("recovers an interrupted journal write and continues from active metadata", async () => {
-    const journalPath = path.join("/home/update-test", ".resin", "journal.json");
+    const journalPath = path.join(path.resolve("/home/update-test"), ".resin", "journal.json");
     const fixture = createEngineFixture({
       currentVersion: "1.1.0",
       targetVersion: "1.1.0",
@@ -722,7 +732,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     expect(trusted.events).toContain("switch:0.9.0");
 
     const provenancePath = path.join(
-      "/home/update-test",
+      path.resolve("/home/update-test"),
       ".resin",
       "versions",
       "v0.9.0",
@@ -798,7 +808,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
         homeDir,
         resinHome,
         configPath,
-        platformInfo: detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" }),
+        platformInfo: TEST_PLATFORM_INFO,
         acquireLock: async () => ({ async release() {} }),
         resolveRelease: async () => release,
         downloadAsset: async (request) => ({
@@ -834,9 +844,12 @@ describe("UpdateEngine staging, activation, and rollback", () => {
             expect(await fs.readFile(path.join(candidateDir, "marker"), "utf8")).toBe("candidate");
             const [backupName] = await fs.readdir(path.join(resinHome, "backups"));
             const backupPath = path.join(resinHome, "backups", backupName!);
-            expect((await fs.stat(backupPath)).mode & 0o777).toBe(0o700);
             const configBackupPath = path.join(backupPath, "config.json");
-            expect((await fs.stat(configBackupPath)).mode & 0o777).toBe(0o600);
+            // NTFS has no mode bits: on Windows the backups inherit the Resin home's private DACL.
+            if (process.platform !== "win32") {
+              expect((await fs.stat(backupPath)).mode & 0o777).toBe(0o700);
+              expect((await fs.stat(configBackupPath)).mode & 0o777).toBe(0o600);
+            }
             expect(await fs.readFile(configBackupPath, "utf8")).not.toContain("authToken");
           },
           async start() {
@@ -875,7 +888,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   });
 
   it("recovers an interrupted same-version pointer switch before doing more work", async () => {
-    const homeDir = "/home/reinstall-recovery";
+    const homeDir = path.resolve("/home/reinstall-recovery");
     const resinHome = path.join(homeDir, ".resin");
     const candidateVersion = "1.0.0+resin-reinstall.interrupted";
     const recoveryPath = path.join(resinHome, "updates", "reinstall-recovery.json");
@@ -895,7 +908,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
       homeDir,
       resinHome,
       fsBridge: bridge,
-      platformInfo: detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" }),
+      platformInfo: TEST_PLATFORM_INFO,
       acquireLock: async () => ({ async release() {} }),
       resolveRelease: async () => signedRelease("1.0.0"),
       readActiveVersion: async () => activeVersion,
@@ -923,7 +936,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("uses the real authenticated IPC health response to acquire a drain before switching", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let serviceActive = true;
@@ -1082,7 +1095,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("proceeds to activation when daemon accepts gracefulShutdown, closes socket, and service reaches inactive", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-disconnect-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let serviceActive = true;
@@ -1221,7 +1234,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("defers activation when daemon accepts gracefulShutdown and disconnects, but service remains active past timeout", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-active-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let serverStopped = false;
@@ -1346,7 +1359,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("never drains in-flight work for background updates and retries later instead", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-background-idle-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     // SAFETY: Mock supervisor object implements subset of DaemonSupervisor required for IPC health tests.
@@ -1466,7 +1479,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("rolls back and quarantines a candidate whose daemon does not report the target version", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-version-gate-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let activeVersion = "1.0.0";
@@ -1588,7 +1601,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("defers activation as session-activity-unavailable when daemon disconnects post-drain and service status check throws", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-status-fail-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let initialStatusChecked = false;
@@ -1718,7 +1731,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("defers activation as session-activity-unavailable when post-drain service status probe hangs until timeout", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-status-hang-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let initialStatusChecked = false;
@@ -1850,7 +1863,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("defers activation as session-activity-unavailable when pre-drain IPC communication fails", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-pre-drain-fail-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const events: string[] = [];
     try {
       await fs.mkdir(resinHome, { recursive: true });
@@ -1934,7 +1947,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("aborts activation when signal is aborted during post-drain inactivity polling", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-abort-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const ac = new AbortController();
     let initialStatusChecked = false;
@@ -2059,7 +2072,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
   it("fails activation and rolls back when authoritative serviceManager.stop fails during cutover", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-drain-stop-fail-"));
     const resinHome = path.join(homeDir, ".resin");
-    const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+    const platformInfo = TEST_PLATFORM_INFO;
     const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
     const events: string[] = [];
     let serviceActive = true;
@@ -2227,9 +2240,11 @@ describe("UpdateEngine old release pruning", () => {
     ]);
     try {
       // The live `current` pointer names a suffixed reinstall directory; it must survive too.
+      // A junction on Windows (what Resin itself creates there); the type is ignored elsewhere.
       await fs.symlink(
         path.join(resinHome, "versions", "v1.0.0+resin-reinstall.54d5b0120836"),
         path.join(resinHome, "current"),
+        "junction",
       );
       const fixture = createEngineFixture({ homeDir, removeVersion: removeForReal });
 

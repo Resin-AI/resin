@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { reconcileNotifications, resolvePaths } from "@resin/observer";
+import { ensurePrivateDirectory, reconcileNotifications, resolvePaths } from "@resin/observer";
 import type { ActionableNotification } from "@resin/protocol";
 import { z } from "zod";
 import type { UpdateSchedulerState } from "./scheduler.js";
@@ -203,7 +203,8 @@ export async function publishAutoUpdateNotification(options: {
 
 async function writePrivateJson(filePath: string, value: object): Promise<void> {
   const directory = path.dirname(filePath);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  // POSIX: mkdir -p 0700. Windows: an owner-only DACL the files created inside inherit.
+  await ensurePrivateDirectory(directory);
   const temporaryPath = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,

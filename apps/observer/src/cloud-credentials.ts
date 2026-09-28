@@ -14,6 +14,7 @@ import {
 } from "@resin/protocol";
 import { z } from "zod";
 import { resolvePaths } from "./paths.js";
+import { ensurePrivateDirectory } from "./private-fs.js";
 
 /**
  * Validated schema for persistent cloud device credentials.
@@ -342,9 +343,7 @@ export class CloudCredentialStore {
         handle = await fs.open(lockPath, "wx", 0o600);
       } catch (error) {
         if (isNodeError(error, "ENOENT")) {
-          await fs
-            .mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 })
-            .catch(() => undefined);
+          await ensurePrivateDirectory(path.dirname(lockPath)).catch(() => undefined);
         } else if (!isNodeError(error, "EEXIST")) {
           throw error;
         }
@@ -483,7 +482,9 @@ export class CloudCredentialStore {
     StoredCloudCredentialsSchema.parse(credsToStore);
 
     const tokenDirectory = path.dirname(this.tokenFilePath);
-    await fs.mkdir(tokenDirectory, { recursive: true, mode: 0o700 });
+    // Windows: an owner-only directory DACL, inherited by the temporary token file and kept
+    // across the rename below.
+    await ensurePrivateDirectory(tokenDirectory);
     try {
       await fs.chmod(tokenDirectory, 0o700);
     } catch {

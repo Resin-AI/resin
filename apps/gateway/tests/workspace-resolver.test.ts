@@ -23,8 +23,11 @@ import {
   uriOrPathToFsPath,
 } from "../src/workspace-resolver.js";
 import { FakeGatewayRouter } from "./fixtures/fake-router.js";
+import { canCreateFileSymlinks, directoryLinkType } from "./fixtures/symlinks.js";
 
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Plain Windows users cannot create file symlinks (EPERM), so such a fixture needs the privilege.
+const itWithFileSymlinks = it.skipIf(!canCreateFileSymlinks);
 
 describe("Workspace Resolver & Project Bootstrap", () => {
   describe("Path Normalization & Symlink Utilities", () => {
@@ -406,14 +409,15 @@ describe("Workspace Resolver & Project Bootstrap", () => {
       fs.mkdirSync(projectRoot, { recursive: true });
 
       try {
-        fs.symlinkSync(realResin, symResin, "dir");
+        // A junction on Windows: any user can create one, and it redirects `.resin` the same way.
+        fs.symlinkSync(realResin, symResin, directoryLinkType);
         expect(() => bootstrapProject(projectRoot)).toThrow(/Security violation: '.resin'/);
       } finally {
         fs.rmSync(base, { recursive: true, force: true });
       }
     });
 
-    it("fails closed when project.json or resin.lock is a symbolic link", () => {
+    itWithFileSymlinks("fails closed when project.json or resin.lock is a symbolic link", () => {
       const base = fs.mkdtempSync(path.join(os.tmpdir(), "resin-sym-file-"));
       const projectRoot = path.join(base, "proj");
       const resinDir = path.join(projectRoot, ".resin");

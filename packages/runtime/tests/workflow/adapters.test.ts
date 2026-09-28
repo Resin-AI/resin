@@ -144,6 +144,18 @@ lines.on("line", (line) => {
 });
 `;
 
+/** Git Bash prints a Windows directory as `C:/…` only with `pwd -W`; POSIX shells print it as is. */
+const PWD = process.platform === "win32" ? "pwd -W" : "pwd";
+const printedPath = (directory: string) =>
+  process.platform === "win32" ? directory.replaceAll("\\", "/") : directory;
+
+/**
+ * The newline Python's text-mode stdout writes: `os.linesep`, so `\r\n` on Windows. Replays keep a
+ * process's stdout byte for byte, as the recording on that device observed it; the Eval result
+ * channel carries the Python-level text, so its values keep `\n`.
+ */
+const pythonEol = process.platform === "win32" ? "\r\n" : "\n";
+
 describe("recorded program adapters", () => {
   it("runs a recorded shell program whole: its pipe, its operator and its redirect all happen", async () => {
     const workspace = await makeWorkspace();
@@ -225,33 +237,37 @@ describe("recorded program adapters", () => {
     );
   });
 
-  it("keeps the inherited PATH in front when a login profile resets it", async () => {
-    // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
-    const workspace = await makeWorkspace();
-    const home = await makeWorkspace();
-    const bin = await makeWorkspace();
-    await writeFile(join(home, ".bash_profile"), "PATH=/usr/bin:/bin\n");
-    await writeFile(join(bin, "resin-path-probe"), "#!/bin/sh\necho found\n", { mode: 0o755 });
-    const adapter = createProcessAdapter({
-      env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
-    });
-    const step = recordedStep({
-      id: "native-path",
-      runtime: RESIN_PROCESS_RUNTIME,
-      name: "command_exec",
-      program: { kind: "shell", source: "", argument: "cmd" },
-    });
-    expect(
-      await adapter.call({
-        step,
-        arguments: {
-          cmd: 'resin-path-probe; echo "${RESIN_INHERITED_PATH-unset}"',
-          workdir: workspace,
-          resinCodexShellProfile: "bash-login-native-v1",
-        },
-      }),
-    ).toBe("found\nunset\n");
-  });
+  // A POSIX login profile and a POSIX PATH; Codex records this profile only for `/bin/bash -lc`.
+  it.skipIf(process.platform === "win32")(
+    "keeps the inherited PATH in front when a login profile resets it",
+    async () => {
+      // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
+      const workspace = await makeWorkspace();
+      const home = await makeWorkspace();
+      const bin = await makeWorkspace();
+      await writeFile(join(home, ".bash_profile"), "PATH=/usr/bin:/bin\n");
+      await writeFile(join(bin, "resin-path-probe"), "#!/bin/sh\necho found\n", { mode: 0o755 });
+      const adapter = createProcessAdapter({
+        env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` },
+      });
+      const step = recordedStep({
+        id: "native-path",
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "command_exec",
+        program: { kind: "shell", source: "", argument: "cmd" },
+      });
+      expect(
+        await adapter.call({
+          step,
+          arguments: {
+            cmd: 'resin-path-probe; echo "${RESIN_INHERITED_PATH-unset}"',
+            workdir: workspace,
+            resinCodexShellProfile: "bash-login-native-v1",
+          },
+        }),
+      ).toBe("found\nunset\n");
+    },
+  );
 
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {
     const workspace = await makeWorkspace();
@@ -293,7 +309,7 @@ describe("recorded program adapters", () => {
 
     // The tool the caller ran answered with text; a replay that returned an object would answer
     // differently from the recording, and would do so only for programs that happen to print JSON.
-    expect(value).toBe('{"count": 3, "label": "ok"}\n');
+    expect(value).toBe(`{"count": 3, "label": "ok"}${pythonEol}`);
   });
 
   it("replays only the final expression for the explicit Python Eval interface", async () => {
@@ -323,10 +339,10 @@ describe("recorded program adapters", () => {
     expect(bare.stdout).toBe("");
     expect(bare.value).toBe("{'count': 2}");
     expect(semicolon.value).toBe("42");
-    expect(printed.stdout).toBe("prefix\n");
+    expect(printed.stdout).toBe(`prefix${pythonEol}`);
     expect(printed.value).toBe("prefix\n42");
     expect(none.value).toBe("");
-    expect(whitespace.stdout).toBe("  output  \n");
+    expect(whitespace.stdout).toBe(`  output  ${pythonEol}`);
     expect(whitespace.value).toBe("output");
   });
 
@@ -760,7 +776,7 @@ describe("recorded program adapters", () => {
       { cwd: workspace },
     );
     expect(run.exitCode).toBe(0);
-    expect(run.stdout).toBe("prefix\npartial");
+    expect(run.stdout).toBe(`prefix${pythonEol}partial`);
     expect(run.value).toBe("prefix\n42\npartial");
   });
 
@@ -788,8 +804,8 @@ describe("recorded program adapters", () => {
     );
 
     expect(ordinary.value).toBe("");
-    expect(printed.stdout).toBe("  exact  \n");
-    expect(printed.value).toBe("  exact  \n");
+    expect(printed.stdout).toBe(`  exact  ${pythonEol}`);
+    expect(printed.value).toBe(`  exact  ${pythonEol}`);
   });
 
   it("replays a marked Eval expression over its closed Python setup", async () => {
@@ -899,7 +915,7 @@ describe("recorded program adapters", () => {
       access: { workspaceId: "workspace-python" },
     });
 
-    expect(value).toBe("1 12 shadowed-exec shadowed-compile shadowed-globals\n");
+    expect(value).toBe(`1 12 shadowed-exec shadowed-compile shadowed-globals${pythonEol}`);
     expect(resolved).toEqual([
       { reference: "private:python:setup-1", workspaceId: "workspace-python" },
       { reference: "private:python:setup-2", workspaceId: "workspace-python" },
@@ -1019,7 +1035,7 @@ describe("recorded program adapters", () => {
       { kind: "python", source: "print(len(payload))", pythonState: setup },
       { cwd: workspace, resolvePrivate: () => setupSource },
     );
-    expect(run.value).toBe("150000\n");
+    expect(run.value).toBe(`150000${pythonEol}`);
   });
 
   it("rejects an oversized Python replay before composing or starting a child", async () => {
@@ -1224,14 +1240,14 @@ describe("recorded program adapters", () => {
       id: "ordinary-workdir-data",
       runtime: RESIN_PROCESS_RUNTIME,
       name: "run-command",
-      program: { kind: "shell", source: "pwd", argument: "command" },
-      arguments: [literalArgument("command", "pwd")],
+      program: { kind: "shell", source: PWD, argument: "command" },
+      arguments: [literalArgument("command", PWD)],
     });
-    expect(
-      await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: "/" } }),
-    ).toBe(`${workspace}\n`);
-    expect(await adapter.call({ step: ordinary, arguments: { command: "pwd", workdir: 3 } })).toBe(
-      `${workspace}\n`,
+    expect(await adapter.call({ step: ordinary, arguments: { command: PWD, workdir: "/" } })).toBe(
+      `${printedPath(workspace)}\n`,
+    );
+    expect(await adapter.call({ step: ordinary, arguments: { command: PWD, workdir: 3 } })).toBe(
+      `${printedPath(workspace)}\n`,
     );
   });
 
@@ -1243,19 +1259,19 @@ describe("recorded program adapters", () => {
       runtime: RESIN_PROCESS_RUNTIME,
       name: "exec",
       program: { kind: "shell", source: "", argument: "cmd" },
-      arguments: [literalArgument("cmd", '[[ -n "$BASH_VERSION" ]] && pwd')],
+      arguments: [literalArgument("cmd", `[[ -n "$BASH_VERSION" ]] && ${PWD}`)],
     });
     expect(
       await adapter.call({
         step,
         arguments: {
-          cmd: '[[ -n "$BASH_VERSION" ]] && pwd',
+          cmd: `[[ -n "$BASH_VERSION" ]] && ${PWD}`,
           workdir: workspace,
           raw: "const r = await tools.exec_command({cmd:'x'}); text(r.output);",
           resinCodexShellProfile: "bash-login-v1",
         },
       }),
-    ).toBe(`${workspace}\n`);
+    ).toBe(`${printedPath(workspace)}\n`);
     expect(
       await adapter.call({
         step,

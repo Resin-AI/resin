@@ -6,8 +6,13 @@ import {
   isResinDiscoveryToolCall,
   readCodexCommandMetadata,
   referencesHarnessState,
+  windowsShellInvocation,
 } from "@resin/contracts";
-import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
+import {
+  type HarnessSession,
+  RESIN_LOCAL_SOURCE_INTERFACE_KEY,
+  type RawHarnessRecord,
+} from "@resin/harness-contracts";
 import { ExponentialBackoff } from "@resin/protocol";
 import { z } from "zod";
 import { AuthRecoveryError, ResourceForbiddenError } from "../auth-recovery.js";
@@ -495,7 +500,20 @@ export class TrajectoryCaptureCoordinator {
     }
     if (original.type !== "tool_call" && original.type !== "command_exec") return false;
 
-    const command = extractRawCommandStringFromEvent(original);
+    // A PowerShell or cmd program Codex recorded running on Windows is read in its own grammar; a
+    // PowerShell tool whose edition is unknown is read in the wider PowerShell 7 grammar.
+    const windows =
+      original.type === "command_exec" && Array.isArray(original.args)
+        ? windowsShellInvocation(original.command, original.args)
+        : undefined;
+    const command = windows?.program ?? extractRawCommandStringFromEvent(original);
+    const commandLanguage =
+      windows?.dialect ??
+      (original.type === "tool_call" &&
+      ((original.toolName === "PowerShell" && original.connection === undefined) ||
+        original.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "codex-unproven-shell")
+        ? "pwsh"
+        : "shell");
     const parameters = original.type === "tool_call" ? original.parameters : undefined;
     const language =
       typeof parameters?.language === "string" ? parameters.language.trim().toLowerCase() : "";
@@ -503,7 +521,7 @@ export class TrajectoryCaptureCoordinator {
       (original.type === "tool_call" &&
         isResinDiscoveryToolCall(original.toolName, original.connection)) ||
       (command !== null
-        ? isHarnessIntrospectionProgram(command, "shell")
+        ? isHarnessIntrospectionProgram(command, commandLanguage)
         : typeof parameters?.code === "string" &&
           isHarnessIntrospectionProgram(
             parameters.code,

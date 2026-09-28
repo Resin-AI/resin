@@ -21,6 +21,12 @@ import {
   tokenizeProgram,
 } from "./program-tokens.js";
 import { isOptionalSetupSegment } from "./shell-and-chain.js";
+import {
+  type ShellDialect,
+  isShellDialect,
+  programNotLearnableReason,
+  recordedProgramLanguage,
+} from "./shell-dialects.js";
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
@@ -70,7 +76,7 @@ export type WorkflowValueTemplate =
    */
   | {
       type: "program";
-      language: WorkflowRecordedProgram["kind"];
+      language: WorkflowProgramLanguage;
       source: WorkflowValueTemplate;
       /**
        * `token` is a top-level token index. With `embedded`, the hole addresses token `embedded` of
@@ -134,6 +140,13 @@ export type WorkflowPythonState = {
 };
 
 /**
+ * The language a program template's text is read in: a recorded program kind, or for a shell
+ * program recorded in PowerShell, the edition's own grammar (`powershell` for Windows PowerShell
+ * 5.1, `pwsh` for PowerShell 7+). A template's language must be its step's program's grammar.
+ */
+export type WorkflowProgramLanguage = WorkflowRecordedProgram["kind"] | "powershell" | "pwsh";
+
+/**
  * A program the recording executed, with its source retained verbatim unless projected safely.
  *
  * For a native projected capture, `source` is sanitized metadata matching the argument template's
@@ -151,6 +164,17 @@ export type WorkflowRecordedProgram = {
    * one file's unified diff, applied in-process to the file its header names.
    */
   kind: "shell" | "python" | "javascript" | "typescript" | "patch";
+  /**
+   * The shell dialect a `shell` program ran in, as the recording proved it (a harness's own shell
+   * tool, or the shell executable it recorded running). Absent on a record made before dialects
+   * were recorded, which keeps the POSIX reading. Never inferred from an operating system.
+   */
+  dialect?: ShellDialect;
+  /**
+   * A `shell` program whose dialect the recording does not prove. It is captured but never
+   * tokenized, split, parameterized or replayed.
+   */
+  unprovenDialect?: true;
   /** Program text as recorded, or sanitized source metadata in a projected capture. */
   source: string;
   /**
@@ -464,6 +488,34 @@ const PYTHON_SETUP_KEYS = ["callId", "sourceEventId", "resultEventId", "referenc
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+/**
+ * A shell program's argument template is read in its recorded dialect's grammar: a template in any
+ * other language would render bound values with another shell's quoting. A program that is never
+ * learned (cmd.exe, or an unproven dialect) takes no program template at all.
+ */
+function validateProgramArgumentLanguage(
+  stepId: string,
+  program: WorkflowRecordedProgram,
+  argument: unknown,
+  errors: string[],
+): void {
+  if (program.kind !== "shell" || !isPlainObject(argument)) return;
+  const source = argument.source;
+  if (!isPlainObject(source) || source.kind !== "template") return;
+  const template = source.template;
+  if (!isPlainObject(template) || template.type !== "program") return;
+  const notLearnable = programNotLearnableReason(program);
+  if (notLearnable !== undefined) {
+    errors.push(`step ${stepId} argument ${program.argument}: ${notLearnable}`);
+    return;
+  }
+  if (template.language !== recordedProgramLanguage(program)) {
+    errors.push(
+      `step ${stepId} argument ${program.argument} is a program template in another shell dialect than its recorded program`,
+    );
+  }
 }
 
 /** Rejects interface/language mismatches rather than silently replaying under different semantics. */
@@ -1029,7 +1081,9 @@ function validateWorkflowSegments(workflow: Record<string, unknown>, errors: str
       (segment.count as number) < 2 ||
       (segment.index as number) < 0 ||
       (segment.index as number) >= (segment.count as number) ||
-      program?.kind !== "shell"
+      program?.kind !== "shell" ||
+      // Only a POSIX program (or one recorded before dialects were) splits into `&&` segments.
+      recordedProgramLanguage(program as WorkflowRecordedProgram) !== "shell"
     ) {
       errors.push(
         `step ${stepId} segment must be an index below a count of two or more of a shell program`,
@@ -1507,6 +1561,8 @@ export function validateRecordedWorkflow(value: unknown): {
             case "program": {
               if (
                 template.language !== "shell" &&
+                template.language !== "powershell" &&
+                template.language !== "pwsh" &&
                 template.language !== "python" &&
                 template.language !== "javascript" &&
                 template.language !== "typescript" &&
@@ -1671,6 +1727,15 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} records neither a program source, an argument vector, nor the argument the program arrives in`,
         );
+      } else if (
+        (program.dialect !== undefined &&
+          (program.kind !== "shell" || !isShellDialect(program.dialect))) ||
+        (program.unprovenDialect !== undefined &&
+          (program.kind !== "shell" ||
+            program.unprovenDialect !== true ||
+            program.dialect !== undefined))
+      ) {
+        errors.push(`step ${step.id} has an invalid recorded shell dialect`);
       } else {
         validateWorkflowProgramSourceInterface(program, step.id, errors);
         validateWorkflowPythonState(
@@ -1679,6 +1744,12 @@ export function validateRecordedWorkflow(value: unknown): {
           typeof step.callId === "string" ? step.callId : undefined,
           workflowCallIds,
           declaredPrivates,
+          errors,
+        );
+        validateProgramArgumentLanguage(
+          step.id,
+          program as WorkflowRecordedProgram,
+          args.find((entry) => isPlainObject(entry) && entry.name === program.argument),
           errors,
         );
       }
@@ -1738,22 +1809,26 @@ export function validateRecordedWorkflow(value: unknown): {
         const path = Array.isArray(candidate.path) ? candidate.path : [];
         if (path[0] === "tokens") {
           const address = programTokenPath(path);
+          const recorded =
+            isPlainObject(step) && isPlainObject(step.callable) ? step.callable.program : undefined;
+          const language = isPlainObject(recorded)
+            ? recordedProgramLanguage(recorded as WorkflowRecordedProgram)
+            : undefined;
           if (
             address === undefined ||
-            (address.embedded !== undefined &&
-              isPlainObject(step) &&
-              isPlainObject(step.callable) &&
-              isPlainObject(step.callable.program) &&
-              step.callable.program.kind !== "shell")
+            (address.embedded !== undefined && isPlainObject(recorded) && language !== "shell")
           ) {
             errors.push(`candidate ${stepId}.${candidate.argument} has an invalid token position`);
           }
-          const program = isPlainObject(step) ? step.callable : undefined;
-          const recorded = isPlainObject(program) ? program.program : undefined;
           if (!isPlainObject(recorded) || recorded.argument !== candidate.argument) {
             errors.push(
               `candidate ${stepId}.${candidate.argument} names a token of a program the step's record does not hold in that argument`,
             );
+          } else {
+            const notLearnable = programNotLearnableReason(recorded as WorkflowRecordedProgram);
+            if (notLearnable !== undefined) {
+              errors.push(`candidate ${stepId}.${candidate.argument}: ${notLearnable}`);
+            }
           }
         }
         const proposed = candidate.proposed;

@@ -331,9 +331,24 @@ describe("splitting a shell && chain", () => {
   });
 });
 
-const bashAvailable = spawnSync("bash", ["-c", "true"]).status === 0;
+/**
+ * The bash that counts runs: `/bin/bash`, or on Windows Git for Windows' MSYS bash beside the `git`
+ * on PATH (never WSL's `bash.exe`). Its `usr/bin/bash.exe`, unlike the `bin/bash.exe` launcher, keeps
+ * the stub-only PATH.
+ */
+function countingBash(): string | undefined {
+  if (process.platform !== "win32") {
+    return spawnSync("bash", ["-c", "true"]).status === 0 ? "/bin/bash" : undefined;
+  }
+  // `git --exec-path` is `<Git>/mingw64/libexec/git-core`.
+  const gitCore = spawnSync("git", ["--exec-path"], { encoding: "utf8" }).stdout?.trim();
+  if (!gitCore) return undefined;
+  const bash = path.resolve(gitCore, "..", "..", "..", "usr", "bin", "bash.exe");
+  return existsSync(bash) ? bash : undefined;
+}
+const bash = countingBash();
 
-describe.runIf(bashAvailable)("the allowlist against the commands bash runs", () => {
+describe.runIf(bash !== undefined)("the allowlist against the commands bash runs", () => {
   /** External commands the corpus names: each is a stub that logs one line per run and succeeds. */
   const STUBS = [
     "make",
@@ -367,7 +382,7 @@ describe.runIf(bashAvailable)("the allowlist against the commands bash runs", ()
       // What the corpus's redirections read and write into; `mkdir` itself is a stub.
       writeFileSync(path.join(root, "in"), "b\na\n");
       mkdirSync(path.join(root, "backups", "beta"), { recursive: true });
-      spawnSync("/bin/bash", ["--norc", "--noprofile", "-c", source], {
+      spawnSync(bash ?? "/bin/bash", ["--norc", "--noprofile", "-c", source], {
         cwd: root,
         env: { PATH: bin },
       });

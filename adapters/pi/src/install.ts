@@ -38,8 +38,8 @@ export const piInstallHarness: HarnessInstallDefinition = {
     transports: ["stdio"],
     planRegistration: ({ targetPath, command, args, fsBridge }) =>
       planPiRegistration({ targetPath, command, args, fsBridge }),
-    verifyRegistration: ({ targetPath, command, fsBridge }) =>
-      verifyPiRegistration({ targetPath, command, fsBridge }),
+    verifyRegistration: ({ targetPath, command, args, fsBridge }) =>
+      verifyPiRegistration({ targetPath, command, args, fsBridge }),
     removeRegistration: ({ home, env, fsBridge, dryRun }) =>
       removePiRegistration({
         paths: piInstallHarness.mcpConfig.uninstallPaths(home, env),

@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { resolveReleaseMilestones } from "./generate-release-evidence.mjs";
 
 const PLATFORM_SPECS = Object.freeze([
@@ -12,6 +13,14 @@ const PLATFORM_SPECS = Object.freeze([
   { id: "darwin-x64", os: "darwin", arch: "x64", serviceManager: "launchd" },
   { id: "darwin-arm64", os: "darwin", arch: "arm64", serviceManager: "launchd" },
   { id: "wsl", os: "linux", arch: "x64", serviceManager: "wsl-systemd" },
+  { id: "windows-x64", os: "win32", arch: "x64", serviceManager: "windows-task", nativeOnly: true },
+  {
+    id: "windows-arm64",
+    os: "win32",
+    arch: "arm64",
+    serviceManager: "windows-task",
+    nativeOnly: true,
+  },
 ]);
 
 const HARNESS_SPECS = Object.freeze([
@@ -85,6 +94,52 @@ function runUrl(runId, env) {
   return `${server}/${repository}/actions/runs/${runId}`;
 }
 
+/**
+ * Native Windows lanes have no artifact-only fallback: they must have run natively on a
+ * Windows runner, exercised the Scheduled Task service (including a crash restart), and
+ * proved with a second local user that the daemon pipe and private files are owner-only.
+ */
+function requireNativeWindowsLane(id, lane, filePath) {
+  requireEvidence(
+    lane.status === "QUALIFIED" && lane.execution?.native === true,
+    `Platform '${id}' must be qualified natively on Windows, found '${lane.status}'`,
+  );
+  const service = lane.checks?.windowsService;
+  requireEvidence(
+    service?.backend === "windows-task" &&
+      service.statusHealthy === true &&
+      service.crashRestart === true &&
+      service.stopStart === true,
+    `Platform '${id}' evidence lacks the Scheduled Task service lifecycle`,
+  );
+  const prebuilds = lane.checks?.artifactLayout?.nativePrebuilds ?? {};
+  requireEvidence(
+    Object.keys(prebuilds).length > 0 &&
+      Object.values(prebuilds).every(
+        (prebuild) => prebuild.peArch === lane.release?.platformMetadata?.arch,
+      ),
+    `Platform '${id}' evidence does not record native prebuilds for its architecture`,
+  );
+  const isolationPath = path.join(path.dirname(filePath), `${id}-second-user-isolation.json`);
+  requireEvidence(
+    fs.existsSync(isolationPath),
+    `Platform '${id}' is missing second-user isolation evidence`,
+  );
+  const isolation = JSON.parse(fs.readFileSync(isolationPath, "utf8"));
+  requireEvidence(
+    isolation.expect === "denied" && isolation.ok === true,
+    `Platform '${id}' second-user isolation probe did not prove access was denied`,
+  );
+  return {
+    serviceLifecycle: "PASSED",
+    secondUserIsolation: "PASSED",
+    isolationEvidenceSha256: sha256File(isolationPath),
+    nativePrebuilds: Object.fromEntries(
+      Object.entries(prebuilds).map(([name, prebuild]) => [name, prebuild.sha256]),
+    ),
+  };
+}
+
 function loadPlatformQualification(platformDir, commitSha, runId, env) {
   const records = new Map();
   for (const filePath of collectJsonFiles(platformDir)) {
@@ -110,14 +165,17 @@ function loadPlatformQualification(platformDir, commitSha, runId, env) {
       lane.release?.commitSha === commitSha,
       `Platform '${spec.id}' evidence is bound to '${lane.release?.commitSha}', expected '${commitSha}'`,
     );
+    const { nativeOnly, ...platform } = spec;
+    const windows = nativeOnly ? requireNativeWindowsLane(spec.id, lane, record.filePath) : {};
     return {
-      ...spec,
+      ...platform,
       status: lane.status,
       native: lane.execution?.native === true,
       runId,
       runUrl: runUrl(runId, env),
       evidenceSha256: sha256File(record.filePath),
       assetSha256: lane.release?.assetSha256,
+      ...windows,
     };
   });
 
@@ -250,10 +308,7 @@ export function generateProductionQualificationEvidence(options = {}) {
   return evidence;
 }
 
-if (
-  process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
-) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const options = parseArgs(process.argv.slice(2));
   options.outputPath ||= process.env.RESIN_RELEASE_EVIDENCE_PATH;
   requireEvidence(options.outputPath, "--output or RESIN_RELEASE_EVIDENCE_PATH is required");
