@@ -211,6 +211,38 @@ describe("the daemon's validation module", () => {
     }
   });
 
+  it("stops only after a pass in flight has finished writing its state", async () => {
+    const recorded = recording();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const module = createWorkflowValidationDaemonModule(context, {
+      client: {
+        listPending: async () => {
+          await held;
+          return [];
+        },
+        submitDecision: async () => ({ status: "recorded" }),
+      },
+      privateValues: recorded.store,
+      localCalls: localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]),
+      pollIntervalMs: 1,
+      pollJitterRatio: 0,
+    });
+    await module.start(moduleContext());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    let stopped = false;
+    const stopping = module.stop(moduleContext()).then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
   it.each([
     ["a workspace the device is not enrolled in", { workspaceId: OTHER_WORKSPACE_ID }],
     ["another device", { deviceId: "dev_daemon_other" }],

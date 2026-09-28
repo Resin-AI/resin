@@ -59,7 +59,7 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
 
   async stop(_context: ModuleContext): Promise<void> {
     this.state = "stopping";
-    this.worker.stop();
+    await this.worker.stop();
     this.state = "stopped";
   }
 

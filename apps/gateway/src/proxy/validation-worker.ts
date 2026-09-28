@@ -474,13 +474,17 @@ export class WorkflowValidationWorker {
     this.armTimer();
   }
 
-  /** Stops polling and cancels a transport call in flight; a check already running finishes. */
-  stop(): void {
+  /**
+   * Stops polling and cancels a transport call in flight. The returned promise settles once a pass
+   * already running has finished, so no ledger, lease or store write outlives the stop.
+   */
+  async stop(): Promise<void> {
     clearTimeout(this.timer);
     this.timer = undefined;
     this.timerDueAt = undefined;
     this.abortController?.abort();
     this.abortController = undefined;
+    await this.inFlight?.catch(() => undefined);
   }
 
   /**
