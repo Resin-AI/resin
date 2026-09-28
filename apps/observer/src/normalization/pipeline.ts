@@ -57,6 +57,8 @@ export interface NormalizationPipelineOptions {
   privateValueStore?: {
     get(key: string): unknown | undefined;
     set(key: string, value: unknown): void;
+    /** Device-local key tagging placeholders; stable so a secret keeps one placeholder. */
+    redactionKey?(): Uint8Array;
   };
 }
 
@@ -130,6 +132,8 @@ export class NormalizationPipeline {
     const userOnRedact = options.redactionConfig?.onRedact;
     this.redactionEngine = new RedactionEngine({
       ...options.redactionConfig,
+      fingerprintKey:
+        options.redactionConfig?.fingerprintKey ?? privateValueStore?.redactionKey?.(),
       onRedact: (placeholder, original) => {
         privateValueStore?.set(placeholder, original);
         userOnRedact?.(placeholder, original);

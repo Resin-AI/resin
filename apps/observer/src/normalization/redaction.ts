@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { RedactionMeta, RedactionStrategy } from "@resin/contracts";
@@ -33,8 +33,23 @@ export interface RedactionConfig {
   repoRoot?: string;
   /** Additional custom path or string aliases (e.g. { "/Users/alice/projects/app": "$REPO_ROOT" }) */
   pathAliases?: Record<string, string>;
-  /** Environment variable names whose values must be scrubbed from content */
+  /**
+   * Environment variable names whose values must be scrubbed from content. Unset: the default
+   * list plus every secret-named variable (`*_TOKEN`, `*_PASSWORD`, `DATABASE_URL`, ...) found in
+   * `environment`.
+   */
   sensitiveEnvVars?: string[];
+  /**
+   * Environment of the harness session whose content is redacted, when its adapter exposes it.
+   * Defaults to this process's environment.
+   */
+  environment?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Device-local HMAC key for placeholder tags. It never leaves the device, so an uploaded tag
+   * cannot be matched against guessed secrets or correlated across devices. Defaults to a fresh
+   * random key for this engine.
+   */
+  fingerprintKey?: Uint8Array;
   /** Custom explicit secret strings to redact */
   customSecrets?: string[];
   /** Whether to scan text content for API keys, tokens, and credentials (default: true) */
@@ -87,6 +102,13 @@ const DEFAULT_SENSITIVE_ENV_VARS = [
   "DISCORD_TOKEN",
 ];
 
+/** Variable names that mark their value a credential, scrubbed when present in the environment. */
+const SECRET_ENV_NAME =
+  /(?:PASS|PASSWD|PASSWORD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|AUTH)$|^(?:DATABASE|REDIS|MONGO(?:DB)?|POSTGRES(?:QL)?|MYSQL|AMQP|RABBITMQ|BROKER|CACHE)_URL$/i;
+
+/** Hex characters of the keyed tag carried by each placeholder. */
+const FINGERPRINT_HEX_LENGTH = 16;
+
 const DEFAULT_LOCAL_ONLY_FIELDS = [
   "workingDirectory",
   "cwd",
@@ -117,8 +139,13 @@ const PRESERVED_IDENTIFIER_FIELDS = new Set([
   "source",
 ]);
 
-function computeFingerprint(secret: string): string {
-  return createHash("sha256").update(secret).digest("hex").slice(0, 8);
+/** Field names whose value is a content digest when it is shaped like one. */
+const DIGEST_FIELD_NAME = /(?:hash|digest|sha(?:1|256|512)?|checksum)$/i;
+const DIGEST_VALUE = /^(?:sha(?:1|256|512):)?(?:[0-9a-f]{40}|[0-9a-f]{64}|[0-9a-f]{128})$/i;
+
+/** Keyed tag: without the device key an uploaded tag confirms nothing about a guessed secret. */
+function computeFingerprint(key: Uint8Array, secret: string): string {
+  return createHmac("sha256", key).update(secret).digest("hex").slice(0, FINGERPRINT_HEX_LENGTH);
 }
 
 /**
@@ -134,6 +161,7 @@ export class RedactionEngine {
     name: string;
   }>;
   private readonly customSecretReplacements: Array<{ secret: string; fingerprint: string }>;
+  private readonly fingerprintKey: Uint8Array;
   private readonly localOnlyFieldsSet: Set<string>;
   private readonly preserveWorkspaceRootCwd: boolean;
 
@@ -144,7 +172,7 @@ export class RedactionEngine {
       homeDir: config.homeDir ?? os.homedir(),
       repoRoot: config.repoRoot,
       pathAliases: config.pathAliases ?? {},
-      sensitiveEnvVars: config.sensitiveEnvVars ?? DEFAULT_SENSITIVE_ENV_VARS,
+      sensitiveEnvVars: config.sensitiveEnvVars,
       customSecrets: config.customSecrets ?? [],
       scanContent: config.scanContent ?? true,
       redactHighEntropy: config.redactHighEntropy ?? true,
@@ -153,6 +181,7 @@ export class RedactionEngine {
       localOnlyFields: config.localOnlyFields ?? DEFAULT_LOCAL_ONLY_FIELDS,
       onRedact: config.onRedact,
     };
+    this.fingerprintKey = config.fingerprintKey ?? randomBytes(32);
 
     this.scanner =
       config.scanner ??
@@ -187,12 +216,21 @@ export class RedactionEngine {
       .sort((a, b) => b[0].length - a[0].length)
       .map(([pattern, replacement]) => ({ pattern, replacement }));
 
-    // Build env secrets list
+    // Build env secrets list from the session's environment
+    const environment = config.environment ?? process.env;
+    const sensitiveEnvVars =
+      this.config.sensitiveEnvVars ??
+      Array.from(
+        new Set([
+          ...DEFAULT_SENSITIVE_ENV_VARS,
+          ...Object.keys(environment).filter((name) => SECRET_ENV_NAME.test(name)),
+        ]),
+      );
     this.envSecretReplacements = [];
-    for (const envVarName of this.config.sensitiveEnvVars ?? []) {
-      const val = process.env[envVarName];
+    for (const envVarName of sensitiveEnvVars) {
+      const val = environment[envVarName];
       if (val && val.trim().length >= 6) {
-        const fp = computeFingerprint(val);
+        const fp = computeFingerprint(this.fingerprintKey, val);
         this.envSecretReplacements.push({
           secret: val,
           placeholder: `[REDACTED_ENV:${envVarName}:${fp}]`,
@@ -200,13 +238,15 @@ export class RedactionEngine {
         });
       }
     }
+    // Longest value first so a secret containing another is replaced whole.
+    this.envSecretReplacements.sort((a, b) => b.secret.length - a.secret.length);
 
     // Build custom secrets list
     this.customSecretReplacements = (this.config.customSecrets ?? [])
       .filter((s) => Boolean(s) && s.trim().length >= 4)
       .map((secret) => ({
         secret,
-        fingerprint: computeFingerprint(secret),
+        fingerprint: computeFingerprint(this.fingerprintKey, secret),
       }));
   }
 
@@ -266,7 +306,7 @@ export class RedactionEngine {
         // Replace from end to start to keep offsets valid
         for (let i = matches.length - 1; i >= 0; i--) {
           const m = matches[i];
-          const fp = computeFingerprint(m.match);
+          const fp = computeFingerprint(this.fingerprintKey, m.match);
           const placeholder = `[REDACTED_${m.secretType}:${fp}]`;
           current = current.slice(0, m.start) + placeholder + current.slice(m.end);
           changed = true;
@@ -380,6 +420,12 @@ export class RedactionEngine {
           if (PRESERVED_IDENTIFIER_FIELDS.has(key)) {
             // SAFETY: Preserved identifier fields are kept intact without redaction.
             result[key] = val as JsonValue;
+            continue;
+          }
+
+          // Content digests (beforeHash, afterHash, contentSha256) are hashes, not secrets.
+          if (DIGEST_FIELD_NAME.test(key) && typeof val === "string" && DIGEST_VALUE.test(val)) {
+            result[key] = val;
             continue;
           }
 
