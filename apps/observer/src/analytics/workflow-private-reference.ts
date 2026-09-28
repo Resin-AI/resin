@@ -32,6 +32,14 @@ export const WORKFLOW_CALL_ORDER_SLOT = "order:v1";
  */
 export const WORKFLOW_CALL_EXIT_CODE_SLOT = "exit-code:v1";
 
+/**
+ * Demonstration slot holding the argument positions the call's upload kept private, as
+ * `[{argument, path}]`, computed from the carrier the recorder emitted. A validation check compares
+ * those positions only with values the device supplies; a call without this slot is treated as
+ * private in every string leaf.
+ */
+export const WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT = "private-positions:v1";
+
 /** Demonstration slot holding one whole recorded argument of a call. */
 export function workflowCallArgumentSlot(argument: string): string {
   return `argument:${argument}`;

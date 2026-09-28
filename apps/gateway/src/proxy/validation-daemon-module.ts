@@ -9,6 +9,10 @@ import {
   createLocalCallIdentity,
 } from "@resin/observer";
 import {
+  FileValidationAskLedger,
+  WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME,
+} from "./validation-ask-ledger.js";
+import {
   FileWorkflowValidationPassLease,
   WORKFLOW_VALIDATION_LEASE_FILE_NAME,
 } from "./validation-lease.js";
@@ -87,6 +91,9 @@ export function createWorkflowValidationDaemonModule(
       timeoutMs: DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
       passLease: new FileWorkflowValidationPassLease({
         filePath: path.join(context.paths.stateDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME),
+      }),
+      askLedger: new FileValidationAskLedger({
+        filePath: path.join(context.paths.stateDir, WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME),
       }),
       log: (message) => context.logger.info(message),
       ...overrides,

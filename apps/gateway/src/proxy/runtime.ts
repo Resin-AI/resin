@@ -57,6 +57,10 @@ import {
 } from "./sync.js";
 import { ManagedToolAccess } from "./tool-access.js";
 import {
+  FileValidationAskLedger,
+  WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME,
+} from "./validation-ask-ledger.js";
+import {
   FileWorkflowValidationPassLease,
   WORKFLOW_VALIDATION_LEASE_FILE_NAME,
 } from "./validation-lease.js";
@@ -416,6 +420,9 @@ export async function createProductionProxyRuntime(
       timeoutMs: DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
       passLease: new FileWorkflowValidationPassLease({
         filePath: path.join(paths.stateDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME),
+      }),
+      askLedger: new FileValidationAskLedger({
+        filePath: path.join(paths.stateDir, WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME),
       }),
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });

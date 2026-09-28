@@ -1,4 +1,4 @@
-import type { WorkflowJsonValue } from "@resin/contracts";
+import type { WorkflowJsonValue, WorkflowValuePath } from "@resin/contracts";
 import type { HarnessAdapter } from "@resin/harness-contracts";
 import { z } from "zod";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
@@ -11,6 +11,7 @@ import {
   WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
+  WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -37,6 +38,12 @@ export interface LocalRecordedCall {
   };
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
+  /**
+   * Argument positions this call's upload kept private (recorded with the call): private leaves
+   * and protected program tokens; `redacted` marks what secret redaction removed. Every string
+   * leaf, all redacted, when the recording kept none.
+   */
+  privatePositions: Array<{ argument: string; path: WorkflowValuePath; redacted: boolean }>;
   /** The exit status this device recorded for a shell call, when the harness established one. */
   exitCode?: number;
   /** Absent when the recording kept no successful result for the call. */
@@ -129,6 +136,32 @@ function ownedValue(
   } catch {
     return undefined;
   }
+}
+
+/** The stored positions a call's upload kept private. */
+const RecordedPrivatePositions = z.array(
+  z.object({
+    argument: z.string(),
+    path: z.array(z.union([z.string(), z.number().int().nonnegative()])),
+    redacted: z.boolean(),
+  }),
+);
+
+/**
+ * Fail-closed positions for a call recorded without them: every string leaf, and a program
+ * argument as a whole.
+ */
+function everyStringLeaf(
+  value: WorkflowJsonValue,
+  path: WorkflowValuePath = [],
+): WorkflowValuePath[] {
+  if (typeof value === "string") return [path];
+  if (Array.isArray(value))
+    return value.flatMap((item, index) => everyStringLeaf(item, [...path, index]));
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).flatMap(([key, entry]) => everyStringLeaf(entry, [...path, key]));
+  }
+  return [];
 }
 
 /** The callable and argument names a recorded call kept under its identity slot. */
@@ -242,6 +275,29 @@ export function createLocalCallIdentity(options: {
         args[name] = owned.value;
         argumentReferences[name] = reference;
       }
+      // The positions the call's own upload kept private, as recorded then. A call recorded
+      // without them (an older recording, or one whose upload view was not kept) is private in
+      // every string leaf, and a program argument as a whole.
+      const stored = ownedValue(
+        store,
+        referenceFor(WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT),
+        match.representation,
+        workspaceId,
+      );
+      const recordedPositions =
+        stored === undefined ? undefined : RecordedPrivatePositions.safeParse(stored.value);
+      const privatePositions: LocalRecordedCall["privatePositions"] =
+        recordedPositions?.success === true
+          ? recordedPositions.data
+          : argumentNames.flatMap((name) =>
+              callable.program?.argument === name
+                ? [{ argument: name, path: [], redacted: true }]
+                : everyStringLeaf(args[name]!).map((path) => ({
+                    argument: name,
+                    path,
+                    redacted: true,
+                  })),
+            );
       // A result is kept under the representation of the result event, which can differ from the
       // call's: an invoke_tool call is always recorded redacted, its result as the event arrived.
       let result: LocalRecordedCall["result"];
@@ -282,6 +338,7 @@ export function createLocalCallIdentity(options: {
         callable,
         arguments: args,
         argumentReferences,
+        privatePositions,
         ...(typeof exit?.value === "number" && Number.isSafeInteger(exit.value)
           ? { exitCode: exit.value }
           : {}),
