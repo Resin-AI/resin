@@ -10,8 +10,9 @@
  * - Outside quotes, none of `$ \ `` # ! ( ) { } < > * ? [ ] ~ ; | % ^`, no `&` but the `&&`
  *   separators, and no word starting with `=` — except these redirections, each starting a word
  *   after a segment's command word and staying inside that segment's text:
- *   - `>`, `>>`, `<`, `2>` and `2>>`, each followed (after optional blanks) by one non-empty
- *     target word in the same grammar;
+ *   - `>`, `>>`, `<`, `2>` and `2>>`, each followed (after optional blanks) by one target word in
+ *     the same grammar that is a plain file path: no `..` component, never under `/dev`, `/proc`
+ *     or `/sys`;
  *   - `2>&1`, `1>&2` and `>&2`, followed by a blank or the end.
  *
  *   `<<`, `<<<`, `<(`, `>(`, `>|`, `&>`, `&>>`, `<>`, `<&`, any other descriptor, `>&` of a word,
@@ -36,6 +37,30 @@ import type { WorkflowStep } from "./recorded-workflow.js";
 
 /** The version of these splitting rules; bump it whenever a program would split differently. */
 export const SHELL_AND_CHAIN_SPLITTER_VERSION = 2 as const;
+
+/**
+ * Every splitter version this device still re-splits under: version 1 is the grammar without
+ * redirections, so plans and tools split by an older device keep verifying and running.
+ */
+export type ShellAndChainSplitterVersion = 1 | typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
+const SPLITTER_VERSIONS: ReadonlySet<number> = new Set([1, SHELL_AND_CHAIN_SPLITTER_VERSION]);
+
+/**
+ * Where a redirection may never point, after quote removal: the kernel's and bash's special files
+ * (`/dev/tcp`, `/dev/udp`, `/dev/fd`, `/dev/std*`, `/proc/self/fd`, ...), which open sockets or
+ * alias descriptors instead of writing or reading a file.
+ */
+const SPECIAL_FILE_ROOTS = ["dev", "proc", "sys"];
+
+/**
+ * Whether a redirection target is a plain file path: relative or absolute, no `..` component, and
+ * not under a special-file root however its slashes and `.` components are spelled.
+ */
+function isPlainFileTarget(target: string): boolean {
+  const parts = target.split("/").filter((part) => part.length > 0 && part !== ".");
+  if (parts.length === 0 || parts.includes("..")) return false;
+  return !(target.startsWith("/") && SPECIAL_FILE_ROOTS.includes(parts[0]!));
+}
 
 /**
  * Shells whose `&&` lists these rules describe. zsh, PowerShell and any other shell never split.
@@ -159,7 +184,7 @@ export interface ShellAndChainSegment {
 }
 
 export interface ShellAndChain {
-  version: typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
+  version: ShellAndChainSplitterVersion;
   segments: ShellAndChainSegment[];
 }
 
@@ -210,7 +235,10 @@ function redirectionAt(
  * undefined when the segment is not in the grammar: an unquoted character outside it, a redirection
  * outside it, before the command word, or without a non-empty target word.
  */
-function segmentWords(text: string): { words: string[]; redirects: boolean } | undefined {
+function segmentWords(
+  text: string,
+  version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
+): { words: string[]; redirects: boolean } | undefined {
   const words: string[] = [];
   let redirects = false;
   let index = 0;
@@ -241,7 +269,8 @@ function segmentWords(text: string): { words: string[]; redirects: boolean } | u
       index += 1;
       continue;
     }
-    const redirection = redirectionAt(text, index);
+    // Version 1 has no redirections: their operators are unsafe characters of a word.
+    const redirection = version === 1 ? undefined : redirectionAt(text, index);
     if (redirection === null || (redirection !== undefined && words.length === 0)) return undefined;
     if (redirection !== undefined) {
       redirects = true;
@@ -250,7 +279,7 @@ function segmentWords(text: string): { words: string[]; redirects: boolean } | u
       while (isBlank(text[index])) index += 1;
       if (index === text.length || redirectionAt(text, index) !== undefined) return undefined;
       const target = word();
-      if (target === undefined || target.length === 0) return undefined;
+      if (target === undefined || !isPlainFileTarget(target)) return undefined;
       continue;
     }
     const next = word();
@@ -261,8 +290,8 @@ function segmentWords(text: string): { words: string[]; redirects: boolean } | u
 }
 
 /** Whether a segment runs an external command, the only kind of segment a chain splits into. */
-function runsExternalCommand(text: string): boolean {
-  const first = segmentWords(text)?.words[0];
+function runsExternalCommand(text: string, version: ShellAndChainSplitterVersion): boolean {
+  const first = segmentWords(text, version)?.words[0];
   return (
     first !== undefined &&
     first.length > 0 &&
@@ -276,7 +305,11 @@ function runsExternalCommand(text: string): boolean {
  * The top-level `&&` segments of a recorded program, or `undefined` when `shell` is not a POSIX
  * shell, or the program is not a chain of two or more external commands in the grammar above.
  */
-export function splitShellAndChain(shell: string, source: string): ShellAndChain | undefined {
+export function splitShellAndChain(
+  shell: string,
+  source: string,
+  version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
+): ShellAndChain | undefined {
   if (POSIX_SHELLS[shell] !== true) return undefined;
   const cuts: Array<[number, number]> = [];
   let quote: "'" | '"' | undefined;
@@ -305,7 +338,7 @@ export function splitShellAndChain(shell: string, source: string): ShellAndChain
       wordStart = true;
       continue;
     }
-    if (wordStart) {
+    if (wordStart && version !== 1) {
       // A redirection stays inside its segment; `segmentWords` checks its place and its target.
       const redirection = redirectionAt(source, index);
       if (redirection === null) return undefined;
@@ -328,7 +361,7 @@ export function splitShellAndChain(shell: string, source: string): ShellAndChain
     while (end > start && isBlank(source[end - 1]!)) end -= 1;
     if (start === end) return undefined;
     const text = source.slice(start, end);
-    if (!runsExternalCommand(text)) return undefined;
+    if (!runsExternalCommand(text, version)) return undefined;
     segments.push({ start, end, text });
     from = cutEnd;
   }
@@ -344,22 +377,21 @@ export function splitShellAndChain(shell: string, source: string): ShellAndChain
   }
   if (!/^[ \t]*$/.test(source.slice(0, segments[0]!.start)) || rejoined !== source)
     return undefined;
-  return { version: SHELL_AND_CHAIN_SPLITTER_VERSION, segments };
+  return { version, segments };
 }
 
 /**
- * The text of one segment of a recorded chain, re-split under this splitter for the recorded
- * `shell`: undefined when the recorded source is not text, does not split, or was split by another
- * splitter version or into another number of segments.
+ * The text of one segment of a recorded chain, re-split for the recorded `shell` under the
+ * segment's own splitter version: undefined when the recorded source is not text, the version is
+ * one this device does not have, or the source does not split under it into that many segments.
  */
 export function shellAndChainSegmentText(
   shell: string,
   source: unknown,
   segment: { index: number; count: number; version: number },
 ): string | undefined {
-  if (typeof source !== "string" || segment.version !== SHELL_AND_CHAIN_SPLITTER_VERSION)
-    return undefined;
-  const chain = splitShellAndChain(shell, source);
+  if (typeof source !== "string" || !SPLITTER_VERSIONS.has(segment.version)) return undefined;
+  const chain = splitShellAndChain(shell, source, segment.version as ShellAndChainSplitterVersion);
   if (chain === undefined || chain.segments.length !== segment.count) return undefined;
   return chain.segments[segment.index]?.text;
 }
@@ -377,6 +409,59 @@ export function isOptionalSetupSegment(text: string): boolean {
     words[0] === "mkdir" &&
     words[1] === "-p" &&
     words.slice(2).every((word) => word.length > 0 && !word.startsWith("-"))
+  );
+}
+
+/**
+ * Commands that only read files and print: none can write a file or run another program. A chain's
+ * trailing `cat` of what it wrote is the harness's `read` in another run.
+ */
+const READ_ONLY_INSPECTIONS: ReadonlySet<string> = new Set([
+  "cat",
+  "ls",
+  "head",
+  "tail",
+  "wc",
+  "stat",
+  "grep",
+  "cmp",
+  "diff",
+  "cksum",
+  "md5sum",
+  "sha1sum",
+  "sha224sum",
+  "sha256sum",
+  "sha384sum",
+  "sha512sum",
+  "b2sum",
+]);
+
+/**
+ * Whether a segment only inspects files: no redirection, no assignment prefix, and a first word
+ * (quotes removed, no `/`) in the closed read-only list.
+ */
+export function isReadOnlyInspectionSegment(text: string): boolean {
+  const parsed = segmentWords(text);
+  const first = parsed?.words[0];
+  return (
+    parsed !== undefined &&
+    !parsed.redirects &&
+    first !== undefined &&
+    !first.includes("/") &&
+    !first.includes("=") &&
+    READ_ONLY_INSPECTIONS.has(first)
+  );
+}
+
+/**
+ * Whether a chain's segment, as this device re-split it, may go unnamed by a plan's steps: its
+ * `mkdir -p` setup under any splitter version, and from version 2 also a read-only inspection.
+ * The cloud mirrors this rule for plans it addresses under `and-chain-segments-v2`.
+ */
+export function isSkippableSegment(text: string, version: number): boolean {
+  return (
+    isOptionalSetupSegment(text) ||
+    (version >= SHELL_AND_CHAIN_SPLITTER_VERSION && isReadOnlyInspectionSegment(text))
   );
 }
 

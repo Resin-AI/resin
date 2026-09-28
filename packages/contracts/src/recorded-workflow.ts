@@ -20,7 +20,7 @@ import {
   programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
-import { isOptionalSetupSegment } from "./shell-and-chain.js";
+import { SHELL_AND_CHAIN_SPLITTER_VERSION, isOptionalSetupSegment } from "./shell-and-chain.js";
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
@@ -1057,25 +1057,40 @@ function validateWorkflowSegments(workflow: Record<string, unknown>, errors: str
     }
     if (seen.has(String(callId))) continue;
     seen.add(String(callId));
-    const chain = steps.slice(position, position + (segment.count as number));
+    // From splitter version 2 a plan may leave out a segment of its own chain the recording device
+    // finds skippable (`isSkippableSegment`): the steps it names stay adjacent, in order, one count
+    // and one version. Only the device holds the left-out text, so the device checks it.
+    const gaps = (segment.version as number) >= SHELL_AND_CHAIN_SPLITTER_VERSION;
+    const chain = steps.slice(position, position + sharing.length + 1);
     const whole =
-      chain.length === segment.count &&
-      sharing.length === (segment.count as number) - 1 &&
+      (gaps || chain.length === segment.count) &&
+      chain.length <= (segment.count as number) &&
       chain.every(
         (other, index) =>
           other.callId === callId &&
           isPlainObject(other.segment) &&
-          other.segment.index === index &&
+          Number.isSafeInteger(other.segment.index) &&
+          (gaps
+            ? index === 0 ||
+              (other.segment.index as number) >
+                (chain[index - 1]!.segment as { index: number }).index
+            : other.segment.index === index) &&
           other.segment.count === segment.count &&
           other.segment.version === segment.version,
       );
     if (!whole) {
       errors.push(
-        `call ${String(callId)} must be split into all its segments, adjacent and in order`,
+        gaps
+          ? `call ${String(callId)} must be split into its segments, adjacent and in order`
+          : `call ${String(callId)} must be split into all its segments, adjacent and in order`,
       );
       continue;
     }
-    for (const other of chain.slice(0, -1)) nonFinal.add(String(other.id));
+    // A chain printed its output once, after its last segment: only that segment's result is read.
+    for (const other of chain) {
+      if ((other.segment as { index: number }).index < (segment.count as number) - 1)
+        nonFinal.add(String(other.id));
+    }
   }
   if (nonFinal.size === 0) return;
   const walk = (node: unknown, where: string): void => {

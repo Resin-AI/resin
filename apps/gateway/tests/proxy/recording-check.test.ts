@@ -751,12 +751,18 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     version: number = SPLITTER,
     chain = EMEA,
     addresses?: Array<{ index: number; count: number; version: number }>,
+    /** The chain's segments the plan keeps as steps; by default all of them. */
+    keep?: number[],
   ) {
     const store = new InMemoryPrivateValueStore();
     const recorded = record(store, report("emea", chain));
     record(store, heldOut, owner, OTHER);
     const texts = chain.split(" && ");
-    const plan = segmented(recorded, texts, version);
+    const split = segmented(recorded, texts, version);
+    const plan = {
+      ...split,
+      steps: split.steps.filter((step) => keep?.includes(step.segment!.index) ?? true),
+    };
     delete (plan as { baseline?: unknown }).baseline;
     const candidates = plan.steps.flatMap((step): WorkflowBindingCandidate[] => {
       const region = tokenizeProgram("shell", step.callable.program!.source).findIndex(
@@ -798,6 +804,32 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
   });
 
+  it("confirms a version-1 plan's segments, re-split under the version-1 grammar", async () => {
+    const answer = await ask(report("apac", "mkdir -p out && ./reportctl render --region APAC"), 1);
+    expect(answer.verification?.status).toBe("verified");
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+  });
+
+  describe("a chain whose segment redirects to a file", () => {
+    const PLAN = "./reportctl render --region EMEA > out/report.txt && ./reportctl validate out";
+    const APAC = report(
+      "apac",
+      "./reportctl render --region APAC > out/report.txt && ./reportctl validate out",
+    );
+
+    it("confirms the region under the version-2 grammar", async () => {
+      const answer = await ask(APAC, SPLITTER, PLAN);
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+    });
+
+    it("misses it under a version-1 address, whose grammar never splits a redirection", async () => {
+      const answer = await ask(APAC, 1, PLAN);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    });
+  });
+
   it.each([
     [
       "the chain exited non-zero",
@@ -822,7 +854,7 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     [
       "the plan was split by another splitter version",
       report("apac", "mkdir -p out && ./reportctl render --region APAC"),
-      SPLITTER - 1,
+      SPLITTER + 1,
     ],
   ])("misses the segment when %s", async (_, heldOut, version) => {
     const answer = await ask(heldOut, version);
@@ -860,8 +892,8 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       [
         "another splitter version",
         [
-          { index: 1, count: 3, version: SPLITTER - 1 },
-          { index: 2, count: 3, version: SPLITTER - 1 },
+          { index: 1, count: 3, version: SPLITTER + 1 },
+          { index: 2, count: 3, version: SPLITTER + 1 },
         ],
       ],
     ])("misses the segments when the held-out address names %s", async (_, addresses) => {
@@ -871,18 +903,58 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     });
   });
 
-  it("misses the segments when the held-out addresses skip a segment that is not mkdir -p setup", async () => {
+  describe("a held-out chain with a segment no plan step names", () => {
     const PLAN = "./reportctl extract --region EMEA && ./reportctl render --region EMEA";
-    const SKIPPED = report(
-      "apac",
-      "./reportctl extract --region APAC && rm -f cache.db && ./reportctl render --region APAC",
-    );
-    const answer = await ask(SKIPPED, SPLITTER, PLAN, [
-      { index: 0, count: 3, version: SPLITTER },
-      { index: 2, count: 3, version: SPLITTER },
-    ]);
-    expect(answer.verification?.status).not.toBe("verified");
-    expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+    const EXTRACT = "./reportctl extract --region APAC";
+    const RENDER = "./reportctl render --region APAC";
+    /** Asks with the held-out chain `segments`, the plan's two steps named at `named`. */
+    const skipping = (segments: string[], named: number[], version: number = SPLITTER) =>
+      ask(
+        report("apac", segments.join(" && ")),
+        version,
+        PLAN,
+        named.map((index) => ({ index, count: segments.length, version })),
+      );
+
+    it.each([
+      ["a trailing cat of what it wrote", [EXTRACT, RENDER, "cat out/sum"], [0, 1]],
+      ["a checksum check", [EXTRACT, "sha256sum -c out/sum", RENDER], [0, 2]],
+      ["a mid-chain ls", [EXTRACT, "ls out", RENDER], [0, 2]],
+    ])("confirms the region when it skips %s", async (_, segments, named) => {
+      const answer = await skipping(segments, named);
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true, true]);
+    });
+
+    it.each([
+      ["a cat redirected into a file", "cat a > b"],
+      ["a cat behind an assignment prefix", "LD_PRELOAD=x cat f"],
+      ["a cat by path", "./cat f"],
+      ["a tar listing", "tar -tzf f"],
+      ["a sort writing its output file", "sort -o f g"],
+      ["a removal", "rm f"],
+      ["a removal of a cache", "rm -f cache.db"],
+    ])("misses the segments when they skip %s", async (_, skipped) => {
+      const answer = await skipping([EXTRACT, skipped, RENDER], [0, 2]);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+    });
+
+    it.each([
+      ["confirms", "cat out/sum", true],
+      ["misses", "rm out/sum", false],
+    ])("%s a plan that leaves out its own chain's trailing %s", async (_, trailing, confirmed) => {
+      const chain = `${PLAN} && ${trailing}`;
+      const heldOut = report("apac", `${EXTRACT} && ${RENDER} && ${trailing}`);
+      const answer = await ask(heldOut, SPLITTER, chain, undefined, [0, 1]);
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([confirmed, confirmed]);
+    });
+
+    it("misses the segments when a version-1 address skips a cat", async () => {
+      const answer = await skipping([EXTRACT, RENDER, "cat out/sum"], [0, 1], 1);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+    });
   });
 
   it("misses the segment when the other chain recorded no exit code", async () => {

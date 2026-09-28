@@ -72,6 +72,23 @@ describe("segment steps of a recorded chain", () => {
       expect(validateRecordedWorkflow(plan(steps)).valid).toBe(false);
   });
 
+  it("lets a version-2 plan leave out segments of its chain, in order, never reading a non-final one", () => {
+    const v2 = (index: number, text: string) =>
+      segment(index, text, { id: `s${index}`, segment: { index, count: 3, version: 2 } });
+    const first = v2(0, "mkdir -p out");
+    const second = v2(1, "./reportctl render out");
+    expect(validateRecordedWorkflow(plan([first, second])).errors).toEqual([]);
+    expect(validateRecordedWorkflow(plan([first, v2(2, "cat out/sum")])).errors).toEqual([]);
+    expect(validateRecordedWorkflow(plan([second, first])).valid).toBe(false);
+    expect(
+      validateRecordedWorkflow(plan([first, { ...reader("s0"), id: "x" }, second])).valid,
+    ).toBe(false);
+    // Its last named segment is not the chain's last: the recorded output is not its own.
+    expect(validateRecordedWorkflow(plan([first, second, reader("s1")])).valid).toBe(false);
+    // A version-1 plan still names every segment.
+    expect(validateRecordedWorkflow(plan([chain[1]!])).valid).toBe(false);
+  });
+
   it("refuses two unsegmented steps sharing a call", () => {
     const { segment: _a, ...first } = chain[0]!;
     const { segment: _b, ...second } = { ...chain[1]!, id: "s1" };

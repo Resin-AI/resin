@@ -23,7 +23,7 @@ import {
   type WorkflowJsonValue,
   type WorkflowStep,
   type WorkflowValuePath,
-  isOptionalSetupSegment,
+  isSkippableSegment,
   recordedPosixShell,
   shellAndChainSegmentText,
   workflowValidationPlanDigest,
@@ -222,13 +222,13 @@ async function localDemonstration(
     located.push({ step, calls, addresses });
   }
   // The named segments of a chain are all of it: the plan may leave out only a segment that this
-  // device's own re-split shows to be `mkdir -p` setup. Leaving out anything else would let the plan
+  // device's own re-split shows to be skippable (`isSkippableSegment`). Leaving out anything else would let the plan
   // stand for a run that did more than the plan does.
   for (const { call, address, indices, steps } of chains.values()) {
     for (let index = 0; index < address.count; index += 1) {
       if (indices.has(index)) continue;
       const text = segmentText({ ...address, index }, call);
-      if (text === undefined || !isOptionalSetupSegment(text)) {
+      if (text === undefined || !isSkippableSegment(text, address.version)) {
         for (const stepId of steps) incoherent.add(stepId);
       }
     }

@@ -1,6 +1,6 @@
 /**
  * The cloud withholds segment tools and segment validation asks from a device that does not
- * declare `and-chain-segments-v1`, per request. Every request that fetches the catalog, a tool
+ * declare `and-chain-segments-v1` and `-v2`, per request. Every request that fetches the catalog, a tool
  * artifact or an invocation must therefore declare what this device supports.
  */
 import crypto from "node:crypto";
@@ -32,7 +32,9 @@ describe("the workflow capabilities a device declares", () => {
     });
     await client.fetchCatalogSnapshot().catch(() => undefined);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(declared(init)).toContain("and-chain-segments-v1");
+    expect(declared(init)).toEqual(
+      expect.arrayContaining(["and-chain-segments-v1", "and-chain-segments-v2"]),
+    );
   });
 
   it("are sent when downloading a tool artifact", async () => {
@@ -42,7 +44,9 @@ describe("the workflow capabilities a device declares", () => {
     const client = new CloudCatalogClient({ identityProvider: identity, fetchFn: fetchMock });
     await client.downloadArtifact(digest);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(declared(init)).toContain("and-chain-segments-v1");
+    expect(declared(init)).toEqual(
+      expect.arrayContaining(["and-chain-segments-v1", "and-chain-segments-v2"]),
+    );
   });
 
   it("are sent when invoking a cloud tool", async () => {
@@ -63,6 +67,8 @@ describe("the workflow capabilities a device declares", () => {
       } as never)
       .catch(() => undefined);
     const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/invoke"));
-    expect(declared((call as [string, RequestInit])[1])).toContain("and-chain-segments-v1");
+    expect(declared((call as [string, RequestInit])[1])).toEqual(
+      expect.arrayContaining(["and-chain-segments-v1", "and-chain-segments-v2"]),
+    );
   });
 });
