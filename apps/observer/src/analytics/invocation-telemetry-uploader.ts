@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { InvocationRecord } from "@resin/contracts";
 import type { AuditRepository } from "@resin/db";
+import { ProtocolError } from "@resin/protocol";
 import { ResourceForbiddenError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
@@ -26,7 +27,7 @@ export class InvocationTelemetryUploader {
   private readonly batchSize: number;
   private readonly logger?: Logger;
 
-  private readonly resourceForbiddenRetries = new Map<string, number>();
+  private readonly nonRetryableFailures = new Map<string, number>();
 
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
@@ -112,7 +113,7 @@ export class InvocationTelemetryUploader {
           });
 
           if (response.status === "accepted" || response.status === "partial") {
-            this.resourceForbiddenRetries.delete(workspaceId);
+            this.nonRetryableFailures.delete(workspaceId);
             const uploadedAt = new Date().toISOString();
             const ids = invocations.map((inv) => inv.invocationId);
             this.auditRepository.markInvocationsUploaded(ids, uploadedAt);
@@ -125,16 +126,17 @@ export class InvocationTelemetryUploader {
             });
           }
         } catch (error) {
-          if (error instanceof ResourceForbiddenError) {
-            const currentRetries = (this.resourceForbiddenRetries.get(workspaceId) ?? 0) + 1;
-            this.resourceForbiddenRetries.set(workspaceId, currentRetries);
+          const nonRetryableReason = describeNonRetryableFailure(error, workspaceId);
+          if (nonRetryableReason !== null) {
+            const currentRetries = (this.nonRetryableFailures.get(workspaceId) ?? 0) + 1;
+            this.nonRetryableFailures.set(workspaceId, currentRetries);
 
             if (currentRetries < 3) {
               this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
                 workspaceId,
                 count: invocations.length,
                 retries: currentRetries,
-                error: error.message,
+                error: (error as Error).message,
               });
             } else {
               this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
@@ -142,7 +144,7 @@ export class InvocationTelemetryUploader {
                 count: invocations.length,
                 retries: currentRetries,
                 exhausted: true,
-                error: error.message,
+                error: (error as Error).message,
               });
 
               const failedAt = new Date().toISOString();
@@ -159,7 +161,7 @@ export class InvocationTelemetryUploader {
                     invocationIds: ids,
                     count: invocations.length,
                   },
-                  errorReason: `Resource forbidden for workspace ${workspaceId}: ${error.message}`,
+                  errorReason: nonRetryableReason,
                   failedAt,
                   retryCount: currentRetries,
                   status: "exhausted",
@@ -172,7 +174,7 @@ export class InvocationTelemetryUploader {
                 });
               }
 
-              this.resourceForbiddenRetries.delete(workspaceId);
+              this.nonRetryableFailures.delete(workspaceId);
             }
           } else {
             this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
@@ -189,4 +191,25 @@ export class InvocationTelemetryUploader {
       this.isFlushing = false;
     }
   }
+}
+
+/**
+ * Failures the cloud will keep returning for the same batch. They get bounded
+ * retries and are then dead-lettered so one poison batch cannot block the queue.
+ */
+function describeNonRetryableFailure(error: unknown, workspaceId: string): string | null {
+  if (error instanceof ResourceForbiddenError) {
+    return `Resource forbidden for workspace ${workspaceId}: ${error.message}`;
+  }
+  if (
+    error instanceof ProtocolError &&
+    error.code === "validation" &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  ) {
+    return `Telemetry batch rejected for workspace ${workspaceId}: ${error.message}`;
+  }
+  return null;
 }

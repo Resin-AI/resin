@@ -1,6 +1,6 @@
 import type { InvocationRecord } from "@resin/contracts";
 import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
-import type { TelemetryBatchResponse } from "@resin/protocol";
+import { ProtocolError, type TelemetryBatchResponse } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InvocationTelemetryUploader } from "../../src/analytics/invocation-telemetry-uploader.js";
 import { ResourceForbiddenError } from "../../src/auth-recovery.js";
@@ -338,6 +338,70 @@ describe("InvocationTelemetryUploader", () => {
 
     vi.useRealTimers();
   });
+  it("dead-letters a batch the cloud rejects with HTTP 400 so later telemetry still uploads", async () => {
+    await store.audit.recordInvocation(
+      makeInvocation({ invocationId: "inv_poison_1", workspaceId: "ws_poison" }),
+    );
+    const sendTelemetryBatch = vi
+      .fn()
+      .mockImplementation(
+        async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
+          if (input.invocations.some((inv) => inv.invocationId === "inv_poison_1")) {
+            throw new ProtocolError("validation", "Telemetry batch request failed with HTTP 400", {
+              status: 400,
+            });
+          }
+          return {
+            batchId: "tb_ok",
+            status: "accepted",
+            processedCount: input.invocations.length,
+          };
+        },
+      );
+    const uploader = new InvocationTelemetryUploader({
+      auditRepository: store.audit,
+      cloudClient: { sendTelemetryBatch } as unknown as CloudObservationClient,
+      logger: mockLogger,
+    });
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
+    }
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+    expect((await store.audit.getInvocation("inv_poison_1"))?.status).toBe("error");
+    const deadLetters = store.conn.all<{ error_reason: string }>(
+      "SELECT error_reason FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch'",
+    );
+    expect(deadLetters).toHaveLength(1);
+    expect(deadLetters[0]?.error_reason).toContain("HTTP 400");
+
+    await store.audit.recordInvocation(
+      makeInvocation({ invocationId: "inv_after_1", workspaceId: "ws_poison" }),
+    );
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+  });
+
+  it("keeps retrying a batch rate limited with HTTP 429", async () => {
+    await store.audit.recordInvocation(
+      makeInvocation({ invocationId: "inv_limited_1", workspaceId: "ws_limited" }),
+    );
+    const sendTelemetryBatch = vi.fn().mockRejectedValue(
+      new ProtocolError("validation", "Telemetry batch request failed with HTTP 429", {
+        status: 429,
+      }),
+    );
+    const uploader = new InvocationTelemetryUploader({
+      auditRepository: store.audit,
+      cloudClient: { sendTelemetryBatch } as unknown as CloudObservationClient,
+      logger: mockLogger,
+    });
+
+    for (let cycle = 0; cycle < 4; cycle++) {
+      await uploader.flushOnce();
+    }
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
+  });
+
   it("dead-letters after bounded retries on ResourceForbiddenError and continues with the next batch", async () => {
     await store.audit.recordInvocation(
       makeInvocation({
