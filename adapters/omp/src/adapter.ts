@@ -77,10 +77,12 @@ const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
 // (a scan runs every 10 s). Only symlink changes and new subagent files in long-quiet session
 // folders wait for one; the latter are still captured whole, from their cursor.
 const FULL_SWEEP_EVERY_SCANS = 12;
-// Scans between re-stats of finished (completed, failed, interrupted) transcripts. A resumed one
-// is seen within this many scans and, like any OMP session, captured from its cursor, so the wait
-// delays capture but loses nothing.
+// Scans between re-stats of finished (completed, failed, interrupted) and long-dormant idle
+// transcripts. A resumed one is seen within this many scans and, like any OMP session, captured
+// from its cursor, so the wait delays capture but loses nothing.
 const SETTLED_RECHECK_EVERY_SCANS = 3;
+// An idle transcript untouched this long is dormant rather than a session paused mid-use.
+const DORMANT_IDLE_MS = 30 * 60_000;
 
 async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
   try {
@@ -213,25 +215,28 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     const catalog = await buildOmpDiscoveryCatalog({
       ...discoveryOptions,
       inspectTranscript: async (filePath, options) => {
-        const cached = this.transcriptCache.get(filePath);
-        // Only finished sessions wait for the re-check: an idle one may still be attached, and its
-        // exit or next turn must be seen on the next scan.
-        const status = cached?.transcript.status;
-        if (
-          cached &&
-          !recheckSettled &&
-          (status === "completed" || status === "failed" || status === "interrupted")
-        ) {
-          cycleCache.set(filePath, cached);
-          return cached.transcript;
-        }
-        const before = await getTranscriptFileIdentity(filePath);
         const nowMs =
           options?.now instanceof Date
             ? options.now.getTime()
             : typeof options?.now === "number"
               ? options.now
               : Date.now();
+        const cached = this.transcriptCache.get(filePath);
+        // Finished and long-dormant sessions wait for the re-check. A recently idle one may still
+        // be attached, and its exit or next turn must be seen on the next scan.
+        const status = cached?.transcript.status;
+        if (
+          cached &&
+          !recheckSettled &&
+          (status === "completed" ||
+            status === "failed" ||
+            status === "interrupted" ||
+            (status === "idle" && nowMs - cached.identity.mtimeMs > DORMANT_IDLE_MS))
+        ) {
+          cycleCache.set(filePath, cached);
+          return cached.transcript;
+        }
+        const before = await getTranscriptFileIdentity(filePath);
         const ageMs = before ? nowMs - before.mtimeMs : Number.NEGATIVE_INFINITY;
         const historical = before !== null && ageMs > TRANSCRIPT_STATUS_SETTLE_MS;
 
