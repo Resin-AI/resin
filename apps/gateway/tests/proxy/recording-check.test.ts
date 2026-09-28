@@ -864,4 +864,126 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
     });
   });
+
+  it("misses the segment when the other chain recorded no exit code", async () => {
+    // Not recorded through OMP's proven bash interface: nothing tells how the chain exited.
+    const unproven: Turn[] = [
+      { user: "Produce the monthly report" },
+      {
+        callId: "apac",
+        toolName: "bash",
+        parameters: { command: "mkdir -p out && ./reportctl render --region APAC" },
+        result: "done\n",
+      },
+    ];
+    const answer = await ask(unproven);
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(second(answer)).toBe(true);
+    expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+  });
+
+  describe("crossing a whole call and a chain segment between runs", () => {
+    type Address = { index: number; count: number; version: number } | null;
+    /**
+     * Asks to confirm `region` in a plan recorded from `planChain` — split into segment steps when
+     * `split`, else one whole step — with `heldOut`'s calls named per step at the given addresses.
+     */
+    async function cross(
+      planChain: string,
+      split: boolean,
+      heldOut: Turn[],
+      named: Array<Array<{ callId: string; address: Address }>>,
+    ) {
+      const store = new InMemoryPrivateValueStore();
+      const recorded = record(store, report("emea", planChain));
+      record(store, heldOut, owner, OTHER);
+      const plan = segmented(recorded, split ? planChain.split(" && ") : [planChain]);
+      // One whole step: the plan's step as recorded, carrying no segment address.
+      if (!split) plan.steps = plan.steps.map(({ segment: _, ...step }) => step);
+      delete (plan as { baseline?: unknown }).baseline;
+      const candidates = plan.steps.flatMap((step): WorkflowBindingCandidate[] => {
+        const region = tokenizeProgram("shell", step.callable.program!.source).findIndex(
+          (token) => token.raw === "EMEA",
+        );
+        return region === -1
+          ? []
+          : [
+              {
+                stepId: step.id,
+                argument: "command",
+                path: ["tokens", region],
+                proposed: { kind: "input", name: "region", type: "string" },
+                reason: "varies-across-executions",
+                missing: "a demonstration with a different value",
+              },
+            ];
+      });
+      return validator(store, { sessions: [SESSION, OTHER] })({
+        ...plan,
+        candidates,
+        heldOut: {
+          inputs: [],
+          observed: [],
+          calls: plan.steps.map((step, index) => ({
+            stepId: step.id,
+            callIds: named[index]!.map((entry) => entry.callId),
+            segments: named[index]!.map((entry) => entry.address),
+          })),
+        },
+      });
+    }
+    const WHOLE = "./reportctl render --region EMEA";
+    const CHAIN = report("apac", "mkdir -p out && ./reportctl render --region APAC");
+    const at = (index: number) => ({ index, count: 2, version: 1 });
+    const whole = (callId: string, command: string): Turn => ({
+      callId,
+      toolName: "bash",
+      parameters: { command },
+      result: "done\n",
+      ompBash: true,
+      ompCompleted: true,
+    });
+
+    it("verifies a whole plan step against another run's chain segment", async () => {
+      const answer = await cross(WHOLE, false, CHAIN, [[{ callId: "apac", address: at(1) }]]);
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+    });
+
+    it("misses a whole plan step addressed at another run's mkdir -p segment", async () => {
+      const answer = await cross(WHOLE, false, CHAIN, [[{ callId: "apac", address: at(0) }]]);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    });
+
+    it("misses a whole plan step when the held-out chain is named as a whole call", async () => {
+      const answer = await cross(WHOLE, false, CHAIN, [[{ callId: "apac", address: null }]]);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    });
+
+    const SEPARATE: Turn[] = [
+      { user: "Produce the monthly report" },
+      whole("mkdir", "mkdir -p out"),
+      whole("render", "./reportctl render --region APAC"),
+    ];
+
+    it("verifies segment steps against another run's whole calls", async () => {
+      const answer = await cross(EMEA, true, SEPARATE, [
+        [{ callId: "mkdir", address: null }],
+        [{ callId: "render", address: null }],
+      ]);
+      expect(answer.verification?.status).toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+    });
+
+    it("misses a segment step whose whole held-out call is another step's", async () => {
+      const answer = await cross(EMEA, true, SEPARATE, [
+        [{ callId: "render", address: null }],
+        [{ callId: "mkdir", address: null }],
+      ]);
+      expect(answer.verification?.status).not.toBe("verified");
+      expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+    });
+  });
 });

@@ -100,18 +100,21 @@ describe("segment steps of a recorded chain", () => {
     ).toBe(false);
   });
 
-  it("refuses a segment address on a held-out call of a step that is not a segment", () => {
+  it("accepts a whole step addressed at one segment of another run's chain, refusing a malformed address", () => {
     const { segment: _a, ...first } = chain[0]!;
     const plain = plan([{ ...first, callId: "one" }]);
-    const heldOut = {
-      inputs: [],
-      observed: [],
-      calls: [{ stepId: "s0", callIds: ["other"], segments: [{ index: 0, count: 2, version: 1 }] }],
-    };
-    expect(validateRecordedWorkflow({ ...plain, heldOut }).valid).toBe(false);
-    const { segments: _s, ...call } = heldOut.calls[0]!;
-    expect(
-      validateRecordedWorkflow({ ...plain, heldOut: { ...heldOut, calls: [call] } }).valid,
-    ).toBe(true);
+    const withSegments = (segments: unknown[]) =>
+      validateRecordedWorkflow({
+        ...plain,
+        heldOut: {
+          inputs: [],
+          observed: [],
+          calls: [{ stepId: "s0", callIds: ["other"], segments }],
+        },
+      }).valid;
+    expect(withSegments([{ index: 0, count: 2, version: 1 }])).toBe(true);
+    expect(withSegments([null])).toBe(true);
+    expect(withSegments([{ index: 2, count: 2, version: 1 }])).toBe(false);
+    expect(withSegments([])).toBe(false);
   });
 });

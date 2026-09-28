@@ -270,9 +270,8 @@ function iterationDemonstration(
 ): LocalDemonstration {
   // A segment this device cannot re-split exactly as the plan did is not in its recording.
   const calls = located.flatMap(({ step, call, address }) => {
-    if (address === null) return [{ step, call, address }];
-    const segment = segmentCall(address, call);
-    return segment === undefined ? [] : [{ step, call: segment, address }];
+    const recorded = address === null ? call : segmentCall(address, call);
+    return recorded === undefined ? [] : [{ step, call: recorded, address }];
   });
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
   // calls. A token or leaf it traces to an earlier recorded output must be read by the plan. A
