@@ -443,18 +443,30 @@ function asPlanShellCall(
   const text = recorded.arguments[from];
   const reference = recorded.argumentReferences[from];
   if (text === undefined || reference === undefined) return undefined;
-  const directory =
-    heldDirectory === undefined
-      ? {}
-      : { [planDirectory ?? heldDirectory]: recorded.arguments[heldDirectory]! };
+  const directoryName = planDirectory ?? heldDirectory;
+  const moved = (name: string) =>
+    name === from
+      ? to
+      : heldDirectory !== undefined && name === heldDirectory
+        ? directoryName
+        : undefined;
+  const arguments_: Record<string, WorkflowJsonValue> = { [to]: text };
+  const argumentReferences: Record<string, string> = { [to]: reference };
+  if (heldDirectory !== undefined && directoryName !== undefined) {
+    arguments_[directoryName] = recorded.arguments[heldDirectory]!;
+    const directoryReference = recorded.argumentReferences[heldDirectory];
+    if (directoryReference !== undefined) argumentReferences[directoryName] = directoryReference;
+  }
   return {
     ...recorded,
     callable: plan,
-    arguments: { [to]: text, ...directory },
-    argumentReferences: { [to]: reference },
-    privatePositions: recorded.privatePositions
-      .filter((position) => position.argument === from)
-      .map((position) => ({ ...position, argument: to })),
+    arguments: arguments_,
+    argumentReferences,
+    // Positions move with the arguments that cross: the program and the working directory.
+    privatePositions: recorded.privatePositions.flatMap((position) => {
+      const name = moved(position.argument);
+      return name === undefined ? [] : [{ ...position, argument: name }];
+    }),
   };
 }
 

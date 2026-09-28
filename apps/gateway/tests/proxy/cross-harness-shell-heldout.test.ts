@@ -246,4 +246,95 @@ describe("a held-out another harness's built-in shell recorded", () => {
     );
     expect(answer.unavailable).toMatch(/recorded with a different tool/);
   });
+
+  it("refuses a guess at a redacted working directory cross-harness exactly as same-harness", async () => {
+    const DIR = "clients/acme-9f2a";
+    const store = new InMemoryPrivateValueStore();
+    store.set("private:v2:demonstration:cwd", DIR, { workspaceId: owner }, "literal");
+    for (const id of ["plan_count", "held_count"]) {
+      store.set(`private:v2:demonstration:${id}:command`, COUNT, { workspaceId: owner }, "literal");
+      store.set(
+        `private:v2:demonstration:${id}:result`,
+        "4 brand-report.txt\n",
+        { workspaceId: owner },
+        "literal",
+      );
+    }
+    // Only the held-out run's working directory was redacted from its upload.
+    const call = (callId: string, name: string, sequence: number, redacted: boolean) => ({
+      sessionId: "s",
+      callId,
+      callable: {
+        name,
+        program: { kind: "shell", argument: "command" },
+        builtinShell: true as const,
+      },
+      arguments: { command: COUNT, cwd: DIR },
+      argumentReferences: {
+        command: `private:v2:demonstration:${callId}:command`,
+        cwd: "private:v2:demonstration:cwd",
+      },
+      privatePositions: redacted ? [{ argument: "cwd", path: [], redacted: true }] : [],
+      result: {
+        value: "4 brand-report.txt\n",
+        reference: `private:v2:demonstration:${callId}:result`,
+      },
+      sequence: { epoch: "e", index: sequence },
+    });
+    const answer = async (heldName: string, guess: string) => {
+      const calls = new Map([
+        ["plan_count", call("plan_count", "bash", 0, false)],
+        ["held_count", call("held_count", heldName, 1, true)],
+      ]);
+      const plan: RecordedWorkflow = {
+        schemaVersion: 1,
+        workflowId: "wf_cwd",
+        inputs: [],
+        steps: [
+          {
+            id: "step0",
+            callId: "plan_count",
+            callable: {
+              runtime: "resin-process",
+              name: "bash",
+              program: { kind: "shell", source: COUNT, argument: "command" },
+            },
+            arguments: [
+              { name: "command", source: { kind: "literal", value: COUNT } },
+              { name: "cwd", source: { kind: "literal", value: guess } },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+          },
+        ],
+        baseline: {
+          inputs: [],
+          observed: [],
+          calls: [{ stepId: "step0", callIds: ["plan_count"] }],
+        },
+        heldOut: {
+          inputs: [],
+          observed: [],
+          calls: [{ stepId: "step0", callIds: ["held_count"] }],
+        },
+        candidates: [],
+      } as unknown as RecordedWorkflow;
+      const result = await createRecordingCheckValidator({
+        workspaceId: owner,
+        privateValues: store,
+        localCalls: { lookup: async (id) => calls.get(id) as never },
+      })(plan);
+      return {
+        unavailable: result.unavailable,
+        status: result.verification?.status,
+        missed: result.verification?.missed.map((entry) => entry.stepId),
+      };
+    };
+    for (const guess of [DIR, "clients/other"]) {
+      const cross = await answer("Bash", guess);
+      expect(cross.status).not.toBe("verified");
+      expect(cross).toEqual(await answer("bash", guess));
+    }
+    expect(await answer("Bash", DIR)).toEqual(await answer("Bash", "clients/other"));
+  });
 });
