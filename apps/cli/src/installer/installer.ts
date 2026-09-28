@@ -649,6 +649,7 @@ export class ResinInstaller {
         fsBridge: this.fsBridge,
         dryRun,
         harnesses: requestedHarnesses,
+        installedHarnesses: requestedHarnesses,
       });
 
       if (!orchestrationResult.success) {
