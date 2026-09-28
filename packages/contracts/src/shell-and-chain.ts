@@ -479,8 +479,23 @@ export function isSkippableSegment(
 }
 
 /**
- * The POSIX shell a recorded shell-program call ran in, or undefined: an OMP `bash` call, or a
- * Codex command run under a bash shell profile. Any other shell never splits.
+ * The shell each harness's built-in shell callable runs a command in: OMP, Copilot and OpenCode
+ * `bash`, Claude Code `Bash`, and Cursor `Shell` (whose login shell may be zsh, so only the grammar
+ * every POSIX shell reads the same is split). A step reaches splitting only when its decoder proved
+ * the callable is that built-in and shared its command as a program view.
+ */
+const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
+  bash: "bash",
+  sh: "sh",
+  dash: "dash",
+  Bash: "bash",
+  Shell: "sh",
+  run_terminal_cmd: "sh",
+};
+
+/**
+ * The POSIX shell a recorded shell-program call ran in, or undefined: a harness's built-in shell
+ * callable, or a Codex command run under a bash shell profile. Any other shell never splits.
  */
 export function recordedPosixShell(
   callableName: string,
@@ -488,7 +503,9 @@ export function recordedPosixShell(
 ): string | undefined {
   const profile = args.resinCodexShellProfile;
   if (typeof profile === "string") return profile.startsWith("bash-") ? "bash" : undefined;
-  return POSIX_SHELLS[callableName] === true ? callableName : undefined;
+  return Object.hasOwn(HARNESS_SHELL_CALLABLES, callableName)
+    ? HARNESS_SHELL_CALLABLES[callableName]
+    : undefined;
 }
 
 /**

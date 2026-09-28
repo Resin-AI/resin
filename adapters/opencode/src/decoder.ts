@@ -407,7 +407,14 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         durationMs,
         executionDurationMs: durationMs ?? 0,
         outputSizeBytes: output === undefined ? undefined : Buffer.byteLength(output, "utf8"),
-        metadata: { messageId: message.id, partId: part.id, title: str(state.title) },
+        metadata: {
+          messageId: message.id,
+          partId: part.id,
+          title: str(state.title),
+          ...(exitCode === 0 && !isError && this.resolveConnection(tool) === undefined
+            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+            : {}),
+        },
       },
     ];
 
