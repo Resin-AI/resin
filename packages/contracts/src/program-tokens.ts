@@ -48,10 +48,13 @@ export interface ProgramToken {
 
 /**
  * The shortest bare word the shell renderer will emit without quoting. Anything outside
- * `[A-Za-z0-9_./:=@%+,-]`, or an empty value, is quoted, so a bound value is never reinterpreted as
- * syntax (a `;`, a `$`, a backtick or a space all force quoting).
+ * `[A-Za-z0-9_./:=@%+,-]` — but a `~` inside the word no shell expands — or an empty value, is
+ * quoted, so a bound value is never reinterpreted as syntax (a `;`, a `$`, a backtick or a space all
+ * force quoting).
  */
 const SAFE_BARE_WORD = /^[A-Za-z0-9_./:=@%+,-]+$/;
+/** A `~` inside a word after neither `=` nor `:`, which no shell expands (`HEAD~2..HEAD`). */
+const LITERAL_TILDE = /(?<=[A-Za-z0-9_./@%+,-])~/g;
 
 /** The two-character shell operators, matched before their one-character prefixes. */
 const SHELL_OPERATORS_LONG = ["&&", "||", ">>", "<<", ";;"] as const;
@@ -1284,7 +1287,7 @@ export function renderProgramTokenValue(
   if (token.kind === "string" && quote === "`") {
     return `"${text.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("`", "\\`").replaceAll("$", "\\$")}"`;
   }
-  if (SAFE_BARE_WORD.test(text)) return text;
+  if (SAFE_BARE_WORD.test(text.replace(LITERAL_TILDE, ""))) return text;
   return quoteShellSingle(text);
 }
 
