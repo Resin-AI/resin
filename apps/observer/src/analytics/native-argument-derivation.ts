@@ -40,6 +40,7 @@ import {
   scriptTokenContextName,
   shellCommandSite,
   tokenizeProgram,
+  uniqueRoleName,
   valueFlag,
 } from "@resin/contracts";
 
@@ -550,13 +551,15 @@ export function deriveNativeCalls(
         let name = programInputs.get(key);
         if (name === undefined) {
           if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
-          const base =
-            (script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined) ??
-            programInputBaseName(token.value, tokens, tokenIndex, call.program.kind);
-          name = base;
-          for (let suffix = 2; programInputNames.has(name); suffix += 1) name = `${base}_${suffix}`;
+          const contextName = script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined;
+          const command =
+            call.program.kind === "shell" ? shellCommandSite(tokens, tokenIndex) : undefined;
+          name = uniqueRoleName(
+            contextName ?? programInputBaseName(token.value, tokens, tokenIndex, call.program.kind),
+            command === undefined ? [] : [{ command }],
+            programInputNames,
+          );
           programInputs.set(key, name);
-          programInputNames.add(name);
         } else if (!offered.has(name) && offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) {
           continue;
         }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { inputRoleName, shellCommandSite, tokenizeProgram, valueFlag } from "../src/index.js";
+import {
+  inputRoleName,
+  shellCommandSite,
+  tokenizeProgram,
+  uniqueRoleName,
+  valueFlag,
+} from "../src/index.js";
 
 /** The role name of the word at `index` of a recorded shell command, as the device names it. */
 function roleAt(source: string, index: number): string {
@@ -126,5 +132,23 @@ describe("input role names", () => {
     expect(rolesOf("tar --create --gzip -f out.tgz data/raw")).toMatchObject({
       "data/raw": "directory",
     });
+  });
+
+  it("names a file written by a redirect apart from a file of the same role that is read", () => {
+    // ProdE2E round 4's OpenCode job: `sort -u IN > OUT; wc -l OUT; head -n 3 OUT`.
+    const source = "sort -u words.txt > unique.txt";
+    const tokens = tokenizeProgram("shell", source);
+    const used = new Set<string>();
+    const name = (index: number) =>
+      uniqueRoleName(roleAt(source, index), [{ command: shellCommandSite(tokens, index)! }], used);
+    expect([name(2), name(4)]).toEqual(["document_path", "output_document_path"]);
+    // No collision, no change: the CSV and grep reports keep their names.
+    const alone = new Set<string>(["data_path"]);
+    const report = tokenizeProgram("shell", "cut -d, -f1 sales.csv > report.txt");
+    expect(
+      uniqueRoleName("document_path", [{ command: shellCommandSite(report, 5)! }], alone),
+    ).toBe("document_path");
+    // Two files read keep numeric suffixes.
+    expect(uniqueRoleName("document_path", [], new Set(["document_path"]))).toBe("document_path_2");
   });
 });
