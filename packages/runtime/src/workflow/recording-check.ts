@@ -68,9 +68,9 @@ export interface RecordedCall {
    */
   roots?: { recorded: string; plan: string };
   /**
-   * The call was recorded by another harness's built-in shell than the plan's step: only the
-   * program argument is compared, since the two shells' other arguments (working directory
-   * spelling, timeout, label, profile) are not the same vocabulary.
+   * The call was recorded by another harness's built-in shell than the plan's step: the program
+   * argument and the working directory (as the place it names under each side's root) are
+   * compared; the shells' other arguments (timeout, label, profile) are not one vocabulary.
    */
   programOnly?: true;
 }
@@ -303,10 +303,12 @@ function comparedArguments(
     Object.entries(args).filter(
       ([name]) =>
         name === program.argument ||
-        (!programOnly && Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name)),
+        (programOnly
+          ? (WORKING_DIRECTORY_ARGUMENTS as readonly string[]).includes(name)
+          : Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name)),
     ),
   );
-  if (root === undefined || programOnly) return compared;
+  if (root === undefined) return compared;
   for (const name of WORKING_DIRECTORY_ARGUMENTS) {
     const value = compared[name] ?? ".";
     if (typeof value !== "string") continue;

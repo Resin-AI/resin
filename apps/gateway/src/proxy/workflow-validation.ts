@@ -311,8 +311,7 @@ function iterationDemonstration(
     const recorded = address === null ? call : segmentCall(address, call);
     if (recorded === undefined) return [];
     const own = ownCalls.get(step.id);
-    const asPlan =
-      own === undefined ? undefined : asPlanShellCall(step, own, call, recorded, address);
+    const asPlan = own === undefined ? undefined : asPlanShellCall(step, own, call, recorded);
     return asPlan === undefined
       ? [{ step, call: recorded, address, programOnly: false }]
       : [{ step, call: asPlan, address, programOnly: true }];
@@ -391,20 +390,30 @@ function iterationDemonstration(
   return { recording, demonstration };
 }
 
+/** Working-directory arguments a crossing maps onto each other, as the recording check reads them. */
+const CROSS_DIRECTORY_ARGUMENTS = ["workdir", "cwd"] as const;
+/** Directory-like argument names the recording check does not read as a working directory. */
+const UNMAPPED_DIRECTORY_ARGUMENTS: ReadonlySet<string> = new Set([
+  "directory",
+  "dir",
+  "working_directory",
+  "workingDirectory",
+]);
+
 /**
  * A held-out call another harness's built-in shell ran, as the plan step's own shell would have
  * run it: the plan's callable, and the held-out's program text under the plan's program argument.
  * Undefined (checked with exact identity) unless both calls are proven built-in shell programs of
- * different harnesses; a segment additionally needs the same recorded shell dialect, since the
- * segment grammar differs between shells. Only the argument carrying the program is renamed:
- * its private positions move with it, every other argument is left out.
+ * different harnesses run in the same recorded shell dialect. The argument carrying the program
+ * is renamed (its private positions move with it) and the working directory crosses under the
+ * plan's name for it, compared through the roots as the same-harness check compares it; every
+ * other argument is left out.
  */
 function asPlanShellCall(
   step: WorkflowStep,
   own: LocalRecordedCall,
   original: LocalRecordedCall,
   recorded: LocalRecordedCall,
-  address: SegmentAddress | null,
 ): LocalRecordedCall | undefined {
   const plan = own.callable;
   const held = recorded.callable;
@@ -412,24 +421,36 @@ function asPlanShellCall(
   if (plan.builtinShell !== true || held.builtinShell !== true) return undefined;
   if (plan.program?.kind !== "shell" || held.program?.kind !== "shell") return undefined;
   if (step.callable.program?.argument !== plan.program.argument) return undefined;
-  if (address !== null || step.segment !== undefined) {
-    const planShell = recordedPosixShell(plan.name, own.arguments);
-    if (
-      planShell === undefined ||
-      planShell !== recordedPosixShell(held.name, original.arguments)
-    ) {
-      return undefined;
-    }
+  // Every crossing needs one shell dialect: zsh neither word-splits an unquoted `$var` nor
+  // treats repeated redirections as bash does, so the same text is not the same program.
+  const planShell = recordedPosixShell(plan.name, own.arguments);
+  if (planShell === undefined || planShell !== recordedPosixShell(held.name, original.arguments)) {
+    return undefined;
   }
+  // The working directory crosses too, under the plan's name for it; a harness naming it any
+  // other way cannot be mapped, so the call keeps exact identity.
+  if (Object.keys(original.arguments).some((name) => UNMAPPED_DIRECTORY_ARGUMENTS.has(name))) {
+    return undefined;
+  }
+  const planDirectory = CROSS_DIRECTORY_ARGUMENTS.find((name) =>
+    Object.hasOwn(own.arguments, name),
+  );
+  const heldDirectory = CROSS_DIRECTORY_ARGUMENTS.find((name) =>
+    Object.hasOwn(recorded.arguments, name),
+  );
   const from = held.program.argument;
   const to = plan.program.argument;
   const text = recorded.arguments[from];
   const reference = recorded.argumentReferences[from];
   if (text === undefined || reference === undefined) return undefined;
+  const directory =
+    heldDirectory === undefined
+      ? {}
+      : { [planDirectory ?? heldDirectory]: recorded.arguments[heldDirectory]! };
   return {
     ...recorded,
     callable: plan,
-    arguments: { [to]: text },
+    arguments: { [to]: text, ...directory },
     argumentReferences: { [to]: reference },
     privatePositions: recorded.privatePositions
       .filter((position) => position.argument === from)

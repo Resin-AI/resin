@@ -1,6 +1,6 @@
 /**
- * The round-3 pair: a Codex `exec_command` run (the plan) and the same job as Claude Code `Bash`
- * calls (the held-out), both on this device. The held-out is replayed through the plan's program
+ * The round-3 job as an OMP `bash` run (the plan) and as Claude Code `Bash` calls (the held-out),
+ * both on this device and both bash. The held-out is replayed through the plan's program
  * argument only when both calls are proven built-in shells.
  */
 import type { RecordedWorkflow } from "@resin/contracts";
@@ -16,8 +16,24 @@ const CLAUDE = "claude-round3";
 const REPORT = "tail -n +2 sales.csv | cut -d, -f1 | sort | uniq -c | sort -rn > brand-report.txt";
 const COUNT = "wc -l brand-report.txt";
 
+const ompShell = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash" };
 const codexShell = { codexNative: { sourceInterface: "codex-exec-command" } };
 const claudeShell = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "claude-bash" };
+
+function ompTurn(
+  callId: string,
+  command: string,
+  result: string,
+  parameters: Record<string, unknown> = {},
+): RecordedTurn {
+  return {
+    callId,
+    toolName: "bash",
+    parameters: { command, timeout: 30, ...parameters },
+    result,
+    metadata: ompShell,
+  };
+}
 
 function codexTurn(callId: string, cmd: string, result: string): RecordedTurn {
   return {
@@ -48,12 +64,13 @@ function claudeTurn(
 function pair(
   claude: (callId: string, command: string, result: string) => RecordedTurn,
   report = REPORT,
+  planParameters: Record<string, unknown> = {},
 ): { plan: RecordedWorkflow; store: InMemoryPrivateValueStore } {
   const store = new InMemoryPrivateValueStore();
   const plan = recordSession(store, { workspaceId: owner, sessionId: CODEX, workflowId: "wf_x" }, [
     { user: "Build the brand report from sales.csv" },
-    codexTurn("call_report", REPORT, ""),
-    codexTurn("call_count", COUNT, "4 brand-report.txt\n"),
+    ompTurn("call_report", REPORT, "", planParameters),
+    ompTurn("call_count", COUNT, "4 brand-report.txt\n", planParameters),
   ]);
   recordSession(store, { workspaceId: owner, sessionId: CLAUDE, workflowId: "wf_y" }, [
     { user: "Build the brand report from sales.csv" },
@@ -86,7 +103,7 @@ const validate = (plan: RecordedWorkflow, store: InMemoryPrivateValueStore) =>
   })(plan);
 
 describe("a held-out another harness's built-in shell recorded", () => {
-  it("verifies a Codex exec_command plan against Claude Code Bash calls", async () => {
+  it("verifies an OMP bash plan against Claude Code Bash calls", async () => {
     const { plan, store } = pair(claudeTurn);
     const answer = await validate(plan, store);
     expect(answer.unavailable).toBeUndefined();
@@ -118,8 +135,8 @@ describe("a held-out another harness's built-in shell recorded", () => {
         { workspaceId: owner, sessionId: CODEX, workflowId: "wf_x" },
         [
           { user: "Build the brand report from sales.csv" },
-          codexTurn("call_report", report, ""),
-          codexTurn("call_count", COUNT, "4 brand-report.txt\n"),
+          ompTurn("call_report", report, ""),
+          ompTurn("call_count", COUNT, "4 brand-report.txt\n"),
         ],
       );
       recordSession(store, { workspaceId: owner, sessionId: CLAUDE, workflowId: "wf_y" }, [
@@ -149,7 +166,7 @@ describe("a held-out another harness's built-in shell recorded", () => {
             : {
                 ...step,
                 arguments: step.arguments.map((argument) =>
-                  argument.name === "cmd"
+                  argument.name === "command"
                     ? {
                         ...argument,
                         source: { kind: "literal" as const, value: report.replace(secret, value) },
@@ -167,7 +184,7 @@ describe("a held-out another harness's built-in shell recorded", () => {
       missed: answer.verification?.missed.map((entry) => entry.stepId),
     });
     const cross = setup(claudeTurn);
-    const same = setup((callId, command, result) => codexTurn(callId, command, result));
+    const same = setup((callId, command, result) => ompTurn(callId, command, result));
     for (const plan of [
       (x: typeof cross) => x.asked,
       (x: typeof cross) => x.guessing(secret),
@@ -178,5 +195,55 @@ describe("a held-out another harness's built-in shell recorded", () => {
       );
     }
     expect((await validate(cross.asked, cross.store)).verification?.status).toBe("verified");
+  });
+
+  it("misses a held-out that ran in another working directory", async () => {
+    // The plan's run changed into `reports/`; the Claude Code run did not.
+    const { plan, store } = pair(claudeTurn, REPORT, { cwd: "reports" });
+    const answer = await validate(plan, store);
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.verification?.status).not.toBe("verified");
+  });
+
+  it("refuses to cross between Cursor's sh-or-zsh shell and a bash harness", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = recordSession(
+      store,
+      { workspaceId: owner, sessionId: CODEX, workflowId: "wf_x" },
+      [
+        { user: "Build the brand report from sales.csv" },
+        codexTurn("call_report", REPORT, ""),
+        codexTurn("call_count", COUNT, "4 brand-report.txt\n"),
+      ],
+    );
+    const cursor = (callId: string, command: string, result: string): RecordedTurn => ({
+      callId,
+      toolName: "Shell",
+      parameters: { command },
+      result,
+      metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "cursor-shell" },
+    });
+    recordSession(store, { workspaceId: owner, sessionId: CLAUDE, workflowId: "wf_y" }, [
+      { user: "Build the brand report from sales.csv" },
+      cursor("toolu_report", REPORT, ""),
+      cursor("toolu_count", COUNT, "4 brand-report.txt\n"),
+    ]);
+    const recorded = plan.steps.filter((step) => step.origin !== "derivation");
+    const answer = await validate(
+      {
+        ...plan,
+        candidates: [],
+        heldOut: {
+          inputs: [],
+          observed: [],
+          calls: [
+            { stepId: recorded[0]!.id, callIds: ["toolu_report"] },
+            { stepId: recorded[1]!.id, callIds: ["toolu_count"] },
+          ],
+        },
+      },
+      store,
+    );
+    expect(answer.unavailable).toMatch(/recorded with a different tool/);
   });
 });
