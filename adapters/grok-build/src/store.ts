@@ -93,9 +93,20 @@ export async function listGrokProjects(
   return projects.sort((a, b) => a.cwd.localeCompare(b.cwd));
 }
 
+/**
+ * Per-session results carried between scans, keyed by session directory. A session's summary and
+ * subagent links only change while it is writing, so both are reused while its `updates.jsonl`
+ * identity (inode, size, mtime) is unchanged. Callers clear it periodically to catch anything else.
+ */
+export type GrokSessionCache = Map<
+  string,
+  { identity: string; summary: GrokSessionSummary | null; subagentParents?: Map<string, string> }
+>;
+
 export async function listGrokSessions(
   projectDir: string,
   cwd: string,
+  cache?: GrokSessionCache,
 ): Promise<GrokSessionEntry[]> {
   let entries: Dirent[];
   try {
@@ -109,12 +120,20 @@ export async function listGrokSessions(
     const sessionDir = path.join(projectDir, entry.name);
     const updatesPath = path.join(sessionDir, "updates.jsonl");
     let updatesMtime: Date;
+    let identity: string;
     try {
-      updatesMtime = (await fs.stat(updatesPath)).mtime;
+      const stat = await fs.stat(updatesPath);
+      updatesMtime = stat.mtime;
+      identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     } catch {
       continue;
     }
-    const summary = await readGrokSessionSummary(sessionDir);
+    let cached = cache?.get(sessionDir);
+    if (!cached || cached.identity !== identity) {
+      cached = { identity, summary: await readGrokSessionSummary(sessionDir) };
+      cache?.set(sessionDir, cached);
+    }
+    const summary = cached.summary;
     sessions.push({
       sessionId: summary?.sessionId ?? entry.name,
       cwd: summary?.cwd ?? cwd,
@@ -133,9 +152,17 @@ export async function listGrokSessions(
  */
 export async function readGrokSubagentParents(
   sessions: readonly GrokSessionEntry[],
+  cache?: GrokSessionCache,
 ): Promise<Map<string, string>> {
   const parents = new Map<string, string>();
   for (const session of sessions) {
+    const cached = cache?.get(session.sessionDir);
+    if (cached?.subagentParents) {
+      for (const [child, parent] of cached.subagentParents) parents.set(child, parent);
+      continue;
+    }
+    const own = new Map<string, string>();
+    if (cached) cached.subagentParents = own;
     let children: string[];
     try {
       children = await fs.readdir(path.join(session.sessionDir, "subagents"));
@@ -147,7 +174,9 @@ export async function readGrokSubagentParents(
         await readJson(path.join(session.sessionDir, "subagents", child, "meta.json")),
       );
       const childSessionId = asString(meta?.child_session_id) ?? child;
-      parents.set(childSessionId, asString(meta?.parent_session_id) ?? session.sessionId);
+      const parent = asString(meta?.parent_session_id) ?? session.sessionId;
+      parents.set(childSessionId, parent);
+      own.set(childSessionId, parent);
     }
   }
   return parents;
