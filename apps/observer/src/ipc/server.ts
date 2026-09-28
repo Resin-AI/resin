@@ -58,8 +58,7 @@ export function assertUnixSocketPathFits(
   const limit = unixSocketPathLimit(platform);
   if (bytes > limit) {
     throw new Error(
-      `Daemon socket path is ${bytes} bytes, over this platform's ${limit}-byte Unix socket limit: ${socketPath}. ` +
-        "Use a shorter RESIN_HOME, or set RESIN_SOCKET_PATH to a shorter path.",
+      `Daemon socket path is ${bytes} bytes, over this platform's ${limit}-byte Unix socket limit: ${socketPath}. Use a shorter RESIN_HOME, or set RESIN_SOCKET_PATH to a shorter path.`,
     );
   }
 }
