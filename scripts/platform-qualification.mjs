@@ -574,9 +574,13 @@ async function qualifyDaemon(installedRoot, sandboxDir) {
   const socketPath = path.join(sandboxDir, "daemon.sock");
   const endpoint = daemonEndpointArgs(socketPath);
   fs.mkdirSync(daemonHome, { recursive: true });
+  // HOME/USERPROFILE point at the sandbox too: the private-value store's default location
+  // follows the user's profile, not RESIN_HOME/--home, so the real user's data stays untouched.
   const env = daemonEnv(
     {
       ...process.env,
+      HOME: daemonHome,
+      USERPROFILE: daemonHome,
       NODE_ENV: "production",
       RESIN_LOG_LEVEL: "silent",
       RESIN_CLOUD_SYNC_ENABLED: "false",
@@ -702,8 +706,18 @@ function createRpcClient(child) {
 async function qualifyMcp(installedRoot, sandboxDir) {
   const resinBin = path.join(installedRoot, "bin", "resin");
   const workspace = path.join(sandboxDir, "mcp-workspace");
+  const mcpHome = path.join(sandboxDir, "mcp-home");
   fs.mkdirSync(workspace, { recursive: true });
-  const env = { ...process.env, NODE_ENV: "production" };
+  fs.mkdirSync(mcpHome, { recursive: true });
+  // The standalone gateway opens its state under the user's Resin home; keep it in the sandbox
+  // so qualifying never touches (or reads) the real user's Resin data on any platform.
+  const env = {
+    ...process.env,
+    NODE_ENV: "production",
+    HOME: mcpHome,
+    USERPROFILE: mcpHome,
+    RESIN_HOME: path.join(mcpHome, ".resin"),
+  };
   delete env.NODE_PATH;
   const child = spawn(
     process.execPath,
@@ -1369,12 +1383,17 @@ export async function qualifyCleanHome(installedRoot, sandboxDir, manifest) {
     // Invariant 5: the packaged capture runtime normalizes OMP JSONL into SQLite and
     // receives an acknowledgment from the existing mock-cloud batch endpoint.
     const stateDbPath = path.join(resinHome, "data", "qualification-state.db");
-    await ingestPackagedOmpFixture({
-      installedRoot,
-      stateDbPath,
-      transcriptPath: workspaceTranscriptPath,
-      cloudUrl,
-    });
+    // Runs with the clean home's environment: the capture runtime keeps its private values
+    // (redaction key) under the user's Resin home, which must be the sandbox, not the real one.
+    await ingestPackagedOmpFixture(
+      {
+        installedRoot,
+        stateDbPath,
+        transcriptPath: workspaceTranscriptPath,
+        cloudUrl,
+      },
+      { env: cleanEnv },
+    );
     if (receivedObservationBatches.length === 0 && receivedTrajectoryBatches.length === 0) {
       throw new Error("Packaged OMP capture did not reach the mock-cloud batch endpoint");
     }
@@ -1787,8 +1806,8 @@ function verifyWindowsDaemonIsolation(installedRoot, resinHome) {
   return runPackagedTask("verify-windows-isolation", { installedRoot, resinHome });
 }
 
-function ingestPackagedOmpFixture(args) {
-  return runPackagedTask("ingest-omp-fixture", args);
+function ingestPackagedOmpFixture(args, options = {}) {
+  return runPackagedTask("ingest-omp-fixture", args, options);
 }
 
 function probeHarnesses(installedRoot, env) {
