@@ -245,6 +245,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   readonly name = "Trajectory Capture & Calibration Coordinator";
   readonly dependencies: readonly string[] = ["cloud-runtime"];
   readonly critical = false;
+  /**
+   * Start runs the first discovery scan of every harness's transcript history; on a machine with
+   * tens of thousands of transcripts that alone outlasts the supervisor's 5 s default.
+   */
+  readonly startupTimeoutMs = 60_000;
 
   private state: ModuleLifecycleState = "uninitialized";
   private observerCoordinator: ObserverCoordinator;

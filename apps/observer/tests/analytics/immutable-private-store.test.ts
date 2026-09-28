@@ -58,8 +58,10 @@ describe("immutable private reference persistence", () => {
     for (let i = 0; i < 50; i++)
       first.set(`[REDACTED_SECRET:${i}]`, `secret-${i}`, { workspaceId: "ws-legacy" });
     const file = path.join(root, "private-values", "private-values.json");
+    first.flush();
     const before = statSync(file, { bigint: true });
     first.set("[REDACTED_SECRET:7]", "secret-7", { workspaceId: "ws-legacy" });
+    first.flush();
     const after = statSync(file, { bigint: true });
     expect([after.ino, after.mtimeNs]).toEqual([before.ino, before.mtimeNs]);
 
@@ -142,5 +144,34 @@ describe("immutable private reference persistence", () => {
       for (const name of readdirSync(entries))
         expect(statSync(path.join(entries, name)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("writes a burst of new legacy aliases back once, and before its process exits", async () => {
+    const root = directory();
+    const moduleUrl = new URL("../../dist/analytics/private-value-store.js", import.meta.url).href;
+    // A capture burst: many new aliases, then a normal exit well before the write-back timer.
+    // The store is imported dynamically so it loads after fs.renameSync is counted.
+    const source = `import fs from 'node:fs';
+      let renames = 0; const rename = fs.renameSync;
+      fs.renameSync = (...args) => { renames++; return rename(...args); };
+      const {FilePrivateValueStore} = await import(${JSON.stringify(moduleUrl)});
+      const store = new FilePrivateValueStore(process.argv[1]);
+      for (let i = 0; i < 2000; i++) store.set('[REDACTED_PATH:'+i+']', '/work/file-'+i, {workspaceId:'ws-burst'});
+      process.on('exit', () => process.stderr.write('renames=' + renames));`;
+    const diagnostic = await new Promise<string>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", source, root], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", reject);
+      child.on("close", (code) => (code === 0 ? resolve(stderr) : reject(new Error(stderr))));
+    });
+    expect(diagnostic).toBe("renames=1");
+    const reopened = new FilePrivateValueStore(root);
+    for (const i of [0, 999, 1999])
+      expect(reopened.get(`[REDACTED_PATH:${i}]`)).toBe(`/work/file-${i}`);
   });
 });

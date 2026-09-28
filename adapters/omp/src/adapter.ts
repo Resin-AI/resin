@@ -73,8 +73,13 @@ interface TranscriptInspectionCacheEntry {
 
 // Matches inspectTranscriptFile's stale-to-idle threshold.
 const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
-// Scans between full sweeps of dormant transcripts and quiet directories (a scan runs every 10 s).
-const FULL_SWEEP_EVERY_SCANS = 6;
+// Scans between full refreshes of settled transcripts' resolved paths and of quiet directories
+// (a scan runs every 10 s). Only symlink changes and new subagent files in long-quiet session
+// folders wait for one; the latter are still captured whole, from their cursor.
+const FULL_SWEEP_EVERY_SCANS = 12;
+// Scans between re-stats of settled transcripts. A resumed session is seen within this many
+// scans and, like any OMP session, captured from its cursor, so the wait delays but loses nothing.
+const SETTLED_RECHECK_EVERY_SCANS = 3;
 
 async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
   try {
@@ -131,9 +136,9 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   private readonly directoryCache: TranscriptDirectoryCache = {
     listings: new Map(),
     missing: new Set(),
+    realpaths: new Map(),
     revalidateQuiet: true,
   };
-  private dormantTranscripts = new Set<string>();
   private scansSinceFullSweep = 0;
   private workspaceListInFlight?: Promise<HarnessWorkspace[]>;
   constructor(options?: OmpHarnessAdapterOptions & OmpDiscoveryOptions) {
@@ -179,10 +184,12 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   }
 
   private async refreshWorkspaceCatalog(): Promise<HarnessWorkspace[]> {
-    // Dormant transcripts and quiet directories dominate a long-lived OMP home. Re-checking every
-    // one of them on every scan costs a stat each; revisit them only on a periodic full sweep.
-    // New files and changed directories are never skipped, so new sessions appear next scan.
+    // Settled transcripts and quiet directories dominate a long-lived OMP home: stat'ing,
+    // resolving and listing all of them on every scan is nearly all of its cost. Settled
+    // transcripts are re-stat'ed every few scans and re-resolved on full sweeps; new files and
+    // changed directories are always seen on the next scan.
     const fullSweep = this.scansSinceFullSweep === 0;
+    const recheckSettled = this.scansSinceFullSweep % SETTLED_RECHECK_EVERY_SCANS === 0;
     this.scansSinceFullSweep = (this.scansSinceFullSweep + 1) % FULL_SWEEP_EVERY_SCANS;
     this.directoryCache.revalidateQuiet = fullSweep;
     const discoveryOptions = { ...this.discoveryOptions, directoryCache: this.directoryCache };
@@ -191,23 +198,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
       discoveryOptions.inspectTranscript ||
       discoveryOptions.onInspectTranscript
     ) {
-      const inspectTranscript = discoveryOptions.inspectTranscript ?? inspectTranscriptFile;
-      // A transcript is dormant when inspection found nothing to follow, e.g. it has been
-      // untouched for longer than the active window.
-      const dormant = new Set<string>();
-      const catalog = await buildOmpDiscoveryCatalog({
-        ...discoveryOptions,
-        inspectTranscript: async (filePath, options) => {
-          if (!fullSweep && this.dormantTranscripts.has(filePath)) {
-            dormant.add(filePath);
-            return null;
-          }
-          const transcript = await inspectTranscript(filePath, options);
-          if (transcript === null) dormant.add(filePath);
-          return transcript;
-        },
-      });
-      this.dormantTranscripts = dormant;
+      const catalog = await buildOmpDiscoveryCatalog(discoveryOptions);
       this.transcriptCache.clear();
       this.cachedCatalog = catalog;
       return catalog.workspaces;
@@ -221,6 +212,11 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     const catalog = await buildOmpDiscoveryCatalog({
       ...discoveryOptions,
       inspectTranscript: async (filePath, options) => {
+        const cached = this.transcriptCache.get(filePath);
+        if (cached && !recheckSettled) {
+          cycleCache.set(filePath, cached);
+          return cached.transcript;
+        }
         const before = await getTranscriptFileIdentity(filePath);
         const nowMs =
           options?.now instanceof Date
@@ -230,10 +226,13 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
               : Date.now();
         const ageMs = before ? nowMs - before.mtimeMs : Number.NEGATIVE_INFINITY;
         const historical = before !== null && ageMs > TRANSCRIPT_STATUS_SETTLE_MS;
-        const cached = this.transcriptCache.get(filePath);
 
         if (before && historical && cached && sameTranscriptIdentity(before, cached.identity)) {
-          const transcript = await refreshCachedCanonicalPaths(cached.transcript);
+          // An unchanged file keeps its inspection; its canonical paths (two resolutions per
+          // transcript, the bulk of a scan) are refreshed on full sweeps only.
+          const transcript = fullSweep
+            ? await refreshCachedCanonicalPaths(cached.transcript)
+            : cached.transcript;
           cycleCache.set(filePath, { identity: before, transcript });
           return transcript;
         }

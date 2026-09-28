@@ -1008,6 +1008,8 @@ export interface TranscriptDirectoryCache {
   readonly listings: Map<string, CachedDirectoryListing>;
   /** Candidate roots that did not exist (most workspaces have no project-local `.omp`). */
   readonly missing: Set<string>;
+  /** Resolved workspace roots, cleared on each full sweep. */
+  readonly realpaths: Map<string, string>;
   /** Explicit roots the listings were computed for; cache-subtree exclusion depends on them. */
   rootsKey?: string;
   /**
@@ -1184,6 +1186,17 @@ export async function buildOmpDiscoveryCatalog(
   const workspacesMap = new Map<string, HarnessWorkspace>();
 
   const cwd = path.resolve(options?.cwd ?? process.cwd());
+  // Workspace roots are resolved on every scan, thousands of them on a long-lived OMP home;
+  // between full sweeps the previous resolution stands.
+  const scanCache = options?.directoryCache;
+  if (scanCache?.revalidateQuiet) scanCache.realpaths.clear();
+  const resolveWorkspaceRoot = async (rootPath: string, fallback: string): Promise<string> => {
+    const known = scanCache?.realpaths.get(rootPath);
+    if (known !== undefined) return known;
+    const resolved = await fsp.realpath(rootPath).catch(() => fallback);
+    scanCache?.realpaths.set(rootPath, resolved);
+    return resolved;
+  };
 
   // 1. Check if cwd has .omp directory
   try {
@@ -1293,7 +1306,7 @@ export async function buildOmpDiscoveryCatalog(
           if (workspaceKey.startsWith("-")) {
             rootPath = `/${workspaceKey.slice(1).replace(/-/g, "/")}`;
           }
-          const realRoot = await fsp.realpath(rootPath).catch(() => rootPath);
+          const realRoot = await resolveWorkspaceRoot(rootPath, rootPath);
           if (!workspacesMap.has(realRoot)) {
             const workspaceId = createWorkspaceIdFromPath(realRoot);
             workspacesMap.set(realRoot, {
@@ -1400,9 +1413,10 @@ export async function buildOmpDiscoveryCatalog(
   const transcriptMatchIndex = createTranscriptMatchIndex(inspectedTranscripts);
 
   for (const workspace of allWorkspaces) {
-    const realWsRoot = await fsp
-      .realpath(workspace.rootPath)
-      .catch(() => path.resolve(workspace.rootPath));
+    const realWsRoot = await resolveWorkspaceRoot(
+      workspace.rootPath,
+      path.resolve(workspace.rootPath),
+    );
     const resolvedRoot = path.resolve(workspace.rootPath);
     const workspaceKeys = getWorkspaceKeys(workspace);
     const matchingTranscriptIndexes = findMatchingTranscriptIndexes(

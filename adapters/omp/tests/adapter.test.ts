@@ -548,6 +548,11 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       await fsp.utimes(transcriptPath, historicalTime, historicalTime);
 
       const adapter = new OmpHarnessAdapter({ customHome: ompHome, activeOnly: false });
+      // Settled transcripts are re-checked every third scan; three scans always include one.
+      const rescan = async () => {
+        for (let i = 0; i < 2; i++) await adapter.listWorkspaces();
+        return adapter.listWorkspaces();
+      };
       const [firstWorkspaces] = await Promise.all([
         adapter.listWorkspaces(),
         adapter.listWorkspaces(),
@@ -570,26 +575,26 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
         })}\n`,
       );
       await fsp.utimes(transcriptPath, historicalTime, historicalTime);
-      const afterAppend = (await adapter.listWorkspaces()).find(
+      const afterAppend = (await rescan()).find(
         (item) => item.rootPath === wsPath,
       )!;
       expect(inspectSpy).toHaveBeenCalledTimes(2);
       expect((await adapter.listSessions(afterAppend))[0].status).toBe("completed");
-      await adapter.listWorkspaces();
+      await rescan();
       expect(inspectSpy).toHaveBeenCalledTimes(2);
 
       const replacementPath = path.join(sessionsDir, "replacement.tmp");
       await fsp.writeFile(replacementPath, sessionLine("atomic-replacement"));
       await fsp.utimes(replacementPath, historicalTime, historicalTime);
       await fsp.rename(replacementPath, transcriptPath);
-      const afterReplace = (await adapter.listWorkspaces()).find(
+      const afterReplace = (await rescan()).find(
         (item) => item.rootPath === wsPath,
       )!;
       expect(inspectSpy).toHaveBeenCalledTimes(3);
       expect(
         (await adapter.listSessions(afterReplace)).map((session) => session.sessionId),
       ).toEqual(["atomic-replacement"]);
-      await adapter.listWorkspaces();
+      await rescan();
       expect(inspectSpy).toHaveBeenCalledTimes(3);
     } finally {
       inspectSpy.mockRestore();

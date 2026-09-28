@@ -33,6 +33,11 @@ const STORE_DIR = "private-values";
 const MAX_ENTRIES = 4096;
 const REDACTION_KEY_FILE = "redaction-key";
 const REDACTION_KEY_BYTES = 32;
+/**
+ * Legacy aliases are written back at most this often. Rewriting the whole file per new alias made
+ * capture O(n^2) in the store size: a heavy transcript mints thousands of aliases in seconds.
+ */
+const LEGACY_FLUSH_DELAY_MS = 1_000;
 const PLACEHOLDER_PATTERN = /\[REDACTED_[A-Z_]+:[^\]]+\]/g;
 const PLACEHOLDER_TEST = /\[REDACTED_[A-Z_]+:[^\]]+\]/;
 
@@ -147,21 +152,46 @@ function snapshot(
 }
 
 /**
+ * Legacy-file state shared by every instance in this process that names the same file, so an
+ * alias one instance has not yet written back is still visible to the others.
+ */
+interface LegacyFileState {
+  entries: Map<string, PrivateEntry> | undefined;
+  /** Stat signature of the legacy file last read or written in this process. */
+  loadedSignature: string | undefined;
+  /** Entries set since the last write-back; re-applied over any reload until written. */
+  readonly pending: Map<string, PrivateEntry>;
+  flushTimer: NodeJS.Timeout | undefined;
+  flushOnExit: (() => void) | undefined;
+}
+
+/**
  * New references are immutable owner-only files, atomically created without overwriting a winner.
  * This removes the concurrent shared-JSON read/modify/write race for captured workflow values.
  * Legacy entries remain readable. The cache is bounded; referenced V2 files are not evicted.
  */
 export class FilePrivateValueStore implements PrivateValueStore {
   private static shared: FilePrivateValueStore | undefined;
+  private static readonly legacyStates = new Map<string, LegacyFileState>();
   private readonly file: string;
-  private entries: Map<string, PrivateEntry> | undefined;
-  /** Stat signature of the legacy file last read or written by this instance. */
-  private loadedSignature: string | undefined;
+  private readonly legacy: LegacyFileState;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
   private deviceRedactionKey: Buffer | undefined;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
+    let legacy = FilePrivateValueStore.legacyStates.get(this.file);
+    if (!legacy) {
+      legacy = {
+        entries: undefined,
+        loadedSignature: undefined,
+        pending: new Map(),
+        flushTimer: undefined,
+        flushOnExit: undefined,
+      };
+      FilePrivateValueStore.legacyStates.set(this.file, legacy);
+    }
+    this.legacy = legacy;
   }
 
   static default(): FilePrivateValueStore {
@@ -275,9 +305,11 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   private load(): Map<string, PrivateEntry> {
+    const legacy = this.legacy;
     const signature = this.legacySignature();
-    if (this.entries && signature === this.loadedSignature) return this.entries;
-    this.entries = new Map();
+    if (legacy.entries && signature === legacy.loadedSignature) return legacy.entries;
+    const entries = new Map<string, PrivateEntry>();
+    legacy.entries = entries;
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(this.file, "utf8"));
       if (isPlainObject(raw)) {
@@ -286,7 +318,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
             isPlainObject(entry) && isPlainObject(entry.origin)
               ? (entry.origin as PrivateValueOrigin)
               : undefined;
-          this.entries.set(key, {
+          entries.set(key, {
             value: isPlainObject(entry) && "value" in entry ? entry.value : entry,
             at: isPlainObject(entry) && typeof entry.at === "number" ? entry.at : 0,
             ...(origin ? { origin } : {}),
@@ -296,11 +328,71 @@ export class FilePrivateValueStore implements PrivateValueStore {
           });
         }
       }
-      this.loadedSignature = signature;
+      legacy.loadedSignature = signature;
     } catch {
       // Existing behavior: unavailable legacy values fail resolution, never become guessed data.
     }
-    return this.entries;
+    // Another process replaced the file: entries not yet written back still stand over it.
+    for (const [key, entry] of legacy.pending) {
+      entries.delete(key);
+      entries.set(key, entry);
+    }
+    evictOldest(entries);
+    return entries;
+  }
+
+  /** Writes pending legacy entries now. Runs on its timer and before the process exits. */
+  flush(): void {
+    const legacy = this.legacy;
+    if (legacy.flushTimer) {
+      clearTimeout(legacy.flushTimer);
+      legacy.flushTimer = undefined;
+    }
+    if (legacy.flushOnExit) {
+      process.off("exit", legacy.flushOnExit);
+      legacy.flushOnExit = undefined;
+    }
+    if (legacy.pending.size === 0) return;
+    const entries = this.load();
+    const directory = path.dirname(this.file);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(directory, 0o700);
+    } catch {
+      /* Filesystems without POSIX modes. */
+    }
+    const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      fs.renameSync(temporary, this.file);
+      legacy.loadedSignature = this.legacySignature();
+      legacy.pending.clear();
+      try {
+        fs.chmodSync(this.file, 0o600);
+      } catch {
+        /* Filesystems without POSIX modes. */
+      }
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+  }
+
+  private scheduleLegacyFlush(): void {
+    const legacy = this.legacy;
+    if (legacy.flushTimer) return;
+    legacy.flushTimer = setTimeout(() => {
+      try {
+        this.flush();
+      } catch {
+        // Entries stay pending in memory; the next set() schedules another attempt.
+      }
+    }, LEGACY_FLUSH_DELAY_MS);
+    legacy.flushTimer.unref();
+    legacy.flushOnExit = () => this.flush();
+    process.once("exit", legacy.flushOnExit);
   }
 
   /**
@@ -366,34 +458,18 @@ export class FilePrivateValueStore implements PrivateValueStore {
     // Legacy placeholder keys are aliases, not unique reference identities.
     entries.delete(key);
     entries.set(key, entry);
-    while (entries.size > MAX_ENTRIES) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
-    }
-    const directory = path.dirname(this.file);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    try {
-      fs.chmodSync(directory, 0o700);
-    } catch {
-      /* Filesystems without POSIX modes. */
-    }
-    const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), {
-        flag: "wx",
-        mode: 0o600,
-      });
-      fs.renameSync(temporary, this.file);
-      this.loadedSignature = this.legacySignature();
-      try {
-        fs.chmodSync(this.file, 0o600);
-      } catch {
-        /* Filesystems without POSIX modes. */
-      }
-    } finally {
-      fs.rmSync(temporary, { force: true });
-    }
+    this.legacy.pending.set(key, entry);
+    evictOldest(entries);
+    if (this.legacy.pending.size >= MAX_ENTRIES) this.flush();
+    else this.scheduleLegacyFlush();
+  }
+}
+
+function evictOldest(entries: Map<string, PrivateEntry>): void {
+  while (entries.size > MAX_ENTRIES) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    entries.delete(oldest);
   }
 }
 
