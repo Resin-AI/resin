@@ -310,8 +310,24 @@ export class FilePrivateValueStore implements PrivateValueStore {
     if (legacy.entries && signature === legacy.loadedSignature) return legacy.entries;
     const entries = new Map<string, PrivateEntry>();
     legacy.entries = entries;
+    let text: string | undefined;
     try {
-      const raw: unknown = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      text = fs.readFileSync(this.file, "utf8");
+    } catch {
+      // Existing behavior: unavailable legacy values fail resolution, never become guessed data.
+    }
+    if (text !== undefined) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        // Never treat a torn store as empty: the next write-back would erase every alias in it.
+        // Keep it aside for recovery and fail this operation so the caller retries.
+        const preserved = `${this.file}.corrupt-${Date.now()}`;
+        fs.renameSync(this.file, preserved);
+        legacy.entries = undefined;
+        throw new Error(`Corrupt local private value store; preserved as '${preserved}'`);
+      }
       if (isPlainObject(raw)) {
         for (const [key, entry] of Object.entries(raw)) {
           const origin =
@@ -329,8 +345,6 @@ export class FilePrivateValueStore implements PrivateValueStore {
         }
       }
       legacy.loadedSignature = signature;
-    } catch {
-      // Existing behavior: unavailable legacy values fail resolution, never become guessed data.
     }
     // Another process replaced the file: entries not yet written back still stand over it.
     for (const [key, entry] of legacy.pending) {
@@ -363,11 +377,25 @@ export class FilePrivateValueStore implements PrivateValueStore {
     }
     const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries)), {
-        flag: "wx",
-        mode: 0o600,
-      });
+      const fd = fs.openSync(temporary, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(Object.fromEntries(entries)), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(temporary, this.file);
+      if (process.platform !== "win32") {
+        let directoryFd: number | null = null;
+        try {
+          directoryFd = fs.openSync(directory, "r");
+          fs.fsyncSync(directoryFd);
+        } catch {
+          // Some filesystems do not support directory fsync; the file itself is already synced.
+        } finally {
+          if (directoryFd !== null) fs.closeSync(directoryFd);
+        }
+      }
       legacy.loadedSignature = this.legacySignature();
       legacy.pending.clear();
       try {

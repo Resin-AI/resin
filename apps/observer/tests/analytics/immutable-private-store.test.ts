@@ -174,4 +174,18 @@ describe("immutable private reference persistence", () => {
     for (const i of [0, 999, 1999])
       expect(reopened.get(`[REDACTED_PATH:${i}]`)).toBe(`/work/file-${i}`);
   });
+
+  it("keeps a torn legacy store aside instead of treating it as empty", () => {
+    const root = directory();
+    const dir = path.join(root, "private-values");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "private-values.json"), '{"[REDACTED_SECRET:a]": {"value": "tor');
+    const store = new FilePrivateValueStore(root);
+    expect(() => store.get("[REDACTED_SECRET:a]")).toThrow("Corrupt local private value store");
+    const preserved = readdirSync(dir).filter((name) => name.includes(".corrupt-"));
+    expect(preserved).toHaveLength(1);
+    store.set("[REDACTED_SECRET:b]", "fresh", { workspaceId: "ws-legacy" });
+    store.flush();
+    expect(new FilePrivateValueStore(root).get("[REDACTED_SECRET:b]")).toBe("fresh");
+  });
 });

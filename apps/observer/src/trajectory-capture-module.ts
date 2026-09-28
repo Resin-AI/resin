@@ -409,6 +409,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         pipeline: this.normalizationPipeline,
         observationClient: clientProxy,
         attributionResolver,
+        privateValueStore: FilePrivateValueStore.default(),
         logger: this.logger,
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
@@ -875,6 +876,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       });
       throw err;
     } finally {
+      // Shutdown (SIGTERM/SIGINT or IPC) always persists pending placeholder aliases.
+      FilePrivateValueStore.default().flush();
       this.captureCoordinator.clearComputationEvidence();
       this.captureCoordinator.clearCommandSequenceEvidence();
     }
