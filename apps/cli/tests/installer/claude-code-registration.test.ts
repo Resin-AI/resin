@@ -72,7 +72,7 @@ describe("Claude Code registration on a temporary HOME", () => {
     expect(await fs.readFile(guidancePath, "utf8")).toBe("# My rules\n");
   });
 
-  it("follows CLAUDE_CONFIG_DIR and deletes a guidance file holding only the block", async () => {
+  it("follows CLAUDE_CONFIG_DIR and removes the config and guidance Resin created there", async () => {
     const configDir = path.join(home, "profile");
     const env = { HOME: home, CLAUDE_CONFIG_DIR: configDir };
 
@@ -87,6 +87,6 @@ describe("Claude Code registration on a temporary HOME", () => {
 
     await removeHarnessMcpConfigurations({ env });
     await expect(fs.access(guidancePath)).rejects.toThrow();
-    expect(JSON.parse(await fs.readFile(configPath, "utf8")).mcpServers).toEqual({});
+    await expect(fs.access(configDir)).rejects.toThrow();
   });
 });

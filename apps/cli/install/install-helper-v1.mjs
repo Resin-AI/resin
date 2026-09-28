@@ -8678,6 +8678,8 @@ var init_harness_reconciler = __esm({
       originalContentHash: external_exports.string().regex(SHA256_PATTERN),
       plannedContentHash: external_exports.string().regex(SHA256_PATTERN),
       originalExisted: external_exports.boolean(),
+      /** Directories (deepest first) that did not exist before Resin created the target file. */
+      createdDirectories: external_exports.array(external_exports.string().min(1)).optional(),
       createdAt: external_exports.string().datetime(),
       timestamp: external_exports.number().int().nonnegative()
     }).strict();
@@ -9035,6 +9037,34 @@ var init_harness_reconciler = __esm({
         } catch (error) {
           if (isMissingFileError(error)) {
             return [];
+          }
+          throw error;
+        }
+      }
+      async removeDirectoryWithoutFiles(directoryPath) {
+        let entries;
+        try {
+          entries = await fs8.readdir(directoryPath, { withFileTypes: true });
+        } catch (error) {
+          if (isMissingFileError(error)) {
+            return false;
+          }
+          throw error;
+        }
+        let empty = true;
+        for (const entry of entries) {
+          empty = entry.isDirectory() && !entry.isSymbolicLink() && await this.removeDirectoryWithoutFiles(path27.join(directoryPath, entry.name)) && empty;
+        }
+        if (!empty) {
+          return false;
+        }
+        try {
+          await fs8.rmdir(directoryPath);
+          return true;
+        } catch (error) {
+          const code = error.code;
+          if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") {
+            return false;
           }
           throw error;
         }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { type Dirent, constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -73,6 +73,8 @@ const OwnedBackupMetadataSchema = z
     originalContentHash: z.string().regex(SHA256_PATTERN),
     plannedContentHash: z.string().regex(SHA256_PATTERN),
     originalExisted: z.boolean(),
+    /** Directories (deepest first) that did not exist before Resin created the target file. */
+    createdDirectories: z.array(z.string().min(1)).optional(),
     createdAt: z.string().datetime(),
     timestamp: z.number().int().nonnegative(),
   })
@@ -98,6 +100,11 @@ export type HarnessRegistrationCondition =
  */
 export interface HarnessReconcileFsBridge extends ConfigFsBridge {
   listFiles?(directoryPath: string): Promise<readonly string[]>;
+  /**
+   * Removes `directoryPath` and its subdirectories when the tree holds no files or symlinks;
+   * resolves false and leaves the tree alone otherwise.
+   */
+  removeDirectoryWithoutFiles?(directoryPath: string): Promise<boolean>;
   writeFileExclusive?(filePath: string, content: string): Promise<boolean>;
   compareAndSwapFile?(
     filePath: string,
@@ -646,6 +653,39 @@ export class ReconciliationNodeFsBridge implements HarnessReconcileFsBridge {
     } catch (error: unknown) {
       if (isMissingFileError(error)) {
         return [];
+      }
+      throw error;
+    }
+  }
+
+  async removeDirectoryWithoutFiles(directoryPath: string): Promise<boolean> {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(directoryPath, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return false;
+      }
+      throw error;
+    }
+    let empty = true;
+    for (const entry of entries) {
+      empty =
+        entry.isDirectory() &&
+        !entry.isSymbolicLink() &&
+        (await this.removeDirectoryWithoutFiles(path.join(directoryPath, entry.name))) &&
+        empty;
+    }
+    if (!empty) {
+      return false;
+    }
+    try {
+      await fs.rmdir(directoryPath);
+      return true;
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") {
+        return false;
       }
       throw error;
     }
@@ -1319,9 +1359,17 @@ export class HarnessReconciler {
     const targetPath = resolveHarnessConfigPath(harnessId, options.customHome, options.env);
     const displayName = getHarnessDefinition(harnessId).displayName;
     let configExists: boolean;
+    // A harness-specific config directory (e.g. ~/.codex) signals presence even before the
+    // harness writes its config file. Files directly in the home directory have no such signal.
+    const configDirectory = path.dirname(targetPath);
+    let configDirectoryExists = false;
 
     try {
       configExists = await options.fsBridge.exists(targetPath);
+      configDirectoryExists =
+        !configExists &&
+        path.resolve(configDirectory) !== path.resolve(options.customHome) &&
+        (await options.fsBridge.exists(configDirectory));
     } catch (error: unknown) {
       return {
         harnessId,
@@ -1357,7 +1405,10 @@ export class HarnessReconciler {
     }
 
     const installed =
-      installationAlreadyKnown || installation?.isInstalled === true || configExists;
+      installationAlreadyKnown ||
+      installation?.isInstalled === true ||
+      configExists ||
+      configDirectoryExists;
     if (!installed) {
       return {
         harnessId,
@@ -1583,8 +1634,19 @@ export class HarnessReconciler {
     }
 
     try {
+      // Measured before locking: the lock itself creates the parent directory.
+      const createdDirectories =
+        originalContent === null
+          ? await findMissingAncestors(plan.targetPath, adapterOptions.fsBridge)
+          : [];
       return await this.withConfigLock(adapterOptions.fsBridge, plan.targetPath, async () =>
-        this.applyAndVerifyPlanLocked(plan, originalContent, adapterOptions, now),
+        this.applyAndVerifyPlanLocked(
+          plan,
+          originalContent,
+          adapterOptions,
+          now,
+          createdDirectories,
+        ),
       );
     } catch (error: unknown) {
       return {
@@ -1605,6 +1667,7 @@ export class HarnessReconciler {
       readonly fsBridge: HarnessReconcileFsBridge;
     },
     now: () => Date,
+    createdDirectories: readonly string[],
   ): Promise<MutationOutcome> {
     let latestContent: string | null;
     try {
@@ -1626,6 +1689,7 @@ export class HarnessReconciler {
         originalContent,
         now,
         adapterOptions.fsBridge,
+        createdDirectories,
       );
     } catch (error: unknown) {
       return {
@@ -1720,6 +1784,7 @@ export class HarnessReconciler {
     originalContent: string | null,
     now: () => Date,
     fsBridge: HarnessReconcileFsBridge,
+    createdDirectories: readonly string[],
   ): Promise<ConfigBackup> {
     let timestamp = Math.max(now().getTime(), this.lastBackupTimestamp + 1);
     for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -1738,6 +1803,7 @@ export class HarnessReconciler {
         originalContentHash: computeConfigHash(originalBytes),
         plannedContentHash,
         originalExisted: originalContent !== null,
+        ...(createdDirectories.length === 0 ? {} : { createdDirectories: [...createdDirectories] }),
         createdAt,
         timestamp,
       };
@@ -1956,10 +2022,44 @@ export class HarnessReconciler {
     this.knownBackups.set(targetPath, paths);
   }
 
-  private async pruneBackups(
+  /**
+   * Undoes Resin's footprint on one harness config path during uninstall. Deletes the target
+   * only when authenticated backups prove every byte was written by Resin into a file it created,
+   * then deletes Resin's authenticated backups. Returns the directories Resin created for the
+   * file (deepest first) so the caller can remove them once they are empty.
+   */
+  async releaseOwnedConfig(
     targetPath: string,
     fsBridge: HarnessReconcileFsBridge,
-  ): Promise<void> {
+  ): Promise<{ readonly removedTarget: boolean; readonly createdDirectories: readonly string[] }> {
+    // Locking creates the parent directory, so never lock a path Resin left no trace under.
+    if (!(await fsBridge.exists(path.dirname(targetPath)))) {
+      return { removedTarget: false, createdDirectories: [] };
+    }
+    return this.withConfigLock(fsBridge, targetPath, async () => {
+      const backups = await this.listAuthenticatedBackups(targetPath, fsBridge);
+      const current = await fsBridge.readFile(targetPath);
+      const removedTarget =
+        current !== null &&
+        isResinAuthoredContent(current, backups) &&
+        (await this.unlinkIfUnchanged(fsBridge, targetPath, current));
+      for (const backup of backups) {
+        await fsBridge.unlink(backup.metadata.metadataPath);
+        await fsBridge.unlink(backup.backupPath);
+      }
+      this.knownBackups.delete(targetPath);
+      const creation = backups.find((backup) => !backup.metadata.originalExisted);
+      const createdDirectories = (creation?.metadata.createdDirectories ?? []).filter((directory) =>
+        isStrictAncestor(directory, targetPath),
+      );
+      return { removedTarget, createdDirectories };
+    });
+  }
+
+  private async listAuthenticatedBackups(
+    targetPath: string,
+    fsBridge: HarnessReconcileFsBridge,
+  ): Promise<AuthenticatedBackup[]> {
     const directoryPath = path.dirname(targetPath);
     const candidates = new Set(this.knownBackups.get(targetPath) ?? []);
     if (fsBridge.listFiles !== undefined) {
@@ -1980,10 +2080,7 @@ export class HarnessReconciler {
       }
     }
 
-    const authenticated: Array<{
-      readonly backupPath: string;
-      readonly metadata: OwnedBackupMetadata;
-    }> = [];
+    const authenticated: AuthenticatedBackup[] = [];
     for (const backupPath of candidates) {
       try {
         authenticated.push({
@@ -1991,27 +2088,87 @@ export class HarnessReconciler {
           metadata: await this.readOwnedBackupMetadata(targetPath, backupPath, fsBridge),
         });
       } catch {
-        // Unknown or tampered files are never eligible for retention deletion.
+        // Unknown or tampered files are never eligible for deletion.
       }
     }
-    authenticated.sort(
+    return authenticated.sort(
       (left, right) =>
         right.metadata.timestamp - left.metadata.timestamp ||
         right.backupPath.localeCompare(left.backupPath),
     );
+  }
 
-    for (const obsolete of authenticated.slice(HARNESS_BACKUP_RETENTION)) {
+  private async pruneBackups(
+    targetPath: string,
+    fsBridge: HarnessReconcileFsBridge,
+  ): Promise<void> {
+    const authenticated = await this.listAuthenticatedBackups(targetPath, fsBridge);
+    const retained = new Set(authenticated.slice(0, HARNESS_BACKUP_RETENTION));
+    // The record of Resin creating the file is what lets uninstall remove it again.
+    const creation = authenticated.find((backup) => !backup.metadata.originalExisted);
+    if (creation !== undefined) {
+      retained.add(creation);
+    }
+    for (const obsolete of authenticated) {
+      if (retained.has(obsolete)) continue;
       await fsBridge.unlink(obsolete.metadata.metadataPath);
       await fsBridge.unlink(obsolete.backupPath);
-      candidates.delete(obsolete.backupPath);
     }
     this.knownBackups.set(
       targetPath,
-      new Set(
-        authenticated.slice(0, HARNESS_BACKUP_RETENTION).map((candidate) => candidate.backupPath),
-      ),
+      new Set([...retained].map((candidate) => candidate.backupPath)),
     );
   }
+}
+
+interface AuthenticatedBackup {
+  readonly backupPath: string;
+  readonly metadata: OwnedBackupMetadata;
+}
+
+/**
+ * True when `content` is exactly what Resin last wrote and each earlier Resin write started from
+ * the content of the one before it, back to a write that created the file. Any foreign edit, or
+ * a pruned gap in the chain, breaks the proof.
+ */
+function isResinAuthoredContent(
+  content: string,
+  newestFirst: readonly AuthenticatedBackup[],
+): boolean {
+  let expectedPlannedHash = computeConfigHash(content);
+  for (const backup of newestFirst) {
+    if (backup.metadata.plannedContentHash !== expectedPlannedHash) {
+      return false;
+    }
+    if (!backup.metadata.originalExisted) {
+      return true;
+    }
+    expectedPlannedHash = backup.metadata.originalContentHash;
+  }
+  return false;
+}
+
+function isStrictAncestor(directory: string, filePath: string): boolean {
+  const relative = path.relative(directory, filePath);
+  return (
+    path.isAbsolute(directory) &&
+    relative !== "" &&
+    !relative.startsWith("..") &&
+    !path.isAbsolute(relative)
+  );
+}
+
+async function findMissingAncestors(
+  targetPath: string,
+  fsBridge: HarnessReconcileFsBridge,
+): Promise<string[]> {
+  const missing: string[] = [];
+  let directory = path.dirname(path.resolve(targetPath));
+  while (directory !== path.dirname(directory) && !(await fsBridge.exists(directory))) {
+    missing.push(directory);
+    directory = path.dirname(directory);
+  }
+  return missing;
 }
 
 /**

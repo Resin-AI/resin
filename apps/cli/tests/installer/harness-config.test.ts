@@ -367,6 +367,16 @@ describe("harness adapter operations", () => {
       customHome: "/home/developer",
       env: { HOME: "/home/developer", CODEX_HOME: "/profiles/codex" },
       fsBridge: bridge,
+      probeHarness: async ({ harnessId, targetPath }) => ({
+        harnessId,
+        displayName: harnessId,
+        version: "test",
+        isInstalled: true,
+        status: "ready",
+        configPath: targetPath,
+        detectedAt: "2026-08-28T12:00:00.000Z",
+        metadata: {},
+      }),
     });
 
     expect(result.success).toBe(true);

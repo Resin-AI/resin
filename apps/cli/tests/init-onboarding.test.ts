@@ -199,6 +199,8 @@ describe("init onboarding & pairing workflow", () => {
       .mockImplementation(() => {
         throw new Error("No service manager may be used");
       });
+    // Claude Code is present: its user config already exists.
+    await bridge.writeFile(path.join(home, ".claude.json"), "{}\n");
     const serviceRunner = { run: vi.fn() };
     const readinessVerifier = vi.fn();
     const result = await captureOutput(() =>
@@ -609,6 +611,8 @@ describe("init onboarding & pairing workflow", () => {
     const openBrowser = vi.fn();
     const codexHome = path.join(home, "active-codex");
     const publicSourceRoot = "/work/resin";
+    // Codex is present at its active home: its config already exists.
+    await bridge.writeFile(path.join(codexHome, "config.toml"), 'model = "o3"\n');
 
     await bridge.writeFile(
       path.join(home, ".resin", "versions", "v1.0.32", "version.json"),

@@ -943,7 +943,6 @@ export class HarnessConfigOrchestrator {
     const reconciler = new HarnessReconciler();
     const report = await reconciler.reconcile({
       harnesses: targetHarnesses,
-      installedHarnesses: options.fsBridge === undefined ? undefined : targetHarnesses,
       customHome,
       env,
       resinCommand: options.resinCommand ?? resolveInstalledResinMcpCommand(customHome),
