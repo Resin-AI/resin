@@ -8,7 +8,7 @@ import { type DaemonConfig, DaemonConfigSchema } from "../src/config.js";
 import { IpcClient } from "../src/ipc/client.js";
 import { FrameDecoder, MAX_FRAME_SIZE, encodeFrame } from "../src/ipc/framing.js";
 import { IPC_ERROR_CODES, type IpcRequest, type IpcResponse } from "../src/ipc/protocol.js";
-import { IpcServer } from "../src/ipc/server.js";
+import { IpcServer, assertUnixSocketPathFits } from "../src/ipc/server.js";
 import { createInMemoryIpcPair } from "../src/ipc/transport.js";
 import type { DaemonModule, ModuleContext, ModuleLifecycleState } from "../src/lifecycle.js";
 import type { JsonObject } from "../src/normalization/redaction.js";
@@ -187,6 +187,27 @@ describe("ipc", () => {
   });
 
   describe("Unix Domain Socket Transport", () => {
+    it("refuses to start on a socket path longer than the platform can bind", async () => {
+      if (process.platform === "win32") return;
+      const tempDir = path.join(os.tmpdir(), `resin-ipc-long-${Date.now()}`, "x".repeat(120));
+      const socketPath = path.join(tempDir, "daemon.sock");
+      const config = DaemonConfigSchema.parse({ logLevel: "silent", socketPath });
+      const supervisor = new DaemonSupervisor({ config });
+      await supervisor.start();
+      const server = new IpcServer({ supervisor, socketPath });
+      await expect(server.start()).rejects.toThrow(/Unix socket limit.*RESIN_SOCKET_PATH/s);
+      expect(server.listening).toBe(false);
+      await supervisor.stop();
+    });
+
+    it("applies the macOS 103-byte limit where the macOS kernel would silently misbind", () => {
+      const at = (bytes: number) => `/${"a".repeat(bytes - 1)}`;
+      expect(() => assertUnixSocketPathFits(at(103), "darwin")).not.toThrow();
+      expect(() => assertUnixSocketPathFits(at(104), "darwin")).toThrow(/103-byte/);
+      expect(() => assertUnixSocketPathFits(at(107), "linux")).not.toThrow();
+      expect(() => assertUnixSocketPathFits(at(108), "linux")).toThrow(/107-byte/);
+    });
+
     it("communicates successfully over a real Unix domain socket file without credentials", async () => {
       const tempDir = path.join(os.tmpdir(), `resin-ipc-uds-${Date.now()}`);
       await fs.promises.mkdir(tempDir, { recursive: true });
