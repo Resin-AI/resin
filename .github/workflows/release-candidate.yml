@@ -359,7 +359,8 @@ jobs:
           $bytes = [byte[]]::new(24)
           [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
           $password = 'Rp9!' + ([Convert]::ToBase64String($bytes) -replace '[+/=]', 'x')
-          net user $env:PROBE_USER $password /add /expires:never | Out-Null
+          # /y answers net's "longer than 14 characters" confirmation, which fails without a console.
+          net user $env:PROBE_USER $password /add /expires:never /y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Could not create local user $env:PROBE_USER" }
           icacls $probeDir /grant "${env:PROBE_USER}:(OI)(CI)M" | Out-Null
           $credential = [pscredential]::new($env:PROBE_USER, (ConvertTo-SecureString $password -AsPlainText -Force))
@@ -390,7 +391,14 @@ jobs:
           $resinHome = "$env:USERPROFILE\.resin"
           & "$resinHome\bin\resin.cmd" uninstall --non-interactive --purge-all --json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Start-Sleep -Seconds 2
+          # Uninstall hands the home (including the running launcher) to a hidden cleanup that
+          # deletes it once uninstall has exited; give that cleanup time to finish.
+          $deadline = (Get-Date).AddSeconds(60)
+          do {
+            Start-Sleep -Seconds 2
+            $pending = (Test-Path $resinHome) -or
+              @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*\.resin\*' }).Count -gt 0
+          } while ($pending -and (Get-Date) -lt $deadline)
           $left = @()
           if (Get-ScheduledTask -TaskPath '\Resin\' -ErrorAction SilentlyContinue) { $left += 'Scheduled Task \Resin\' }
           if (Test-Path $resinHome) { $left += "$resinHome ($((Get-ChildItem -Recurse -Force $resinHome | Measure-Object).Count) entries)" }
