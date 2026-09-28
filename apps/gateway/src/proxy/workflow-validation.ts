@@ -362,6 +362,7 @@ function iterationDemonstration(
       callable: call.callable,
       arguments: call.arguments,
       result: call.result.value,
+      resultRedacted: call.result.redacted,
       hiddenDependencies: hidden.get(stepId) ?? [],
       privatePositions: call.privatePositions,
       ...(call.workspaceRoot === undefined || !planRoots.has(stepId)
@@ -574,12 +575,13 @@ function derivationReadsPrivate(
   const tainted = new Set(
     plan.steps
       .filter((step) =>
-        demonstrations.some(
-          ({ recording }) =>
-            recording
-              .get(step.id)
-              ?.privatePositions?.some((position) => position.redacted === true) === true,
-        ),
+        demonstrations.some(({ recording }) => {
+          const recorded = recording.get(step.id);
+          return (
+            recorded?.resultRedacted === true ||
+            recorded?.privatePositions?.some((position) => position.redacted === true) === true
+          );
+        }),
       )
       .map((step) => step.id),
   );

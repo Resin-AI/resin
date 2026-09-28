@@ -10,6 +10,7 @@
  * lock, and a ledger this device cannot read refuses every ask rather than forgetting its count.
  */
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -116,10 +117,28 @@ export class FileValidationAskLedger {
       }
       try {
         if (Date.now() - fs.statSync(lockPath).mtimeMs > STALE_LOCK_MS) {
-          fs.rmSync(lockPath, { force: true });
+          // Only one waiter can move the stale lock aside; the others find it gone and retry `wx`,
+          // so a lock another waiter has just re-taken is never removed.
+          const aside = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+          try {
+            fs.renameSync(lockPath, aside);
+            // Between the stat and the rename another waiter may have broken the stale lock and
+            // taken a fresh one: put a fresh lock back rather than remove it.
+            if (Date.now() - fs.statSync(aside).mtimeMs <= STALE_LOCK_MS) {
+              try {
+                fs.linkSync(aside, lockPath);
+              } catch (linkError) {
+                if ((linkError as NodeJS.ErrnoException).code !== "EEXIST") throw linkError;
+              }
+            }
+            fs.rmSync(aside, { force: true });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
           continue;
         }
-      } catch {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         continue;
       }
       if (Date.now() >= deadline) return undefined;

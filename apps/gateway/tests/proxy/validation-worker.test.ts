@@ -325,6 +325,39 @@ describe("WorkflowValidationWorker", () => {
     expect(decision.verdicts.every((verdict) => !verdict.confirmed)).toBe(true);
   });
 
+  it("bounds each recorded call and each private reference the plan names, withheld ones included", async () => {
+    const plan = recordedPlan();
+    const references = new Set<string>();
+    JSON.stringify(plan, (_key, value) => {
+      if (typeof value === "string" && value.startsWith("private:")) references.add(value);
+      return value;
+    });
+    expect(references.size).toBeGreaterThan(0);
+    const { fetchImpl } = recordingFetch(() => jsonResponse({ requests: [requestFor(plan)] }));
+    const admitted: string[][] = [];
+    const worker = new WorkflowValidationWorker({
+      client: clientOver(fetchImpl),
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      createValidator: () => async () => ({ verdicts: [], unavailable: "stub" }),
+      askLedger: {
+        admit: (ask) => {
+          admitted.push([...ask.keys]);
+          return false;
+        },
+      },
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ pending: 1, answered: 0 });
+    const keys = admitted[0]!;
+    for (const step of plan.steps) {
+      if (step.origin !== "derivation") expect(keys).toContain(`call:${step.callId}`);
+    }
+    // Every private reference, including those that only withhold a non-secret value.
+    for (const reference of references) expect(keys).toContain(`reference:${reference}`);
+  });
+
   it("does not submit a decision while local session discovery is unavailable", async () => {
     const plan = recordedPlan();
     const { calls, fetchImpl } = recordingFetch(() =>

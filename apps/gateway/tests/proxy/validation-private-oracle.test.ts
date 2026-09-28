@@ -24,6 +24,8 @@ const owner = "private-oracle-owner";
 const SESSION = "private-oracle-session";
 const PASSWORD = "Tr0ub4dorPw9x";
 const DUMP = `pg_dump --password ${PASSWORD} inventory > backups/inventory.sql`;
+/** A secret the job only printed: it reaches no argument, only the `cat .env` output. */
+const TOKEN = `ghp_${"a1B2c3D4e5".repeat(3)}Zz9Yy8`;
 const TIMESTAMP = "2026-09-26T00:00:00.000Z";
 
 function record(sequence: number, message: unknown) {
@@ -66,6 +68,7 @@ async function recordJob(store: InMemoryPrivateValueStore): Promise<RecordedWork
   for (const [id, command, output] of [
     ["dump", DUMP, "dumped 42 rows"],
     ["check", "wc -l backups/inventory.sql", "42 backups/inventory.sql"],
+    ["env", "cat .env", `GITHUB_TOKEN=${TOKEN}`],
   ] as const) {
     await feed({
       role: "assistant",
@@ -80,6 +83,7 @@ async function recordJob(store: InMemoryPrivateValueStore): Promise<RecordedWork
   }
   const workflow = recordCallsFromEvents("inventory-backup", events as RecordableEvent[])!.workflow;
   expect(JSON.stringify(workflow)).not.toContain(PASSWORD);
+  expect(JSON.stringify(events)).not.toContain(TOKEN);
   return workflow;
 }
 
@@ -115,6 +119,31 @@ function withDumpCommand(plan: RecordedWorkflow, command: string): RecordedWorkf
   };
 }
 
+/** The plan plus a derivation reading `stepId`'s recorded result. */
+function withDerivation(plan: RecordedWorkflow, stepId: string, code: string): RecordedWorkflow {
+  return {
+    ...plan,
+    steps: [
+      ...plan.steps,
+      {
+        id: "derive",
+        origin: "derivation",
+        callable: {
+          runtime: "resin.program",
+          name: "derive",
+          program: { kind: "python", source: code, argument: "code" },
+        },
+        arguments: [
+          { name: "code", source: { kind: "literal", value: code } },
+          { name: "input", source: { kind: "result", stepId, path: [] } },
+        ],
+        dependsOn: [stepId],
+        failurePolicy: { onError: "abort", policy: "default" },
+      } as unknown as WorkflowStep,
+    ],
+  };
+}
+
 describe("a validation ask over a private recorded value", () => {
   it("verifies the plan as recorded", async () => {
     const store = new InMemoryPrivateValueStore();
@@ -137,32 +166,25 @@ describe("a validation ask over a private recorded value", () => {
     const store = new InMemoryPrivateValueStore();
     const plan = await recordJob(store);
     const dump = plan.steps.find((step) => step.callId === "dump")!;
-    const derive = (code: string): RecordedWorkflow => ({
-      ...plan,
-      steps: [
-        ...plan.steps,
-        {
-          id: "derive",
-          origin: "derivation",
-          callable: {
-            runtime: "resin.program",
-            name: "derive",
-            program: { kind: "python", source: code, argument: "code" },
-          },
-          arguments: [
-            { name: "code", source: { kind: "literal", value: code } },
-            { name: "input", source: { kind: "result", stepId: dump.id, path: [] } },
-          ],
-          dependsOn: [dump.id],
-          failurePolicy: { onError: "abort", policy: "default" },
-        } as unknown as WorkflowStep,
-      ],
-    });
+    const derive = (code: string) => withDerivation(plan, dump.id, code);
     const one = await validate(derive("print(1 if 'Tr0' in input else 0)"), store);
     const other = await validate(derive("print(0)"), store);
     expect(one.unavailable).toMatch(/derivation step of this plan reads recorded data/);
     expect(one.verification).toBeUndefined();
     expect(one).toEqual(other);
+  });
+
+  it("treats a step whose output the upload redacted as private for derivations", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = await recordJob(store);
+    const env = plan.steps.find((step) => step.callId === "env")!;
+    const check = plan.steps.find((step) => step.callId === "check")!;
+    const secretOutput = await validate(withDerivation(plan, env.id, "print(input[:4])"), store);
+    expect(secretOutput.unavailable).toMatch(/derivation step of this plan reads recorded data/);
+    expect(secretOutput.verification).toBeUndefined();
+    // A clean output is still offered to the derivation (which this check refuses to run).
+    const cleanOutput = await validate(withDerivation(plan, check.id, "print(input[:4])"), store);
+    expect(cleanOutput.unavailable ?? "").not.toMatch(/derivation step of this plan reads/);
   });
 
   it("treats a call recorded without its upload's private positions as private throughout", async () => {

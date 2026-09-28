@@ -63,6 +63,7 @@ import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
   WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+  WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   workflowCallArgumentSlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
@@ -542,6 +543,11 @@ export class WorkflowCallRecorder {
         call.resultReference = succeeded
           ? this.localReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
           : undefined;
+        this.recordResultRedaction(
+          event.sessionId,
+          callId,
+          event.type === "command_exec" ? event.stdout : undefined,
+        );
         call.resultComparison = undefined;
         if (call.resultReference !== undefined && state.executions.length > 0) {
           const execution = state.executions.find((entry) => entry.index === call!.executionIndex);
@@ -579,6 +585,13 @@ export class WorkflowCallRecorder {
               "native-result:v1:text-trim",
             )
           : undefined;
+      if (reference !== undefined) {
+        this.recordResultRedaction(
+          event.sessionId,
+          association.callId,
+          event.type === "command_exec" ? event.stdout : undefined,
+        );
+      }
       return {
         ...event,
         metadata: {
@@ -754,6 +767,7 @@ export class WorkflowCallRecorder {
       callId,
       "native-result:v1:exact",
     );
+    this.recordResultRedaction(event.sessionId, callId, WORKFLOW_PATCH_STEP_RESULT);
     call.resultComparison = undefined;
     const execution = state.executions.find((entry) => entry.index === call.executionIndex);
     if (execution?.accumulatedHeldOut !== undefined) {
@@ -1126,6 +1140,22 @@ export class WorkflowCallRecorder {
       default:
         return origin;
     }
+  }
+
+  /**
+   * Records whether a call's output, as its upload's redacted view carried it, had any secret
+   * redacted. An output this path has no redacted view of counts as redacted.
+   */
+  private recordResultRedaction(sessionId: string, callId: string, uploadedOutput: unknown): void {
+    this.localReference(
+      uploadedOutput === undefined ||
+        containsRedactionPlaceholder(
+          typeof uploadedOutput === "string" ? uploadedOutput : JSON.stringify(uploadedOutput),
+        ),
+      sessionId,
+      callId,
+      WORKFLOW_CALL_RESULT_REDACTED_SLOT,
+    );
   }
 
   /** Stores one value of a demonstration and returns the stable reference a replay resolves it by. */
@@ -1719,6 +1749,13 @@ export class WorkflowCallRecorder {
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
+        if (call.result !== undefined) {
+          this.recordResultRedaction(
+            event.sessionId,
+            call.callId,
+            publicEvent.type === "tool_result" ? publicEvent.result : undefined,
+          );
+        }
         // An OMP bash call's status is known only for a run the decoder saw finish in the
         // foreground; a result that returned early carries no exit status at all.
         const exitCode =
