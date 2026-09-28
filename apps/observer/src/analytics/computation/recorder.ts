@@ -1,7 +1,4 @@
-import {
-  RESIN_LOCAL_OMP_NATIVE_CALL_KEY,
-  RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY,
-} from "@resin/adapter-omp";
+import { RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "@resin/adapter-omp";
 import {
   COMPUTATION_IR_LIMITS,
   type ComputationCorrectionV1,
@@ -24,6 +21,7 @@ import {
   hashCanonicalContent,
   readComputationEvidence,
 } from "@resin/contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { isLocalWorkflowResultSuppressed } from "../../normalization/local-workflow-payload.js";
 import { RESIN_WORKFLOW_CALL_METADATA_KEY, readWorkflowCallCarrier } from "../workflow-carrier.js";
 import { parseJavaScriptComputation } from "./javascript.js";
@@ -46,13 +44,13 @@ function withoutLocalNativeMetadata(event: NormalizedSessionEvent): NormalizedSe
   const metadata = event.metadata ?? {};
   if (
     !Object.prototype.hasOwnProperty.call(metadata, RESIN_LOCAL_OMP_NATIVE_CALL_KEY) &&
-    !Object.prototype.hasOwnProperty.call(metadata, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)
+    !Object.prototype.hasOwnProperty.call(metadata, RESIN_LOCAL_SOURCE_INTERFACE_KEY)
   ) {
     return event;
   }
   const sanitized = { ...metadata };
   delete sanitized[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
-  delete sanitized[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+  delete sanitized[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
   return { ...event, metadata: sanitized } as NormalizedSessionEvent;
 }
 function pythonSourceReferenceOf(event: NormalizedSessionEvent): string | undefined {

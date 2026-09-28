@@ -26,6 +26,7 @@ import type {
   RawHarnessRecord,
   RecordDecoderContext,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import {
   OMP_DEVICE_SURFACE_PREFIX,
   OMP_DEVICE_SURFACE_READ_TOOL,
@@ -42,8 +43,6 @@ export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
 /** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
 export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
-/** Local-only proof of OMP eval output semantics; only this decoder may create it. */
-export const RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY = "__resinLocalOmpSourceInterfaceV1";
 
 function boundedNativeArguments(
   args: OmpTranscriptPayload | undefined,
@@ -1050,10 +1049,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     parameters: DecoderMetadataRecord,
     metadata: OmpTranscriptPayload,
   ): OmpTranscriptPayload {
-    const cleanMetadata = Object.hasOwn(metadata, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)
+    const cleanMetadata = Object.hasOwn(metadata, RESIN_LOCAL_SOURCE_INTERFACE_KEY)
       ? { ...metadata }
       : metadata;
-    if (cleanMetadata !== metadata) delete cleanMetadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+    if (cleanMetadata !== metadata) delete cleanMetadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
 
     const language = asString(parameters.language)?.trim().toLowerCase();
     // Only the decoder proves the native interface; the recorder trusts this local-only key.
@@ -1069,7 +1068,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
               : undefined;
     return sourceInterface === undefined
       ? cleanMetadata
-      : { ...cleanMetadata, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: sourceInterface };
+      : { ...cleanMetadata, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: sourceInterface };
   }
 
   /**
@@ -1202,7 +1201,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const metadata = { ...(asObject(rawMeta) ?? {}) };
     // Only the decoder's own argument cache may create this private handoff.
     delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
-    delete metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+    delete metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
 
     const rawRole = asString(obj.role)?.toLowerCase();
     const rawType = String(
@@ -2112,9 +2111,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const nativeArguments =
       toolName === "eval" && lateName === "eval" ? boundedNativeArguments(lateArgs) : undefined;
     // Only the decoder proves a completed run; a key a record carried itself is dropped.
-    const { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
+    const { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
     const resultMetadata = completedBash
-      ? { ...unproven, [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
+      ? { ...unproven, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
       : unproven;
     const eventMetadata =
       nativeArguments === undefined

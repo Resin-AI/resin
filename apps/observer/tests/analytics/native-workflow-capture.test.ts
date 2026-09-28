@@ -4,7 +4,7 @@
  */
 
 import { CodexRecordDecoder, decodeCodexTranscript } from "@resin/adapter-codex";
-import { OmpRecordDecoder, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
+import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import {
   NormalizedSessionEventSchema,
@@ -14,7 +14,7 @@ import {
   readComputationEvidence,
   validateRecordedWorkflow,
 } from "@resin/contracts";
-import type { RawHarnessRecord } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY, type RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { createComputationEvidenceRecorder } from "../../src/analytics/computation/recorder.js";
 import { extractComputationSourceFrames } from "../../src/analytics/computation/source-frames.js";
@@ -536,7 +536,7 @@ describe("native capture of ordinary calls", () => {
           ],
         },
       }),
-      metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" },
+      metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" },
     };
     const results = await pipeline.processRecord(record, {
       sessionId,
@@ -554,13 +554,13 @@ describe("native capture of ordinary calls", () => {
       throw new Error("expected normalized Python Eval tool call");
     }
 
-    expect(decoded.event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("python-eval");
+    expect(decoded.event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("python-eval");
 
     const workflowRecorder = new WorkflowCallRecorder({
       privateValues: new InMemoryPrivateValueStore(),
     });
     const observed = workflowRecorder.observe(decoded.event, { workspaceId: "ws_native" });
-    expect(observed.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(observed.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(observed)?.program).toMatchObject({
       kind: "python",
       argument: "code",
@@ -568,7 +568,7 @@ describe("native capture of ordinary calls", () => {
     });
 
     const computationObserved = createComputationEvidenceRecorder().observe(observed);
-    expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(computationObserved.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("python-eval");
   });
 
@@ -606,7 +606,7 @@ describe("native capture of ordinary calls", () => {
           ],
         },
       }),
-      metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" },
+      metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" },
     };
     const results = await pipeline.processRecord(record, {
       sessionId,
@@ -624,13 +624,13 @@ describe("native capture of ordinary calls", () => {
       throw new Error("expected normalized JavaScript Eval tool call");
     }
 
-    expect(decoded.event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
+    expect(decoded.event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
 
     const workflowRecorder = new WorkflowCallRecorder({
       privateValues: new InMemoryPrivateValueStore(),
     });
     const observed = workflowRecorder.observe(decoded.event, { workspaceId: "ws_native" });
-    expect(observed.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(observed.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(observed)?.program).toMatchObject({
       kind: "javascript",
       argument: "code",
@@ -638,7 +638,7 @@ describe("native capture of ordinary calls", () => {
     });
 
     const computationObserved = createComputationEvidenceRecorder().observe(observed);
-    expect(computationObserved.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+    expect(computationObserved.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("javascript-eval");
   });
 

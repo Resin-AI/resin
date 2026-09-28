@@ -34,6 +34,7 @@ import {
   embeddedPrograms,
   extractCharsetOf,
   extractPrintedValue,
+  inputRoleName,
   programTokenPath,
   scriptRecordFieldKeys,
   scriptTokenContextName,
@@ -280,13 +281,14 @@ function longFlagName(token: ProgramToken | undefined): string | undefined {
   return flag?.[1]?.toLowerCase().replace(/-/g, "_");
 }
 
-/** A readable input name for a program value: its flag's name, else what the value looks like. */
+/**
+ * A readable input name for a program value: its flag's name, else the role the recorded value
+ * plays (`data_path`, `archive_path`, `date`, …). Only this machine sees the value, so the role is
+ * named here; the cloud only sees private references.
+ */
 function programInputBaseName(value: string, previous: ProgramToken | undefined): string {
   const flag = longFlagName(previous);
-  if (flag !== undefined) return flag;
-  if (/^\d+(\.\d+)?$/.test(value)) return "number";
-  if (value.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(value)) return "path";
-  return "text";
+  return inputRoleName([{ value, ...(flag === undefined ? {} : { flag }) }]);
 }
 
 /**

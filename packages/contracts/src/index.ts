@@ -63,6 +63,7 @@ export interface ToolSpec {
 export const CONTRACTS_VERSION = "1.0.0";
 export * from "./recorded-workflow.js";
 export * from "./program-tokens.js";
+export * from "./input-roles.js";
 export * from "./shell-and-chain.js";
 export * from "./extract-locator.js";
 export * from "./derivation-steps.js";

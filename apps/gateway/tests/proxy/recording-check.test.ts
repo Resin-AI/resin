@@ -9,7 +9,6 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
@@ -18,6 +17,7 @@ import {
   type WorkflowBindingCandidate,
   tokenizeProgram,
 } from "@resin/contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import {
   InMemoryPrivateValueStore,
   type RecordableEvent,
@@ -99,7 +99,7 @@ function record(
       parameters: turn.parameters,
       ...(turn.connection === undefined ? {} : { connection: turn.connection }),
       ...(turn.ompBash === true
-        ? { metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash" } }
+        ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash" } }
         : {}),
     });
     emit({
@@ -109,7 +109,7 @@ function record(
       result: turn.result,
       isError: turn.failed === true,
       ...(turn.ompCompleted === true
-        ? { metadata: { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash-completed" } }
+        ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" } }
         : {}),
       executionDurationMs: 1,
     });

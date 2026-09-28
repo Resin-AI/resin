@@ -18,7 +18,6 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY } from "@resin/adapter-omp";
 import {
   type AgentArgumentOrigin,
   type NormalizedSessionEvent,
@@ -40,6 +39,7 @@ import {
   readCodexCommandMetadata,
   tokenizeProgram,
 } from "@resin/contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import {
   isLocalWorkflowResultSuppressed,
   localWorkflowEvent,
@@ -113,17 +113,17 @@ import {
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
 
-function withoutLocalOmpSourceInterface(event: NormalizedSessionEvent): NormalizedSessionEvent {
-  if (!Object.hasOwn(event.metadata ?? {}, RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY)) return event;
+function withoutLocalSourceInterface(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (!Object.hasOwn(event.metadata ?? {}, RESIN_LOCAL_SOURCE_INTERFACE_KEY)) return event;
   const metadata = { ...event.metadata };
-  delete metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY];
+  delete metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
   return { ...event, metadata };
 }
 
 /**
  * The shell interfaces whose command argument may leave as a scrubbed program view, each proven by
- * its decoder rather than by a tool name another server could also use. Claude Code `Bash` is
- * absent: its decoder carries no trusted local marker, so an MCP tool named `Bash` could pose as it.
+ * its decoder's local-only source-interface marker rather than by a tool name another server could
+ * also use.
  */
 const KNOWN_SHELL_COMMANDS: readonly {
   argument: string;
@@ -153,7 +153,20 @@ const KNOWN_SHELL_COMMANDS: readonly {
     argument: "command",
     proves: (event) =>
       event.toolName === "bash" &&
-      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash",
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash",
+  },
+  {
+    argument: "command",
+    proves: (event) =>
+      event.toolName === "Bash" &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "claude-bash",
+  },
+  {
+    argument: "command",
+    proves: (event) =>
+      event.toolName === "bash" &&
+      event.connection === undefined &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "opencode-bash",
   },
 ];
 
@@ -628,7 +641,7 @@ export class WorkflowCallRecorder {
         codex?.kind === "result" ? native?.exitCode : undefined,
       );
       // The cell completed, but the command it ran failed: the step failed.
-      const resultEvent = withoutLocalOmpSourceInterface(
+      const resultEvent = withoutLocalSourceInterface(
         codex?.kind === "result" && native !== undefined && native.exitCode !== 0
           ? { ...event, isError: true, metadata: observed.metadata }
           : { ...event, metadata: observed.metadata },
@@ -1040,15 +1053,16 @@ export class WorkflowCallRecorder {
     if (relationships.dependsOnCallIds.length > 0) {
       carrier.dependsOnCallIds = relationships.dependsOnCallIds;
     }
+    // The normalization engine's redactor is kept for the normalized record, not the local copy.
     const candidates = unprotectedCandidates(
-      event,
+      normalizedEvent,
       parameters,
       relationships.candidates,
       program,
       origins,
     );
     if (candidates.length > 0) carrier.candidates = candidates;
-    return this.withCallCarrier(withoutLocalOmpSourceInterface(event), carrier);
+    return this.withCallCarrier(withoutLocalSourceInterface(event), carrier);
   }
 
   /**
@@ -1178,7 +1192,7 @@ export class WorkflowCallRecorder {
       position: state.position,
       ...("metadata" in event &&
       event.toolName === "bash" &&
-      event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash"
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash"
         ? { ompBash: true as const }
         : {}),
       executionIndex: execution.index,
@@ -1464,10 +1478,10 @@ export class WorkflowCallRecorder {
       typeof parameters.language === "string" ? parameters.language.trim().toLowerCase() : "";
     const sourceInterface =
       event.toolName === "eval" && typeof parameters.code === "string"
-        ? event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "python-eval" &&
+        ? event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "python-eval" &&
           (language === "py" || language === "python")
           ? "python-eval"
-          : event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "javascript-eval" &&
+          : event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "javascript-eval" &&
               (language === "js" || language === "javascript")
             ? "javascript-eval"
             : undefined
@@ -1672,7 +1686,7 @@ export class WorkflowCallRecorder {
           nativeExitCode ??
           (call.ompBash === true &&
           event.isError === false &&
-          event.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY] === "omp-bash-completed"
+          event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "omp-bash-completed"
             ? 0
             : undefined);
         if (exitCode !== undefined) {
