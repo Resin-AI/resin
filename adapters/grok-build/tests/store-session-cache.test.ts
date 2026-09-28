@@ -2,7 +2,12 @@ import * as nodeFs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type GrokSessionCache, listGrokSessions, readGrokSubagentParents } from "../src/store.js";
+import {
+  GROK_SETTLED_RECHECK_MS,
+  type GrokSessionCache,
+  listGrokSessions,
+  readGrokSubagentParents,
+} from "../src/store.js";
 
 const io = vi.hoisted(() => ({ reads: [] as string[] }));
 
@@ -76,5 +81,37 @@ describe("Grok session cache", () => {
     const third = await scan();
     expect(third.reads).toEqual([path.join(s5, "summary.json"), path.join(s5, "subagents")]);
     expect(third.entries.find((e) => e.sessionId === "s5")?.summary?.sessionKind).toBe("subagent");
+  });
+
+  it("sees a new session on the next scan and an append to a settled one within the slow cadence", async () => {
+    const projectDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "grok-settled-cadence-"));
+    dirs.push(projectDir);
+    const settledDir = writeSession(projectDir, "settled");
+    const old = new Date(Date.now() - 3_600_000);
+    nodeFs.utimesSync(path.join(settledDir, "updates.jsonl"), old, old);
+    const cache: GrokSessionCache = new Map();
+    let now = Date.now();
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      await listGrokSessions(projectDir, "/work", cache);
+      writeSession(projectDir, "fresh");
+      now += 10_000;
+      const next = await listGrokSessions(projectDir, "/work", cache);
+      expect(next.map((e) => e.sessionId)).toEqual(["fresh", "settled"]);
+
+      nodeFs.appendFileSync(path.join(settledDir, "updates.jsonl"), "{}\n");
+      const seenAt: number[] = [];
+      for (let t = 10_000; t <= GROK_SETTLED_RECHECK_MS + 10_000; t += 10_000) {
+        now += 10_000;
+        const entry = (await listGrokSessions(projectDir, "/work", cache)).find(
+          (e) => e.sessionId === "settled",
+        );
+        if (entry && entry.updatesMtime.getTime() > old.getTime()) seenAt.push(t);
+      }
+      expect(seenAt.length).toBeGreaterThan(0);
+      expect(seenAt[0]).toBeLessThanOrEqual(GROK_SETTLED_RECHECK_MS + 10_000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

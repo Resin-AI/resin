@@ -93,6 +93,11 @@ export async function listGrokProjects(
   return projects.sort((a, b) => a.cwd.localeCompare(b.cwd));
 }
 
+/** A session with no write for this long is settled. */
+export const GROK_SETTLED_AFTER_MS = 5 * 60_000;
+/** Settled sessions are re-stat'ed at most this often. */
+export const GROK_SETTLED_RECHECK_MS = 60_000;
+
 /**
  * Per-session results carried between scans, keyed by session directory. A session's summary and
  * subagent links only change while it is writing, so both are reused while its `updates.jsonl`
@@ -100,7 +105,13 @@ export async function listGrokProjects(
  */
 export type GrokSessionCache = Map<
   string,
-  { identity: string; summary: GrokSessionSummary | null; subagentParents?: Map<string, string> }
+  {
+    identity: string;
+    updatesMtimeMs: number;
+    checkedAt: number;
+    summary: GrokSessionSummary | null;
+    subagentParents?: Map<string, string>;
+  }
 >;
 
 export async function listGrokSessions(
@@ -119,19 +130,38 @@ export async function listGrokSessions(
     if (!entry.isDirectory()) continue;
     const sessionDir = path.join(projectDir, entry.name);
     const updatesPath = path.join(sessionDir, "updates.jsonl");
-    let updatesMtime: Date;
-    let identity: string;
-    try {
-      const stat = await fs.stat(updatesPath);
-      updatesMtime = stat.mtime;
-      identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
-    } catch {
-      continue;
-    }
+    const now = Date.now();
     let cached = cache?.get(sessionDir);
-    if (!cached || cached.identity !== identity) {
-      cached = { identity, summary: await readGrokSessionSummary(sessionDir) };
-      cache?.set(sessionDir, cached);
+    let updatesMtime: Date;
+    // A settled session (no write for a while) is re-stat'ed on the slow cadence only; an append
+    // is then seen at most GROK_SETTLED_RECHECK_MS late and captured from its cursor.
+    if (
+      cached &&
+      now - cached.updatesMtimeMs > GROK_SETTLED_AFTER_MS &&
+      now - cached.checkedAt < GROK_SETTLED_RECHECK_MS
+    ) {
+      updatesMtime = new Date(cached.updatesMtimeMs);
+    } else {
+      let identity: string;
+      try {
+        const stat = await fs.stat(updatesPath);
+        updatesMtime = stat.mtime;
+        identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+      } catch {
+        cache?.delete(sessionDir);
+        continue;
+      }
+      if (!cached || cached.identity !== identity) {
+        cached = {
+          identity,
+          updatesMtimeMs: updatesMtime.getTime(),
+          checkedAt: now,
+          summary: await readGrokSessionSummary(sessionDir),
+        };
+        cache?.set(sessionDir, cached);
+      } else {
+        cached.checkedAt = now;
+      }
     }
     const summary = cached.summary;
     sessions.push({

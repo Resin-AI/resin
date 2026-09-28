@@ -548,9 +548,9 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       await fsp.utimes(transcriptPath, historicalTime, historicalTime);
 
       const adapter = new OmpHarnessAdapter({ customHome: ompHome, activeOnly: false });
-      // Settled transcripts are re-checked every third scan; three scans always include one.
+      // Settled transcripts are re-checked every sixth scan; six scans always include one.
       const rescan = async () => {
-        for (let i = 0; i < 2; i++) await adapter.listWorkspaces();
+        for (let i = 0; i < 5; i++) await adapter.listWorkspaces();
         return adapter.listWorkspaces();
       };
       const [firstWorkspaces] = await Promise.all([

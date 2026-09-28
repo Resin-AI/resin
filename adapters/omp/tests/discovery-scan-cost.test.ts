@@ -78,10 +78,10 @@ describe("OMP discovery scan cost", () => {
     expect(second.size).toBe(41);
     expect(settledTouches("open") + settledTouches("realpath") + settledTouches("stat")).toBe(0);
 
-    // A resumed settled session is re-inspected within three scans.
+    // A resumed settled session is re-inspected within the slow cadence (six scans).
     const sizeBefore = Number(second.get("settled-7")?.metadata?.fileSize);
     fs.appendFileSync(settledPaths[7], header("settled-7", new Date()));
-    await scan();
+    for (let i = 0; i < 4; i++) await scan();
     expect(Number((await scan()).get("settled-7")?.metadata?.fileSize)).toBeGreaterThan(sizeBefore);
   });
 });
