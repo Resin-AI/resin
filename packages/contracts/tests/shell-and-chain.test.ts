@@ -16,6 +16,7 @@ import {
   SHELL_AND_CHAIN_SPLITTER_VERSION,
   isOptionalSetupSegment,
   isSkippableSegment,
+  recordedPosixShell,
   shellAndChainSegmentText,
   splitShellAndChain,
 } from "../src/shell-and-chain.js";
@@ -249,6 +250,20 @@ describe("splitting a shell && chain", () => {
       "make | x=1 && ls",
     ])
       expect(splitShellAndChain("bash", never)).toBeUndefined();
+    // Only the first stage reads a file and only the last writes one: zsh's MULTIOS would tee
+    // `a > f | b` into both the file and the pipe.
+    for (const multios of [
+      "gen > out.txt | wc -l && ls",
+      "gen 2> err | sort && ls",
+      "gen | sort < in && ls",
+      "a > f | b && c",
+    ])
+      expect(splitShellAndChain("bash", multios)).toBeUndefined();
+    expect(splitShellAndChain("bash", "sort < in | uniq > out && ls")?.segments).toHaveLength(2);
+    // Cursor's Shell may run in zsh, whose EXTENDED_GLOB reads a mid-word `~` as an exclusion.
+    const cursorShell = recordedPosixShell("Shell", {})!;
+    expect(splitShellAndChain(cursorShell, "git log HEAD~2..HEAD > f && wc -l f")).toBeUndefined();
+    expect(splitShellAndChain(cursorShell, manifest)?.segments).toHaveLength(3);
     // A pipeline only inspects nothing: it is never a skippable trailing inspection.
     expect(isSkippableSegment("cat f | head", 3, { trailing: true })).toBe(false);
   });

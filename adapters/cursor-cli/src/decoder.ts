@@ -388,7 +388,11 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
           failureType: stringField(payload, "failure_type"),
           toolUseId: nativeToolUseId,
           interrupted: payload.is_interrupt === true,
-          ...(toolName === cursorToolName && exitCode === 0
+          // Only a foreground run that finished on its own proves its exit status.
+          ...(toolName === cursorToolName &&
+          exitCode === 0 &&
+          payload.is_interrupt !== true &&
+          toMetadata(input)?.is_background !== true
             ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
             : {}),
         },

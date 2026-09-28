@@ -58,9 +58,11 @@ function literalTilde(
   index: number,
   wordStart: boolean,
   version: ShellAndChainSplitterVersion,
+  zsh: boolean,
 ): boolean {
   return (
     version >= 3 &&
+    !zsh &&
     text[index] === "~" &&
     !wordStart &&
     text[index - 1] !== "=" &&
@@ -88,7 +90,14 @@ function isPlainFileTarget(target: string): boolean {
 /**
  * Shells whose `&&` lists these rules describe. zsh, PowerShell and any other shell never split.
  */
+/**
+ * A shell that may be zsh (Cursor runs its `Shell` tool in the user's login shell): split only in
+ * the grammar zsh reads as sh does, without a mid-word `~` (EXTENDED_GLOB makes it a glob).
+ */
+const ZSH_OR_SH = "sh-or-zsh";
+
 const POSIX_SHELLS: Readonly<Record<string, true>> = {
+  [ZSH_OR_SH]: true,
   bash: true,
   sh: true,
   dash: true,
@@ -261,6 +270,7 @@ function redirectionAt(
 function segmentWords(
   text: string,
   version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
+  zsh = false,
 ): { words: string[]; redirects: boolean; pipeline: string[][] } | undefined {
   // From version 3 a segment may be a pipeline: each `|`-separated command's words, in order.
   const pipeline: string[][] = [[]];
@@ -268,6 +278,8 @@ function segmentWords(
   let redirects = false;
   let index = 0;
   const pipes = version >= 3;
+  /** Pipeline stages that redirect output: only the last may, as zsh's MULTIOS would tee it. */
+  const outputStages: number[] = [];
   /** The word starting at `index`, quotes removed, advancing past it; undefined when not safe. */
   const word = (): string | undefined => {
     let value = "";
@@ -285,7 +297,7 @@ function segmentWords(
         continue;
       }
       if (
-        (UNSAFE.has(char) && !literalTilde(text, index, value.length === 0, version)) ||
+        (UNSAFE.has(char) && !literalTilde(text, index, value.length === 0, version, zsh)) ||
         char === "&"
       )
         return undefined;
@@ -314,6 +326,12 @@ function segmentWords(
     if (redirection === null || (redirection !== undefined && words.length === 0)) return undefined;
     if (redirection !== undefined) {
       redirects = true;
+      const stage = pipeline.length - 1;
+      const input = text[/[0-9]/.test(text[index] ?? "") ? index + 1 : index] === "<";
+      // Only the first stage of a pipeline reads a file and only the last writes one: zsh would
+      // otherwise join the redirection and the pipe (MULTIOS), which no other shell does.
+      if (input && stage > 0) return undefined;
+      if (!input) outputStages.push(stage);
       index = redirection.end;
       if (!redirection.target) continue;
       while (isBlank(text[index])) index += 1;
@@ -327,6 +345,7 @@ function segmentWords(
     words.push(next);
   }
   if (words.length === 0) return undefined;
+  if (outputStages.some((stage) => stage < pipeline.length - 1)) return undefined;
   return { words: pipeline[0]!, redirects, pipeline };
 }
 
@@ -334,8 +353,12 @@ function segmentWords(
  * Whether a segment runs external commands only — one, or from version 3 a pipeline of them — the
  * only kind of segment a chain splits into.
  */
-function runsExternalCommand(text: string, version: ShellAndChainSplitterVersion): boolean {
-  const pipeline = segmentWords(text, version)?.pipeline;
+function runsExternalCommand(
+  text: string,
+  version: ShellAndChainSplitterVersion,
+  zsh: boolean,
+): boolean {
+  const pipeline = segmentWords(text, version, zsh)?.pipeline;
   return (
     pipeline !== undefined &&
     pipeline.every((command) => {
@@ -361,6 +384,7 @@ export function splitShellAndChain(
   version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
 ): ShellAndChain | undefined {
   if (POSIX_SHELLS[shell] !== true) return undefined;
+  const zsh = shell === ZSH_OR_SH;
   const cuts: Array<[number, number]> = [];
   let quote: "'" | '"' | undefined;
   let wordStart = true;
@@ -404,7 +428,7 @@ export function splitShellAndChain(
       }
     }
     if (
-      (UNSAFE.has(char) && !literalTilde(source, index, wordStart, version)) ||
+      (UNSAFE.has(char) && !literalTilde(source, index, wordStart, version, zsh)) ||
       (wordStart && char === "=")
     )
       return undefined;
@@ -421,7 +445,7 @@ export function splitShellAndChain(
     while (end > start && isBlank(source[end - 1]!)) end -= 1;
     if (start === end) return undefined;
     const text = source.slice(start, end);
-    if (!runsExternalCommand(text, version)) return undefined;
+    if (!runsExternalCommand(text, version, zsh)) return undefined;
     segments.push({ start, end, text });
     from = cutEnd;
   }
@@ -548,8 +572,8 @@ const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
   sh: "sh",
   dash: "dash",
   Bash: "bash",
-  Shell: "sh",
-  run_terminal_cmd: "sh",
+  Shell: ZSH_OR_SH,
+  run_terminal_cmd: ZSH_OR_SH,
 };
 
 /**
