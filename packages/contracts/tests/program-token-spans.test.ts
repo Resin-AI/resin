@@ -272,4 +272,35 @@ describe("span holes", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("reads every span of a token jointly when the demonstration changed them all", () => {
+    // The 03:43 demo pair: run A's separate `tar` step and the same segment of run B's chain.
+    const recorded = "tar -czf backups/gamma/gamma-2026-03-02.tar.gz -C data gamma";
+    const heldOut = "tar -czf backups/epsilon/epsilon-2026-03-09.tar.gz -C data epsilon";
+    const spans = [
+      { start: 0, end: 13 },
+      { start: 14, end: 19 },
+      { start: 20, end: 30 },
+    ];
+    const read = (span: { start: number; end: number }) =>
+      demonstratedProgramTokenSpanValue("shell", recorded, heldOut, { token: 2, span }, spans);
+    expect(spans.map(read)).toEqual(["backups/epsilon", "epsilon", "2026-03-09"]);
+    // Alone, a span still needs the rest of the token unchanged.
+    expect(
+      demonstratedProgramTokenSpanValue("shell", recorded, heldOut, { token: 2, span: spans[2]! }),
+    ).toBeUndefined();
+    // Text that splits two ways decides no span.
+    expect(
+      demonstratedProgramTokenSpanValue(
+        "shell",
+        "cp a-b x",
+        "cp c-d-e x",
+        { token: 1, span: { start: 0, end: 1 } },
+        [
+          { start: 0, end: 1 },
+          { start: 2, end: 3 },
+        ],
+      ),
+    ).toBeUndefined();
+  });
 });

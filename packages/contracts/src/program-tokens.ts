@@ -1414,15 +1414,22 @@ export function programTokenValueAt(
 
 /**
  * The value a demonstration supplied for a span hole: the held-out token at the same address must
- * keep the recorded token's text before `start` and after `end`, and the text between them is the
- * demonstrated value. Undefined when the demonstration cannot decide it (other prefix or suffix, a
- * missing or non-string token, or an address without a span).
+ * keep the recorded token's text outside the spans, and the text in place of the span is the
+ * demonstrated value. Undefined when the demonstration cannot decide it (other surrounding text, a
+ * missing or non-string token, an address without a span, or an ambiguous split).
+ *
+ * `siblings` are every span bound or proposed on the same token, `address.span` included. With one
+ * span the rest of the token is fixed text. With several (`backups/<dir>/<name>-<date>.tar.gz`),
+ * the demonstrated values of the other spans legitimately differ, so they are decided jointly:
+ * only the recorded text between the spans stays fixed, each span's demonstrated value must use
+ * the character classes its recorded value used, and the split must be unique.
  */
 export function demonstratedProgramTokenSpanValue(
   language: ProgramLanguage,
   recordedSource: string,
   demonstratedSource: string,
   address: ProgramTokenAddress,
+  siblings: readonly ProgramTokenSpan[] = [],
 ): string | undefined {
   if (address.span === undefined) return undefined;
   const whole = { token: address.token, embedded: address.embedded };
@@ -1430,16 +1437,52 @@ export function demonstratedProgramTokenSpanValue(
   const demonstrated = programTokenValueAt(language, demonstratedSource, whole);
   if (typeof recorded !== "string" || typeof demonstrated !== "string") return undefined;
   if (!programTokenSpanFits(address.span, recorded.length)) return undefined;
-  const prefix = recorded.slice(0, address.span.start);
-  const suffix = recorded.slice(address.span.end);
-  if (
-    demonstrated.length <= prefix.length + suffix.length ||
-    !demonstrated.startsWith(prefix) ||
-    !demonstrated.endsWith(suffix)
-  ) {
-    return undefined;
+  const own = address.span;
+  const spans = [
+    own,
+    ...siblings.filter((span) => span.start !== own.start || span.end !== own.end),
+  ].sort((a, b) => a.start - b.start);
+  if (spans.length === 1) {
+    const prefix = recorded.slice(0, own.start);
+    const suffix = recorded.slice(own.end);
+    if (
+      demonstrated.length <= prefix.length + suffix.length ||
+      !demonstrated.startsWith(prefix) ||
+      !demonstrated.endsWith(suffix)
+    ) {
+      return undefined;
+    }
+    return demonstrated.slice(prefix.length, demonstrated.length - suffix.length);
   }
-  return demonstrated.slice(prefix.length, demonstrated.length - suffix.length);
+  for (const [index, span] of spans.entries()) {
+    if (!programTokenSpanFits(span, recorded.length)) return undefined;
+    if (index > 0 && span.start < spans[index - 1]!.end) return undefined;
+  }
+  const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+  const charClass = (value: string): string => {
+    let members = "";
+    if (/[a-z]/.test(value)) members += "a-z";
+    if (/[A-Z]/.test(value)) members += "A-Z";
+    if (/[0-9]/.test(value)) members += "0-9";
+    for (const char of new Set(value.replace(/[a-zA-Z0-9]/g, ""))) members += escape(char);
+    return `[${members}]`;
+  };
+  const pattern = (lazy: boolean): RegExp => {
+    let source = "^";
+    let cursor = 0;
+    for (const span of spans) {
+      source += escape(recorded.slice(cursor, span.start));
+      source += `(${charClass(recorded.slice(span.start, span.end))}+${lazy ? "?" : ""})`;
+      cursor = span.end;
+    }
+    return new RegExp(`${source}${escape(recorded.slice(cursor))}$`);
+  };
+  const greedy = pattern(false).exec(demonstrated);
+  const lazy = pattern(true).exec(demonstrated);
+  if (greedy === null || lazy === null) return undefined;
+  // Two readings of the same text: the spans' boundaries are not established, so none is decided.
+  if (greedy.slice(1).some((value, index) => value !== lazy[index + 1])) return undefined;
+  return greedy[spans.indexOf(own) + 1];
 }
 
 /**

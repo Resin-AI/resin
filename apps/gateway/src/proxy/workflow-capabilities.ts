@@ -11,7 +11,9 @@
  * - `and-chain-segments-v2`: segment addresses of splitter version 2, whose segments may redirect
  *   to plain files, and whose chains may leave a read-only inspection segment (`cat`, `ls`,
  *   `sha256sum`, ... — `isSkippableSegment`) unnamed; version-1 addresses still re-split under the
- *   version-1 grammar and may leave only `mkdir -p` setup unnamed.
+ *   version-1 grammar and may leave only `mkdir -p` setup unnamed;
+ * - `joint-token-spans-v1`: several span proposals or holes inside one program token are decided
+ *   jointly against a demonstration that changed all of them (`backups/<dir>/<name>-<date>.tar.gz`).
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -20,4 +22,5 @@ export const WORKFLOW_CAPABILITIES = [
   "cross-session-held-out-v1",
   "and-chain-segments-v1",
   "and-chain-segments-v2",
+  "joint-token-spans-v1",
 ].join(",");

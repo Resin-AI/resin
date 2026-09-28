@@ -14,6 +14,7 @@
 import {
   type ProgramLanguage,
   type ProgramTokenAddress,
+  type ProgramTokenSpan,
   type ProgramTokenSpanValue,
   type ProgramTokenValue,
   type RecordedWorkflow,
@@ -648,6 +649,7 @@ async function demonstratedTokenValue(
   candidate: WorkflowBindingCandidate,
   supplied: WorkflowJsonValue,
   resolve: (reference: string) => Promise<WorkflowJsonValue>,
+  candidates: readonly WorkflowBindingCandidate[],
 ): Promise<ProgramTokenValue | undefined> {
   const address = programTokenPath(candidate.path);
   if (address === undefined) return undefined;
@@ -664,7 +666,46 @@ async function demonstratedTokenValue(
       ? undefined
       : segmentOriginal(step!, argument.name, await recordedProgramText(argument.source, resolve));
   if (typeof recorded !== "string") return undefined;
-  return demonstratedProgramTokenSpanValue(program.kind, recorded, supplied, address);
+  return demonstratedProgramTokenSpanValue(
+    program.kind,
+    recorded,
+    supplied,
+    address,
+    tokenSpanSiblings(step, candidate.argument, address, candidates),
+  );
+}
+
+/**
+ * Every span bound (a span hole of the step) or proposed (a span candidate) on the token `address`
+ * names: a token split into several spans is read jointly, so each span knows the others.
+ */
+function tokenSpanSiblings(
+  step: WorkflowStep | undefined,
+  argument: string,
+  address: ProgramTokenAddress,
+  candidates: readonly WorkflowBindingCandidate[],
+): ProgramTokenSpan[] {
+  const spans: ProgramTokenSpan[] = [];
+  const add = (span: ProgramTokenSpan | undefined) => {
+    if (
+      span !== undefined &&
+      !spans.some((each) => each.start === span.start && each.end === span.end)
+    ) {
+      spans.push(span);
+    }
+  };
+  const source = step?.arguments.find((entry) => entry.name === argument)?.source;
+  if (source?.kind === "template" && source.template.type === "program") {
+    for (const hole of source.template.holes) {
+      if (hole.token === address.token && hole.embedded === address.embedded) add(hole.span);
+    }
+  }
+  for (const candidate of candidates) {
+    if (candidate.stepId !== step?.id || candidate.argument !== argument) continue;
+    const other = programTokenPath(candidate.path);
+    if (other?.token === address.token && other.embedded === address.embedded) add(other.span);
+  }
+  return spans;
 }
 
 /** The recorded program text an argument holds, resolving private text locally. */
@@ -843,7 +884,13 @@ export async function demonstrationEnvironment(params: {
     if (supplied === undefined) continue;
     const value =
       candidate.path[0] === "tokens"
-        ? await demonstratedTokenValue(params.plan, candidate, supplied, resolveOnce)
+        ? await demonstratedTokenValue(
+            params.plan,
+            candidate,
+            supplied,
+            resolveOnce,
+            params.candidates,
+          )
         : demonstratedValueAtPath(supplied, candidate.path);
     const name = candidate.proposed.name;
     if (
@@ -1079,6 +1126,8 @@ async function demonstratedTokenAt(
   context: DemonstrationContext,
   target: { stepId: string; argument: string; path: WorkflowValuePath },
   resolve: (reference: string) => Promise<WorkflowJsonValue>,
+  /** Candidates whose spans on the same token are read jointly with this one. */
+  siblingCandidates: readonly WorkflowBindingCandidate[] = [],
 ): Promise<{ text: string; value: ProgramTokenValue } | undefined> {
   const address = programTokenPath(target.path);
   const step = plan.steps.find((entry) => entry.id === target.stepId);
@@ -1103,7 +1152,13 @@ async function demonstratedTokenAt(
       argument === undefined ? undefined : await recordedProgramText(argument.source, resolve);
     value =
       typeof recorded === "string"
-        ? demonstratedProgramTokenSpanValue(program.kind, recorded, text, address)
+        ? demonstratedProgramTokenSpanValue(
+            program.kind,
+            recorded,
+            text,
+            address,
+            tokenSpanSiblings(step, target.argument, address, siblingCandidates),
+          )
         : undefined;
   }
   return value === undefined ? undefined : { text, value };
@@ -1351,7 +1406,7 @@ async function evaluateDerivationCandidates(
           value: ProgramTokenValue;
         }> = [];
         for (const context of contexts) {
-          const read = await demonstratedTokenAt(plan, context, candidate, resolve);
+          const read = await demonstratedTokenAt(plan, context, candidate, resolve, group);
           if (read === undefined) break;
           reads.push({ context, ...read });
         }
