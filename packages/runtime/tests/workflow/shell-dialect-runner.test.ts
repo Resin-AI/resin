@@ -6,6 +6,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { CMD_NOT_LEARNABLE_REASON, UNPROVEN_SHELL_DIALECT_REASON } from "@resin/contracts";
+import { serviceHostExecutablePath } from "@resin/windows-security";
 import { describe, expect, it } from "vitest";
 import { runRecordedProgram } from "../../src/workflow/program-runner.js";
 import {
@@ -307,16 +308,64 @@ function stillRunning(marker: string): boolean {
   return check.status !== 0;
 }
 
+/** Whether Windows replays run inside Resin's kill-on-close job host (native prebuilds built). */
+const WINDOWS_JOB_HOST =
+  ON_WINDOWS &&
+  (() => {
+    try {
+      serviceHostExecutablePath();
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
 describe("a program whose shell exits while a background child holds its output", () => {
-  it("ends at its time budget and stops the child", async () => {
-    if (ON_WINDOWS && resolveGitBash({ platform: "win32", env: process.env }) === undefined) return;
-    const marker = `resin-orphan-${process.pid}-${Date.now()}`;
+  const orphanSource = (marker: string, tail: string) => {
     const node = process.execPath.replaceAll("\\", "/");
-    const source = `"${node}" -e "setTimeout(() => {}, 600000)" ${marker} & echo started`;
+    return `"${node}" -e "setTimeout(() => {}, 600000)" ${marker} & ${tail}`;
+  };
+  const dialect = ON_WINDOWS ? "bash" : "sh";
+  const hasShell = () =>
+    !ON_WINDOWS || resolveGitBash({ platform: "win32", env: process.env }) !== undefined;
+
+  it.skipIf(WINDOWS_JOB_HOST)("ends at its time budget and stops the child", async () => {
+    if (!hasShell()) return;
+    const marker = `resin-orphan-${process.pid}-${Date.now()}`;
     const started = process.hrtime.bigint();
     await expect(
       runRecordedProgram(
-        { kind: "shell", dialect: ON_WINDOWS ? "bash" : "sh", source },
+        { kind: "shell", dialect, source: orphanSource(marker, "echo started") },
+        { timeoutMs: 1_500 },
+      ),
+    ).rejects.toThrow(/1500ms time budget/);
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(20_000);
+    expect(stillRunning(marker)).toBe(false);
+  });
+
+  // Windows replays run in a kill-on-close job: what a program leaves running ends with it.
+  it.runIf(WINDOWS_JOB_HOST)(
+    "ends with its shell on Windows and stops what it left running",
+    async () => {
+      if (!hasShell()) return;
+      const marker = `resin-orphan-${process.pid}-${Date.now()}`;
+      const run = await runRecordedProgram(
+        { kind: "shell", dialect, source: orphanSource(marker, "echo started") },
+        { timeoutMs: 60_000 },
+      );
+      expect(run).toMatchObject({ exitCode: 0 });
+      expect(run.stdout.trim()).toBe("started");
+      expect(stillRunning(marker)).toBe(false);
+    },
+  );
+
+  it.runIf(WINDOWS_JOB_HOST)("stops the whole tree at its time budget on Windows", async () => {
+    if (!hasShell()) return;
+    const marker = `resin-orphan-${process.pid}-${Date.now()}`;
+    const started = process.hrtime.bigint();
+    await expect(
+      runRecordedProgram(
+        { kind: "shell", dialect, source: orphanSource(marker, "echo started; sleep 60") },
         { timeoutMs: 1_500 },
       ),
     ).rejects.toThrow(/1500ms time budget/);
