@@ -36,6 +36,7 @@ import {
 } from "./paths.js";
 import { GrokSessionEventSource } from "./source.js";
 import {
+  type GrokSessionCache,
   type GrokSessionEntry,
   computeGrokForkPrefixOffset,
   isGrokTurnOpen,
@@ -96,6 +97,8 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+const GROK_SESSION_CACHE_REFRESH_MS = 2 * 60_000;
+
 export class GrokHarnessAdapter implements HarnessAdapter {
   readonly id = GROK_HARNESS_ID;
   readonly name = "Grok Build";
@@ -107,6 +110,9 @@ export class GrokHarnessAdapter implements HarnessAdapter {
   private readonly activeOnly: boolean;
   private readonly pollIntervalMs?: number;
   private readonly entries = new Map<string, GrokSessionEntry>();
+  /** Summaries and subagent links of unchanged sessions, reused between scans. */
+  private readonly sessionCache: GrokSessionCache = new Map();
+  private sessionCacheClearedAt = 0;
 
   constructor(options: GrokHarnessAdapterOptions = {}) {
     this.home = options.home ?? os.homedir();
@@ -158,10 +164,15 @@ export class GrokHarnessAdapter implements HarnessAdapter {
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
     const sessionsDir = workspace.metadata.sessionsDir;
     if (typeof sessionsDir !== "string") return [];
-    const entries = await listGrokSessions(sessionsDir, workspace.rootPath);
+    // A full re-read every couple of minutes catches edits that leave updates.jsonl untouched.
+    if (Date.now() - this.sessionCacheClearedAt > GROK_SESSION_CACHE_REFRESH_MS) {
+      this.sessionCache.clear();
+      this.sessionCacheClearedAt = Date.now();
+    }
+    const entries = await listGrokSessions(sessionsDir, workspace.rootPath, this.sessionCache);
     const [active, subagentParents] = await Promise.all([
       this.activeSessionIds(),
-      readGrokSubagentParents(entries),
+      readGrokSubagentParents(entries, this.sessionCache),
     ]);
     const sessions: HarnessSession[] = [];
     for (const entry of entries) {

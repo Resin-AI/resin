@@ -93,9 +93,31 @@ export async function listGrokProjects(
   return projects.sort((a, b) => a.cwd.localeCompare(b.cwd));
 }
 
+/** A session with no write for this long is settled. */
+export const GROK_SETTLED_AFTER_MS = 5 * 60_000;
+/** Settled sessions are re-stat'ed at most this often. */
+export const GROK_SETTLED_RECHECK_MS = 60_000;
+
+/**
+ * Per-session results carried between scans, keyed by session directory. A session's summary and
+ * subagent links only change while it is writing, so both are reused while its `updates.jsonl`
+ * identity (inode, size, mtime) is unchanged. Callers clear it periodically to catch anything else.
+ */
+export type GrokSessionCache = Map<
+  string,
+  {
+    identity: string;
+    updatesMtimeMs: number;
+    checkedAt: number;
+    summary: GrokSessionSummary | null;
+    subagentParents?: Map<string, string>;
+  }
+>;
+
 export async function listGrokSessions(
   projectDir: string,
   cwd: string,
+  cache?: GrokSessionCache,
 ): Promise<GrokSessionEntry[]> {
   let entries: Dirent[];
   try {
@@ -108,13 +130,40 @@ export async function listGrokSessions(
     if (!entry.isDirectory()) continue;
     const sessionDir = path.join(projectDir, entry.name);
     const updatesPath = path.join(sessionDir, "updates.jsonl");
+    const now = Date.now();
+    let cached = cache?.get(sessionDir);
     let updatesMtime: Date;
-    try {
-      updatesMtime = (await fs.stat(updatesPath)).mtime;
-    } catch {
-      continue;
+    // A settled session (no write for a while) is re-stat'ed on the slow cadence only; an append
+    // is then seen at most GROK_SETTLED_RECHECK_MS late and captured from its cursor.
+    if (
+      cached &&
+      now - cached.updatesMtimeMs > GROK_SETTLED_AFTER_MS &&
+      now - cached.checkedAt < GROK_SETTLED_RECHECK_MS
+    ) {
+      updatesMtime = new Date(cached.updatesMtimeMs);
+    } else {
+      let identity: string;
+      try {
+        const stat = await fs.stat(updatesPath);
+        updatesMtime = stat.mtime;
+        identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+      } catch {
+        cache?.delete(sessionDir);
+        continue;
+      }
+      if (!cached || cached.identity !== identity) {
+        cached = {
+          identity,
+          updatesMtimeMs: updatesMtime.getTime(),
+          checkedAt: now,
+          summary: await readGrokSessionSummary(sessionDir),
+        };
+        cache?.set(sessionDir, cached);
+      } else {
+        cached.checkedAt = now;
+      }
     }
-    const summary = await readGrokSessionSummary(sessionDir);
+    const summary = cached.summary;
     sessions.push({
       sessionId: summary?.sessionId ?? entry.name,
       cwd: summary?.cwd ?? cwd,
@@ -133,9 +182,17 @@ export async function listGrokSessions(
  */
 export async function readGrokSubagentParents(
   sessions: readonly GrokSessionEntry[],
+  cache?: GrokSessionCache,
 ): Promise<Map<string, string>> {
   const parents = new Map<string, string>();
   for (const session of sessions) {
+    const cached = cache?.get(session.sessionDir);
+    if (cached?.subagentParents) {
+      for (const [child, parent] of cached.subagentParents) parents.set(child, parent);
+      continue;
+    }
+    const own = new Map<string, string>();
+    if (cached) cached.subagentParents = own;
     let children: string[];
     try {
       children = await fs.readdir(path.join(session.sessionDir, "subagents"));
@@ -147,7 +204,9 @@ export async function readGrokSubagentParents(
         await readJson(path.join(session.sessionDir, "subagents", child, "meta.json")),
       );
       const childSessionId = asString(meta?.child_session_id) ?? child;
-      parents.set(childSessionId, asString(meta?.parent_session_id) ?? session.sessionId);
+      const parent = asString(meta?.parent_session_id) ?? session.sessionId;
+      parents.set(childSessionId, parent);
+      own.set(childSessionId, parent);
     }
   }
   return parents;

@@ -76,11 +76,11 @@ const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
 // Scans between full refreshes of settled transcripts' resolved paths and of quiet directories
 // (a scan runs every 10 s). Only symlink changes and new subagent files in long-quiet session
 // folders wait for one; the latter are still captured whole, from their cursor.
-const FULL_SWEEP_EVERY_SCANS = 12;
+const FULL_SWEEP_EVERY_SCANS = 18;
 // Scans between re-stats of finished (completed, failed, interrupted) and long-dormant idle
 // transcripts. A resumed one is seen within this many scans and, like any OMP session, captured
 // from its cursor, so the wait delays capture but loses nothing.
-const SETTLED_RECHECK_EVERY_SCANS = 3;
+const SETTLED_RECHECK_EVERY_SCANS = 6;
 // An idle transcript untouched this long is dormant rather than a session paused mid-use.
 const DORMANT_IDLE_MS = 30 * 60_000;
 
