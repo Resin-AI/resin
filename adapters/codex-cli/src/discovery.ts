@@ -402,7 +402,8 @@ async function readCodexHeader(
   handle: fs.FileHandle,
   fileSize: number,
 ): Promise<CodexHeaderSample> {
-  const buffer = Buffer.allocUnsafe(Math.min(fileSize, CODEX_HEADER_MAX_BYTES));
+  // Zero-filled: line scanning below must never see bytes from memory the file did not supply.
+  const buffer = Buffer.alloc(Math.min(fileSize, CODEX_HEADER_MAX_BYTES));
   const lines: ParsedCodexLine[] = [];
   let bytesRead = 0;
   let lineStart = 0;
@@ -415,7 +416,9 @@ async function readCodexHeader(
     if (read.bytesRead === 0) break;
     bytesRead += read.bytesRead;
 
-    let newlineOffset = buffer.indexOf(0x0a, searchOffset);
+    // Only the bytes read so far are transcript; the rest of the buffer is not yet filled.
+    const filled = buffer.subarray(0, bytesRead);
+    let newlineOffset = filled.indexOf(0x0a, searchOffset);
     while (newlineOffset >= 0) {
       const text = buffer.subarray(lineStart, newlineOffset).toString("utf8").trim();
       if (text) {
@@ -431,7 +434,7 @@ async function readCodexHeader(
       }
       lineStart = newlineOffset + 1;
       searchOffset = lineStart;
-      newlineOffset = buffer.indexOf(0x0a, searchOffset);
+      newlineOffset = filled.indexOf(0x0a, searchOffset);
     }
     if (hasSessionMeta) break;
     searchOffset = bytesRead;
