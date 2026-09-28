@@ -233,6 +233,62 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
     }
   });
 
+  it("accepts a one-time grant that carries no refresh token", async () => {
+    vi.useFakeTimers();
+    const mockFetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/auth/device/code")) {
+        return Response.json({
+          deviceCode: "device_code_privacy_delete_no_refresh",
+          userCode: "DELE-5678",
+          verificationUri: "https://auth.resin.sh/device",
+          expiresIn: 900,
+          interval: 1,
+        });
+      }
+      if (url.endsWith("/v1/auth/device/token")) {
+        return Response.json({
+          accessToken: "atk_one_time_without_refresh",
+          tokenType: "Bearer",
+          expiresIn: 300,
+          claims: {
+            accountId: "acc_privacy_test",
+            deviceId: "dev_privacy_test",
+            installationId: "inst_privacy_test",
+            workspaceId: "ws_privacy_test",
+            scopes: ["privacy:delete"],
+            rawUploadConsent: false,
+            issuedAt: new Date(Date.now()).toISOString(),
+            expiresAt: new Date(Date.now() + 300_000).toISOString(),
+            tokenType: "access",
+          },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const client = new DeviceAuthClient({
+      cloudUrl: "https://mock-cloud.resin.sh",
+      // SAFETY: Mock fetch function implementing fetch interface for testing.
+      customFetch: mockFetch as typeof fetch,
+      tokenFilePath,
+      vaultPath,
+    });
+    try {
+      const pending = client.authorizeOnce({
+        deviceId: "dev_privacy_test",
+        installationId: "inst_privacy_test",
+        scopes: ["privacy:delete"],
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const authorization = await pending;
+      expect(authorization.accessToken).toBe("atk_one_time_without_refresh");
+      await expect(authorization.revoke()).resolves.toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("polls for token exchange handling pending state and returning tokens", async () => {
     const mockTokenResponse: DeviceTokenExchangeResponse = {
       accessToken: "atk_live_test_access_token_12345",

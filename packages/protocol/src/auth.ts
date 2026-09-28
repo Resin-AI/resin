@@ -139,7 +139,8 @@ export const DeviceTokenExchangeResponseSchema = z.object({
   accessToken: z.string().min(1),
   tokenType: z.literal("Bearer").default("Bearer"),
   expiresIn: z.number().int().positive().default(3600), // 1 hour
-  refreshToken: z.string().min(1),
+  /** Absent for one-time grants (privacy:delete elevation), which cannot be refreshed. */
+  refreshToken: z.string().min(1).optional(),
   claims: AuthClaimsSchema,
 });
 
