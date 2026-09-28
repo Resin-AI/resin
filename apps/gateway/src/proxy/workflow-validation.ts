@@ -246,11 +246,13 @@ async function localDemonstration(
   if (located.length === 0) return undefined;
   // Where the plan's own calls ran: what the plan's working directories stand for.
   const planRoots = new Map<string, string>();
+  const ownCalls = new Map<string, LocalRecordedCall>();
   for (const { step } of located) {
     const own =
       step.callId === undefined || step.callId.length === 0
         ? undefined
         : await localCalls.lookup(step.callId);
+    if (own !== undefined) ownCalls.set(step.id, own);
     if (own?.workspaceRoot !== undefined) planRoots.set(step.id, own.workspaceRoot);
   }
   const items = located[0]!.calls.length;
@@ -285,7 +287,7 @@ async function localDemonstration(
       }
       if (sequence !== undefined) previous = call;
     }
-    iterations.push(iterationDemonstration(iteration, planRoots));
+    iterations.push(iterationDemonstration(iteration, planRoots, ownCalls));
   }
   if (unordered.size > 0) {
     return { mismatched: located.map(({ step }) => step.id).filter((id) => unordered.has(id)) };
@@ -301,11 +303,19 @@ function iterationDemonstration(
     address: SegmentAddress | null;
   }>,
   planRoots: ReadonlyMap<string, string>,
+  ownCalls: ReadonlyMap<string, LocalRecordedCall> = new Map(),
 ): LocalDemonstration {
-  // A segment this device cannot re-split exactly as the plan did is not in its recording.
+  // A segment this device cannot re-split exactly as the plan did is not in its recording. A
+  // held-out another harness's built-in shell ran is read as the plan's shell step would run it.
   const calls = located.flatMap(({ step, call, address }) => {
     const recorded = address === null ? call : segmentCall(address, call);
-    return recorded === undefined ? [] : [{ step, call: recorded, address }];
+    if (recorded === undefined) return [];
+    const own = ownCalls.get(step.id);
+    const asPlan =
+      own === undefined ? undefined : asPlanShellCall(step, own, call, recorded, address);
+    return asPlan === undefined
+      ? [{ step, call: recorded, address, programOnly: false }]
+      : [{ step, call: asPlan, address, programOnly: true }];
   });
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
   // calls. A token or leaf it traces to an earlier recorded output must be read by the plan. A
@@ -349,7 +359,7 @@ function iterationDemonstration(
     observed: [],
     calls: [],
   };
-  for (const { step, call, address } of calls) {
+  for (const { step, call, address, programOnly } of calls) {
     const stepId = step.id;
     demonstration.calls.push({
       stepId,
@@ -371,6 +381,7 @@ function iterationDemonstration(
       result: call.result.value,
       resultRedacted: call.result.redacted,
       hiddenDependencies: hidden.get(stepId) ?? [],
+      ...(programOnly ? { programOnly: true as const } : {}),
       privatePositions: call.privatePositions,
       ...(call.workspaceRoot === undefined || !planRoots.has(stepId)
         ? {}
@@ -378,6 +389,52 @@ function iterationDemonstration(
     });
   }
   return { recording, demonstration };
+}
+
+/**
+ * A held-out call another harness's built-in shell ran, as the plan step's own shell would have
+ * run it: the plan's callable, and the held-out's program text under the plan's program argument.
+ * Undefined (checked with exact identity) unless both calls are proven built-in shell programs of
+ * different harnesses; a segment additionally needs the same recorded shell dialect, since the
+ * segment grammar differs between shells. Only the argument carrying the program is renamed:
+ * its private positions move with it, every other argument is left out.
+ */
+function asPlanShellCall(
+  step: WorkflowStep,
+  own: LocalRecordedCall,
+  original: LocalRecordedCall,
+  recorded: LocalRecordedCall,
+  address: SegmentAddress | null,
+): LocalRecordedCall | undefined {
+  const plan = own.callable;
+  const held = recorded.callable;
+  if (plan.name === held.name && plan.connection === held.connection) return undefined;
+  if (plan.builtinShell !== true || held.builtinShell !== true) return undefined;
+  if (plan.program?.kind !== "shell" || held.program?.kind !== "shell") return undefined;
+  if (step.callable.program?.argument !== plan.program.argument) return undefined;
+  if (address !== null || step.segment !== undefined) {
+    const planShell = recordedPosixShell(plan.name, own.arguments);
+    if (
+      planShell === undefined ||
+      planShell !== recordedPosixShell(held.name, original.arguments)
+    ) {
+      return undefined;
+    }
+  }
+  const from = held.program.argument;
+  const to = plan.program.argument;
+  const text = recorded.arguments[from];
+  const reference = recorded.argumentReferences[from];
+  if (text === undefined || reference === undefined) return undefined;
+  return {
+    ...recorded,
+    callable: plan,
+    arguments: { [to]: text },
+    argumentReferences: { [to]: reference },
+    privatePositions: recorded.privatePositions
+      .filter((position) => position.argument === from)
+      .map((position) => ({ ...position, argument: to })),
+  };
 }
 
 /**

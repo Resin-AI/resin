@@ -557,6 +557,8 @@ export class WorkflowCallRecorder {
             parameters,
             program,
             origins,
+            undefined,
+            true,
           );
         }
         const carrier: WorkflowCallCarrier = {
@@ -1118,6 +1120,10 @@ export class WorkflowCallRecorder {
       program,
       origins,
       isPlainObject(normalizedEvent.parameters) ? normalizedEvent.parameters : undefined,
+      program !== undefined &&
+        KNOWN_SHELL_COMMANDS.some(
+          (shell) => shell.argument === program.argument && shell.proves(event),
+        ),
     );
     const relationships = this.relateLocalCall(state, call, event.sessionId);
     carrier.executionIndex = call.executionIndex;
@@ -1261,6 +1267,8 @@ export class WorkflowCallRecorder {
     uploaded?: WorkflowCallCarrier["origins"],
     /** The redacted arguments the upload was built from, when this path has them. */
     uploadedView?: Record<string, WorkflowJsonValue>,
+    /** The harness's own built-in shell ran this program (a `KNOWN_SHELL_COMMANDS` proof). */
+    shellProven = false,
   ): LocalCall {
     const startsExecution = state.executions.length === 0 || state.newExecutionPending;
     if (startsExecution) {
@@ -1337,6 +1345,7 @@ export class WorkflowCallRecorder {
         ...(call.program === undefined
           ? {}
           : { program: { kind: call.program.kind, argument: call.program.argument } }),
+        ...(shellProven && call.program?.kind === "shell" ? { builtinShell: true } : {}),
         arguments: Object.keys(parameters),
       },
       event.sessionId,

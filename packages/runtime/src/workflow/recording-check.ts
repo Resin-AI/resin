@@ -67,6 +67,12 @@ export interface RecordedCall {
    * spelled its directory differently is still the same call. Absent, directories compare as text.
    */
   roots?: { recorded: string; plan: string };
+  /**
+   * The call was recorded by another harness's built-in shell than the plan's step: only the
+   * program argument is compared, since the two shells' other arguments (working directory
+   * spelling, timeout, label, profile) are not the same vocabulary.
+   */
+  programOnly?: true;
 }
 
 /**
@@ -283,6 +289,7 @@ function comparedArguments(
   step: WorkflowStep,
   args: Record<string, WorkflowJsonValue>,
   root: string | undefined,
+  programOnly = false,
 ): Record<string, WorkflowJsonValue> {
   const program = step.callable.program;
   const runtime = step.callable.runtime;
@@ -294,10 +301,12 @@ function comparedArguments(
   }
   const compared = Object.fromEntries(
     Object.entries(args).filter(
-      ([name]) => name === program.argument || Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name),
+      ([name]) =>
+        name === program.argument ||
+        (!programOnly && Object.hasOwn(PROGRAM_CONTEXT_ARGUMENTS, name)),
     ),
   );
-  if (root === undefined) return compared;
+  if (root === undefined || programOnly) return compared;
   for (const name of WORKING_DIRECTORY_ARGUMENTS) {
     const value = compared[name] ?? ".";
     if (typeof value !== "string") continue;
@@ -334,8 +343,8 @@ function mismatch(
   }
   if (
     !deepEqual(
-      comparedArguments(step, request.arguments, recorded.roots?.plan),
-      comparedArguments(step, recorded.arguments, recorded.roots?.recorded),
+      comparedArguments(step, request.arguments, recorded.roots?.plan, recorded.programOnly),
+      comparedArguments(step, recorded.arguments, recorded.roots?.recorded, recorded.programOnly),
     )
   ) {
     return "resolves to arguments the recording did not pass";

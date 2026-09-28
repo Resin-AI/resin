@@ -13,7 +13,10 @@
  *   `sha256sum`, ... — `isSkippableSegment`) unnamed; version-1 addresses still re-split under the
  *   version-1 grammar and may leave only `mkdir -p` setup unnamed;
  * - `joint-token-spans-v1`: several span proposals or holes inside one program token are decided
- *   jointly against a demonstration that changed all of them (`backups/<dir>/<name>-<date>.tar.gz`).
+ *   jointly against a demonstration that changed all of them (`backups/<dir>/<name>-<date>.tar.gz`);
+ * - `cross-harness-shell-heldout-v1`: a held-out recorded by another harness's built-in shell than
+ *   the plan's step (Claude `Bash` for Codex `exec_command`) is checked through the program
+ *   argument alone; segment steps additionally need the same recorded shell dialect.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -23,4 +26,5 @@ export const WORKFLOW_CAPABILITIES = [
   "and-chain-segments-v1",
   "and-chain-segments-v2",
   "joint-token-spans-v1",
+  "cross-harness-shell-heldout-v1",
 ].join(",");

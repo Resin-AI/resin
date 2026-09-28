@@ -36,6 +36,8 @@ export interface LocalRecordedCall {
     name: string;
     connection?: string;
     program?: { kind: string; argument: string };
+    /** The harness's own built-in shell ran it, as the recorder proved from the event. */
+    builtinShell?: true;
   };
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
@@ -179,6 +181,7 @@ const RecordedCallIdentity = z.object({
   name: z.string(),
   connection: z.string().optional(),
   program: z.object({ kind: z.string(), argument: z.string() }).optional(),
+  builtinShell: z.literal(true).optional(),
   arguments: z.array(z.string()),
 });
 
