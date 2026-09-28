@@ -5,6 +5,7 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { GROK_HARNESS_ID } from "./paths.js";
 
 /**
@@ -102,6 +103,15 @@ function resolveCall(update: Json): OpenCall & { connection?: string } {
 }
 
 function resultText(update: Json): string | undefined {
+  const raw = asRecord(update.rawOutput);
+  // A shell call's output is its bytes, empty or not; `output_for_prompt` is Grok's model-facing
+  // wrapper (`exit: 0\n` for a command that printed nothing), not what the command printed.
+  if (raw?.type === "Bash" && Array.isArray(raw.output)) {
+    const bytes = raw.output.filter(
+      (byte): byte is number => Number.isInteger(byte) && byte >= 0 && byte <= 255,
+    );
+    if (bytes.length === raw.output.length) return Buffer.from(bytes).toString("utf8");
+  }
   const texts = (Array.isArray(update.content) ? update.content : [])
     .map((item) => {
       const entry = asRecord(item);
@@ -109,7 +119,6 @@ function resultText(update: Json): string | undefined {
     })
     .filter((text) => text.length > 0);
   if (texts.length > 0) return texts.join("\n");
-  const raw = asRecord(update.rawOutput);
   const output = asRecord(raw?.output);
   return (
     asString(output?.OkayOutput) ??
@@ -250,6 +259,12 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
           ...(agentTimestampMs !== undefined ? { startedAtMs: agentTimestampMs } : {}),
         };
         state.calls.set(toolCallId, call);
+        // Grok's own shell is namespace `grok_build`; MCP tools arrive behind `use_tool`, so only this
+        // decoder proves the call is the built-in shell, with a local-only marker for the recorder.
+        const builtinShell =
+          SHELL_TOOLS[call.builtinName] === true &&
+          call.connection === undefined &&
+          typeof call.input?.command === "string";
         return [
           {
             ...base,
@@ -258,6 +273,9 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
             toolName: call.toolName,
             ...(call.connection ? { connection: call.connection } : {}),
             parameters: call.input ?? {},
+            ...(builtinShell
+              ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "grok-shell" } }
+              : {}),
           },
         ];
       }
@@ -360,6 +378,9 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         ? asCount(raw.exit_code)
         : undefined;
     const commandFailed = status !== "failed" && exitCode !== undefined && exitCode !== 0;
+    // A background run (`is_background`) returns once the command starts: its exit 0 says nothing
+    // about how the command ended, so only a foreground run proves it exited 0.
+    const foreground = call?.input?.is_background !== true;
     const isError = status === "failed" || commandFailed;
     const output = resultText(update);
     const durationMs =
@@ -376,6 +397,9 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         isError,
         ...(commandFailed ? { error: `exit code ${exitCode}` } : {}),
         executionDurationMs: durationMs,
+        ...(exitCode === 0 && !isError && foreground
+          ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" } }
+          : {}),
       },
     ];
     if (!isError) {

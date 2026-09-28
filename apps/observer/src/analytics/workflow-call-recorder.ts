@@ -205,6 +205,14 @@ const KNOWN_SHELL_COMMANDS: readonly {
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "pi-bash",
   },
+  {
+    argument: "command",
+    labels: ["description"],
+    proves: (event) =>
+      event.toolName === "run_terminal_command" &&
+      event.connection === undefined &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "grok-shell",
+  },
 ];
 
 /** One observed call kept locally: its real values never leave this machine. */

@@ -279,7 +279,7 @@ Grok Build `1.0.13` is tested (`adapters/grok-build/tests/fixtures/recorded/1.0.
 
 ### Session Observation
 
-Grok writes each session to `~/.grok/sessions/<encoded cwd>/<id>/`. Resin tails `updates.jsonl` and reads `summary.json` and subagent `subagents/<child>/meta.json`. Headless (`grok -p`), `--resume`, `--fork-session`, ACP (`grok agent stdio`) and background subagents are captured. Because headless runs exit immediately and `--resume` appends to old sessions, capture follows transcript activity rather than session creation time. Grok re-lists Resin's tools when the gateway sends `notifications/tools/list_changed`, so its `search_tool`/`use_tool` meta-tools see new tools in a running session.
+Grok writes each session to `~/.grok/sessions/<encoded cwd>/<id>/`. Resin tails `updates.jsonl` and reads `summary.json` and subagent `subagents/<child>/meta.json`. Headless (`grok -p`), `--resume`, `--fork-session`, ACP (`grok agent stdio`) and background subagents are captured. Because headless runs exit immediately and `--resume` appends to old sessions, capture follows transcript activity rather than session creation time. Grok re-lists Resin's tools when the gateway sends `notifications/tools/list_changed`, so its `search_tool`/`use_tool` meta-tools see new tools in a running session. Its built-in `run_terminal_command` calls are learned as shell programs; its `search_tool` calls and `use_tool` calls to Resin's discovery tools list catalogs, not project work, and are not learned.
 
 ### Known Limits
 

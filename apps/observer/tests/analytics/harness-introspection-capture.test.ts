@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexRecordDecoder } from "@resin/adapter-codex";
 import { CursorHarnessAdapter, CursorRecordDecoder } from "@resin/adapter-cursor-cli";
+import { GrokHarnessAdapter, GrokRecordDecoder } from "@resin/adapter-grok-build";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import type { HarnessRecordDecoder, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
@@ -206,5 +207,39 @@ describe("harness introspection capture", () => {
       event.type === "tool_call" || event.type === "tool_result" ? [event.toolName] : [],
     );
     expect(tools).toEqual(["Shell", "Shell"]);
+  });
+
+  it("drops a recorded Grok session's catalog searches and keeps its project work", async () => {
+    // grok 1.0.13 headless code-stats run: Resin's guidance has it call its built-in `search_tool`
+    // and `use_tool` → `resin__manage_tools` before its `run_terminal_command` work.
+    const sessionId = "01a0e63f-2542-7502-8b1a-42dca17f7d77";
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-grok-introspection-"));
+    fs.cpSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "../../../../adapters/grok-build/tests/fixtures/recorded/1.0.13/sessions",
+        sessionId,
+      ),
+      path.join(home, ".grok", "sessions", encodeURIComponent("/workspace/project"), sessionId),
+      { recursive: true },
+    );
+    const adapter = new GrokHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const [session] = await adapter.listSessions(workspace!);
+    const records = await (await adapter.openEventSource(session!)).readNext(1000);
+
+    const submitted = await captureRecords(
+      new GrokRecordDecoder(),
+      { sessionId, harnessId: "grok-build", timestamp: "2026-09-28T04:21:34.000Z" },
+      records,
+    );
+    const calls = submitted.flatMap((event) => (event.type === "tool_call" ? [event] : []));
+    expect(calls.map((call) => call.toolName)).toEqual([
+      "list_dir",
+      "run_terminal_command",
+      "grep",
+      "run_terminal_command",
+      "run_terminal_command",
+    ]);
   });
 });

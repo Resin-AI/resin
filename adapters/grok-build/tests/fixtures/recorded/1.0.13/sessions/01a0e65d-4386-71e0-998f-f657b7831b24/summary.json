@@ -1,0 +1,25 @@
+{
+  "info": {
+    "id": "01a0e65d-4386-71e0-998f-f657b7831b24",
+    "cwd": "/workspace/project"
+  },
+  "session_summary": "Python TODO counts and line stats",
+  "created_at": "2026-09-28T04:54:26.964512459Z",
+  "updated_at": "2026-09-28T04:54:46.243831748Z",
+  "num_messages": 13,
+  "num_chat_messages": 13,
+  "current_model_id": "grok-4.7",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "session_kind": "headless",
+  "git_root_dir": "/workspace/project/",
+  "head_commit": "954c03aa568b56d692ada304b6d12e85de8b9fc5",
+  "head_branch": "master",
+  "request_id": "60fadbd8-a41d-48a8-a649-4b2a0b30bec9",
+  "grok_home": "/home/user/.grok",
+  "last_active_at": "2026-09-28T04:54:46.243831748Z",
+  "generated_title": "Python TODO counts and line stats",
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off",
+  "reasoning_effort": "high"
+}
