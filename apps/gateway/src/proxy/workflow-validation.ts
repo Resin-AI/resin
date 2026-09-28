@@ -246,11 +246,13 @@ async function localDemonstration(
   if (located.length === 0) return undefined;
   // Where the plan's own calls ran: what the plan's working directories stand for.
   const planRoots = new Map<string, string>();
+  const ownCalls = new Map<string, LocalRecordedCall>();
   for (const { step } of located) {
     const own =
       step.callId === undefined || step.callId.length === 0
         ? undefined
         : await localCalls.lookup(step.callId);
+    if (own !== undefined) ownCalls.set(step.id, own);
     if (own?.workspaceRoot !== undefined) planRoots.set(step.id, own.workspaceRoot);
   }
   const items = located[0]!.calls.length;
@@ -285,7 +287,7 @@ async function localDemonstration(
       }
       if (sequence !== undefined) previous = call;
     }
-    iterations.push(iterationDemonstration(iteration, planRoots));
+    iterations.push(iterationDemonstration(iteration, planRoots, ownCalls));
   }
   if (unordered.size > 0) {
     return { mismatched: located.map(({ step }) => step.id).filter((id) => unordered.has(id)) };
@@ -301,11 +303,18 @@ function iterationDemonstration(
     address: SegmentAddress | null;
   }>,
   planRoots: ReadonlyMap<string, string>,
+  ownCalls: ReadonlyMap<string, LocalRecordedCall> = new Map(),
 ): LocalDemonstration {
-  // A segment this device cannot re-split exactly as the plan did is not in its recording.
+  // A segment this device cannot re-split exactly as the plan did is not in its recording. A
+  // held-out another harness's built-in shell ran is read as the plan's shell step would run it.
   const calls = located.flatMap(({ step, call, address }) => {
     const recorded = address === null ? call : segmentCall(address, call);
-    return recorded === undefined ? [] : [{ step, call: recorded, address }];
+    if (recorded === undefined) return [];
+    const own = ownCalls.get(step.id);
+    const asPlan = own === undefined ? undefined : asPlanShellCall(step, own, call, recorded);
+    return asPlan === undefined
+      ? [{ step, call: recorded, address, programOnly: false }]
+      : [{ step, call: asPlan, address, programOnly: true }];
   });
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
   // calls. A token or leaf it traces to an earlier recorded output must be read by the plan. A
@@ -349,7 +358,7 @@ function iterationDemonstration(
     observed: [],
     calls: [],
   };
-  for (const { step, call, address } of calls) {
+  for (const { step, call, address, programOnly } of calls) {
     const stepId = step.id;
     demonstration.calls.push({
       stepId,
@@ -371,6 +380,7 @@ function iterationDemonstration(
       result: call.result.value,
       resultRedacted: call.result.redacted,
       hiddenDependencies: hidden.get(stepId) ?? [],
+      ...(programOnly ? { programOnly: true as const } : {}),
       privatePositions: call.privatePositions,
       ...(call.workspaceRoot === undefined || !planRoots.has(stepId)
         ? {}
@@ -378,6 +388,86 @@ function iterationDemonstration(
     });
   }
   return { recording, demonstration };
+}
+
+/** Working-directory arguments a crossing maps onto each other, as the recording check reads them. */
+const CROSS_DIRECTORY_ARGUMENTS = ["workdir", "cwd"] as const;
+/** Directory-like argument names the recording check does not read as a working directory. */
+const UNMAPPED_DIRECTORY_ARGUMENTS: ReadonlySet<string> = new Set([
+  "directory",
+  "dir",
+  "working_directory",
+  "workingDirectory",
+]);
+
+/**
+ * A held-out call another harness's built-in shell ran, as the plan step's own shell would have
+ * run it: the plan's callable, and the held-out's program text under the plan's program argument.
+ * Undefined (checked with exact identity) unless both calls are proven built-in shell programs of
+ * different harnesses run in the same recorded shell dialect. The argument carrying the program
+ * is renamed (its private positions move with it) and the working directory crosses under the
+ * plan's name for it, compared through the roots as the same-harness check compares it; every
+ * other argument is left out.
+ */
+function asPlanShellCall(
+  step: WorkflowStep,
+  own: LocalRecordedCall,
+  original: LocalRecordedCall,
+  recorded: LocalRecordedCall,
+): LocalRecordedCall | undefined {
+  const plan = own.callable;
+  const held = recorded.callable;
+  if (plan.name === held.name && plan.connection === held.connection) return undefined;
+  if (plan.builtinShell !== true || held.builtinShell !== true) return undefined;
+  if (plan.program?.kind !== "shell" || held.program?.kind !== "shell") return undefined;
+  if (step.callable.program?.argument !== plan.program.argument) return undefined;
+  // Every crossing needs one shell dialect: zsh neither word-splits an unquoted `$var` nor
+  // treats repeated redirections as bash does, so the same text is not the same program.
+  const planShell = recordedPosixShell(plan.name, own.arguments);
+  if (planShell === undefined || planShell !== recordedPosixShell(held.name, original.arguments)) {
+    return undefined;
+  }
+  // The working directory crosses too, under the plan's name for it; a harness naming it any
+  // other way cannot be mapped, so the call keeps exact identity.
+  if (Object.keys(original.arguments).some((name) => UNMAPPED_DIRECTORY_ARGUMENTS.has(name))) {
+    return undefined;
+  }
+  const planDirectory = CROSS_DIRECTORY_ARGUMENTS.find((name) =>
+    Object.hasOwn(own.arguments, name),
+  );
+  const heldDirectory = CROSS_DIRECTORY_ARGUMENTS.find((name) =>
+    Object.hasOwn(recorded.arguments, name),
+  );
+  const from = held.program.argument;
+  const to = plan.program.argument;
+  const text = recorded.arguments[from];
+  const reference = recorded.argumentReferences[from];
+  if (text === undefined || reference === undefined) return undefined;
+  const directoryName = planDirectory ?? heldDirectory;
+  const moved = (name: string) =>
+    name === from
+      ? to
+      : heldDirectory !== undefined && name === heldDirectory
+        ? directoryName
+        : undefined;
+  const arguments_: Record<string, WorkflowJsonValue> = { [to]: text };
+  const argumentReferences: Record<string, string> = { [to]: reference };
+  if (heldDirectory !== undefined && directoryName !== undefined) {
+    arguments_[directoryName] = recorded.arguments[heldDirectory]!;
+    const directoryReference = recorded.argumentReferences[heldDirectory];
+    if (directoryReference !== undefined) argumentReferences[directoryName] = directoryReference;
+  }
+  return {
+    ...recorded,
+    callable: plan,
+    arguments: arguments_,
+    argumentReferences,
+    // Positions move with the arguments that cross: the program and the working directory.
+    privatePositions: recorded.privatePositions.flatMap((position) => {
+      const name = moved(position.argument);
+      return name === undefined ? [] : [{ ...position, argument: name }];
+    }),
+  };
 }
 
 /**

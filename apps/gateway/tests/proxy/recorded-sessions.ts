@@ -21,6 +21,8 @@ export type RecordedTurn =
       parameters: Record<string, unknown>;
       result: string;
       connection?: string;
+      /** Tool-call metadata as the harness decoder set it (e.g. a built-in shell's marker). */
+      metadata?: Record<string, unknown>;
     };
 
 /**
@@ -63,6 +65,7 @@ export function recordSession(
       toolName: turn.toolName,
       parameters: turn.parameters,
       ...(turn.connection === undefined ? {} : { connection: turn.connection }),
+      ...(turn.metadata === undefined ? {} : { metadata: turn.metadata }),
     });
     emit({
       type: "tool_result",
