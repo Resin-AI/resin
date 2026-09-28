@@ -111,8 +111,20 @@ describe("input role names", () => {
     expect(rolesOf("tar -tzf backups/a.tar.gz")).toMatchObject({
       "backups/a.tar.gz": "archive_path",
     });
-    expect(rolesOf("tar -czf out.tgz data")).toMatchObject({ data: "text" });
+    expect(rolesOf("tar -tzf out.tgz data")).toMatchObject({ data: "text" });
+    expect(rolesOf("tar -czf out.tgz notes.txt")).toMatchObject({ "notes.txt": "document_path" });
     expect(rolesOf("./release build alpha")).toMatchObject({ alpha: "text" });
     expect(rolesOf("DEBUG=1 mkdir x")).toMatchObject({ x: "directory" });
+  });
+
+  it("names what a created archive packs: a folder, or a directory given as a path", () => {
+    // ReportPairing's real production pair ran `tar -czf <archive> <folder>` without `-C`.
+    expect(rolesOf("tar -czf backups/zeta-2026-04-06.tar.gz zeta")).toMatchObject({
+      "backups/zeta-2026-04-06.tar.gz": "archive_path",
+      zeta: "folder",
+    });
+    expect(rolesOf("tar --create --gzip -f out.tgz data/raw")).toMatchObject({
+      "data/raw": "directory",
+    });
   });
 });
