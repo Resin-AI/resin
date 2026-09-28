@@ -481,6 +481,12 @@ export class ToolRegistry {
   private readonly sessionActiveTools = new Map<string, Map<string, string>>();
   // Workspace-bound V1ToolLocks: workspaceId -> V1ToolLock
   private readonly workspaceLocks = new Map<string, V1ToolLock>();
+  // Cloud tools a workspace's latest verified catalog snapshot dropped, indexed both ways:
+  // workspaceId -> { toolId -> public name, public name -> toolId }.
+  private readonly retiredCloudTools = new Map<
+    string,
+    { ids: Map<string, string>; names: Map<string, string> }
+  >();
 
   // Monotonic local revision counter per workspace
   private readonly workspaceRevisions = new Map<string, number>();
@@ -587,6 +593,98 @@ export class ToolRegistry {
   async removeManagedTool(entry: V1LockedToolEntry, workspaceId?: string): Promise<void> {
     this.forgetBlockedTools();
     await this.toolRepo?.removeManagedToolVersion?.(entry, workspaceId);
+  }
+
+  /**
+   * Evicts, from `workspaceId` only, cloud tools that workspace's latest verified catalog
+   * snapshot no longer contains. Every workspace-scoped version leaves discovery, later
+   * registrations for the workspace (store hydration, stale caches) are ignored, and handlers
+   * captured earlier refuse new calls, until a snapshot carries the tool again. System and
+   * global tools are never retired. A call already running when retirement lands is not
+   * cancelled; it finishes, and only later calls are refused.
+   */
+  async retireCloudTools(
+    workspaceId: string,
+    tools: Array<{ toolId: string; name: string }>,
+  ): Promise<void> {
+    const retirable = tools.filter(({ toolId }) => !isSystemMetaTool(toolId));
+    if (retirable.length === 0) return;
+    let retired = this.retiredCloudTools.get(workspaceId);
+    if (!retired) {
+      retired = { ids: new Map(), names: new Map() };
+      this.retiredCloudTools.set(workspaceId, retired);
+    }
+    const active = this.workspaceActiveTools.get(workspaceId);
+    for (const tool of retirable) {
+      retired.ids.set(tool.toolId, tool.name);
+      retired.names.set(tool.name, tool.toolId);
+      active?.delete(tool.toolId);
+      const versions = this.registeredTools.get(tool.toolId);
+      if (!versions) continue;
+      for (const [version, registered] of versions) {
+        if (
+          registered.workspaceId === workspaceId &&
+          !registered.isSystem &&
+          registered.scope !== "system" &&
+          registered.scope !== "global"
+        ) {
+          versions.delete(version);
+        }
+      }
+      if (versions.size === 0) {
+        this.registeredTools.delete(tool.toolId);
+        this.latestVersions.delete(tool.toolId);
+      } else if (!versions.has(this.latestVersions.get(tool.toolId) ?? "")) {
+        this.latestVersions.set(tool.toolId, [...versions.keys()].at(-1) as string);
+      }
+    }
+    const revision = (this.workspaceRevisions.get(workspaceId) ?? 0) + 1;
+    this.workspaceRevisions.set(workspaceId, revision);
+    this.cache.invalidateWorkspace(workspaceId);
+    const snapshot = await this.resolveCatalog(workspaceId);
+    this.events.emit({
+      workspaceId,
+      revision,
+      snapshot,
+      changedToolIds: retirable.map((tool) => tool.toolId),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Lets tools a newer verified snapshot of `workspaceId` publishes register and run again. A
+   * published name also stops answering as retired, even under a new tool id.
+   */
+  reinstateCloudTools(workspaceId: string, published: Array<{ id: string; name: string }>): void {
+    const retired = this.retiredCloudTools.get(workspaceId);
+    if (!retired) return;
+    for (const { id, name } of published) {
+      const retiredName = retired.ids.get(id);
+      retired.ids.delete(id);
+      if (retiredName !== undefined && retired.names.get(retiredName) === id) {
+        retired.names.delete(retiredName);
+      }
+      retired.names.delete(name);
+    }
+  }
+
+  /** Whether `workspaceId`'s latest verified snapshot dropped `toolId`. */
+  isCloudToolRetired(workspaceId: string | undefined, toolId: string): boolean {
+    return (
+      workspaceId !== undefined && this.retiredCloudTools.get(workspaceId)?.ids.has(toolId) === true
+    );
+  }
+
+  /** The refusal for a tool `workspaceId` retired, addressed by id or public name. */
+  retiredToolMessage(identifier: string, workspaceId: string | undefined): string | undefined {
+    if (workspaceId === undefined) return undefined;
+    const retired = this.retiredCloudTools.get(workspaceId);
+    if (!retired) return undefined;
+    const name =
+      retired.ids.get(identifier) ?? (retired.names.has(identifier) ? identifier : undefined);
+    return name === undefined
+      ? undefined
+      : `Tool '${name}' is no longer available: it was removed from this workspace's catalog.`;
   }
 
   /**
@@ -930,6 +1028,7 @@ export class ToolRegistry {
    */
   registerToolSync(tool: RegistryTool): void {
     if (this.managedToolAccess?.isBlocked(tool)) return;
+    if (this.isCloudToolRetired(tool.workspaceId, tool.toolId)) return;
     let versions = this.registeredTools.get(tool.toolId);
     if (!versions) {
       versions = new Map();
@@ -957,6 +1056,10 @@ export class ToolRegistry {
     }
     const handler = tool.handler;
     tool.handler = async (context, params, options) => {
+      const retired =
+        this.retiredToolMessage(tool.toolId, context.workspaceId) ??
+        this.retiredToolMessage(tool.toolId, tool.workspaceId);
+      if (retired) throw new Error(retired);
       this.managedToolAccess?.assertAllowed(tool);
       if (
         this.managedToolAccess?.isManaged(tool) &&
@@ -1306,6 +1409,7 @@ export class ToolRegistry {
     try {
       for (const { tool, scope } of candidateTools.values()) {
         if (this.managedToolAccess?.isBlocked(tool)) continue;
+        if (this.isCloudToolRetired(workspaceId, tool.toolId)) continue;
         const exposedName = nameMap.get(tool.toolId) || sanitizeToolName(tool.name);
         const isPinned =
           Boolean(controls.pinnedVersions[tool.toolId]) ||
@@ -1388,6 +1492,9 @@ export class ToolRegistry {
   ): Promise<RegistryTool | undefined> {
     this.forgetBlockedTools();
     if (!toolIdOrName) {
+      return undefined;
+    }
+    if (this.retiredToolMessage(toolIdOrName, workspaceId)) {
       return undefined;
     }
 

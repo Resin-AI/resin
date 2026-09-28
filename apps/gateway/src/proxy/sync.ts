@@ -516,7 +516,7 @@ export class CloudCatalogSyncCoordinator {
       return;
     }
     if (this.autoRegisterInRegistry && this.registry && snapshot.tools) {
-      if (!(await this.reconcileRegistry(snapshot.tools))) return;
+      if (!(await this.reconcileRegistry(snapshot))) return;
       activeTools = snapshot.tools.map((tool) => ({ toolId: tool.id, version: tool.version }));
     } else {
       activeTools = [];
@@ -658,7 +658,7 @@ export class CloudCatalogSyncCoordinator {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
 
-    let currentLock = this.lockManager.read();
+    let currentLock = await this.retireToolsMissingFrom(this.lockManager.read(), snapshot);
     this.bindRegistryLock(currentLock);
 
     const newerAvailable: string[] = [];
@@ -818,8 +818,93 @@ export class CloudCatalogSyncCoordinator {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
 
+    // Offline, the last verified snapshot stays authoritative: a lock entry it no longer carries
+    // is not revived from local artifacts.
+    const verified = this.cache.getSnapshot(this.workspaceId);
+    if (verified) currentLock = await this.retireToolsMissingFrom(currentLock, verified);
+
     this.bindRegistryLock(currentLock);
     return await this.activateLockedEntries(currentLock, undefined, false);
+  }
+
+  /**
+   * The tool ids a verified snapshot authoritatively publishes, or undefined when it cannot
+   * justify retiring anything: without an explicit tools array the catalog is unknown, and an
+   * empty catalog while the account still has tool access is suspicious rather than a purge.
+   */
+  private publishedToolIds(snapshot: CatalogSnapshotResponse): Set<string> | undefined {
+    if (!Array.isArray(snapshot.tools)) return undefined;
+    if (snapshot.tools.length === 0 && !this.options.managedToolAccess?.isInactive()) {
+      return undefined;
+    }
+    return new Set(snapshot.tools.map((tool) => tool.id));
+  }
+
+  /**
+   * Hides every lock entry whose tool the verified snapshot no longer carries (at any version):
+   * it is left out of the lock this workspace binds and activates, and retired in the registry
+   * for this workspace only. Entries this workspace owns (a receipt proves this account recorded
+   * them into this lock for this workspace) are also removed from the lock file and their stored
+   * manifest and artifact reference released. Entries it does not own (written before receipts
+   * named their lock, or by another workspace) stay byte-identical on disk and reappear when the
+   * owning workspace binds. The lock only ever holds cloud-published tools, so local-only state
+   * is never affected.
+   */
+  private async retireToolsMissingFrom(
+    lock: V1ToolLock,
+    snapshot: CatalogSnapshotResponse,
+  ): Promise<V1ToolLock> {
+    const lockManager = this.lockManager;
+    const workspaceId = this.workspaceId;
+    const access = this.options.managedToolAccess;
+    const published = this.publishedToolIds(snapshot);
+    if (workspaceId) this.registry?.reinstateCloudTools(workspaceId, snapshot.tools ?? []);
+    if (!lockManager || !workspaceId || !published) return lock;
+    const dropped = Object.values(lock.tools).filter((entry) => !published.has(entry.toolId));
+    if (dropped.length === 0) return lock;
+    const owned = dropped.filter((entry) =>
+      access?.ownsLockEntry(entry, workspaceId, lockManager.lockPath),
+    );
+
+    let nextLock = lock;
+    for (const entry of owned) {
+      try {
+        nextLock = lockManager.remove(entry.name, entry);
+      } catch (error: unknown) {
+        this.options.onToolSyncError?.(
+          entry.name,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    const tools = { ...nextLock.tools };
+    for (const entry of dropped) delete tools[entry.name];
+    const visibleLock: V1ToolLock = { ...nextLock, tools };
+    await this.registry?.retireCloudTools(
+      workspaceId,
+      dropped.map((entry) => ({ toolId: entry.toolId, name: entry.name })),
+    );
+    // Garbage collection runs inside the serialized sync and only for tools still retired, so a
+    // republish that reinstated one cannot lose the manifest or reference it reuses. The lock and
+    // registry above already make the tool inert, so a failed release is only reported.
+    for (const entry of owned) {
+      if (this.registry && !this.registry.isCloudToolRetired(workspaceId, entry.toolId)) continue;
+      try {
+        await this.registry?.removeManagedTool(entry, workspaceId);
+        await this.artifactCache?.removeOwnedArtifactReference(
+          entry.artifactDigest,
+          `${lock.projectId}:${entry.name}`,
+          entry.toolId,
+          entry.version,
+        );
+      } catch (error: unknown) {
+        this.options.onToolSyncError?.(
+          entry.name,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    return visibleLock;
   }
 
   /**
@@ -880,6 +965,8 @@ export class CloudCatalogSyncCoordinator {
         if (entry.status === "disabled") {
           continue;
         }
+        // Hidden: this workspace's latest verified snapshot dropped the tool.
+        if (this.registry?.isCloudToolRetired(this.workspaceId, entry.toolId)) continue;
         eligible.push([toolName, entry]);
       }
     } finally {
@@ -1271,13 +1358,32 @@ export class CloudCatalogSyncCoordinator {
    * Registers/updates all cloud tools in ToolRegistry (legacy/unlocked helper). Returns whether
    * every tool was registered and activated in a bound workspace.
    */
-  private async reconcileRegistry(tools: ToolManifest[]): Promise<boolean> {
+  private async reconcileRegistry(snapshot: CatalogSnapshotResponse): Promise<boolean> {
     if (!this.registry) {
       return false;
     }
 
+    const tools = snapshot.tools ?? [];
     const workspaceId = this.workspaceId;
     let allActivated = workspaceId !== undefined;
+    const published = this.publishedToolIds(snapshot);
+    if (workspaceId) {
+      this.registry.reinstateCloudTools(workspaceId, tools);
+      if (published) {
+        await this.registry.retireCloudTools(
+          workspaceId,
+          this.registry
+            .getAllRegisteredTools()
+            .filter(
+              (registered) =>
+                registered.metadata?.source === "cloud" &&
+                registered.workspaceId === workspaceId &&
+                !published.has(registered.toolId),
+            )
+            .map((registered) => ({ toolId: registered.toolId, name: registered.name })),
+        );
+      }
+    }
     for (const tool of tools) {
       const meta = tool.metadata && tool.metadata instanceof Object ? tool.metadata : undefined;
       const metaManifestDigest =

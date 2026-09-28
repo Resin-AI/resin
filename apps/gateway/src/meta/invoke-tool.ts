@@ -264,7 +264,10 @@ export function createInvokeToolHandler(
         content: [
           {
             type: "text",
-            text: `Tool '${displayIdentifier}' not found or not accessible in workspace '${context.workspaceId}'.`,
+            text:
+              (publicName && registry.retiredToolMessage(publicName, context.workspaceId)) ||
+              (toolId && registry.retiredToolMessage(toolId, context.workspaceId)) ||
+              `Tool '${displayIdentifier}' not found or not accessible in workspace '${context.workspaceId}'.`,
           },
         ],
       };
