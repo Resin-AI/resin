@@ -563,9 +563,10 @@ export function isSkippableSegment(
 
 /**
  * The shell each harness's built-in shell callable runs a command in: OMP, Copilot and OpenCode
- * `bash`, Claude Code `Bash`, and Cursor `Shell` (whose login shell may be zsh, so only the grammar
- * every POSIX shell reads the same is split). A step reaches splitting only when its decoder proved
- * the callable is that built-in and shared its command as a program view.
+ * `bash`, Claude Code `Bash`, and Cursor `Shell` and Grok `run_terminal_command` (whose login shell
+ * may be zsh, so only the grammar every POSIX shell reads the same is split). A step reaches
+ * splitting only when its decoder proved the callable is that built-in and shared its command as a
+ * program view.
  */
 const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
   bash: "bash",
@@ -574,6 +575,7 @@ const HARNESS_SHELL_CALLABLES: Readonly<Record<string, string>> = {
   Bash: "bash",
   Shell: ZSH_OR_SH,
   run_terminal_cmd: ZSH_OR_SH,
+  run_terminal_command: ZSH_OR_SH,
 };
 
 /**

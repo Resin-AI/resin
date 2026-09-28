@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { HarnessSession, IntermediateSessionEvent } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GrokHarnessAdapter } from "../src/adapter.js";
 import { GrokRecordDecoder } from "../src/decoder.js";
@@ -13,6 +14,7 @@ const FORK = "22222222-2222-4222-8222-222222222222";
 const REWIND = "33333333-3333-4333-8333-333333333333";
 const CHILD = "01a0dfee-1b9f-7c33-9932-c0ca2035569f";
 const HEADLESS = "44444444-4444-4444-8444-444444444444";
+const QUIET_SHELL = "01a0e65d-4386-71e0-998f-f657b7831b24";
 
 let home: string;
 let sessions: Map<string, HarnessSession>;
@@ -210,5 +212,61 @@ describe("recorded grok 1.0.13 sessions", () => {
     } finally {
       await fs.writeFile(updatesPath, full);
     }
+  });
+
+  it("records a shell command's own output, even when it printed nothing", async () => {
+    // Code-stats run whose first command redirects everything into src-stats.txt: Grok shows the
+    // model `exit: 0` for it, but the command printed nothing.
+    const events = await capture(QUIET_SHELL);
+    const results = events.flatMap((e) => (e.type === "tool_result" ? [e] : []));
+    expect(results.map((r) => [r.toolName, r.result, r.isError])).toEqual([
+      ["run_terminal_command", "", false],
+      ["run_terminal_command", "src/a.py\t1\t5\nsrc/b.py\t1\t7\n", false],
+    ]);
+  });
+
+  it("proves exit 0 only for a foreground shell run", () => {
+    const decoder = new GrokRecordDecoder();
+    const record = (sequenceNumber: number, update: object) => ({
+      recordId: `r${sequenceNumber}`,
+      sessionId: "s",
+      harnessId: "grok-build",
+      sequenceNumber,
+      recordType: "transcript_line" as const,
+      timestamp: "2026-09-28T00:00:00.000Z",
+      rawPayload: { method: "session/update", params: { sessionId: "s", update } },
+      cursor: {
+        offset: sequenceNumber,
+        line: sequenceNumber,
+        sequence: sequenceNumber,
+        timestamp: "",
+      },
+      metadata: {},
+    });
+    const markers = [false, true].map((background, index) => {
+      const callId = `call-${index}`;
+      decoder.decode(
+        record(index * 2, {
+          sessionUpdate: "tool_call",
+          toolCallId: callId,
+          title: "run_terminal_command",
+          rawInput: { variant: "Bash", command: "make build", is_background: background },
+          _meta: { "x.ai/tool": { name: "run_terminal_command", namespace: "grok_build" } },
+        }),
+      );
+      const [result] =
+        decoder.decode(
+          record(index * 2 + 1, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: callId,
+            status: "completed",
+            rawOutput: { type: "Bash", output: [], exit_code: 0 },
+          }),
+        ) ?? [];
+      return result?.type === "tool_result"
+        ? result.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]
+        : "no result";
+    });
+    expect(markers).toEqual(["shell-exited-0", undefined]);
   });
 });

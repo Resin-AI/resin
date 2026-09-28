@@ -14,6 +14,7 @@ reads: `updates.jsonl`, `summary.json`, and the parent's `subagents/<child>/meta
 | `01a0dfee-…` | subagent child of `11111111-…` | `session_kind: "subagent"`, linked by the parent's `subagents/<id>/meta.json` |
 | `22222222-…` | `--resume 1111… --fork-session`, then `/compact` | fork with the parent's updates copied as a prefix, `parent_session_id`, compaction |
 | `33333333-…` | ACP (`grok agent stdio`) | two prompts, `_x.ai/rewind/execute` to prompt 1 (`rewind_marker`), replacement prompt |
+| `01a0e63f-…` | headless `-p` through `resin init --harness grok-build` (isolated home, local cloud) | code-stats job (`grep -c TODO` + `wc -l` into `src-stats.txt`): `search_tool` and `use_tool` → `resin__manage_tools` before the `run_terminal_command` work; scrubbed with `scripts/harness-fixtures/scrub.mjs`, plus the project path inside the `grep` tool's byte-array `stdout` |
 
 ## Setup
 
