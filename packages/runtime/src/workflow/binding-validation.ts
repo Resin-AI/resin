@@ -769,14 +769,28 @@ export async function demonstrationEnvironment(params: {
     return value;
   };
   // A segment step's program argument is supplied as its recorded chain; what the segment ran is
-  // that chain's segment, re-split as the recording check split it.
+  // that chain's segment, re-split at the demonstration's own address as the recording check did.
   const suppliedFor = async (
     step: WorkflowStep,
     argument: string,
     reference: string,
   ): Promise<WorkflowJsonValue | undefined> => {
     const value = await resolveOnce(reference);
-    return segmentOriginal(step, argument, value) as WorkflowJsonValue | undefined;
+    if (step.callable.program?.argument !== argument) return value;
+    // The demonstration's call names where it ran the step: a segment of its own chain, or the
+    // whole call. The plan's own baseline call ran where the plan step says. An input names no
+    // call, so it reads an address only when its step names exactly one call.
+    const entry = demonstration.calls?.find((candidate) => candidate.stepId === step.id);
+    const address =
+      entry?.segments !== undefined
+        ? entry.callIds.length === 1 && entry.segments.length === 1
+          ? entry.segments[0]
+          : undefined
+        : label === "baseline" || step.segment === undefined
+          ? (step.segment ?? null)
+          : undefined;
+    if (address === undefined) return undefined;
+    return segmentOriginal(step, argument, value, address) as WorkflowJsonValue | undefined;
   };
   for (const entry of demonstration.inputs) {
     const step = params.plan.steps.find((candidate) => candidate.id === entry.stepId);

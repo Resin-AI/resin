@@ -20,6 +20,7 @@ import {
   programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
+import { isOptionalSetupSegment } from "./shell-and-chain.js";
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
@@ -382,7 +383,19 @@ export type WorkflowHeldOutDemonstration = {
    * execution order; more than one only for `for_each` iterations. The host recomputes every
    * recorded value from these call ids and its own sessions, so a plan never carries the recording.
    */
-  calls?: Array<{ stepId: string; callIds: string[] }>;
+  calls?: Array<{
+    stepId: string;
+    callIds: string[];
+    /**
+     * Where each named call ran this step, parallel to `callIds`: a segment address in that call's
+     * own recorded `&&` chain, or `null` for the whole call. Another run may have chained the same
+     * command differently — behind another setup, fused with the next command, or alone — so the
+     * address need not be the plan step's `segment`. Required for a segment step; absent means every
+     * call ran the whole step. The host re-splits its own recording at an address and admits
+     * nothing when it does not split so.
+     */
+    segments?: Array<{ index: number; count: number; version: number } | null>;
+  }>;
 };
 
 export type RecordedWorkflow = {
@@ -884,6 +897,17 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
     } else if (input.type !== "boolean" || input.default !== true) {
       errors.push(`step ${stepId} toggle input ${name} must be a boolean defaulting to true`);
     }
+    // A segment step may be skipped only when it is the chain's one setup that nothing else needs.
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    if (
+      Object.hasOwn(step, "segment") &&
+      (typeof program?.source !== "string" || !isOptionalSetupSegment(program.source))
+    ) {
+      errors.push(
+        `step ${stepId} is a segment that only a mkdir -p setup segment may make optional`,
+      );
+    }
     const other = toggles.get(name);
     if (other !== undefined) {
       errors.push(`input ${name} toggles both step ${other} and step ${stepId}`);
@@ -947,8 +971,41 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
  * adjacent and in order, of one shell program, one count and one splitter version; no step shares
  * a callId otherwise, and nothing reads a segment's result but the chain's last segment's.
  */
+/** Whether a value is a segment address: an index below a count of two or more, and a version. */
+function isSegmentAddress(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    hasOnlyKeys(value, ["index", "count", "version"]) &&
+    Number.isSafeInteger(value.index) &&
+    Number.isSafeInteger(value.count) &&
+    Number.isSafeInteger(value.version) &&
+    (value.count as number) >= 2 &&
+    (value.index as number) >= 0 &&
+    (value.index as number) < (value.count as number)
+  );
+}
+
 function validateWorkflowSegments(workflow: Record<string, unknown>, errors: string[]): void {
   const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  // A held-out call names where it ran the step: a segment of its own chain, or the whole call.
+  const heldOut = isPlainObject(workflow.heldOut) ? workflow.heldOut : undefined;
+  for (const entry of Array.isArray(heldOut?.calls) ? heldOut.calls : []) {
+    if (!isPlainObject(entry)) continue;
+    const step = steps.find((candidate) => candidate.id === entry.stepId);
+    const segmented = step !== undefined && Object.hasOwn(step, "segment");
+    const segments = entry.segments;
+    if (segments === undefined && !segmented) continue;
+    if (
+      !Array.isArray(segments) ||
+      !Array.isArray(entry.callIds) ||
+      segments.length !== entry.callIds.length ||
+      !segments.every((address) => address === null || isSegmentAddress(address))
+    ) {
+      errors.push(
+        `heldOut.calls entry for step ${String(entry.stepId)} needs one segment address or null per call`,
+      );
+    }
+  }
   const nonFinal = new Set<string>();
   const seen = new Set<string>();
   for (let position = 0; position < steps.length; position += 1) {

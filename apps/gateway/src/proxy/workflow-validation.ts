@@ -23,6 +23,7 @@ import {
   type WorkflowJsonValue,
   type WorkflowStep,
   type WorkflowValuePath,
+  isOptionalSetupSegment,
   recordedPosixShell,
   shellAndChainSegmentText,
   workflowValidationPlanDigest,
@@ -102,6 +103,8 @@ const TYPE_DISAGREES =
 const UNAVAILABLE =
   "this device could not identify the demonstration's recorded calls; no parameter decision was performed";
 
+type SegmentAddress = NonNullable<WorkflowStep["segment"]>;
+
 interface LocalDemonstration {
   recording: Map<string, RecordedCall>;
   demonstration: WorkflowHeldOutDemonstration;
@@ -138,6 +141,9 @@ async function localDemonstration(
 ): Promise<LocalDemonstrationRuns | undefined> {
   const recordedSteps = plan.steps.filter((step) => step.origin !== "derivation");
   const callIdsByStep = new Map<string, readonly string[]>();
+  // Where each named call ran its step: a segment of its own chain, or `null` for the whole call.
+  // The plan's own calls ran where the plan step says; another run's where its held-out entry does.
+  const addressesByStep = new Map<string, ReadonlyArray<SegmentAddress | null | undefined>>();
   const baselineIds = new Set<string>();
   for (const step of recordedSteps) {
     if (step.callId !== undefined && step.callId.length > 0) baselineIds.add(step.callId);
@@ -146,27 +152,54 @@ async function localDemonstration(
     for (const step of recordedSteps) {
       if (step.callId === undefined || step.callId.length === 0) return undefined;
       callIdsByStep.set(step.id, [step.callId]);
+      addressesByStep.set(step.id, [step.segment ?? null]);
     }
   } else {
     const calls = plan.heldOut?.calls;
     if (calls === undefined) return undefined;
-    for (const entry of calls) callIdsByStep.set(entry.stepId, entry.callIds);
+    for (const entry of calls) {
+      callIdsByStep.set(entry.stepId, entry.callIds);
+      const step = recordedSteps.find((candidate) => candidate.id === entry.stepId);
+      // Without addresses every call ran a whole step; a segment step must name its addresses.
+      addressesByStep.set(
+        entry.stepId,
+        entry.segments ?? (step?.segment === undefined ? entry.callIds.map(() => null) : []),
+      );
+    }
   }
 
-  const located: Array<{ step: WorkflowStep; calls: LocalRecordedCall[] }> = [];
+  const located: Array<{
+    step: WorkflowStep;
+    calls: LocalRecordedCall[];
+    addresses: Array<SegmentAddress | null>;
+  }> = [];
   const incoherent = new Set<string>();
   const named = new Set<string>();
-  // A chain's segments name its one call in turn: segment i may name the call segment i-1 named.
-  const segmentNamed = new Map<string, number>();
+  // A chain's segments name its one call in turn, each a later segment of it than the one before.
+  const segmentNamed = new Map<string, SegmentAddress>();
+  // Each named chain's call, the segments of it the plan's steps ran, and those steps.
+  const chains = new Map<
+    string,
+    { call: LocalRecordedCall; address: SegmentAddress; indices: Set<number>; steps: string[] }
+  >();
   for (const step of recordedSteps) {
     const callIds = callIdsByStep.get(step.id);
     if (callIds === undefined) continue;
     if (callIds.length === 0) return undefined;
     const calls: LocalRecordedCall[] = [];
-    for (const callId of callIds) {
+    const addresses: Array<SegmentAddress | null> = [];
+    for (const [position, callId] of callIds.entries()) {
+      const address = addressesByStep.get(step.id)?.[position];
+      if (address === undefined) incoherent.add(step.id);
       // One recorded call is one step of one iteration; the held-out run is a different run.
+      const earlier = segmentNamed.get(callId);
       const continuesChain =
-        step.segment !== undefined && segmentNamed.get(callId) === step.segment.index - 1;
+        address !== undefined &&
+        address !== null &&
+        earlier !== undefined &&
+        earlier.count === address.count &&
+        earlier.version === address.version &&
+        earlier.index < address.index;
       if (
         (named.has(callId) && !continuesChain) ||
         (label === "held-out" && baselineIds.has(callId))
@@ -174,12 +207,31 @@ async function localDemonstration(
         incoherent.add(step.id);
       }
       named.add(callId);
-      if (step.segment !== undefined) segmentNamed.set(callId, step.segment.index);
+      if (address !== undefined && address !== null) segmentNamed.set(callId, address);
       const call = await localCalls.lookup(callId);
       if (call === undefined) return undefined;
+      if (address !== undefined && address !== null) {
+        const chain = chains.get(callId) ?? { call, address, indices: new Set(), steps: [] };
+        chain.indices.add(address.index);
+        chain.steps.push(step.id);
+        chains.set(callId, chain);
+      }
       calls.push(call);
+      addresses.push(address ?? null);
     }
-    located.push({ step, calls });
+    located.push({ step, calls, addresses });
+  }
+  // The named segments of a chain are all of it: the plan may leave out only a segment that this
+  // device's own re-split shows to be `mkdir -p` setup. Leaving out anything else would let the plan
+  // stand for a run that did more than the plan does.
+  for (const { call, address, indices, steps } of chains.values()) {
+    for (let index = 0; index < address.count; index += 1) {
+      if (indices.has(index)) continue;
+      const text = segmentText({ ...address, index }, call);
+      if (text === undefined || !isOptionalSetupSegment(text)) {
+        for (const stepId of steps) incoherent.add(stepId);
+      }
+    }
   }
   if (located.length === 0) return undefined;
   // Where the plan's own calls ran: what the plan's working directories stand for.
@@ -200,7 +252,11 @@ async function localDemonstration(
   const iterations: LocalDemonstration[] = [];
   const unordered = new Set<string>();
   for (let item = 0; item < items; item += 1) {
-    const iteration = located.map(({ step, calls }) => ({ step, call: calls[item]! }));
+    const iteration = located.map(({ step, calls, addresses }) => ({
+      step,
+      call: calls[item]!,
+      address: addresses[item],
+    }));
     const sessionId = iteration[0]!.call.sessionId;
     if (iteration.some(({ call }) => call.sessionId !== sessionId)) return undefined;
     // Recorded order: each step's call was recorded after the previous step's, by one recorder;
@@ -208,8 +264,7 @@ async function localDemonstration(
     let previous: LocalRecordedCall | undefined;
     for (const { step, call } of iteration) {
       const sequence = call.sequence;
-      const sameChain =
-        step.segment !== undefined && step.segment.index > 0 && previous?.callId === call.callId;
+      const sameChain = previous?.callId === call.callId;
       if (
         sequence === undefined ||
         (previous?.sequence !== undefined &&
@@ -230,26 +285,29 @@ async function localDemonstration(
 
 /** One iteration's recording and demonstration: each step's call for that item, in plan order. */
 function iterationDemonstration(
-  located: ReadonlyArray<{ step: WorkflowStep; call: LocalRecordedCall }>,
+  located: ReadonlyArray<{
+    step: WorkflowStep;
+    call: LocalRecordedCall;
+    address: SegmentAddress | null;
+  }>,
   planRoots: ReadonlyMap<string, string>,
 ): LocalDemonstration {
   // A segment this device cannot re-split exactly as the plan did is not in its recording.
-  const calls = located.flatMap(({ step, call }) => {
-    const segment = step.segment === undefined ? call : segmentCall(step, call);
-    return segment === undefined ? [] : [{ step, call: segment }];
+  const calls = located.flatMap(({ step, call, address }) => {
+    const recorded = address === null ? call : segmentCall(address, call);
+    return recorded === undefined ? [] : [{ step, call: recorded, address }];
   });
   // Hidden dependencies: the recorder's own relationship detection, run over this iteration's
   // calls. A token or leaf it traces to an earlier recorded output must be read by the plan. A
   // chain printed its output once, after its last segment: no earlier segment produced any of it.
   const derivation = deriveNativeCalls(
-    calls.map(({ step, call }) => ({
+    calls.map(({ step, call, address }) => ({
       callId: call.callId,
       stepId: step.id,
       toolName: call.callable.name,
       runtime: step.callable.runtime,
       arguments: call.arguments,
-      ...(call.result === undefined ||
-      (step.segment !== undefined && step.segment.index < step.segment.count - 1)
+      ...(call.result === undefined || (address !== null && address.index < address.count - 1)
         ? {}
         : { result: call.result.value }),
       ...(call.callable.program === undefined
@@ -281,9 +339,13 @@ function iterationDemonstration(
     observed: [],
     calls: [],
   };
-  for (const { step, call } of calls) {
+  for (const { step, call, address } of calls) {
     const stepId = step.id;
-    demonstration.calls.push({ stepId, callIds: [call.callId] });
+    demonstration.calls.push({
+      stepId,
+      callIds: [call.callId],
+      ...(address === null && step.segment === undefined ? {} : { segments: [address] }),
+    });
     for (const [argument, reference] of Object.entries(call.argumentReferences)) {
       demonstration.inputs.push({ stepId, argument, reference });
     }
@@ -309,24 +371,29 @@ function iterationDemonstration(
 /**
  * The recorded call of one segment of a recorded `&&` chain: the chain's call with the segment's
  * text as its program. Only a chain that completed — its exit status zero, so every segment ran —
- * in a POSIX shell, re-split by this device into the plan's segment count under the plan's splitter
- * version, has segments; anything else leaves the segment unrecorded and so missed. Each segment
- * answers with the chain's recorded output, which only the last segment's readers may read.
+ * in a POSIX shell, re-split by this device into the address's segment count under its splitter
+ * version, has segments; anything else leaves the segment unrecorded and so missed. The address is
+ * where the segment sits in this call's own chain. Each segment answers with the chain's recorded
+ * output, which only the last segment's readers may read.
  */
-function segmentCall(step: WorkflowStep, call: LocalRecordedCall): LocalRecordedCall | undefined {
+function segmentCall(
+  address: SegmentAddress,
+  call: LocalRecordedCall,
+): LocalRecordedCall | undefined {
+  const text = segmentText(address, call);
   const program = call.callable.program;
-  if (
-    step.segment === undefined ||
-    call.exitCode !== 0 ||
-    call.result === undefined ||
-    program?.kind !== "shell"
-  )
+  if (text === undefined || program === undefined) return undefined;
+  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
+}
+
+/** A completed POSIX chain's segment text at `address`, as this device re-splits its recording. */
+function segmentText(address: SegmentAddress, call: LocalRecordedCall): string | undefined {
+  const program = call.callable.program;
+  if (call.exitCode !== 0 || call.result === undefined || program?.kind !== "shell")
     return undefined;
   const shell = recordedPosixShell(call.callable.name, call.arguments);
   if (shell === undefined) return undefined;
-  const text = shellAndChainSegmentText(shell, call.arguments[program.argument], step.segment);
-  if (text === undefined) return undefined;
-  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
+  return shellAndChainSegmentText(shell, call.arguments[program.argument], address);
 }
 
 /** The JSON type of the value at `path`; undefined when absent, null, or not a declarable type. */

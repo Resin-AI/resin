@@ -77,4 +77,58 @@ describe("segment steps of a recorded chain", () => {
     const { segment: _b, ...second } = { ...chain[1]!, id: "s1" };
     expect(validateRecordedWorkflow(plan([first, second])).valid).toBe(false);
   });
+
+  it("requires a held-out call of a segment step to name its segment in that call's own chain", () => {
+    const withCalls = (calls: unknown[]) =>
+      validateRecordedWorkflow({
+        ...plan(chain),
+        heldOut: { inputs: [], observed: [], calls },
+      }).valid;
+    const address = (index: number) => ({ index, count: 3, version: 1 });
+    expect(
+      withCalls([
+        { stepId: "s0", callIds: ["other"], segments: [address(1)] },
+        { stepId: "s1", callIds: ["other"], segments: [address(2)] },
+      ]),
+    ).toBe(true);
+    expect(withCalls([{ stepId: "s0", callIds: ["other"] }])).toBe(false);
+    expect(withCalls([{ stepId: "s0", callIds: ["a", "b"], segments: [address(1)] }])).toBe(false);
+    expect(
+      withCalls([
+        { stepId: "s0", callIds: ["other"], segments: [{ index: 3, count: 3, version: 1 }] },
+      ]),
+    ).toBe(false);
+  });
+
+  it("accepts a whole step addressed at one segment of another run's chain, refusing a malformed address", () => {
+    const { segment: _a, ...first } = chain[0]!;
+    const plain = plan([{ ...first, callId: "one" }]);
+    const withSegments = (segments: unknown[]) =>
+      validateRecordedWorkflow({
+        ...plain,
+        heldOut: {
+          inputs: [],
+          observed: [],
+          calls: [{ stepId: "s0", callIds: ["other"], segments }],
+        },
+      }).valid;
+    expect(withSegments([{ index: 0, count: 2, version: 1 }])).toBe(true);
+    expect(withSegments([null])).toBe(true);
+    expect(withSegments([{ index: 2, count: 2, version: 1 }])).toBe(false);
+    expect(withSegments([])).toBe(false);
+  });
+
+  it("lets only a mkdir -p setup segment be optional", () => {
+    const toggled = (index: number) =>
+      validateRecordedWorkflow({
+        ...plan(
+          chain.map((step, at) =>
+            at === index ? { ...step, optional: { input: "setup" } } : step,
+          ),
+        ),
+        inputs: [{ name: "setup", type: "boolean", default: true }],
+      }).valid;
+    expect(toggled(0)).toBe(true);
+    expect(toggled(1)).toBe(false);
+  });
 });

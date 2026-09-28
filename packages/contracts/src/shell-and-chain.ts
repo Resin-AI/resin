@@ -312,16 +312,18 @@ export function recordedPosixShell(
 }
 
 /**
- * What one argument of a step ran, given the original text its recording holds: for a segment
- * step's program argument, that segment of the recorded chain (undefined when the original does not
- * split as the step was split); otherwise the original itself. The recording check admitted the
- * segment only under the recorded POSIX shell; the grammar reads the same in every POSIX shell.
+ * What one argument of a step ran, given the original text its recording holds: for a step's
+ * program argument at a segment `address` — by default the step's own segment — that segment of
+ * the recorded chain (undefined when the original does not split so); otherwise the original
+ * itself. The recording check admitted the segment only under the recorded POSIX shell; the grammar
+ * reads the same in every POSIX shell.
  */
 export function segmentOriginal(
   step: Pick<WorkflowStep, "segment" | "callable">,
   argument: string,
   original: unknown,
+  address: { index: number; count: number; version: number } | null = step.segment ?? null,
 ): unknown {
-  if (step.segment === undefined || step.callable.program?.argument !== argument) return original;
-  return shellAndChainSegmentText("sh", original, step.segment);
+  if (address === null || step.callable.program?.argument !== argument) return original;
+  return shellAndChainSegmentText("sh", original, address);
 }
