@@ -31,7 +31,7 @@ jobs:
     if: >-
       ${{ (github.event_name == 'schedule' && github.event.schedule == '17 */3 * * *') ||
           (github.event_name == 'workflow_dispatch' && (inputs.operation == 'check' || inputs.operation == 'notification-drill')) }}
-    runs-on: resin-vm-linux-arm64
+    runs-on: resin-ovh-linux-x64
     timeout-minutes: 5
     permissions:
       contents: read
@@ -83,7 +83,7 @@ jobs:
       ${{ github.ref == 'refs/heads/main' && github.ref_protected == true &&
           ((github.event_name == 'schedule' && github.event.schedule == '47 */12 * * *') ||
            (github.event_name == 'workflow_dispatch' && (inputs.operation == 'renew' || inputs.operation == 'restore'))) }}
-    runs-on: resin-vm-linux-arm64
+    runs-on: resin-ovh-linux-x64
     timeout-minutes: 15
     environment: production
     concurrency:

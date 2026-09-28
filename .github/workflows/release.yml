@@ -40,7 +40,7 @@ concurrency:
 jobs:
   release:
     name: Public Release Publication
-    runs-on: resin-vm-linux-arm64
+    runs-on: resin-ovh-linux-x64
     environment:
       name: ${{ inputs.environment || 'production' }}
     permissions:
@@ -403,12 +403,12 @@ jobs:
         run: |
           set -euo pipefail
           pwsh_dir="${RUNNER_TEMP:-/tmp}/powershell-7.6.5"
-          archive="${RUNNER_TEMP:-/tmp}/powershell-7.6.5-linux-arm64.tar.gz"
+          archive="${RUNNER_TEMP:-/tmp}/powershell-7.6.5-linux-x64.tar.gz"
           mkdir -p "$pwsh_dir"
           curl --fail --location --silent --show-error \
             --output "$archive" \
-            https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/powershell-7.6.5-linux-arm64.tar.gz
-          echo "ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df  $archive" | sha256sum --check
+            https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/powershell-7.6.5-linux-x64.tar.gz
+          echo "b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844  $archive" | sha256sum --check
           tar -xzf "$archive" -C "$pwsh_dir"
           chmod +x "$pwsh_dir/pwsh"
           echo "$pwsh_dir" >> "$GITHUB_PATH"
