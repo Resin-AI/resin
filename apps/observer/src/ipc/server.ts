@@ -36,6 +36,34 @@ export interface IpcServerOptions {
  * Local IPC server supporting Unix Domain Sockets,
  * Windows Named Pipes, and in-memory transports for testing.
  */
+/**
+ * Longest Unix domain socket path, in bytes, the platform's `sun_path` holds (without its NUL).
+ * macOS and the BSDs allow 104 bytes including the terminator; Linux allows 108.
+ */
+export function unixSocketPathLimit(platform: NodeJS.Platform = process.platform): number {
+  return platform === "linux" || platform === "android" ? 107 : 103;
+}
+
+/**
+ * Refuses a socket path the kernel cannot bind. On macOS an over-long path does not fail
+ * `listen()`: the socket is never created where clients look, so the daemon reports a running IPC
+ * server that nothing can reach. Fail at start with the fix instead.
+ */
+export function assertUnixSocketPathFits(
+  socketPath: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === "win32" || socketPath.startsWith("\\\\.\\pipe\\")) return;
+  const bytes = Buffer.byteLength(socketPath);
+  const limit = unixSocketPathLimit(platform);
+  if (bytes > limit) {
+    throw new Error(
+      `Daemon socket path is ${bytes} bytes, over this platform's ${limit}-byte Unix socket limit: ${socketPath}. ` +
+        "Use a shorter RESIN_HOME, or set RESIN_SOCKET_PATH to a shorter path.",
+    );
+  }
+}
+
 export class IpcServer {
   readonly supervisor: DaemonSupervisor;
   readonly socketPath?: string;
@@ -142,6 +170,7 @@ export class IpcServer {
   }
 
   private async startNetServer(socketPath: string): Promise<void> {
+    assertUnixSocketPathFits(socketPath);
     // If socket file exists on filesystem, check if stale and unlink
     if (!socketPath.startsWith("\\\\.\\pipe\\")) {
       const socketDir = path.dirname(socketPath);
