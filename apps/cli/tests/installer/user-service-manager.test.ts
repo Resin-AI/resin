@@ -16,6 +16,7 @@ import {
   LaunchdUserServiceManager,
   SystemdUserServiceManager,
   WslUserServiceManager,
+  isStaleSupervisorUnitContent,
 } from "../../src/service/manager.js";
 
 /**
@@ -234,6 +235,22 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(plistContent).toContain("<key>KeepAlive</key>");
       expect(plistContent).toContain("<key>StandardOutPath</key>");
       expect(plistContent).toContain("<key>StandardErrorPath</key>");
+    });
+
+    it("gives the launch agent a PATH that reaches the installing Node, and treats older plists as stale", () => {
+      const nodePath = "/opt/homebrew/bin/node";
+      const manager = new LaunchdUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+      const plist = manager.getUnitDefinition({ nodePath });
+      const pathValue = plist.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+      expect(pathValue?.split(":")[0]).toBe("/opt/homebrew/bin");
+
+      const plistWithoutPath = plist.replace(/\s*<key>PATH<\/key>\s*<string>[^<]*<\/string>/, "");
+      expect(isStaleSupervisorUnitContent(plistWithoutPath, plist)).toBe(true);
+      expect(isStaleSupervisorUnitContent(plist, plist)).toBe(false);
     });
 
     it("installs, starts, and manages launchd service", async () => {

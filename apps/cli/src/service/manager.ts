@@ -467,7 +467,12 @@ export function isStaleSupervisorUnitContent(
   );
   if (onDiskArgsMatch && expectedArgsMatch) {
     const normalizeArgs = (str: string) => str.replace(/\s+/g, " ").trim();
-    return normalizeArgs(onDiskArgsMatch[1]) !== normalizeArgs(expectedArgsMatch[1]);
+    // Plists written before launchd agents carried PATH cannot start `#!/usr/bin/env node`.
+    const pathKey = "<key>PATH</key>";
+    return (
+      normalizeArgs(onDiskArgsMatch[1]) !== normalizeArgs(expectedArgsMatch[1]) ||
+      (expectedContent.includes(pathKey) && !onDiskContent.includes(pathKey))
+    );
   }
 
   // 4. WSL fallback script: compare command invocation line
@@ -602,6 +607,14 @@ export interface UserServiceManager {
 // Systemd User Service Manager (Linux & WSL with Systemd)
 // -----------------------------------------------------------------------------
 
+/** Service PATH: the directory of the Node that runs Resin first, then the installing shell's PATH. */
+function serviceSearchPath(nodePath: string): string {
+  const inheritedPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  return Array.from(new Set([path.dirname(nodePath), ...inheritedPath.split(path.delimiter)])).join(
+    path.delimiter,
+  );
+}
+
 export class SystemdUserServiceManager implements UserServiceManager {
   readonly name = "systemd";
   readonly platform = "systemd" as const;
@@ -646,12 +659,8 @@ export class SystemdUserServiceManager implements UserServiceManager {
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
-    const inheritedPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-    const servicePath = Array.from(
-      new Set([path.dirname(nodePath), ...inheritedPath.split(path.delimiter)]),
-    ).join(path.delimiter);
     const envVars = {
-      PATH: servicePath,
+      PATH: serviceSearchPath(nodePath),
       ...this.defaultEnv,
       ...(options.env ?? {}),
     };
@@ -950,9 +959,15 @@ export class LaunchdUserServiceManager implements UserServiceManager {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const logDir = path.join(resinHome, "logs");
-    const envVars = { ...this.defaultEnv, ...(options.env ?? {}) };
-
     const nodePath = options.nodePath ?? this.nodePath;
+    // launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where `#!/usr/bin/env node`
+    // cannot find a Homebrew, nvm or installer Node, so the daemon would exit 127 on every start.
+    const envVars = {
+      PATH: serviceSearchPath(nodePath),
+      ...this.defaultEnv,
+      ...(options.env ?? {}),
+    };
+
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const programArgs = createSupervisorProgramArguments(
       daemonPath,

@@ -10054,6 +10054,12 @@ function formatShellEnvironment(name, value) {
   }
   return `export ${name}=${quoteShellArgument(value)}`;
 }
+function serviceSearchPath(nodePath) {
+  const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  return Array.from(/* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])).join(
+    path28.delimiter
+  );
+}
 var SystemdUserServiceManager = class {
   name = "systemd";
   platform = "systemd";
@@ -10091,12 +10097,8 @@ var SystemdUserServiceManager = class {
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
-    const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-    const servicePath = Array.from(
-      /* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])
-    ).join(path28.delimiter);
     const envVars = {
-      PATH: servicePath,
+      PATH: serviceSearchPath(nodePath),
       ...this.defaultEnv,
       ...options.env ?? {}
     };
@@ -10346,8 +10348,12 @@ var LaunchdUserServiceManager = class {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const logDir = path28.join(resinHome, "logs");
-    const envVars = { ...this.defaultEnv, ...options.env ?? {} };
     const nodePath = options.nodePath ?? this.nodePath;
+    const envVars = {
+      PATH: serviceSearchPath(nodePath),
+      ...this.defaultEnv,
+      ...options.env ?? {}
+    };
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const programArgs = createSupervisorProgramArguments(
       daemonPath,
