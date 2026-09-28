@@ -100,7 +100,7 @@ export const PI_RESIN_GUIDANCE = `# Resin learned tools
 
 Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\` in your tool list; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
 
-- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools and their descriptions.
+- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools in your tool list and their descriptions. They are already listed there: never run a command to list or announce them, and when there are none, just do the task.
 - A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Their output is the commands' current output: use it instead of running those commands yourself.`;
 
