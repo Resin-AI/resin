@@ -27,6 +27,7 @@ import {
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
+import { serviceHostExecutablePath } from "@resin/windows-security";
 import { runDerivation } from "./derivation-sandbox.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
@@ -1081,7 +1082,51 @@ interface ChildLifetime {
   startedAtMs: number;
   /** When the child itself exited, if it has; its descendants may still hold its output pipes. */
   exitedAtMs?: number;
+  /**
+   * The child is Resin's Windows job host running the program in a kill-on-close job: ending the
+   * host ends every process the program started.
+   */
+  jobbed?: boolean;
 }
+
+/**
+ * Resin's windowless job host (`resin-service-host.exe`), when this Windows install has it. Without
+ * it (a source checkout that has not built the native prebuilds) replays fall back to stopping
+ * descendants by parent process id.
+ */
+function windowsJobHost(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  try {
+    return serviceHostExecutablePath();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * On Windows, run the program inside the job host: the host starts it suspended in a kill-on-close
+ * job, passes its standard handles through and exits with its exit code, and everything the program
+ * started — including MSYS children of Git Bash, which a parent-PID walk cannot see — ends with the
+ * replay. The Python Eval wrapper's private result descriptor cannot pass through the host, so that
+ * invocation runs directly.
+ */
+function jobHostedInvocation(invocation: ChildInvocation): {
+  command: string;
+  args: string[];
+  jobbed: boolean;
+} {
+  const host = invocation.privateResultFd === undefined ? windowsJobHost() : undefined;
+  if (host === undefined)
+    return { command: invocation.command, args: invocation.args, jobbed: false };
+  return {
+    command: host,
+    args: ["--inherit-stdio", "--restart-limit", "0", "--", invocation.command, ...invocation.args],
+    jobbed: true,
+  };
+}
+
+/** Exit code the job host reports when it could not start the program. */
+const JOB_HOST_EXIT_SPAWN = 0x52450003;
 
 /**
  * Stops every descendant of a Windows child, found by the parent process id Windows records for each
@@ -1117,6 +1162,11 @@ function windowsDescendantKillScript(pid: number, lifetime: ChildLifetime): stri
 
 function killProcessTree(child: ChildProcess, lifetime: ChildLifetime): void {
   if (child.pid === undefined) return;
+  if (process.platform === "win32" && lifetime.jobbed) {
+    // Terminating the job host closes its kill-on-close job, which ends the whole program tree.
+    child.kill("SIGKILL");
+    return;
+  }
   if (process.platform === "win32") {
     // A Windows child is not the root of a process group: its descendants are found and stopped by
     // parent process id, and the child itself once that walk is done.
@@ -1192,8 +1242,9 @@ function runChild(
             ),
             ...invocation.setEnv,
           };
-    const lifetime: ChildLifetime = { startedAtMs: Date.now() };
-    const child = spawn(invocation.command, invocation.args, {
+    const hosted = jobHostedInvocation(invocation);
+    const lifetime: ChildLifetime = { startedAtMs: Date.now(), jobbed: hosted.jobbed };
+    const child = spawn(hosted.command, hosted.args, {
       cwd,
       env: childEnv,
       stdio,
@@ -1250,6 +1301,9 @@ function runChild(
       }
     }
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (hosted.jobbed && code === JOB_HOST_EXIT_SPAWN && termination === undefined) {
+        termination = `recorded program could not be started (${invocation.command})`;
+      }
       const diagnostics: string[] = [];
       if (stdout.truncated) diagnostics.push(`[stdout truncated: ${stdout.omitted} bytes omitted]`);
       if (stderr.truncated) diagnostics.push(`[stderr truncated: ${stderr.omitted} bytes omitted]`);

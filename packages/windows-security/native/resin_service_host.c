@@ -11,8 +11,13 @@
 // --restart-limit times (default 999; reset after ten minutes of uptime), and
 // then the host exits with the supervisor's exit code.
 //
+// The runtime also uses it to replay learned programs (--restart-limit 0
+// --inherit-stdio): the program's whole tree lives in the job, so killing the
+// host at the time budget stops descendants that a parent-PID walk cannot see
+// (for example MSYS children of Git Bash).
+//
 // Usage:
-//   resin-service-host.exe [--stdout <file>] [--stderr <file>]
+//   resin-service-host.exe [--stdout <file>] [--stderr <file>] [--inherit-stdio]
 //       [--env NAME=VALUE]... [--path-prepend <dir>] [--cwd <dir>]
 //       [--restart-delay-seconds <n>] [--restart-limit <n>]
 //       -- <program> [args...]
@@ -145,7 +150,20 @@ typedef struct {
   const wchar_t* stderr_path;
   const wchar_t* working_directory;
   wchar_t* command_line;
+  BOOL inherit_stdio;
 } child_launch;
+
+// The host's own standard handle, made inheritable for the child; NULL device when absent.
+static HANDLE inheritable_std_handle(DWORD which, BOOL* opened) {
+  *opened = FALSE;
+  HANDLE handle = GetStdHandle(which);
+  if (handle == NULL || handle == INVALID_HANDLE_VALUE ||
+      !SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+    handle = open_null_input();
+    *opened = handle != INVALID_HANDLE_VALUE;
+  }
+  return handle;
+}
 
 // Runs the child once inside a fresh kill-on-close job and returns its exit code.
 static DWORD run_child_once(const child_launch* launch) {
@@ -169,7 +187,19 @@ static DWORD run_child_once(const child_launch* launch) {
   HANDLE input = INVALID_HANDLE_VALUE;
   HANDLE output = INVALID_HANDLE_VALUE;
   HANDLE error = INVALID_HANDLE_VALUE;
-  if (launch->stdout_path != NULL || launch->stderr_path != NULL) {
+  if (launch->inherit_stdio) {
+    BOOL opened_input = FALSE;
+    BOOL opened_output = FALSE;
+    BOOL opened_error = FALSE;
+    startup.dwFlags |= STARTF_USESTDHANDLES;
+    startup.hStdInput = inheritable_std_handle(STD_INPUT_HANDLE, &opened_input);
+    startup.hStdOutput = inheritable_std_handle(STD_OUTPUT_HANDLE, &opened_output);
+    startup.hStdError = inheritable_std_handle(STD_ERROR_HANDLE, &opened_error);
+    // Only handles opened here are closed after the spawn; the host's own stay with it.
+    if (opened_input) input = startup.hStdInput;
+    if (opened_output) output = startup.hStdOutput;
+    if (opened_error) error = startup.hStdError;
+  } else if (launch->stdout_path != NULL || launch->stderr_path != NULL) {
     input = open_null_input();
     output = launch->stdout_path != NULL ? open_log(launch->stdout_path) : INVALID_HANDLE_VALUE;
     error = launch->stderr_path != NULL ? open_log(launch->stderr_path) : output;
@@ -233,7 +263,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (argv == NULL) return HOST_EXIT_USAGE;
 
-  child_launch launch = {NULL, NULL, NULL, NULL};
+  child_launch launch = {NULL, NULL, NULL, NULL, FALSE};
   DWORD restart_delay_seconds = 60;
   DWORD restart_limit = 999;
   int program_index = -1;
@@ -242,6 +272,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     if (wcscmp(argument, L"--") == 0) {
       program_index = index + 1;
       break;
+    }
+    if (wcscmp(argument, L"--inherit-stdio") == 0) {
+      launch.inherit_stdio = TRUE;
+      continue;
     }
     if (index + 1 >= argc) return HOST_EXIT_USAGE;
     const wchar_t* value = argv[++index];
