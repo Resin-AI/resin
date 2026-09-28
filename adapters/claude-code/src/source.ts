@@ -1,6 +1,8 @@
+import fs from "node:fs/promises";
 import {
   type ConfigFsBridge,
   type HarnessSession,
+  InMemoryConfigFsBridge,
   type ObservationFidelity,
   type RawHarnessRecord,
   type RecordListener,
@@ -10,6 +12,14 @@ import {
   computeConfigHash,
   defaultFsBridge,
 } from "@resin/harness-contracts";
+
+const READ_CHUNK_BYTES = 64 * 1024;
+
+interface TranscriptReader {
+  size: number;
+  read(target: Buffer, position: number): Promise<number>;
+  close(): Promise<void>;
+}
 
 /**
  * Options for configuring ClaudeSessionEventSource.
@@ -102,13 +112,13 @@ export class ClaudeSessionEventSource implements SessionEventSource {
   }
 
   async detectRotation(): Promise<boolean> {
-    const content = await this.fsBridge.readFile(this.transcriptPath);
-    if (content === null) return false;
-    const currentSize = Buffer.byteLength(content, "utf8");
-    if (currentSize < this.currentByteOffset) {
-      return true; // file truncated or rotated
+    const transcript = await this.openTranscript();
+    if (transcript === null) return false;
+    try {
+      return transcript.size < this.currentByteOffset; // file truncated or rotated
+    } finally {
+      await transcript.close();
     }
-    return false;
   }
 
   async start(): Promise<void> {
@@ -176,82 +186,53 @@ export class ClaudeSessionEventSource implements SessionEventSource {
         return [];
       }
 
-      const content = await this.fsBridge.readFile(this.transcriptPath);
-      if (content === null) {
+      const transcript = await this.openTranscript();
+      if (transcript === null) {
         return [];
       }
 
-      const buffer = Buffer.from(content, "utf8");
-      if (buffer.length < this.currentByteOffset) {
-        this.currentByteOffset = 0;
-        this.currentLineNumber = 1;
-        this.currentSequence = 0;
-      }
-      if (buffer.length <= this.currentByteOffset) {
-        return [];
-      }
-
-      const newBytes = buffer.subarray(this.currentByteOffset);
-      const newText = newBytes.toString("utf8");
-
-      const lines = newText.split("\n");
-      const completeLines = lines.slice(0, -1);
-
-      let consumedBytes = 0;
-
-      for (let i = 0; i < completeLines.length && records.length < maxRecords; i++) {
-        const line = completeLines[i];
-        const lineBytes = Buffer.byteLength(line, "utf8") + 1;
-
-        if (line.trim().length === 0) {
-          consumedBytes += lineBytes;
-          this.currentLineNumber++;
-          continue;
+      try {
+        const { size } = transcript;
+        if (size < this.currentByteOffset) {
+          this.currentByteOffset = 0;
+          this.currentLineNumber = 1;
+          this.currentSequence = 0;
         }
 
-        this.currentSequence++;
-        this.currentLineNumber++;
-        consumedBytes += lineBytes;
+        // Read bounded chunks from the cursor and stop once maxRecords complete lines are
+        // collected, so large transcripts are never loaded (or re-read) whole per call.
+        let pending = Buffer.alloc(0);
+        let position = this.currentByteOffset;
+        while (records.length < maxRecords && position < size) {
+          const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, size - position));
+          const bytesRead = await transcript.read(chunk, position);
+          if (bytesRead === 0) break;
+          position += bytesRead;
+          pending =
+            pending.length === 0
+              ? chunk.subarray(0, bytesRead)
+              : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
 
-        const lineHash = computeConfigHash(line);
-        const recordTime = new Date().toISOString();
+          let newline = pending.indexOf(0x0a);
+          while (newline !== -1 && records.length < maxRecords) {
+            // Decode each line from its own byte range so records never retain the chunk.
+            const line = pending.toString("utf8", 0, newline);
+            pending = pending.subarray(newline + 1);
+            this.currentByteOffset += newline + 1;
+            this.currentLineNumber++;
+            newline = pending.indexOf(0x0a);
 
-        const cursor: SourceCursor = {
-          offset: this.currentByteOffset + consumedBytes,
-          line: Math.max(1, this.currentLineNumber),
-          sequence: this.currentSequence,
-          checkpoint: lineHash,
-          timestamp: recordTime,
-        };
-        this.cursor = cursor;
+            if (line.trim().length === 0) {
+              continue;
+            }
 
-        const rawPayload = (() => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return { text: line };
+            this.currentSequence++;
+            records.push(this.toRecord(line));
           }
-        })();
-
-        const record: RawHarnessRecord = {
-          recordId: `${this.sessionId}-rec-${this.currentSequence}`,
-          sessionId: this.sessionId,
-          harnessId: this.harnessId,
-          sequenceNumber: this.currentSequence,
-          timestamp: recordTime,
-          recordType: "transcript_line",
-          rawPayload,
-          cursor,
-          metadata: {
-            transcriptPath: this.transcriptPath,
-            line: this.currentLineNumber,
-          },
-        };
-
-        records.push(record);
+        }
+      } finally {
+        await transcript.close();
       }
-
-      this.currentByteOffset += consumedBytes;
     } catch (err) {
       this.notifyError(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -259,6 +240,80 @@ export class ClaudeSessionEventSource implements SessionEventSource {
     }
 
     return records;
+  }
+
+  private toRecord(line: string): RawHarnessRecord {
+    const lineHash = computeConfigHash(line);
+    const recordTime = new Date().toISOString();
+
+    const cursor: SourceCursor = {
+      offset: this.currentByteOffset,
+      line: Math.max(1, this.currentLineNumber),
+      sequence: this.currentSequence,
+      checkpoint: lineHash,
+      timestamp: recordTime,
+    };
+    this.cursor = cursor;
+
+    const rawPayload = (() => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { text: line };
+      }
+    })();
+
+    return {
+      recordId: `${this.sessionId}-rec-${this.currentSequence}`,
+      sessionId: this.sessionId,
+      harnessId: this.harnessId,
+      sequenceNumber: this.currentSequence,
+      timestamp: recordTime,
+      recordType: "transcript_line",
+      rawPayload,
+      cursor,
+      metadata: {
+        transcriptPath: this.transcriptPath,
+        line: this.currentLineNumber,
+      },
+    };
+  }
+
+  /**
+   * Opens the transcript for ranged reads. In-memory test bridges have no ranged API, so their
+   * content is served from a buffer; every other bridge is backed by the real filesystem.
+   */
+  private async openTranscript(): Promise<TranscriptReader | null> {
+    if (this.fsBridge instanceof InMemoryConfigFsBridge) {
+      const content = await this.fsBridge.readFile(this.transcriptPath);
+      if (content === null) return null;
+      const buffer = Buffer.from(content, "utf8");
+      return {
+        size: buffer.length,
+        read: async (target, position) =>
+          buffer.copy(target, 0, position, position + target.length),
+        close: async () => {},
+      };
+    }
+    let handle: fs.FileHandle;
+    try {
+      handle = await fs.open(this.transcriptPath, "r");
+    } catch (err) {
+      if (err instanceof Error && "code" in err && err.code === "ENOENT") return null;
+      throw err;
+    }
+    try {
+      const { size } = await handle.stat();
+      return {
+        size,
+        read: async (target, position) =>
+          (await handle.read(target, 0, target.length, position)).bytesRead,
+        close: () => handle.close(),
+      };
+    } catch (err) {
+      await handle.close();
+      throw err;
+    }
   }
 
   private notifyError(err: Error): void {

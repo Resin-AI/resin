@@ -93,6 +93,9 @@ export function resolveSessionAttribution(
   return parsed.data;
 }
 
+/** How long start() waits for the first discovery scan; well inside the supervisor's 5 s. */
+const INITIAL_SCAN_WAIT_MS = 3_000;
+
 /** Sessions of `file-activity` harnesses are backfilled whole and captured by transcript activity. */
 function capturesByFileActivity(session: HarnessSession): boolean {
   return HARNESS_DEFINITIONS.some(
@@ -245,6 +248,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   readonly name = "Trajectory Capture & Calibration Coordinator";
   readonly dependencies: readonly string[] = ["cloud-runtime"];
   readonly critical = false;
+  /** The first discovery scan; start() waits for it only briefly, stop() waits for it fully. */
+  private initialScan: Promise<void> = Promise.resolve();
 
   private state: ModuleLifecycleState = "uninitialized";
   private observerCoordinator: ObserverCoordinator;
@@ -404,6 +409,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         pipeline: this.normalizationPipeline,
         observationClient: clientProxy,
         attributionResolver,
+        privateValueStore: FilePrivateValueStore.default(),
         logger: this.logger,
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
@@ -824,7 +830,24 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
 
     try {
       await this.resetCursorsForPrivacyBoundary();
-      await this.observerCoordinator.start();
+      // The first discovery scan walks every harness's transcript history: tens of seconds on a
+      // machine with tens of thousands of transcripts. Start waits a bounded time so a normal
+      // start still begins with sessions attached, then lets it finish in the background so
+      // daemon readiness never waits on history size.
+      const scan = this.observerCoordinator.start();
+      this.initialScan = scan.catch((err: unknown) => {
+        this.logger?.error("Initial transcript discovery failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      let waitTimer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        scan,
+        new Promise<void>((resolve) => {
+          waitTimer = setTimeout(resolve, INITIAL_SCAN_WAIT_MS);
+          waitTimer.unref();
+        }),
+      ]).finally(() => clearTimeout(waitTimer));
       this.state = "ready";
       this.skipBackfillOnNextStart = false;
       this.logger?.info("Trajectory capture runtime module started successfully", {
@@ -857,6 +880,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       ) {
         await this.captureCoordinator.waitForIdle();
       }
+      await this.initialScan;
       await this.observerCoordinator.stop();
       if (this.ownsObserverCoordinator) {
         this.observerCoordinatorNeedsRebuild = true;
@@ -870,6 +894,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       });
       throw err;
     } finally {
+      // Shutdown (SIGTERM/SIGINT or IPC) always persists pending placeholder aliases.
+      FilePrivateValueStore.default().flush();
       this.captureCoordinator.clearComputationEvidence();
       this.captureCoordinator.clearCommandSequenceEvidence();
     }

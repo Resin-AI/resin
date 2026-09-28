@@ -2,7 +2,7 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OmpRecordDecoder } from "../src/decoder.js";
 import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.js";
 
@@ -334,6 +334,95 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
       expect(batch2.length).toBe(1);
       expect(batch2[0].cursor.line).toBe(2);
 
+      await source.close();
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a large backlog in bounded chunks and walks it with exact byte offsets", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-bounded-"));
+    const probe = await fsp.open(__filename, "r");
+    const handleProto = Object.getPrototypeOf(probe) as { read: (...args: never[]) => unknown };
+    await probe.close();
+    const readSpy = vi.spyOn(handleProto, "read");
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const lines = Array.from({ length: 4000 }, (_, i) =>
+        JSON.stringify({
+          type: "message",
+          role: "user",
+          content: `é line ${i} ${"x".repeat(1000)}`,
+        }),
+      );
+      // One line longer than any read window, so the window must widen to fit it.
+      lines.splice(2000, 0, JSON.stringify({ type: "message", content: "y".repeat(600_000) }));
+      const content = `${lines.join("\n")}\n`;
+      await fsp.writeFile(transcriptPath, content);
+      const fileBytes = Buffer.byteLength(content);
+
+      const session: HarnessSession = {
+        sessionId: "session-bounded",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        transcriptPath,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      };
+      const source = new OmpSessionEventSource(session);
+      const bytesRequested = () =>
+        readSpy.mock.calls.reduce((sum, call) => sum + Number(call[2] ?? 0), 0);
+
+      const first = await source.readNext(2);
+      expect(first.map((r) => r.rawPayload)).toEqual(lines.slice(0, 2));
+      expect(bytesRequested()).toBeLessThan(fileBytes / 10);
+
+      const payloads = first.map((r) => r.rawPayload);
+      let last = first[first.length - 1];
+      for (;;) {
+        const batch = await source.readNext(50);
+        if (batch.length === 0) break;
+        payloads.push(...batch.map((r) => r.rawPayload));
+        last = batch[batch.length - 1];
+      }
+      expect(payloads).toEqual(lines);
+      expect(last?.cursor.offset).toBe(fileBytes);
+      expect(last?.cursor.line).toBe(lines.length);
+      // Walking the whole file must cost about one pass, not one pass per batch.
+      expect(bytesRequested()).toBeLessThan(fileBytes * 3);
+
+      await source.close();
+    } finally {
+      readSpy.mockRestore();
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers each line once when reads overlap", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-overlap-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const lines = Array.from({ length: 10 }, (_, i) =>
+        JSON.stringify({ type: "message", role: "user", content: `line-${i}` }),
+      );
+      await fsp.writeFile(transcriptPath, `${lines.join("\n")}\n`);
+      const source = new OmpSessionEventSource({
+        sessionId: "session-overlap",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        transcriptPath,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      });
+
+      // The tailer pulls batches while the source's own poll reads too.
+      const [first, second] = await Promise.all([source.readNext(5), source.readNext(5)]);
+      expect([...first, ...second].map((r) => r.rawPayload)).toEqual(lines);
+      expect(second[4]?.cursor.line).toBe(10);
       await source.close();
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true });

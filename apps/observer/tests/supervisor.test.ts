@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DaemonConfigSchema } from "../src/config.js";
 import type {
   DaemonModule,
@@ -7,7 +7,7 @@ import type {
   ModuleLifecycleState,
 } from "../src/lifecycle.js";
 import type { JsonObject } from "../src/normalization/redaction.js";
-import { DaemonSupervisor, DefaultLogger } from "../src/supervisor.js";
+import { DaemonSupervisor, DefaultLogger, WARNING_REPEAT_WINDOW_MS } from "../src/supervisor.js";
 
 describe("supervisor", () => {
   function createTrackingModule(
@@ -288,5 +288,30 @@ describe("supervisor", () => {
 
       await supervisor.stop();
     });
+  });
+});
+
+describe("DefaultLogger", () => {
+  it("emits an identical warning once per window and reports how many repeats it suppressed", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let now = 1_000;
+    const logger = new DefaultLogger("info", () => now);
+    try {
+      for (let i = 0; i < 50; i++) logger.warn("Upload failed", { attempt: i });
+      logger.warn("Other failure");
+      expect(warn.mock.calls).toEqual([
+        ["[WARN] Upload failed", { attempt: 0 }],
+        ["[WARN] Other failure", ""],
+      ]);
+
+      now += WARNING_REPEAT_WINDOW_MS;
+      logger.warn("Upload failed", { attempt: 50 });
+      expect(warn.mock.calls[2]).toEqual([
+        "[WARN] Upload failed",
+        { attempt: 50, suppressedRepeats: 49 },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -71,9 +71,8 @@ export async function readPiSessionHeader(filePath: string): Promise<PiSessionHe
   try {
     const buffer = Buffer.alloc(HEADER_SCAN_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, HEADER_SCAN_BYTES, 0);
-    const text = buffer.toString("utf8", 0, bytesRead);
-    const newline = text.indexOf("\n");
-    return parsePiSessionHeader(newline === -1 ? text : text.slice(0, newline));
+    const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+    return parsePiSessionHeader(buffer.toString("utf8", 0, newline === -1 ? bytesRead : newline));
   } finally {
     await handle.close();
   }
@@ -113,12 +112,21 @@ async function listJsonlFiles(dir: string, depth: number): Promise<string[]> {
 }
 
 /**
+ * Session headers from earlier scans, keyed by transcript path. A header is the file's first line
+ * and never changes, so it is re-read only when the path now names a different file (inode).
+ * Entries are small and track files on disk, so the cache lives as long as its adapter.
+ */
+export type PiHeaderCache = Map<string, { ino: number; header: PiSessionHeader | null }>;
+
+/**
  * Finds Pi transcripts under the given session roots. Default roots group files in one
  * `--<cwd>--` directory level; custom session directories hold files directly. Files are bound to
- * workspaces by the header's `cwd`, never by directory name.
+ * workspaces by the header's `cwd`, never by directory name. With a `headerCache`, unchanged
+ * files cost one stat per scan instead of an open and read.
  */
 export async function scanPiTranscripts(
   roots: readonly PiSessionRoot[],
+  headerCache?: PiHeaderCache,
 ): Promise<PiTranscriptInfo[]> {
   const seen = new Set<string>();
   const transcripts: PiTranscriptInfo[] = [];
@@ -126,14 +134,20 @@ export async function scanPiTranscripts(
     for (const file of await listJsonlFiles(root.dir, 1)) {
       if (seen.has(file)) continue;
       seen.add(file);
-      const header = await readPiSessionHeader(file);
-      if (!header) continue;
       let stat: Stats;
       try {
         stat = await fsp.stat(file);
       } catch {
         continue;
       }
+      const cached = headerCache?.get(file);
+      // An empty file has no header yet; look again once it has content.
+      const header =
+        cached && cached.ino === stat.ino && (cached.header || stat.size === 0)
+          ? cached.header
+          : await readPiSessionHeader(file);
+      headerCache?.set(file, { ino: stat.ino, header });
+      if (!header) continue;
       transcripts.push({
         transcriptPath: file,
         header,

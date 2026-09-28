@@ -30,6 +30,7 @@ import {
   type OmpDiscoveryCatalog,
   type OmpDiscoveryOptions,
   type ParsedTranscript,
+  type TranscriptDirectoryCache,
   buildOmpDiscoveryCatalog,
   discoverOmpSessions,
   discoverOmpWorkspaces,
@@ -72,6 +73,16 @@ interface TranscriptInspectionCacheEntry {
 
 // Matches inspectTranscriptFile's stale-to-idle threshold.
 const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
+// Scans between full refreshes of settled transcripts' resolved paths and of quiet directories
+// (a scan runs every 10 s). Only symlink changes and new subagent files in long-quiet session
+// folders wait for one; the latter are still captured whole, from their cursor.
+const FULL_SWEEP_EVERY_SCANS = 12;
+// Scans between re-stats of finished (completed, failed, interrupted) and long-dormant idle
+// transcripts. A resumed one is seen within this many scans and, like any OMP session, captured
+// from its cursor, so the wait delays capture but loses nothing.
+const SETTLED_RECHECK_EVERY_SCANS = 3;
+// An idle transcript untouched this long is dormant rather than a session paused mid-use.
+const DORMANT_IDLE_MS = 30 * 60_000;
 
 async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
   try {
@@ -125,6 +136,13 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   private discoveryOptions?: OmpDiscoveryOptions;
   private cachedCatalog?: OmpDiscoveryCatalog;
   private readonly transcriptCache = new Map<string, TranscriptInspectionCacheEntry>();
+  private readonly directoryCache: TranscriptDirectoryCache = {
+    listings: new Map(),
+    missing: new Set(),
+    realpaths: new Map(),
+    revalidateQuiet: true,
+  };
+  private scansSinceFullSweep = 0;
   private workspaceListInFlight?: Promise<HarnessWorkspace[]>;
   constructor(options?: OmpHarnessAdapterOptions & OmpDiscoveryOptions) {
     this.fsBridge = options?.fsBridge;
@@ -169,9 +187,17 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   }
 
   private async refreshWorkspaceCatalog(): Promise<HarnessWorkspace[]> {
-    const discoveryOptions = this.discoveryOptions;
+    // Settled transcripts and quiet directories dominate a long-lived OMP home: stat'ing,
+    // resolving and listing all of them on every scan is nearly all of its cost. Settled
+    // transcripts are re-stat'ed every few scans and re-resolved on full sweeps; new files and
+    // changed directories are always seen on the next scan.
+    const fullSweep = this.scansSinceFullSweep === 0;
+    const recheckSettled = this.scansSinceFullSweep % SETTLED_RECHECK_EVERY_SCANS === 0;
+    this.scansSinceFullSweep = (this.scansSinceFullSweep + 1) % FULL_SWEEP_EVERY_SCANS;
+    this.directoryCache.revalidateQuiet = fullSweep;
+    const discoveryOptions = { ...this.discoveryOptions, directoryCache: this.directoryCache };
     if (
-      discoveryOptions?.activeOnly !== false ||
+      discoveryOptions.activeOnly !== false ||
       discoveryOptions.inspectTranscript ||
       discoveryOptions.onInspectTranscript
     ) {
@@ -189,19 +215,37 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
     const catalog = await buildOmpDiscoveryCatalog({
       ...discoveryOptions,
       inspectTranscript: async (filePath, options) => {
-        const before = await getTranscriptFileIdentity(filePath);
         const nowMs =
           options?.now instanceof Date
             ? options.now.getTime()
             : typeof options?.now === "number"
               ? options.now
               : Date.now();
+        const cached = this.transcriptCache.get(filePath);
+        // Finished and long-dormant sessions wait for the re-check. A recently idle one may still
+        // be attached, and its exit or next turn must be seen on the next scan.
+        const status = cached?.transcript.status;
+        if (
+          cached &&
+          !recheckSettled &&
+          (status === "completed" ||
+            status === "failed" ||
+            status === "interrupted" ||
+            (status === "idle" && nowMs - cached.identity.mtimeMs > DORMANT_IDLE_MS))
+        ) {
+          cycleCache.set(filePath, cached);
+          return cached.transcript;
+        }
+        const before = await getTranscriptFileIdentity(filePath);
         const ageMs = before ? nowMs - before.mtimeMs : Number.NEGATIVE_INFINITY;
         const historical = before !== null && ageMs > TRANSCRIPT_STATUS_SETTLE_MS;
-        const cached = this.transcriptCache.get(filePath);
 
         if (before && historical && cached && sameTranscriptIdentity(before, cached.identity)) {
-          const transcript = await refreshCachedCanonicalPaths(cached.transcript);
+          // An unchanged file keeps its inspection; its canonical paths (two resolutions per
+          // transcript, the bulk of a scan) are refreshed on full sweeps only.
+          const transcript = fullSweep
+            ? await refreshCachedCanonicalPaths(cached.transcript)
+            : cached.transcript;
           cycleCache.set(filePath, { identity: before, transcript });
           return transcript;
         }

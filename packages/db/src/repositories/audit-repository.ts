@@ -225,16 +225,6 @@ export class AuditRepository {
       [uploadedAt, ...invocationIds],
     );
   }
-  markInvocationsFailed(invocationIds: string[], failedAt: string): void {
-    if (invocationIds.length === 0) {
-      return;
-    }
-    const placeholders = invocationIds.map(() => "?").join(", ");
-    this.conn.run(
-      `UPDATE invocation_records SET status = 'error', uploaded_at = ? WHERE invocation_id IN (${placeholders});`,
-      [failedAt, ...invocationIds],
-    );
-  }
 
   saveDeadLetter(deadLetter: DeadLetterRecord): void {
     this.conn.run(

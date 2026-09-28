@@ -150,14 +150,35 @@ class PiFileState {
   }
 }
 
-function forEachLine(text: string, visit: (line: string, bytes: number) => boolean): void {
-  let start = 0;
-  for (;;) {
-    const newline = text.indexOf("\n", start);
-    if (newline === -1) return;
-    const line = text.slice(start, newline);
-    start = newline + 1;
-    if (!visit(line, Buffer.byteLength(line, "utf8") + 1)) return;
+const READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Yields complete lines between `start` and `end` in bounded chunks, each decoded from its own
+ * byte range. A trailing partial line is not yielded. Stopping iteration stops reading.
+ */
+async function* readLines(
+  handle: fsp.FileHandle,
+  start: number,
+  end: number,
+): AsyncGenerator<{ line: string; bytes: number }> {
+  let pending = Buffer.alloc(0);
+  let position = start;
+  while (position < end) {
+    const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, end - position));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+    if (bytesRead === 0) return;
+    position += bytesRead;
+    pending =
+      pending.length === 0
+        ? chunk.subarray(0, bytesRead)
+        : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+    let newline = pending.indexOf(0x0a);
+    while (newline !== -1) {
+      const line = pending.toString("utf8", 0, newline);
+      pending = pending.subarray(newline + 1);
+      yield { line, bytes: newline + 1 };
+      newline = pending.indexOf(0x0a);
+    }
   }
 }
 
@@ -190,8 +211,12 @@ export class PiSessionEventSource implements SessionEventSource {
   }
 
   async checkpoint(cursor: SourceCursor): Promise<void> {
+    // Acking the position this source already reached keeps the replayed decoder state;
+    // anything else must replay the file up to the new cursor.
+    if (cursor.offset !== this.cursor.offset || cursor.line !== this.cursor.line) {
+      this.state = null;
+    }
     this.cursor = { ...cursor };
-    this.state = null;
   }
 
   /** Replays the file up to the cursor so records after it decode as if read in one pass. */
@@ -199,21 +224,16 @@ export class PiSessionEventSource implements SessionEventSource {
     const state = new PiFileState();
     if (this.cursor.offset === 0) return state;
     const handle = await fsp.open(filePath, "r");
-    let prefix: string;
     try {
-      const buffer = Buffer.alloc(this.cursor.offset);
-      const { bytesRead } = await handle.read(buffer, 0, this.cursor.offset, 0);
-      prefix = buffer.toString("utf8", 0, bytesRead);
+      let lineNumber = 1;
+      for await (const { line } of readLines(handle, 0, this.cursor.offset)) {
+        const entry = line.trim() ? parseEntry(line.trim()) : null;
+        if (entry) state.observe(entry, lineNumber);
+        lineNumber += 1;
+      }
     } finally {
       await handle.close();
     }
-    let lineNumber = 1;
-    forEachLine(prefix, (line) => {
-      const entry = line.trim() ? parseEntry(line.trim()) : null;
-      if (entry) state.observe(entry, lineNumber);
-      lineNumber += 1;
-      return true;
-    });
     return state;
   }
 
@@ -238,51 +258,46 @@ export class PiSessionEventSource implements SessionEventSource {
     this.state ??= await this.rebuildState(filePath);
     const state = this.state;
 
-    const length = stat.size - this.cursor.offset;
-    const buffer = Buffer.alloc(length);
+    const limit = batchSize ?? this.maxBatchSize;
+    const records: RawHarnessRecord[] = [];
     const handle = await fsp.open(filePath, "r");
-    let bytesRead: number;
     try {
-      ({ bytesRead } = await handle.read(buffer, 0, length, this.cursor.offset));
+      for await (const { line, bytes } of readLines(handle, this.cursor.offset, stat.size)) {
+        const lineNumber = this.cursor.line;
+        this.cursor.offset += bytes;
+        this.cursor.line += 1;
+        this.cursor.timestamp = new Date().toISOString();
+        const entry = line.trim() ? parseEntry(line.trim()) : null;
+        const observed = entry ? state.observe(entry, lineNumber) : null;
+        if (!entry || !observed) continue;
+
+        this.cursor.sequence += 1;
+        const entryTime =
+          typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+        const metadata: PiRecordMetadata = {
+          transcriptPath: filePath,
+          lineNumber,
+          byteOffset: this.cursor.offset,
+          ...observed,
+        };
+        records.push({
+          recordId: `${this.session.sessionId}-l${lineNumber}`,
+          sessionId: this.session.sessionId,
+          harnessId: PI_HARNESS_ID,
+          sequenceNumber: this.cursor.sequence,
+          timestamp: Number.isFinite(entryTime)
+            ? new Date(entryTime).toISOString()
+            : new Date().toISOString(),
+          recordType: recordTypeOf(entry),
+          rawPayload: entry,
+          cursor: { ...this.cursor },
+          metadata: { ...metadata },
+        });
+        if (records.length >= limit) break;
+      }
     } finally {
       await handle.close();
     }
-
-    const limit = batchSize ?? this.maxBatchSize;
-    const records: RawHarnessRecord[] = [];
-    forEachLine(buffer.toString("utf8", 0, bytesRead), (line, bytes) => {
-      const lineNumber = this.cursor.line;
-      this.cursor.offset += bytes;
-      this.cursor.line += 1;
-      this.cursor.timestamp = new Date().toISOString();
-      const entry = line.trim() ? parseEntry(line.trim()) : null;
-      const observed = entry ? state.observe(entry, lineNumber) : null;
-      if (!entry || !observed) return true;
-
-      this.cursor.sequence += 1;
-      const entryTime =
-        typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-      const metadata: PiRecordMetadata = {
-        transcriptPath: filePath,
-        lineNumber,
-        byteOffset: this.cursor.offset,
-        ...observed,
-      };
-      records.push({
-        recordId: `${this.session.sessionId}-l${lineNumber}`,
-        sessionId: this.session.sessionId,
-        harnessId: PI_HARNESS_ID,
-        sequenceNumber: this.cursor.sequence,
-        timestamp: Number.isFinite(entryTime)
-          ? new Date(entryTime).toISOString()
-          : new Date().toISOString(),
-        recordType: recordTypeOf(entry),
-        rawPayload: entry,
-        cursor: { ...this.cursor },
-        metadata: { ...metadata },
-      });
-      return records.length < limit;
-    });
     return records;
   }
 

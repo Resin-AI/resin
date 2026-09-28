@@ -10,6 +10,8 @@ import type {
 import { parseSpoolLine } from "./hook-records.js";
 import { CURSOR_HARNESS_ID } from "./paths.js";
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
 const RECORD_TYPE_BY_EVENT: Record<string, RecordType> = {
   beforeSubmitPrompt: "prompt",
   afterAgentResponse: "completion",
@@ -75,48 +77,57 @@ export class CursorSessionEventSource implements SessionEventSource {
     }
     if (size <= this.cursor.offset) return [];
 
-    const handle = await fsp.open(filePath, "r");
-    let chunk: Buffer;
-    try {
-      chunk = Buffer.alloc(size - this.cursor.offset);
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, this.cursor.offset);
-      chunk = chunk.subarray(0, bytesRead);
-    } finally {
-      await handle.close();
-    }
-
     const limit = batchSize ?? this.maxBatchSize;
     const records: RawHarnessRecord[] = [];
-    let start = 0;
-    while (records.length < limit) {
-      const newline = chunk.indexOf(0x0a, start);
-      if (newline === -1) break;
-      const line = chunk.toString("utf8", start, newline);
-      this.cursor.offset += newline + 1 - start;
-      start = newline + 1;
-      const lineNumber = this.cursor.line;
-      this.cursor.line += 1;
-      const payload = parseSpoolLine(line);
-      if (payload === null) continue;
-      this.cursor.sequence += 1;
-      const receivedAt = payload.resin_received_at;
-      const timestamp =
-        typeof receivedAt === "string" && !Number.isNaN(Date.parse(receivedAt))
-          ? receivedAt
-          : new Date().toISOString();
-      this.cursor.timestamp = timestamp;
-      const event = payload.hook_event_name;
-      records.push({
-        recordId: `${this.session.sessionId}-rec-${this.cursor.sequence}`,
-        sessionId: this.session.sessionId,
-        harnessId: CURSOR_HARNESS_ID,
-        sequenceNumber: this.cursor.sequence,
-        timestamp,
-        recordType: (typeof event === "string" && RECORD_TYPE_BY_EVENT[event]) || "custom",
-        rawPayload: payload,
-        cursor: { ...this.cursor },
-        metadata: { transcriptPath: filePath, lineNumber, byteOffset: this.cursor.offset },
-      });
+    // Read bounded chunks from the cursor and stop once `limit` records are collected, so a
+    // large spool is never loaded (or re-read) whole per call.
+    const handle = await fsp.open(filePath, "r");
+    try {
+      let pending = Buffer.alloc(0);
+      let position = this.cursor.offset;
+      while (records.length < limit && position < size) {
+        const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, size - position));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+        if (bytesRead === 0) break;
+        position += bytesRead;
+        pending =
+          pending.length === 0
+            ? chunk.subarray(0, bytesRead)
+            : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+
+        let newline = pending.indexOf(0x0a);
+        while (newline !== -1 && records.length < limit) {
+          const line = pending.toString("utf8", 0, newline);
+          pending = pending.subarray(newline + 1);
+          this.cursor.offset += newline + 1;
+          newline = pending.indexOf(0x0a);
+          const lineNumber = this.cursor.line;
+          this.cursor.line += 1;
+          const payload = parseSpoolLine(line);
+          if (payload === null) continue;
+          this.cursor.sequence += 1;
+          const receivedAt = payload.resin_received_at;
+          const timestamp =
+            typeof receivedAt === "string" && !Number.isNaN(Date.parse(receivedAt))
+              ? receivedAt
+              : new Date().toISOString();
+          this.cursor.timestamp = timestamp;
+          const event = payload.hook_event_name;
+          records.push({
+            recordId: `${this.session.sessionId}-rec-${this.cursor.sequence}`,
+            sessionId: this.session.sessionId,
+            harnessId: CURSOR_HARNESS_ID,
+            sequenceNumber: this.cursor.sequence,
+            timestamp,
+            recordType: (typeof event === "string" && RECORD_TYPE_BY_EVENT[event]) || "custom",
+            rawPayload: payload,
+            cursor: { ...this.cursor },
+            metadata: { transcriptPath: filePath, lineNumber, byteOffset: this.cursor.offset },
+          });
+        }
+      }
+    } finally {
+      await handle.close();
     }
     return records;
   }

@@ -202,6 +202,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
   observationClient?: CloudObservationClient;
   cloudClient?: CloudObservationClient;
   attributionResolver?: TrajectoryAttributionResolver;
+  /**
+   * Local store the redaction pipeline and workflow recorder mint placeholder aliases into. Its
+   * pending writes are persisted before any batch is acknowledged or any event leaves the device,
+   * so a placeholder never outlives the alias that resolves it.
+   */
+  privateValueStore?: { flush(): void };
   logger?: Logger;
   /**
    * Dynamic transmission gate. Any value other than an explicit `true` fails closed.
@@ -283,7 +289,6 @@ interface GenericCoalescingBuffer {
   session: HarnessSession;
   validEvents: NormalizedSessionEvent[];
   projectedEvents: NormalizedSessionEvent[];
-  rawRecords: RawHarnessRecord[];
   acks: Array<() => Promise<void>>;
   timer: NodeJS.Timeout | null;
   /** Wall-clock time the pending timer fires; null when no timer is pending. */
@@ -348,6 +353,7 @@ export class TrajectoryCaptureCoordinator {
   private lastGenericBatchSize = 0;
   private totalGenericBatchesAccepted = 0;
   private totalGenericObservationsAccepted = 0;
+  private readonly privateValueStore?: { flush(): void };
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(
     pipeline: NormalizationPipeline,
@@ -414,6 +420,9 @@ export class TrajectoryCaptureCoordinator {
 
     this.authorizeTelemetryEmissionFn = !(pipelineOrOptions instanceof NormalizationPipeline)
       ? pipelineOrOptions.authorizeTelemetryEmission
+      : undefined;
+    this.privateValueStore = !(pipelineOrOptions instanceof NormalizationPipeline)
+      ? pipelineOrOptions.privateValueStore
       : undefined;
   }
   private getSessionBackoff(sessionId: string): ExponentialBackoff {
@@ -672,9 +681,15 @@ export class TrajectoryCaptureCoordinator {
   public readonly handleRecords: TailerRecordHandler = async (
     session: HarnessSession,
     records: RawHarnessRecord[],
-    ack: () => Promise<void>,
+    sourceAck: () => Promise<void>,
   ): Promise<void> => {
     const { sessionId } = session;
+    // Aliases minted while processing this batch are persisted before the batch becomes durable
+    // (cursor ack); uploads flush the same way before events leave the device.
+    const ack = async () => {
+      this.privateValueStore?.flush();
+      await sourceAck();
+    };
     const telemetryGeneration = this.telemetryGeneration;
     const { records: telemetryRecords, timestampMs: telemetryRecordTimestampMs } =
       this.recordsAfterPrivacyCutoff(records);
@@ -750,7 +765,7 @@ export class TrajectoryCaptureCoordinator {
             this.activeGenericSessions.add(sessionId);
           }
         } else {
-          this.logger?.info(
+          this.logger?.debug(
             `Session ${sessionId} has no trajectory attribution; processing as generic observation session`,
           );
           this.genericSessions.add(sessionId);
@@ -838,6 +853,7 @@ export class TrajectoryCaptureCoordinator {
           }
           const observation = emitter.getObservation() ?? emitter.finalize();
           try {
+            this.privateValueStore?.flush();
             await this.observationClient.sendTrajectoryObservationBatch({
               observations: [observation],
             });
@@ -1073,7 +1089,6 @@ export class TrajectoryCaptureCoordinator {
             session,
             validEvents: [],
             projectedEvents: [],
-            rawRecords: [],
             acks: [],
             timer: null,
             flushDueAtMs: null,
@@ -1092,7 +1107,6 @@ export class TrajectoryCaptureCoordinator {
         for (const event of projectedEvents) {
           buffer.projectedBytes += serializedByteLength(event);
         }
-        buffer.rawRecords.push(...records);
         buffer.acks.push(ack);
         buffer.telemetryRecordTimestampMs.push(...telemetryRecordTimestampMs);
         if (latestTail) {
@@ -1156,6 +1170,7 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
     try {
+      this.privateValueStore?.flush();
       await this.onSessionEvents(
         session,
         events.map((event) => structuredClone(event)),
@@ -1372,6 +1387,7 @@ export class TrajectoryCaptureCoordinator {
       // sent in bounded chunks, in event order, and acknowledged only after every chunk is accepted.
       for (const chunk of chunkObservationsForUpload(projectedEvents, buffer.projectedBytes)) {
         batchId = chunkBatchId(chunk);
+        this.privateValueStore?.flush();
         const receipt = await this.observationClient.sendObservationBatch({
           batchId,
           observations: chunk,
