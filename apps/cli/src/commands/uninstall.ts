@@ -14,6 +14,11 @@ import {
 import { resolvePaths } from "@resin/observer";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
 import { removeShellPath } from "../installer/bootstrap-entry.js";
+import {
+  type HarnessReconcileFsBridge,
+  HarnessReconciler,
+  ReconciliationNodeFsBridge,
+} from "../installer/harness-reconciler.js";
 import { createUserServiceManager } from "../service/manager.js";
 export type McpServerConfigValue =
   | string
@@ -168,15 +173,16 @@ async function removeResinFromJsonConfig(
 export async function removeHarnessMcpConfigurations(options: {
   customHome?: string;
   env?: NodeJS.ProcessEnv;
-  fsBridge?: ConfigFsBridge;
+  fsBridge?: HarnessReconcileFsBridge;
 }): Promise<string[]> {
-  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const fsBridge = options.fsBridge ?? new ReconciliationNodeFsBridge();
   const home = path.resolve(options.customHome ?? options.env?.HOME ?? os.homedir());
   const env = options.env ?? (options.customHome === undefined ? process.env : { HOME: home });
+  const reconciler = new HarnessReconciler();
   const cleaned: string[] = [];
 
   for (const definition of HARNESS_DEFINITIONS) {
-    if (await removeHarnessRegistration(definition, home, env, fsBridge)) {
+    if (await removeHarnessRegistration(definition, home, env, fsBridge, reconciler)) {
       cleaned.push(definition.displayName);
     }
   }
@@ -188,10 +194,19 @@ async function removeHarnessRegistration(
   definition: HarnessInstallDefinition,
   home: string,
   env: NodeJS.ProcessEnv,
-  fsBridge: ConfigFsBridge,
+  fsBridge: HarnessReconcileFsBridge,
+  reconciler: HarnessReconciler,
 ): Promise<boolean> {
   const { mcpConfig } = definition;
   let cleaned = false;
+  // Files Resin created and alone wrote go entirely, with Resin's backups; directories Resin
+  // created for them go once everything below is removed and they are empty.
+  const createdDirectories: string[] = [];
+  for (const configPath of new Set(mcpConfig.uninstallPaths(home, env))) {
+    const released = await reconciler.releaseOwnedConfig(configPath, fsBridge);
+    cleaned = released.removedTarget || cleaned;
+    createdDirectories.push(...released.createdDirectories);
+  }
   if (mcpConfig.removeRegistration !== undefined) {
     cleaned = await mcpConfig.removeRegistration({ home, env, fsBridge });
   } else {
@@ -225,6 +240,9 @@ async function removeHarnessRegistration(
   for (const extension of definition.installExtensions ?? []) {
     const outcomes = await extension.uninstall({ home, env, fsBridge });
     cleaned = outcomes.some((outcome) => outcome.action === "removed") || cleaned;
+  }
+  for (const directory of createdDirectories) {
+    await fsBridge.removeDirectoryWithoutFiles?.(directory);
   }
   return cleaned;
 }
@@ -360,7 +378,7 @@ export async function uninstallCommand(
     const cleanedHarnesses = await removeHarnessMcpConfigurations({
       customHome,
       env,
-      fsBridge,
+      fsBridge: options.fsBridge,
     });
 
     // 3. Purge data / secrets / all if requested

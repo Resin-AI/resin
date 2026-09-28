@@ -6788,8 +6788,7 @@ Resin learned tools from earlier work in your projects. They are MCP tools on th
         "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
         "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
         "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
-        "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session.",
-        "cursor-agent has no user-level rules directory: it loads `.cursor/rules` from the workspace and each of its ancestors (verified with 2026.09.26), so the guidance rule in ~/.cursor/rules reaches projects under your home directory only. Elsewhere agents get Resin's MCP server instructions but not this guidance."
+        "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session. Whether user rules in ~/.cursor/rules are applied is unverified."
       ],
       probeInstallation: (context) => probeCursorInstallation({
         home: context.home,
@@ -8678,6 +8677,8 @@ var init_harness_reconciler = __esm({
       originalContentHash: external_exports.string().regex(SHA256_PATTERN),
       plannedContentHash: external_exports.string().regex(SHA256_PATTERN),
       originalExisted: external_exports.boolean(),
+      /** Directories (deepest first) that did not exist before Resin created the target file. */
+      createdDirectories: external_exports.array(external_exports.string().min(1)).optional(),
       createdAt: external_exports.string().datetime(),
       timestamp: external_exports.number().int().nonnegative()
     }).strict();
@@ -9035,6 +9036,34 @@ var init_harness_reconciler = __esm({
         } catch (error) {
           if (isMissingFileError(error)) {
             return [];
+          }
+          throw error;
+        }
+      }
+      async removeDirectoryWithoutFiles(directoryPath) {
+        let entries;
+        try {
+          entries = await fs8.readdir(directoryPath, { withFileTypes: true });
+        } catch (error) {
+          if (isMissingFileError(error)) {
+            return false;
+          }
+          throw error;
+        }
+        let empty = true;
+        for (const entry of entries) {
+          empty = entry.isDirectory() && !entry.isSymbolicLink() && await this.removeDirectoryWithoutFiles(path27.join(directoryPath, entry.name)) && empty;
+        }
+        if (!empty) {
+          return false;
+        }
+        try {
+          await fs8.rmdir(directoryPath);
+          return true;
+        } catch (error) {
+          const code = error.code;
+          if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST") {
+            return false;
           }
           throw error;
         }

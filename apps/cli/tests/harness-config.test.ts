@@ -1,10 +1,31 @@
-import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
+import { type HarnessInstallation, InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
-import { HarnessConfigOrchestrator } from "../src/installer/harness-config.js";
+import {
+  HarnessConfigOrchestrator,
+  type HarnessProbeOptions,
+} from "../src/installer/harness-config.js";
+
+async function everyHarnessPresent({
+  harnessId,
+  targetPath,
+  customHome,
+}: HarnessProbeOptions): Promise<HarnessInstallation> {
+  return {
+    harnessId,
+    displayName: harnessId,
+    version: "test",
+    isInstalled: true,
+    status: "ready",
+    configPath: targetPath,
+    homePath: customHome,
+    detectedAt: "2026-08-28T12:00:00.000Z",
+    metadata: {},
+  };
+}
 
 describe("HarnessConfigOrchestrator", () => {
-  it("configures Claude Code, Codex CLI, and OMP in a clean environment", async () => {
+  it("configures every present harness in a clean environment", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
 
@@ -16,6 +37,7 @@ describe("HarnessConfigOrchestrator", () => {
       customHome: home,
       workspacePath: workspace,
       fsBridge: bridge,
+      probeHarness: everyHarnessPresent,
       gatewayUrl: "http://127.0.0.1:9400/mcp/sse",
     });
 
@@ -61,6 +83,7 @@ describe("HarnessConfigOrchestrator", () => {
       customHome: home,
       workspacePath: workspace,
       fsBridge: bridge,
+      probeHarness: everyHarnessPresent,
     });
     expect(firstRun.success).toBe(true);
     expect(firstRun.backups).toHaveLength(SUPPORTED_HARNESS_IDS.length);
@@ -70,6 +93,7 @@ describe("HarnessConfigOrchestrator", () => {
       customHome: home,
       workspacePath: workspace,
       fsBridge: bridge,
+      probeHarness: everyHarnessPresent,
     });
 
     expect(secondRun.success).toBe(true);
@@ -88,6 +112,7 @@ describe("HarnessConfigOrchestrator", () => {
       customHome: home,
       workspacePath: workspace,
       fsBridge: bridge,
+      probeHarness: everyHarnessPresent,
       dryRun: true,
     });
 
@@ -117,6 +142,7 @@ describe("HarnessConfigOrchestrator", () => {
       customHome: home,
       workspacePath: workspace,
       fsBridge: bridge,
+      probeHarness: everyHarnessPresent,
     });
     expect(runResult.success).toBe(true);
 
