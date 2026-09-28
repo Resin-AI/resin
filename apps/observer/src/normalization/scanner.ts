@@ -241,6 +241,9 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
   },
 ];
 
+/** A placeholder an earlier redaction step wrote, with its type and keyed tag. */
+const PLACEHOLDER = /\[REDACTED_[A-Z_]+:[^\]\s]*\]/g;
+
 /** Context words announcing that the next value on the line is a credential. */
 const SECRET_CONTEXT =
   /(?:key|token|secret|passw(?:or)?d|pwd|auth|credential|bearer|session|cookie|signature)[^\n]{0,24}$/i;
@@ -523,14 +526,24 @@ export class ContentScanner {
       }
     }
 
+    // A placeholder an earlier redaction step wrote is never rescanned: its tag is keyed random hex,
+    // which a pass (the token scan, say, on `REDACTED_SECRET:<tag>`) could otherwise flag and nest.
+    const placeholders = [...text.matchAll(PLACEHOLDER)].map((found) => ({
+      start: found.index,
+      end: found.index + found[0].length,
+    }));
+    const outsidePlaceholders = matches.filter(
+      (m) => !placeholders.some((span) => m.start < span.end && m.end > span.start),
+    );
+
     // Sort matches by start position ascending
-    matches.sort((a, b) => a.start - b.start);
+    outsidePlaceholders.sort((a, b) => a.start - b.start);
 
     // Filter out overlapping matches, keeping the longer / earlier match
     const nonOverlapping: SecretMatch[] = [];
     let lastEnd = -1;
 
-    for (const m of matches) {
+    for (const m of outsidePlaceholders) {
       if (m.start >= lastEnd) {
         nonOverlapping.push(m);
         lastEnd = m.end;
