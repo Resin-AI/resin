@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/bin/cli.js";
 import { initCommand, parseInitFlags } from "../src/commands/init.js";
 import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
+import { resolveHarnessConfigPath } from "../src/installer/harness-config.js";
 import {
   InstallationError,
   type InstallationPairingSummary,
@@ -75,6 +76,20 @@ afterEach(() => {
   testHomes.length = 0;
 });
 
+/** Harnesses whose empty MCP config Resin may extend; the in-memory bridge has no directories. */
+const SEEDED_HARNESS_IDS = SUPPORTED_HARNESS_IDS.filter(
+  (harnessId) => !["pi", "muse-code", "opencode"].includes(harnessId),
+);
+
+/** Resin registers only present harnesses: an existing config file marks a harness present. */
+async function seedPresentHarnessConfigs(bridge: InMemoryConfigFsBridge, home: string) {
+  for (const harnessId of SEEDED_HARNESS_IDS) {
+    const configPath = resolveHarnessConfigPath(harnessId, home);
+    const empty = configPath.endsWith(".json") ? "{}\n" : configPath.endsWith(".toml") ? "" : null;
+    if (empty !== null) await bridge.writeFile(configPath, empty);
+  }
+}
+
 describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("parses CLI flags accurately", () => {
     const flags = parseInitFlags([
@@ -108,6 +123,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     const promptFn = vi.fn().mockResolvedValue(false);
 
     const home = "/home/developer";
+    await seedPresentHarnessConfigs(bridge, home);
     const workspace = "/home/developer/code/my-app";
 
     const installer = new ResinInstaller({
@@ -142,7 +158,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     );
     expect(verifyStep?.details).toMatchObject({
       allConfigured: true,
-      installedHarnessCount: SUPPORTED_HARNESS_IDS.length,
+      installedHarnessCount: SEEDED_HARNESS_IDS.length,
       onboardingReady: false,
     });
 
@@ -267,6 +283,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("enforces idempotency on repeated init runs", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
+    await seedPresentHarnessConfigs(bridge, home);
     const workspace = "/home/developer/code/my-app";
 
     const installer = new ResinInstaller({
@@ -296,7 +313,9 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
       autoApprove: true,
     });
     expect(run2.success).toBe(true);
-    expect(run2.harnesses.every((h) => h.wasAlreadyConfigured)).toBe(true);
+    const present = run2.harnesses.filter((h) => h.installed);
+    expect(present.map((h) => h.harnessId)).toEqual(SEEDED_HARNESS_IDS);
+    expect(present.every((h) => h.wasAlreadyConfigured)).toBe(true);
   });
 
   it("rolls back all applied configurations atomically upon failure injection", async () => {
@@ -458,6 +477,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("emits canonical stdio configurations and does not write explicit gatewayUrl into harness configs", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
+    await seedPresentHarnessConfigs(bridge, home);
     const resinCommand = path.join(home, ".resin", "bin", "resin");
     const workspace = "/home/developer/code/my-app";
     const customGateway = "http://127.0.0.1:9876/mcp/sse";
@@ -498,6 +518,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
   it("uses the public source tree for local-test assets and harness commands", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
+    await seedPresentHarnessConfigs(bridge, home);
     const sourceRoot = "/work/resin";
     const workspace = "/work/resin-cloud";
     const sourcePaths = resolveLocalSourceInstallPaths(sourceRoot);
