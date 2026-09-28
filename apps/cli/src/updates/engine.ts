@@ -20,6 +20,7 @@ import {
   downloadAndVerifyAsset,
   getActiveVersion,
   installReleaseVersion,
+  pruneInstalledVersions,
   switchActiveVersion,
 } from "../installer/asset-downloader.js";
 import { compareSemver } from "../installer/channel-verifier.js";
@@ -242,6 +243,8 @@ export interface UpdateEngineOptions {
   readonly clock?: () => number;
   readonly sleep?: (delayMs: number) => Promise<void>;
   readonly onSnapshot?: (snapshot: UpdateStatusSnapshot) => void | Promise<void>;
+  /** Receives non-fatal diagnostics such as old-release pruning failures. Defaults to stderr. */
+  readonly logger?: (message: string) => void;
 }
 
 interface VersionMetadataState {
@@ -592,6 +595,7 @@ export class UpdateEngine {
   private readonly switchVersion: VersionSwitcher;
   private readonly readActiveVersion: (resinHome: string) => string | null | Promise<string | null>;
   private readonly removeVersion: (versionDir: string) => Promise<void>;
+  private readonly logger: (message: string) => void;
   private readonly serviceManager: UpdateServiceManager;
   private readonly sessionActivity?: UpdateEngineOptions["sessionActivity"];
   private readonly healthProbe?: UpdateEngineOptions["healthProbe"];
@@ -637,6 +641,7 @@ export class UpdateEngine {
       (async (versionDir) => {
         await fs.rm(versionDir, { recursive: true, force: true });
       });
+    this.logger = options.logger ?? ((message) => process.stderr.write(`${message}\n`));
     this.serviceManager =
       options.serviceManager ??
       createUserServiceManager({
@@ -1351,6 +1356,14 @@ export class UpdateEngine {
       }
       await this.cleanupReinstallSwap(reinstallSwap);
       await this.cleanupBackup(backup);
+      await this.pruneRetiredVersions([
+        targetVersion,
+        installed.version,
+        reinstallSwap?.candidateVersion,
+        rollbackTarget,
+        metadata.version,
+        release?.channel.rollbackReferences?.targetVersion,
+      ]);
       return this.createResult({
         request,
         snapshot,
@@ -2202,6 +2215,37 @@ export class UpdateEngine {
       throw new UpdateVerificationError(
         `Installed release v${normalized} failed its trusted tree digest check.`,
       );
+    }
+  }
+
+  /**
+   * Shared post-activation cleanup for manual upgrades and background auto-updates: removes
+   * release directories other than the active, previous and rollback-target versions (including
+   * the physical directories their trusted records point at). Never fails the update.
+   */
+  private async pruneRetiredVersions(
+    retainVersions: readonly (string | null | undefined)[],
+  ): Promise<void> {
+    try {
+      const logical = retainVersions.filter((version): version is string => Boolean(version));
+      const physical = await Promise.all(
+        logical.map(async (version) => {
+          try {
+            return (await this.readTrustedInstalledRelease(normalizeExactVersion(version)))
+              .physicalVersion;
+          } catch {
+            return undefined;
+          }
+        }),
+      );
+      await pruneInstalledVersions({
+        resinHome: this.resinHome,
+        retainVersions: [...logical, ...physical],
+        removeDirectory: this.removeVersion,
+        logger: this.logger,
+      });
+    } catch (error) {
+      this.logger(`Old release version pruning failed: ${safeDiagnostic(error)}`);
     }
   }
 
