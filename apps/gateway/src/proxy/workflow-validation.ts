@@ -361,6 +361,7 @@ function iterationDemonstration(
       arguments: call.arguments,
       result: call.result.value,
       hiddenDependencies: hidden.get(stepId) ?? [],
+      privatePositions: call.privatePositions,
       ...(call.workspaceRoot === undefined || !planRoots.has(stepId)
         ? {}
         : { roots: { recorded: call.workspaceRoot, plan: planRoots.get(stepId)! } }),
@@ -384,7 +385,17 @@ function segmentCall(
   const text = segmentText(address, call);
   const program = call.callable.program;
   if (text === undefined || program === undefined) return undefined;
-  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
+  // Token positions of the whole chain do not address the segment: a chain with any private
+  // position keeps every segment's text private as a whole.
+  const privateText = call.privatePositions.some((entry) => entry.argument === program.argument);
+  return {
+    ...call,
+    arguments: { ...call.arguments, [program.argument]: text },
+    privatePositions: [
+      ...call.privatePositions.filter((entry) => entry.argument !== program.argument),
+      ...(privateText ? [{ argument: program.argument, path: [] }] : []),
+    ],
+  };
 }
 
 /** A completed POSIX chain's segment text at `address`, as this device re-splits its recording. */
@@ -512,6 +523,44 @@ async function acrossIterations(
   }
 }
 
+/** Every `stepId` a step's argument sources read, however deeply templates nest them. */
+function readStepIds(value: unknown, into: Set<string>): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) readStepIds(item, into);
+  } else if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "stepId" && typeof entry === "string") into.add(entry);
+      else readStepIds(entry, into);
+    }
+  }
+  return into;
+}
+
+/**
+ * Steps whose own outcome could answer a question about a private value: model-written derivation
+ * steps (their code runs over recorded data), recorded steps with a private position, and steps
+ * that read a derivation's output.
+ */
+function sensitiveSteps(
+  plan: RecordedWorkflow,
+  demonstrations: readonly LocalDemonstration[],
+): Set<string> {
+  const derivations = new Set(
+    plan.steps.filter((step) => step.origin === "derivation").map((step) => step.id),
+  );
+  const sensitive = new Set(derivations);
+  for (const step of plan.steps) {
+    const privateHere = demonstrations.some(
+      ({ recording }) => (recording.get(step.id)?.privatePositions?.length ?? 0) > 0,
+    );
+    const readsDerivation = [...readStepIds(step.arguments, new Set())].some((id) =>
+      derivations.has(id),
+    );
+    if (privateHere || readsDerivation) sensitive.add(step.id);
+  }
+  return sensitive;
+}
+
 /**
  * The validator this device runs for the cloud's validation asks. Candidates require held-out
  * evidence; with no held-out run, the baseline recording can prove the closed plan and the
@@ -579,8 +628,16 @@ export function createRecordingCheckValidator(
       };
     }
     const baselineRun = runs.get("baseline")?.iterations?.[0];
-    const registry = (found: LocalDemonstration): RuntimeAdapterRegistry =>
+    const registry = (
+      found: LocalDemonstration,
+      checked: RecordedWorkflow,
+    ): RuntimeAdapterRegistry =>
       createRecordingCheckAdapters({
+        planSuppliedInputs: new Set(
+          checked.inputs
+            .filter((input) => Object.hasOwn(input, "default"))
+            .map((input) => input.name),
+        ),
         recording: found.recording,
         runtimes: [RESIN_INVOKE_TOOL_RUNTIME],
         derivation,
@@ -604,8 +661,8 @@ export function createRecordingCheckValidator(
       environmentCandidates: readonly WorkflowBindingCandidate[],
     ) => {
       const registries = new Map<DemonstrationLabel, RuntimeAdapterRegistry>();
-      if (baselineRun !== undefined) registries.set("baseline", registry(baselineRun));
-      if (heldOut !== undefined) registries.set("held-out", registry(heldOut));
+      if (baselineRun !== undefined) registries.set("baseline", registry(baselineRun, checked));
+      if (heldOut !== undefined) registries.set("held-out", registry(heldOut, checked));
       const environment = await demonstrationEnvironment({
         plan: checked,
         demonstration: label,
@@ -728,6 +785,20 @@ export function createRecordingCheckValidator(
         stepId,
         detail: MISSED_DETAIL,
       }));
+      if (verification.status !== "verified") {
+        // A failed plan never says which privacy-sensitive step failed: every such step is reported
+        // missed, so its outcome cannot answer a guess about a private value or a derivation's bit.
+        const sensitive = sensitiveSteps(decided.plan, [
+          ...(baselineRun === undefined ? [] : [baselineRun]),
+          ...(selected.iterations ?? []),
+        ]);
+        const missed = new Set(verification.missed.map(({ stepId }) => stepId));
+        for (const stepId of sensitive) missed.add(stepId);
+        verification.reproduced = verification.reproduced.filter((stepId) => !missed.has(stepId));
+        verification.missed = decided.plan.steps
+          .filter((step) => missed.has(step.id))
+          .map((step) => ({ stepId: step.id, detail: MISSED_DETAIL }));
+      }
       verification.dropped = verification.dropped.map(({ candidate }) => ({
         candidate: originalOf.get(candidate) ?? candidate,
         reason: NOT_CONFIRMED,

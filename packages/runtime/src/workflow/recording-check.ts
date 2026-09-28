@@ -46,6 +46,13 @@ export interface RecordedCall {
    */
   hiddenDependencies: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
   /**
+   * Argument positions whose recorded value is private: it was redacted before anything was
+   * uploaded, so the cloud never saw it. The plan must read each one from this device (a `private`
+   * reference, an input, or a recorded step's output); a value the plan supplies itself, or one a
+   * model-written derivation computed, is never compared with it. `[]` covers the whole argument.
+   */
+  privatePositions?: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
+  /**
    * The workspace roots the two sides' working directories stand for: `recorded` is the root of the
    * session that made this call, `plan` the root of the session the plan's own call ran in. Given
    * both, a working directory is compared as the place it names within its own root — `.`, the
@@ -151,6 +158,99 @@ export function stepBindsPosition(
 }
 
 /**
+ * What a check may compare with a private recorded value: only values this device supplies. A
+ * literal is the cloud's own guess; a derivation's output is the cloud's code applied to recorded
+ * data; an input declared with a plan-written default is a literal by another name. A recorded
+ * step's result stays the device's own record.
+ */
+export interface DeviceSourceRules {
+  /** Steps this device recorded: their results are recorded values, not computed ones. */
+  recordedSteps: ReadonlySet<string>;
+  /** Inputs whose value the plan itself can supply (a declared `default`). */
+  planSuppliedInputs: ReadonlySet<string>;
+}
+
+function templateDeviceSourced(
+  template: WorkflowValueTemplate,
+  path: WorkflowValuePath,
+  rules: DeviceSourceRules,
+): boolean {
+  switch (template.type) {
+    case "private":
+      return true;
+    case "input":
+      return !rules.planSuppliedInputs.has(template.name);
+    case "result":
+    case "extract":
+      return rules.recordedSteps.has(template.stepId);
+    case "literal":
+    case "unresolved":
+      return false;
+    case "object": {
+      if (path.length === 0) {
+        return Object.values(template.entries).every((entry) =>
+          templateDeviceSourced(entry, [], rules),
+        );
+      }
+      const [head, ...rest] = path;
+      const child = typeof head === "string" ? template.entries[head] : undefined;
+      return child !== undefined && templateDeviceSourced(child, rest, rules);
+    }
+    case "array": {
+      if (path.length === 0) {
+        return template.items.every((item) => templateDeviceSourced(item, [], rules));
+      }
+      const [head, ...rest] = path;
+      const child = typeof head === "number" ? template.items[head] : undefined;
+      return child !== undefined && templateDeviceSourced(child, rest, rules);
+    }
+    case "program": {
+      // Recorded text comes from this device's store only through a private source reference; the
+      // plan's literal source is the uploaded, redacted view or the cloud's own text.
+      const text = template.sourceReference !== undefined || template.source.type === "private";
+      if (path.length === 0) {
+        return (
+          text && template.holes.every((hole) => templateDeviceSourced(hole.binding, [], rules))
+        );
+      }
+      const address = programTokenPath(path);
+      if (address === undefined) return false;
+      const covering = template.holes.filter(
+        (hole) => hole.token === address.token && hole.embedded === address.embedded,
+      );
+      if (!covering.every((hole) => templateDeviceSourced(hole.binding, [], rules))) return false;
+      // A whole-token hole replaces the token; a span hole leaves the rest of it to the text.
+      return text || covering.some((hole) => hole.span === undefined);
+    }
+    default:
+      return false;
+  }
+}
+
+/** Whether the plan reads this argument position from values this device supplies. */
+export function stepDeviceSourcesPosition(
+  step: WorkflowStep,
+  argument: string,
+  path: WorkflowValuePath,
+  rules: DeviceSourceRules,
+): boolean {
+  const source = step.arguments.find((entry) => entry.name === argument)?.source;
+  if (source === undefined) return false;
+  switch (source.kind) {
+    case "private":
+      return true;
+    case "input":
+      return !rules.planSuppliedInputs.has(source.name);
+    case "result":
+      return rules.recordedSteps.has(source.stepId);
+    case "template":
+      return templateDeviceSourced(source.template, path, rules);
+    default:
+      return false;
+  }
+}
+
+/**
  * Arguments of a recorded program call that decide what its replay runs, beside the program
  * argument itself: where it runs and how the program runner invokes it. Everything else a harness
  * passed with the program — an intent label, a timeout, an output limit, a yield interval — never
@@ -200,7 +300,12 @@ function comparedArguments(
 }
 
 /** Why a resolved call is not the recorded one; undefined when it is. */
-function mismatch(step: WorkflowStep, request: RecordedCallRequest, recorded: RecordedCall) {
+function mismatch(
+  step: WorkflowStep,
+  request: RecordedCallRequest,
+  recorded: RecordedCall,
+  rules: DeviceSourceRules,
+) {
   const callable = step.callable;
   if (
     callable.name !== recorded.callable.name ||
@@ -209,6 +314,13 @@ function mismatch(step: WorkflowStep, request: RecordedCallRequest, recorded: Re
     callable.program?.argument !== recorded.callable.program?.argument
   ) {
     return "names a different callable than the recording";
+  }
+  // Checked before any comparison: a guessed or computed value at a private position is refused
+  // whether or not it would have matched, so the verdict says nothing about the recorded value.
+  for (const position of recorded.privatePositions ?? []) {
+    if (!stepDeviceSourcesPosition(step, position.argument, position.path, rules)) {
+      return "compares a private recorded value with a value this device did not supply";
+    }
   }
   if (
     !deepEqual(
@@ -236,7 +348,9 @@ export function createRecordingCheckAdapter(
   runtime: string,
   recording: WorkflowRecording,
   derivation?: RuntimeAdapter,
+  planSuppliedInputs: ReadonlySet<string> = new Set(),
 ): RuntimeAdapter {
+  const rules: DeviceSourceRules = { recordedSteps: new Set(recording.keys()), planSuppliedInputs };
   return {
     runtime,
     async call(request) {
@@ -251,7 +365,7 @@ export function createRecordingCheckAdapter(
       if (recorded === undefined) {
         throw new Error(`step '${step.id}' has no call in this device's recording`);
       }
-      const reason = mismatch(step, request, recorded);
+      const reason = mismatch(step, request, recorded, rules);
       if (reason !== undefined) throw new Error(`step '${step.id}' ${reason}`);
       return recorded.result;
     },
@@ -265,6 +379,8 @@ export function createRecordingCheckAdapters(options: {
   runtimes?: readonly string[];
   /** Sandboxed runner for model-written derivation steps. */
   derivation?: RuntimeAdapter;
+  /** The plan's inputs declared with a `default`: the plan, not this device, supplies them. */
+  planSuppliedInputs?: ReadonlySet<string>;
 }): RuntimeAdapterRegistry {
   const registry = new RuntimeAdapterRegistry();
   for (const runtime of new Set([...RECORDING_CHECK_RUNTIMES, ...(options.runtimes ?? [])])) {
@@ -273,6 +389,7 @@ export function createRecordingCheckAdapters(options: {
         runtime,
         options.recording,
         runtime === RESIN_PROGRAM_RUNTIME ? options.derivation : undefined,
+        options.planSuppliedInputs,
       ),
     );
   }

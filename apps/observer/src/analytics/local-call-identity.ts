@@ -1,7 +1,13 @@
-import type { WorkflowJsonValue } from "@resin/contracts";
+import {
+  type ProgramLanguage,
+  type WorkflowJsonValue,
+  type WorkflowValuePath,
+  analyzeProgramSourceProjection,
+} from "@resin/contracts";
 import type { HarnessAdapter } from "@resin/harness-contracts";
 import { z } from "zod";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
+import { RedactionEngine } from "../normalization/redaction.js";
 import {
   type PrivateValueRepresentation,
   type PrivateValueStore,
@@ -37,6 +43,11 @@ export interface LocalRecordedCall {
   };
   arguments: Record<string, WorkflowJsonValue>;
   argumentReferences: Record<string, string>;
+  /**
+   * Argument positions whose recorded value was redacted from every upload: leaves (and program
+   * tokens) that differ between the call as recorded and the view the cloud could have seen.
+   */
+  privatePositions: Array<{ argument: string; path: WorkflowValuePath }>;
   /** The exit status this device recorded for a shell call, when the harness established one. */
   exitCode?: number;
   /** Absent when the recording kept no successful result for the call. */
@@ -129,6 +140,51 @@ function ownedValue(
   } catch {
     return undefined;
   }
+}
+
+/** Secret scanning only: the upload view's credential redaction, without path aliasing. */
+const UPLOAD_VIEW = new RedactionEngine({
+  homeDir: "",
+  sensitiveEnvVars: [],
+  localOnlyFields: [],
+  maxStringLength: 0,
+});
+
+/**
+ * Where `view` (what an upload could carry) differs from `original` (what the device recorded):
+ * each differing leaf, and for a program text each token the redaction changed. A program whose
+ * redacted view no longer aligns with its original is private as a whole.
+ */
+function privatePaths(
+  original: WorkflowJsonValue,
+  view: unknown,
+  language: ProgramLanguage | undefined,
+  path: WorkflowValuePath = [],
+): WorkflowValuePath[] {
+  if (typeof original === "string") {
+    if (view === original) return [];
+    if (language === undefined || typeof view !== "string") return [path];
+    try {
+      const { protectedTokens } = analyzeProgramSourceProjection(language, original, view);
+      return protectedTokens.map((token) => [...path, "tokens", token]);
+    } catch {
+      return [path];
+    }
+  }
+  if (Array.isArray(original)) {
+    if (!Array.isArray(view) || view.length !== original.length) return [path];
+    return original.flatMap((item, index) =>
+      privatePaths(item, view[index], undefined, [...path, index]),
+    );
+  }
+  if (original !== null && typeof original === "object") {
+    if (view === null || typeof view !== "object" || Array.isArray(view)) return [path];
+    const viewed = view as Record<string, unknown>;
+    return Object.entries(original).flatMap(([key, entry]) =>
+      privatePaths(entry, viewed[key], undefined, [...path, key]),
+    );
+  }
+  return [];
 }
 
 /** The callable and argument names a recorded call kept under its identity slot. */
@@ -235,12 +291,26 @@ export function createLocalCallIdentity(options: {
         ]);
       const args: Record<string, WorkflowJsonValue> = {};
       const argumentReferences: Record<string, string> = {};
+      const privatePositions: LocalRecordedCall["privatePositions"] = [];
       for (const name of argumentNames) {
         const reference = referenceFor(workflowCallArgumentSlot(name));
         const owned = ownedValue(store, reference, match.representation, workspaceId);
         if (owned === undefined) return undefined;
         args[name] = owned.value;
         argumentReferences[name] = reference;
+        // A redacted record keeps the placeholders the upload carried; a literal one is scanned
+        // the way its upload was.
+        const view =
+          match.representation === "redacted"
+            ? store.get(reference)
+            : UPLOAD_VIEW.redact(owned.value).data;
+        const language =
+          callable.program?.argument === name
+            ? (callable.program.kind as ProgramLanguage)
+            : undefined;
+        for (const path of privatePaths(owned.value, view, language)) {
+          privatePositions.push({ argument: name, path });
+        }
       }
       // A result is kept under the representation of the result event, which can differ from the
       // call's: an invoke_tool call is always recorded redacted, its result as the event arrived.
@@ -282,6 +352,7 @@ export function createLocalCallIdentity(options: {
         callable,
         arguments: args,
         argumentReferences,
+        privatePositions,
         ...(typeof exit?.value === "number" && Number.isSafeInteger(exit.value)
           ? { exitCode: exit.value }
           : {}),

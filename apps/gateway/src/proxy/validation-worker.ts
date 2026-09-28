@@ -34,6 +34,7 @@ import {
 } from "@resin/observer";
 import { PROTOCOL_VERSION } from "@resin/protocol";
 import { z } from "zod";
+import type { FileValidationAskLedger } from "./validation-ask-ledger.js";
 import type {
   WorkflowValidationPassLease,
   WorkflowValidationPassLeaseHandle,
@@ -367,6 +368,11 @@ export interface WorkflowValidationWorkerOptions {
    * that cannot take it skips the pass, so no two processes check and deliver the same ask.
    */
   passLease?: WorkflowValidationPassLease;
+  /**
+   * Bounds how often one recorded call is checked and keeps the local audit of every check. The
+   * daemon and gateway pass the owner-only ledger under the Resin state directory.
+   */
+  askLedger?: Pick<FileValidationAskLedger, "admit">;
 }
 
 function boundedTimeout(value: number | undefined): number {
@@ -420,6 +426,7 @@ export class WorkflowValidationWorker {
   private readonly random: () => number;
   private readonly log: (message: string) => void;
   private readonly passLease?: WorkflowValidationPassLease;
+  private readonly askLedger?: Pick<FileValidationAskLedger, "admit">;
   private timer?: NodeJS.Timeout;
   /** When the armed timer fires, in `Date.now()` time; lets a wake pull it earlier. */
   private timerDueAt?: number;
@@ -456,6 +463,7 @@ export class WorkflowValidationWorker {
     this.random = options.random ?? Math.random;
     this.log = options.log ?? (() => undefined);
     this.passLease = options.passLease;
+    this.askLedger = options.askLedger;
   }
 
   /** Arms the poll, on the fast cadence. Passes never hold the process open: the timer is unref'd. */
@@ -685,6 +693,24 @@ export class WorkflowValidationWorker {
     if (request.expiresAt !== undefined && Date.parse(request.expiresAt) <= this.now().getTime()) {
       this.log(
         `workflow validation: refused ask '${request.requestId}': it expired at ${request.expiresAt}`,
+      );
+      return undefined;
+    }
+    // Every recorded call the plan names, from both demonstrations: what this answer is about.
+    const callIds = [
+      ...request.plan.steps.flatMap((step) =>
+        step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
+          ? [step.callId]
+          : [],
+      ),
+      ...(request.plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
+    ];
+    if (
+      this.askLedger !== undefined &&
+      !this.askLedger.admit({ requestId: request.requestId, planDigest, callIds })
+    ) {
+      this.log(
+        `workflow validation: refused ask '${request.requestId}': a recorded call it checks reached its daily check limit`,
       );
       return undefined;
     }
