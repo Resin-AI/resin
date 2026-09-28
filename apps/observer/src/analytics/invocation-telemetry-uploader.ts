@@ -62,12 +62,6 @@ export class InvocationTelemetryUploader {
   private readonly batchSize: number;
   private readonly logger?: Logger;
 
-  /**
-   * Workspaces the cloud refused telemetry for during this process: the device is not
-   * enrolled in them, so their records are retired locally instead of being sent again.
-   */
-  private readonly unenrolledWorkspaces = new Set<string>();
-
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
   private isFlushing = false;
@@ -118,10 +112,10 @@ export class InvocationTelemetryUploader {
    * 2. Groups them by `workspaceId`.
    * 3. Dispatches one telemetry batch request per workspace to Resin Cloud.
    * 4. Marks accepted/partial records as uploaded in the audit repository.
-   * 5. A workspace the cloud forbids is not enrolled for this device: all of its pending
-   *    records are retired at once and never sent again; one summary line reports them.
-   * 6. A batch the cloud permanently rejects (4xx validation) is dead-lettered, not retried.
-   * 7. Any other failure leaves records pending for the next cycle.
+   * 5. A batch the cloud refuses for good (403: a workspace or tool this device may not report
+   *    on; other 4xx: a payload it will never accept) is dead-lettered after that one attempt,
+   *    never retried; one summary line per cycle reports every such batch.
+   * 6. Any other failure leaves records pending for the next cycle.
    */
   async flushOnce(): Promise<{ uploaded: number }> {
     if (this.isFlushing) {
@@ -144,21 +138,10 @@ export class InvocationTelemetryUploader {
       }
 
       let totalUploaded = 0;
-      const dropped = { workspaces: 0, records: 0 };
-      const dropWorkspace = (workspaceId: string) => {
-        this.unenrolledWorkspaces.add(workspaceId);
-        dropped.workspaces += 1;
-        dropped.records += this.auditRepository.dropPendingInvocationUploadsForWorkspace(
-          workspaceId,
-          new Date().toISOString(),
-        );
-      };
+      // One batch per workspace per cycle, so `batches` is also the number of workspaces refused.
+      const refused = { batches: 0, records: 0, errors: [] as string[] };
 
       for (const [workspaceId, invocations] of byWorkspace.entries()) {
-        if (this.unenrolledWorkspaces.has(workspaceId)) {
-          dropWorkspace(workspaceId);
-          continue;
-        }
         try {
           // `workspaceId` here is the daemon's local workspace identifier, which the
           // cloud has never seen; the batch is addressed to the paired cloud
@@ -180,10 +163,12 @@ export class InvocationTelemetryUploader {
             });
           }
         } catch (error) {
-          if (error instanceof ResourceForbiddenError) {
-            dropWorkspace(workspaceId);
-          } else if (isPermanentRejection(error)) {
-            this.deadLetter(workspaceId, invocations, error);
+          if (error instanceof ResourceForbiddenError || isPermanentRejection(error)) {
+            const reason = error instanceof Error ? error.message : String(error);
+            this.deadLetter(workspaceId, invocations, reason);
+            refused.batches += 1;
+            refused.records += invocations.length;
+            if (!refused.errors.includes(reason)) refused.errors.push(reason);
           } else {
             this.logger?.warn("Failed to upload invocation telemetry batch for workspace", {
               workspaceId,
@@ -194,10 +179,10 @@ export class InvocationTelemetryUploader {
         }
       }
 
-      if (dropped.records > 0) {
+      if (refused.batches > 0) {
         this.logger?.warn(
-          "Dropped invocation telemetry for workspaces this device is not enrolled in",
-          dropped,
+          "Invocation telemetry refused by cloud; dead-lettered without retry",
+          refused,
         );
       }
 
@@ -207,10 +192,9 @@ export class InvocationTelemetryUploader {
     }
   }
 
-  private deadLetter(workspaceId: string, invocations: InvocationRecord[], error: unknown): void {
+  private deadLetter(workspaceId: string, invocations: InvocationRecord[], reason: string): void {
     const failedAt = new Date().toISOString();
     const ids = invocations.map((inv) => inv.invocationId);
-    const reason = error instanceof Error ? error.message : String(error);
     // Retire the rows without touching their status: the invocations ran as recorded; only
     // their telemetry was refused, and the dead letter below keeps that outcome.
     this.auditRepository.markInvocationsUploaded(ids, failedAt);
@@ -220,7 +204,7 @@ export class InvocationTelemetryUploader {
         deadLetterId,
         originalEventType: "invocation_telemetry_batch",
         payload: { workspaceId, invocationIds: ids, count: invocations.length },
-        errorReason: `Telemetry batch permanently rejected for workspace ${workspaceId}: ${reason}`,
+        errorReason: `Telemetry batch refused for workspace ${workspaceId}: ${reason}`,
         failedAt,
         retryCount: 0,
         status: "exhausted",
@@ -232,10 +216,5 @@ export class InvocationTelemetryUploader {
         error: dlError instanceof Error ? dlError.message : String(dlError),
       });
     }
-    this.logger?.warn("Invocation telemetry batch permanently rejected by cloud; dead-lettered", {
-      workspaceId,
-      count: invocations.length,
-      error: reason,
-    });
   }
 }

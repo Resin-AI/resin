@@ -575,9 +575,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
         })}\n`,
       );
       await fsp.utimes(transcriptPath, historicalTime, historicalTime);
-      const afterAppend = (await rescan()).find(
-        (item) => item.rootPath === wsPath,
-      )!;
+      const afterAppend = (await rescan()).find((item) => item.rootPath === wsPath)!;
       expect(inspectSpy).toHaveBeenCalledTimes(2);
       expect((await adapter.listSessions(afterAppend))[0].status).toBe("completed");
       await rescan();
@@ -587,9 +585,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       await fsp.writeFile(replacementPath, sessionLine("atomic-replacement"));
       await fsp.utimes(replacementPath, historicalTime, historicalTime);
       await fsp.rename(replacementPath, transcriptPath);
-      const afterReplace = (await rescan()).find(
-        (item) => item.rootPath === wsPath,
-      )!;
+      const afterReplace = (await rescan()).find((item) => item.rootPath === wsPath)!;
       expect(inspectSpy).toHaveBeenCalledTimes(3);
       expect(
         (await adapter.listSessions(afterReplace)).map((session) => session.sessionId),

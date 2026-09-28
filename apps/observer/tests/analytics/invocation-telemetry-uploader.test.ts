@@ -338,7 +338,7 @@ describe("InvocationTelemetryUploader", () => {
 
     vi.useRealTimers();
   });
-  it("retires every pending record of a forbidden workspace in one cycle, sends it no more, and logs one summary", async () => {
+  it("sends a batch for a workspace the cloud forbids exactly once, keeps the rows' status, and logs one summary", async () => {
     for (let i = 1; i <= 3; i++) {
       await store.audit.recordInvocation(
         makeInvocation({
@@ -378,34 +378,30 @@ describe("InvocationTelemetryUploader", () => {
           },
         ),
     } as unknown as CloudObservationClient;
-
-    // A batch smaller than the backlog: the forbidden workspace's unread rows must go too.
     const uploader = new InvocationTelemetryUploader({
       auditRepository: store.audit,
       cloudClient: mockCloudClient,
       logger: mockLogger,
-      batchSize: 2,
     });
 
-    expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
-    expect(sentWorkspaces).toEqual(["ws_forbidden"]);
-    expect(store.audit.listPendingInvocationUploads(10).map((r) => r.invocationId)).toEqual([
-      "inv_healthy_1",
-    ]);
-    expect((await store.audit.getInvocation("inv_forbidden_3"))?.status).toBe("success");
-    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      "Dropped invocation telemetry for workspaces this device is not enrolled in",
-      { workspaces: 1, records: 3 },
-    );
-
-    // New records for the refused workspace are retired without another request.
-    await store.audit.recordInvocation(
-      makeInvocation({ invocationId: "inv_forbidden_4", workspaceId: "ws_forbidden" }),
-    );
     expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
     expect(sentWorkspaces).toEqual(["ws_forbidden", "ws_healthy"]);
     expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+    expect((await store.audit.getInvocation("inv_forbidden_2"))?.status).toBe("success");
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Invocation telemetry refused by cloud; dead-lettered without retry",
+      {
+        batches: 1,
+        records: 3,
+        errors: ["Cloud request forbidden for workspace ws_forbidden"],
+      },
+    );
+    const deadLetters = store.conn.all<{ status: string }>(
+      "SELECT status FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';",
+    );
+    expect(deadLetters).toEqual([{ status: "exhausted" }]);
   });
 
   it("sends error details within the cloud's limits and dead-letters a batch the cloud permanently rejects", async () => {
