@@ -258,32 +258,45 @@ jobs:
           pnpm exec vitest run --no-file-parallelism @suites
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Serve the exact candidate on loopback
+      - name: Fetch the pinned Deno runtime for the candidate
         run: |
           $runtimes = Join-Path $env:RUNNER_TEMP 'deno-runtime'
           node scripts/windows-lane.mjs fetch-runtime --lane $env:LANE --out $runtimes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $portFile = Join-Path $env:RUNNER_TEMP 'release-server.port'
-          $server = Start-Process -FilePath node -NoNewWindow -PassThru -ArgumentList @(
-            'scripts/windows-lane.mjs', 'serve', '--release-dir', $env:RELEASE_DIR,
-            '--runtime-dir', $runtimes, '--port-file', $portFile)
-          for ($i = 0; $i -lt 100 -and -not (Test-Path $portFile); $i++) { Start-Sleep -Milliseconds 100 }
-          if (-not (Test-Path $portFile)) { throw 'Release server did not start' }
-          $port = (Get-Content $portFile -Raw).Trim()
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value @(
-            "RELEASE_SERVER_PID=$($server.Id)",
-            "RESIN_CHANNEL_URL=http://127.0.0.1:$port/releases/v1/channels.json")
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "DENO_RUNTIME_DIR=$runtimes"
 
       # Windows PowerShell 5.1 is what a clean Windows 10/11 machine runs the one-liner in.
+      # The loopback release server lives inside this step: a process started in an earlier
+      # step does not outlive that step's console on Windows runners.
       - name: Install with install.ps1 (Windows PowerShell 5.1)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:RESIN_INSTALL_TEST_ONLY = '1'
-          $env:RESIN_INSTALL_HELPER_PATH = (Resolve-Path 'apps/cli/install/install-helper-v1.mjs').Path
-          $env:RESIN_INSTALL_TRUSTED_KEYS_JSON = (Resolve-Path "$env:RELEASE_DIR/release-trust.json").Path
-          & ./apps/cli/install/install.ps1 -ChannelUrl $env:RESIN_CHANNEL_URL -NonInteractive -NoOnboarding
-          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          $portFile = Join-Path $env:RUNNER_TEMP 'release-server.port'
+          $serverLog = Join-Path $env:RUNNER_TEMP 'release-server.log'
+          Remove-Item $portFile -ErrorAction SilentlyContinue
+          $server = Start-Process -FilePath node -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $serverLog -RedirectStandardError "$serverLog.err" -ArgumentList @(
+              'scripts/windows-lane.mjs', 'serve', '--release-dir', $env:RELEASE_DIR,
+              '--runtime-dir', $env:DENO_RUNTIME_DIR, '--port-file', $portFile)
+          try {
+            for ($i = 0; $i -lt 100 -and -not (Test-Path $portFile); $i++) { Start-Sleep -Milliseconds 100 }
+            if (-not (Test-Path $portFile)) { throw 'Release server did not start' }
+            $port = (Get-Content $portFile -Raw).Trim()
+            $channelUrl = "http://127.0.0.1:$port/releases/v1/channels.json"
+            # Fail here, with the server's log, if the channel is not being served.
+            $null = Invoke-WebRequest -UseBasicParsing -Uri $channelUrl -TimeoutSec 10
+            $env:RESIN_INSTALL_TEST_ONLY = '1'
+            $env:RESIN_INSTALL_HELPER_PATH = (Resolve-Path 'apps/cli/install/install-helper-v1.mjs').Path
+            $env:RESIN_INSTALL_TRUSTED_KEYS_JSON = (Resolve-Path "$env:RELEASE_DIR/release-trust.json").Path
+            & ./apps/cli/install/install.ps1 -ChannelUrl $channelUrl -NonInteractive -NoOnboarding
+            if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
+          } catch {
+            Get-Content $serverLog, "$serverLog.err" -ErrorAction SilentlyContinue
+            throw
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
           if (-not (Test-Path "$env:USERPROFILE\.resin\bin\resin.cmd")) { throw 'install.ps1 did not install resin.cmd' }
           $version = (& "$env:USERPROFILE\.resin\bin\resin.cmd" --version | Out-String).Trim()
           if ($LASTEXITCODE -ne 0 -or $version -notmatch '1\.0\.3') { throw "Installed resin --version returned '$version'" }
