@@ -113,6 +113,40 @@ export function isDefiningPowerShellPath(word: string): boolean {
   return DEFINING_DRIVE.test(word);
 }
 
+/**
+ * PowerShell commands that evaluate a script-block argument in-process, once per pipeline object, as
+ * a predicate (`Where-Object`, `where`, `?`), a projection (`ForEach-Object`, `foreach`, `%`) or a
+ * sort or group key (`Sort-Object`, `sort`, `Group-Object`, `group`), and use its result as data.
+ * Nothing else is on the list: every other command that takes a block may run it elsewhere, later
+ * or as a new program (`Invoke-Command`, `Start-Job`, `Register-*Event -Action`, `& { }`, …).
+ * `Select-Object` is absent because its calculated properties are hashtables. Names match exactly
+ * (a module-qualified cmdlet aside): `where.exe` and `sort.exe` are native programs.
+ */
+const POWERSHELL_BLOCK_FILTERS: ReadonlySet<string> = new Set([
+  "where-object",
+  "where",
+  "?",
+  "foreach-object",
+  "foreach",
+  "%",
+  "sort-object",
+  "sort",
+  "group-object",
+  "group",
+  "microsoft.powershell.core\\where-object",
+  "microsoft.powershell.core\\foreach-object",
+  "microsoft.powershell.utility\\sort-object",
+  "microsoft.powershell.utility\\group-object",
+]);
+
+/**
+ * Whether a PowerShell command evaluates a script-block argument in-process as a filter,
+ * projection or key (see {@link POWERSHELL_BLOCK_FILTERS}), so a literal inside it can be data.
+ */
+export function isPowerShellBlockFilterWord(word: string): boolean {
+  return POWERSHELL_BLOCK_FILTERS.has(word.toLowerCase());
+}
+
 /** Whether a word names a program whose code flag's argument is source code. */
 export function isCodeRunnerWord(word: string): boolean {
   return CODE_RUNNER.test(commandBaseName(word));

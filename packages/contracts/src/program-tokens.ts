@@ -1314,6 +1314,16 @@ export function renderProgramTokenValue(
     }
     return text;
   }
+  if (token.kind === "number" && (language === "powershell" || language === "pwsh")) {
+    // A PowerShell script-block number: a plain decimal stays a number, anything else is quoted.
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("a numeric program token requires a finite number");
+    }
+    if (typeof value !== "number" && typeof value !== "string") {
+      throw new TypeError("a PowerShell number token takes a number or a string");
+    }
+    return renderPowerShellTokenValue(token, String(value));
+  }
   if (token.kind === "number") {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new TypeError("a numeric program token requires a finite number");

@@ -757,14 +757,12 @@ export class WorkflowCallRecorder {
     }
     if (event.type === "file_edit") return this.observeCodexFileEdit(event);
     if (event.type === "tool_call") {
-      // The cell's edits arrive as Codex-native file edits; those, not the cell, are the calls.
-      if (
-        event.toolName === "exec" &&
-        readCodexCommandMetadata(event.metadata)?.kind === "patch-call"
-      ) {
-        return event;
-      }
-      if (event.toolName === "exec" && readCodexCommandMetadata(event.metadata)?.kind === "call") {
+      // The cell's edits arrive as Codex-native file edits, and a carrier cell's commands as native
+      // command items; those, not the cell, are the calls.
+      const cellKind =
+        event.toolName === "exec" ? readCodexCommandMetadata(event.metadata)?.kind : undefined;
+      if (cellKind === "patch-call" || cellKind === "carrier-call") return event;
+      if (cellKind === "call") {
         const state = this.sessionState(event.sessionId);
         if (state.openCodexWrappers.size >= MAX_LOCAL_CALLS) state.codexWrapperOverflow = true;
         else state.openCodexWrappers.add(event.callId);
