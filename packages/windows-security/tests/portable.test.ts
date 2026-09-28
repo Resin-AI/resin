@@ -96,6 +96,38 @@ describe("ownerOnlyProblems", () => {
       "has an unsupported ACE type granting access to an unknown SID",
     ]);
   });
+
+  it("accepts objects an elevated administrator or LocalSystem created, if only the user has access", () => {
+    // An elevated admin token makes BUILTIN\Administrators the default owner of new objects.
+    expect(ownerOnlyProblems({ ...ownerOnly, owner: "S-1-5-32-544" }, SID)).toEqual([]);
+    expect(
+      ownerOnlyProblems({ ...ownerOnly, owner: "S-1-5-18" }, SID, { requireProtected: true }),
+    ).toEqual([]);
+    // The owner exemption never admits extra grants.
+    expect(
+      ownerOnlyProblems(
+        {
+          ...ownerOnly,
+          owner: "S-1-5-32-544",
+          entries: [
+            ...ownerOnly.entries,
+            {
+              type: "allow",
+              sid: "S-1-5-32-544",
+              mask: 0x1f01ff,
+              inherited: false,
+              inheritOnly: false,
+            },
+          ],
+        },
+        SID,
+      ),
+    ).toEqual(["grants access to S-1-5-32-544"]);
+    // Standard users' SIDs stay foreign, as do well-known groups other than the two above.
+    expect(ownerOnlyProblems({ ...ownerOnly, owner: "S-1-5-32-545" }, SID)).toEqual([
+      `is owned by S-1-5-32-545, not the current user ${SID}`,
+    ]);
+  });
 });
 
 describe.skipIf(process.platform === "win32")("off Windows", () => {
