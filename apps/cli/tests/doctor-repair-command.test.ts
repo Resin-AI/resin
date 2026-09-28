@@ -495,6 +495,45 @@ describe("doctor & repair commands", () => {
     expect(actions).toContain("Restarted active daemon service to restore IPC: resin.service");
   });
 
+  it("warns about a running service that is not enabled at login and enables it on repair", async () => {
+    const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+    const unitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;
+    const fsBridge = createMockFsBridge({ [unitPath]: unitContent });
+    const mockServiceManager = createMockServiceManager(unitPath);
+    mockServiceManager.enable = vi.fn().mockResolvedValue(undefined);
+    mockServiceManager.status = vi.fn().mockResolvedValue({
+      installed: true,
+      active: true,
+      enabled: false,
+      serviceName: "resin.service",
+      unitPath,
+      pid: 1234,
+      state: "active",
+    });
+    mockServiceManager.getUnitDefinition = vi.fn().mockReturnValue(unitContent);
+
+    const diagnostics = await runDiagnostics({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+    });
+    const svcDiag = diagnostics.find((d) => d.id === "service_installed");
+    expect(svcDiag?.status).toBe("warn");
+    expect(svcDiag?.message).toContain("not enabled at login");
+
+    const actions = await repairState({
+      home: homeDir,
+      fsBridge,
+      serviceManager: mockServiceManager,
+      safetyCertification: {
+        probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+      },
+    });
+
+    expect(mockServiceManager.enable).toHaveBeenCalledOnce();
+    expect(actions).toContain("Enabled user background service at login: resin.service");
+  });
+
   it("detects and repairs stale v1.0.20 unit definition to current valid command and remains idempotent", async () => {
     const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
     const staleUnitContent = `[Unit]\nDescription=Resin Daemon\nExecStart=/usr/bin/node ${resinHome}/versions/v1.0.20/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- /bin/resin-daemon --foreground\n`;

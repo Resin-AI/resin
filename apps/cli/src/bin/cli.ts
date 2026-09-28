@@ -576,8 +576,9 @@ export function isMainModule(metaUrl: string = import.meta.url, argv1?: string):
   if (!targetPath) return false;
   try {
     const resolvedPath = path.resolve(targetPath);
-    const expectedUrl = pathToFileURL(resolvedPath).href;
-    return metaUrl === expectedUrl;
+    if (metaUrl === pathToFileURL(resolvedPath).href) return true;
+    // A symlinked entry path (e.g. macOS /var → /private/var) still names this module.
+    return fs.realpathSync(fileURLToPath(metaUrl)) === fs.realpathSync(resolvedPath);
   } catch {
     return false;
   }

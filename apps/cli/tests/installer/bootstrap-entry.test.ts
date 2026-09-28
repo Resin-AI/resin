@@ -407,6 +407,18 @@ describe("bootstrap-entry", () => {
     expect(isMainModule(u1, "/tmp/other/script.ts")).toBe(false);
   });
 
+  it("identifies the entrypoint when it is reached through a symlinked directory (macOS /var/folders)", () => {
+    const realDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-main-real-"));
+    const linkDir = `${realDir}-link`;
+    testHomes.push(realDir, linkDir);
+    fs.writeFileSync(path.join(realDir, "install-helper-v1.mjs"), "");
+    fs.symlinkSync(realDir, linkDir);
+    const moduleUrl = pathToFileURL(path.join(realDir, "install-helper-v1.mjs")).href;
+
+    expect(isMainModule(moduleUrl, path.join(linkDir, "install-helper-v1.mjs"))).toBe(true);
+    expect(isMainModule(moduleUrl, path.join(linkDir, "other.mjs"))).toBe(false);
+  });
+
   it("performs end-to-end verified bootstrap installation against local signed server", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-bootstrap-home-"));
     testHomes.push(home);

@@ -13,6 +13,7 @@ import {
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
 import { HARNESS_DEFINITIONS } from "../harness-registry.js";
+import { removeShellPath } from "../installer/bootstrap-entry.js";
 import { createUserServiceManager } from "../service/manager.js";
 export type McpServerConfigValue =
   | string
@@ -367,11 +368,13 @@ export async function uninstallCommand(
     const purgeData = Boolean(flags.purgeData || purgeAll);
     const purgeSecrets = Boolean(flags.purgeSecrets || purgeAll);
 
+    let cleanedProfiles: string[] = [];
     if (purgeAll) {
       if (await fsBridge.exists(resinHome)) {
         await fs.rm(resinHome, { recursive: true, force: true }).catch(() => {});
         removedPaths.push(resinHome);
       }
+      cleanedProfiles = await removeShellPath({ resinHome, homeDir: customHome, fsBridge });
     } else {
       if (purgeData) {
         const dataDirs = [
@@ -423,6 +426,9 @@ export async function uninstallCommand(
       }
       if (purgeAll) {
         process.stdout.write(`  • Purged directory: ${resinHome}\n`);
+        for (const profilePath of cleanedProfiles) {
+          process.stdout.write(`  • Removed Resin PATH entry from ${profilePath}\n`);
+        }
       } else {
         if (purgeData) process.stdout.write("  • Data and log files purged.\n");
         if (purgeSecrets) process.stdout.write("  • Secrets and credentials purged.\n");

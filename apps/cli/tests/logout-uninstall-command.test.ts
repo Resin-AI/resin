@@ -364,6 +364,31 @@ url = "http://localhost:9400"
     }
   });
 
+  it("removes the installer's PATH line from shell profiles on --purge-all, keeping user lines", async () => {
+    const bashrc = path.join(homeDir, ".bashrc");
+    const zshrc = path.join(homeDir, ".zshrc");
+    const installerLine = 'export PATH="$HOME/.resin/bin:$PATH"';
+    const userLine = 'export PATH="$HOME/.resin/bin/extra:$PATH" # mine';
+    const fsBridge = createMockFsBridge({
+      [bashrc]: `alias ll='ls -l'\n${installerLine}\n`,
+      [zshrc]: `${userLine}\n${installerLine}\nsetopt autocd\n`,
+    });
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockReturnValue(true);
+
+    try {
+      const exitCode = await uninstallCommand(["--purge-all", "--yes", "--home", homeDir], {
+        fsBridge,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(fsBridge.files.get(bashrc)).toBe("alias ll='ls -l'\n");
+      expect(fsBridge.files.get(zshrc)).toBe(`${userLine}\nsetopt autocd\n`);
+    } finally {
+      process.stdout.write = originalStdout;
+    }
+  });
+
   it("removes the learned-tool block from OMP's appended system prompt, keeping the user's text", async () => {
     const home = await mkdtemp(join(tmpdir(), "uninstall-omp-guidance-"));
     try {

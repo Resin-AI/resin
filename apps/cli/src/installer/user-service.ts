@@ -253,6 +253,10 @@ export async function setupAndStartDaemonService(
       }
 
       if (healthy) {
+        if (!priorEnabled && manager.enable) {
+          await manager.enable();
+          log(`Enabled existing daemon service at login (${unitPath}).`);
+        }
         log(
           `Existing daemon service is valid and active (${unitPath}). Reusing without recreation.`,
         );
@@ -278,7 +282,7 @@ export async function setupAndStartDaemonService(
       env: options.env,
     });
 
-    if (!installResult.success) {
+    if (!installResult.success || !installResult.enabled) {
       await rollback();
       return {
         success: false,
@@ -287,7 +291,11 @@ export async function setupAndStartDaemonService(
         started: false,
         healthy: false,
         unitPath: installResult.unitPath,
-        error: installResult.error ?? "Failed to install user service definition",
+        error:
+          installResult.error ??
+          (installResult.success
+            ? "Failed to enable the user service at login"
+            : "Failed to install user service definition"),
         rollback,
       };
     }
