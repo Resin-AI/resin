@@ -352,7 +352,15 @@ describe("runtime state healing", () => {
       const directory = await createTemporaryDirectory();
       const lockPath = path.join(directory, "daemon.lock");
       const socketPath = windowsTestPipeName("live");
-      const server = await startResponsiveIpcSocket(socketPath);
+      // The real daemon's IPC server: on Windows it serves an owner-only pipe that names the
+      // current user as owner, which is what the lock's verified probe checks. A plain `net`
+      // pipe would be owned by BUILTIN\Administrators under an elevated token.
+      const supervisor = new RecoveryAwareDaemonSupervisor({
+        config: DaemonConfigSchema.parse({ socketPath }),
+        enableSignalHandlers: false,
+      });
+      const server = new IpcServer({ supervisor, socketPath });
+      await server.start();
       const originalLockContent = `${JSON.stringify(
         {
           pid: process.pid,
@@ -379,7 +387,7 @@ describe("runtime state healing", () => {
           }
         }
       } finally {
-        await closeSocketServer(server);
+        await server.stop();
       }
     },
   );
