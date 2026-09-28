@@ -16,6 +16,7 @@ import {
   LaunchdUserServiceManager,
   SystemdUserServiceManager,
   WslUserServiceManager,
+  isStaleSupervisorUnitContent,
 } from "../../src/service/manager.js";
 
 /**
@@ -26,6 +27,7 @@ class MockServiceCommandRunner implements ServiceCommandRunner {
   statusOutput = "active (running)";
   statusExitCode = 0;
   statusPid = 4242;
+  enabledState = "enabled";
 
   async run(cmd: string, args: string[]): Promise<ServiceCommandResult> {
     this.commands.push({ cmd, args });
@@ -44,9 +46,9 @@ class MockServiceCommandRunner implements ServiceCommandRunner {
     // Systemctl is-enabled
     if (args.includes("is-enabled")) {
       return {
-        stdout: "enabled\n",
+        stdout: `${this.enabledState}\n`,
         stderr: "",
-        exitCode: 0,
+        exitCode: this.enabledState === "enabled" ? 0 : 1,
       };
     }
 
@@ -233,6 +235,22 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
       expect(plistContent).toContain("<key>KeepAlive</key>");
       expect(plistContent).toContain("<key>StandardOutPath</key>");
       expect(plistContent).toContain("<key>StandardErrorPath</key>");
+    });
+
+    it("gives the launch agent a PATH that reaches the installing Node, and treats older plists as stale", () => {
+      const nodePath = "/opt/homebrew/bin/node";
+      const manager = new LaunchdUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+      const plist = manager.getUnitDefinition({ nodePath });
+      const pathValue = plist.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1];
+      expect(pathValue?.split(":")[0]).toBe("/opt/homebrew/bin");
+
+      const plistWithoutPath = plist.replace(/\s*<key>PATH<\/key>\s*<string>[^<]*<\/string>/, "");
+      expect(isStaleSupervisorUnitContent(plistWithoutPath, plist)).toBe(true);
+      expect(isStaleSupervisorUnitContent(plist, plist)).toBe(false);
     });
 
     it("installs, starts, and manages launchd service", async () => {
@@ -805,6 +823,32 @@ WantedBy=default.target
             c.args.includes("enable")),
       );
       expect(mutations.length).toBe(0);
+    });
+    it("enables an active matching service that was left disabled at login", async () => {
+      const manager = createUserServiceManager({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+      });
+      const unitPath = manager.getUnitPath();
+      fs.mkdirSync(path.dirname(unitPath), { recursive: true });
+      fs.writeFileSync(unitPath, manager.getUnitDefinition());
+      mockRunner.enabledState = "disabled";
+      mockRunner.commands = [];
+
+      const result = await setupAndStartDaemonService({
+        homeDir: fakeHome,
+        resinHome,
+        runner: mockRunner,
+        autoStart: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.reused).toBe(true);
+      expect(mockRunner.commands).toContainEqual({
+        cmd: "systemctl",
+        args: ["--user", "enable", "resin.service"],
+      });
     });
 
     it("ensures zero root execution: all file paths remain strictly within user home directory", async () => {

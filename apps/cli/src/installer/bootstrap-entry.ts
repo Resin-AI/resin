@@ -8,10 +8,11 @@
  */
 
 import child_process from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { defaultFsBridge } from "@resin/harness-contracts";
@@ -738,6 +739,48 @@ export function resolveCandidateProfiles(shellName?: string): CandidateProfilesR
   };
 }
 
+function resinShellPathLine(homeDir: string, resinHome: string): string {
+  const binDir = path.join(resinHome, "bin");
+  if (resinHome === path.join(homeDir, ".resin")) {
+    return 'export PATH="$HOME/.resin/bin:$PATH"';
+  }
+  if (resinHome.startsWith(homeDir + path.sep)) {
+    const rel = path.relative(homeDir, binDir).split(path.sep).join("/");
+    return `export PATH="$HOME/${rel}:$PATH"`;
+  }
+  return `export PATH="${binDir}:$PATH"`;
+}
+
+/**
+ * Removes the PATH line written by configureShellPath from every shell profile it may have used.
+ * Only the exact line Resin writes is removed; user-authored PATH edits stay untouched.
+ */
+export async function removeShellPath(options: {
+  readonly resinHome: string;
+  readonly homeDir: string;
+  readonly fsBridge?: ConfigFsBridge;
+}): Promise<string[]> {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const homeDir = path.resolve(options.homeDir);
+  const pathLine = resinShellPathLine(homeDir, path.resolve(options.resinHome));
+  const profiles = new Set(
+    ["zsh", "bash", ""].flatMap((shell) => resolveCandidateProfiles(shell).candidates),
+  );
+  const cleaned: string[] = [];
+  for (const profile of profiles) {
+    const profilePath = path.join(homeDir, profile);
+    if (!(await fsBridge.exists(profilePath))) continue;
+    const content = await fsBridge.readFile(profilePath);
+    if (content === null) continue;
+    const lines = content.split("\n");
+    const kept = lines.filter((line) => line.trim() !== pathLine);
+    if (kept.length === lines.length) continue;
+    await fsBridge.writeFile(profilePath, kept.join("\n"));
+    cleaned.push(profilePath);
+  }
+  return cleaned;
+}
+
 /**
  * Safely and idempotently configures ~/.resin/bin in the user's shell profile for POSIX environments.
  */
@@ -774,17 +817,7 @@ export async function configureShellPath(
   const shellName = path.basename(shellRaw).toLowerCase();
   const { candidates, defaultProfile } = resolveCandidateProfiles(shellName);
 
-  // Format the PATH line
-  let pathLine: string;
-  const defaultResinHome = path.join(homeDir, ".resin");
-  if (resinHome === defaultResinHome) {
-    pathLine = 'export PATH="$HOME/.resin/bin:$PATH"';
-  } else if (resinHome.startsWith(homeDir + path.sep)) {
-    const rel = path.relative(homeDir, binDir).split(path.sep).join("/");
-    pathLine = `export PATH="$HOME/${rel}:$PATH"`;
-  } else {
-    pathLine = `export PATH="${binDir}:$PATH"`;
-  }
+  const pathLine = resinShellPathLine(homeDir, resinHome);
 
   // Check if any candidate profile already contains Resin PATH configuration
   for (const candidate of candidates) {
@@ -1459,8 +1492,9 @@ export function isMainModule(metaUrl: string = import.meta.url, argv1?: string):
   if (!targetPath) return false;
   try {
     const resolvedPath = path.resolve(targetPath);
-    const expectedUrl = pathToFileURL(resolvedPath).href;
-    return metaUrl === expectedUrl;
+    if (metaUrl === pathToFileURL(resolvedPath).href) return true;
+    // macOS temp dirs (/var/folders → /private/var/folders) reach the module through a symlink.
+    return fs.realpathSync(fileURLToPath(metaUrl)) === fs.realpathSync(resolvedPath);
   } catch {
     return false;
   }

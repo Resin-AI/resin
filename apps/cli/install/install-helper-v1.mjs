@@ -4744,14 +4744,14 @@ ${block}
   }
   return { action: current === null ? "created" : "updated", content: next };
 }
-async function applyManagedBlock(fs11, filePath, markers, body, options = {}) {
-  const edit = editManagedBlock(await fs11.readFile(filePath), markers, body);
+async function applyManagedBlock(fs12, filePath, markers, body, options = {}) {
+  const edit = editManagedBlock(await fs12.readFile(filePath), markers, body);
   if (edit.action !== "unchanged" && !options.dryRun) {
     if (edit.content === null) {
-      await fs11.unlink(filePath);
+      await fs12.unlink(filePath);
     } else {
-      await fs11.mkdirp(path2.dirname(filePath));
-      await fs11.writeFile(filePath, edit.content);
+      await fs12.mkdirp(path2.dirname(filePath));
+      await fs12.writeFile(filePath, edit.content);
     }
   }
   return { path: filePath, action: edit.action };
@@ -6628,8 +6628,8 @@ function editCursorHooksDocument(doc, command, install) {
   }
   return { ...doc, version: doc.version ?? 1, hooks };
 }
-async function writeOwned(fs11, filePath, content, dryRun) {
-  const current = await fs11.readFile(filePath);
+async function writeOwned(fs12, filePath, content, dryRun) {
+  const current = await fs12.readFile(filePath);
   let action;
   if (content === null)
     action = current === null ? "unchanged" : "removed";
@@ -6639,10 +6639,10 @@ async function writeOwned(fs11, filePath, content, dryRun) {
     action = current === null ? "created" : "updated";
   if (!dryRun && action !== "unchanged") {
     if (content === null) {
-      await fs11.unlink(filePath);
+      await fs12.unlink(filePath);
     } else {
-      await fs11.mkdirp(path11.dirname(filePath));
-      await fs11.writeFile(filePath, content);
+      await fs12.mkdirp(path11.dirname(filePath));
+      await fs12.writeFile(filePath, content);
     }
   }
   return { path: filePath, action };
@@ -9526,10 +9526,11 @@ var init_harness_reconciler = __esm({
 // apps/cli/src/installer/bootstrap-entry.ts
 init_dist();
 import child_process from "node:child_process";
+import fs11 from "node:fs";
 import os11 from "node:os";
 import path32 from "node:path";
 import process5 from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath as fileURLToPath2, pathToFileURL } from "node:url";
 
 // apps/cli/src/platform/platform.ts
 init_harness_registry();
@@ -10053,6 +10054,12 @@ function formatShellEnvironment(name, value) {
   }
   return `export ${name}=${quoteShellArgument(value)}`;
 }
+function serviceSearchPath(nodePath) {
+  const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  return Array.from(/* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])).join(
+    path28.delimiter
+  );
+}
 var SystemdUserServiceManager = class {
   name = "systemd";
   platform = "systemd";
@@ -10090,12 +10097,8 @@ var SystemdUserServiceManager = class {
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
-    const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-    const servicePath = Array.from(
-      /* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])
-    ).join(path28.delimiter);
     const envVars = {
-      PATH: servicePath,
+      PATH: serviceSearchPath(nodePath),
       ...this.defaultEnv,
       ...options.env ?? {}
     };
@@ -10345,8 +10348,12 @@ var LaunchdUserServiceManager = class {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
     const logDir = path28.join(resinHome, "logs");
-    const envVars = { ...this.defaultEnv, ...options.env ?? {} };
     const nodePath = options.nodePath ?? this.nodePath;
+    const envVars = {
+      PATH: serviceSearchPath(nodePath),
+      ...this.defaultEnv,
+      ...options.env ?? {}
+    };
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
     const programArgs = createSupervisorProgramArguments(
       daemonPath,
@@ -17128,6 +17135,38 @@ function resolveCandidateProfiles(shellName) {
     defaultProfile: ".profile"
   };
 }
+function resinShellPathLine(homeDir, resinHome) {
+  const binDir = path32.join(resinHome, "bin");
+  if (resinHome === path32.join(homeDir, ".resin")) {
+    return 'export PATH="$HOME/.resin/bin:$PATH"';
+  }
+  if (resinHome.startsWith(homeDir + path32.sep)) {
+    const rel = path32.relative(homeDir, binDir).split(path32.sep).join("/");
+    return `export PATH="$HOME/${rel}:$PATH"`;
+  }
+  return `export PATH="${binDir}:$PATH"`;
+}
+async function removeShellPath(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const homeDir = path32.resolve(options.homeDir);
+  const pathLine = resinShellPathLine(homeDir, path32.resolve(options.resinHome));
+  const profiles = new Set(
+    ["zsh", "bash", ""].flatMap((shell) => resolveCandidateProfiles(shell).candidates)
+  );
+  const cleaned = [];
+  for (const profile of profiles) {
+    const profilePath = path32.join(homeDir, profile);
+    if (!await fsBridge.exists(profilePath)) continue;
+    const content = await fsBridge.readFile(profilePath);
+    if (content === null) continue;
+    const lines = content.split("\n");
+    const kept = lines.filter((line) => line.trim() !== pathLine);
+    if (kept.length === lines.length) continue;
+    await fsBridge.writeFile(profilePath, kept.join("\n"));
+    cleaned.push(profilePath);
+  }
+  return cleaned;
+}
 async function configureShellPath(options) {
   const env = options.env ?? process5.env;
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -17149,16 +17188,7 @@ async function configureShellPath(options) {
   const shellRaw = options.shell ?? env.SHELL ?? "";
   const shellName = path32.basename(shellRaw).toLowerCase();
   const { candidates, defaultProfile } = resolveCandidateProfiles(shellName);
-  let pathLine;
-  const defaultResinHome = path32.join(homeDir, ".resin");
-  if (resinHome === defaultResinHome) {
-    pathLine = 'export PATH="$HOME/.resin/bin:$PATH"';
-  } else if (resinHome.startsWith(homeDir + path32.sep)) {
-    const rel = path32.relative(homeDir, binDir).split(path32.sep).join("/");
-    pathLine = `export PATH="$HOME/${rel}:$PATH"`;
-  } else {
-    pathLine = `export PATH="${binDir}:$PATH"`;
-  }
+  const pathLine = resinShellPathLine(homeDir, resinHome);
   for (const candidate of candidates) {
     const fullCandidatePath = path32.join(homeDir, candidate);
     try {
@@ -17697,8 +17727,8 @@ function isMainModule(metaUrl = import.meta.url, argv1) {
   if (!targetPath) return false;
   try {
     const resolvedPath = path32.resolve(targetPath);
-    const expectedUrl = pathToFileURL(resolvedPath).href;
-    return metaUrl === expectedUrl;
+    if (metaUrl === pathToFileURL(resolvedPath).href) return true;
+    return fs11.realpathSync(fileURLToPath2(metaUrl)) === fs11.realpathSync(resolvedPath);
   } catch {
     return false;
   }
@@ -17839,6 +17869,7 @@ export {
   detectOnboardingSkipReason,
   isAlreadyInitialized,
   isMainModule,
+  removeShellPath,
   resolveCandidateProfiles,
   resolveTrustedReleaseKeys,
   runCli,

@@ -452,6 +452,16 @@ export async function runDiagnostics(options: {
       remediation: "Run `resin repair` to start the daemon service.",
       fixable: true,
     });
+  } else if (!svcStatus.enabled) {
+    items.push({
+      id: "service_installed",
+      name: "Background User Autostart Service",
+      category: "service",
+      status: "warn",
+      message: `Service ${svcStatus.serviceName} is running but not enabled at login; it will not start after the next reboot or login`,
+      remediation: "Run `resin doctor --fix` to enable the background service at login.",
+      fixable: true,
+    });
   } else {
     items.push({
       id: "service_installed",
@@ -604,8 +614,8 @@ export async function runDiagnostics(options: {
       name: "Cloud Authentication Credentials",
       category: "auth",
       status: "warn",
-      message: "No cloud credentials found (running in local offline mode)",
-      remediation: "Run `resin init` to connect to Resin Cloud.",
+      message:
+        "No cloud credentials found (running in local offline mode). Run `resin init` to connect to Resin Cloud.",
       fixable: false,
     });
   }
@@ -975,6 +985,10 @@ export async function repairState(options: {
           // Ignored if unable to start immediately in test environment
         }
       }
+      if (!svcStatus.enabled && serviceManager.enable) {
+        await serviceManager.enable();
+        actions.push(`Enabled user background service at login: ${svcStatus.serviceName}`);
+      }
     }
   } else if (svcStatus.installed) {
     const unitPath = svcStatus.unitPath ?? serviceManager.getUnitPath();
@@ -1078,6 +1092,28 @@ export async function repairState(options: {
   }
 
   // 5. Execute evidence-backed local Runtime certification.
+  const targetAttPath = await certifyRuntimeSafety({
+    resinHome,
+    env,
+    fsBridge,
+    safetyCertification: options.safetyCertification,
+  });
+  actions.push(`Certified and wrote production safety attestation: ${targetAttPath}`);
+
+  return actions;
+}
+
+/**
+ * Certifies the local tool runtime and writes the signed production safety attestation.
+ * Init runs this once so a fresh install starts certified; `resin doctor --fix` re-runs it.
+ */
+export async function certifyRuntimeSafety(options: {
+  resinHome: string;
+  env: NodeJS.ProcessEnv;
+  fsBridge: ConfigFsBridge;
+  safetyCertification?: LocalSafetyCertificationOptions;
+}): Promise<string> {
+  const { resinHome, env, fsBridge } = options;
   const targetAttPath = path.join(resinHome, "safety-attestation.json");
   const privateKeyPath = path.join(resinHome, "state", "safety-attestation.key.pem");
   const publicKeyPath = path.join(resinHome, "state", "safety-attestation.pub.pem");
@@ -1096,9 +1132,7 @@ export async function repairState(options: {
   await fsBridge.writeFile(privateKeyPath, certification.privateKeyPem);
   await fsBridge.writeFile(publicKeyPath, certification.publicKeyPem);
   await fsBridge.writeFile(targetAttPath, JSON.stringify(certification.attestation, null, 2));
-  actions.push(`Certified and wrote production safety attestation: ${targetAttPath}`);
-
-  return actions;
+  return targetAttPath;
 }
 
 export function formatDoctorForTerminal(report: DoctorReport): string {

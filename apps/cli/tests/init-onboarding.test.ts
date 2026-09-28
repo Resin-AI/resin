@@ -211,6 +211,7 @@ describe("init onboarding & pairing workflow", () => {
         autoStartService: true,
         serviceRunner,
         readinessVerifier,
+        safetyCertification: { probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" } },
       }),
     );
     expect(result.exitCode).toBe(0);
@@ -223,6 +224,11 @@ describe("init onboarding & pairing workflow", () => {
       "utf8",
     );
     expect(JSON.parse(credentials).accessToken).toBe(ACCESS_TOKEN);
+    expect(
+      JSON.parse(
+        (await bridge.readFile(path.join(home, ".resin", "safety-attestation.json"))) ?? "{}",
+      ),
+    ).toHaveProperty("signature");
     expect(result.stdout).toContain("Daemon startup and readiness were not checked");
     expect(result.stdout).toContain("resin-daemon --foreground");
     expect(result.stdout).not.toContain("installation completed successfully");

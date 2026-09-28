@@ -1,7 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import type { ConfigFsBridge } from "@resin/harness-contracts";
+import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import type { LocalSafetyCertificationOptions } from "@resin/runtime";
 import { SUPPORTED_HARNESS_IDS } from "../harness-registry.js";
 import { resolveInstalledResinMcpCommand } from "../installer/harness-config.js";
 import {
@@ -22,6 +23,7 @@ import {
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import { DEFAULT_CLOUD_URL, validateCloudUrl } from "../service/auth-bootstrap.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
+import { certifyRuntimeSafety } from "./doctor.js";
 import { type BrowserLauncher, performPairing } from "./login.js";
 export interface InitCommandFlags {
   dryRun?: boolean;
@@ -48,6 +50,7 @@ export interface InitCommandOptions {
   customFsBridge?: ConfigFsBridge;
   customFetch?: typeof fetch;
   openBrowser?: BrowserLauncher;
+  safetyCertification?: LocalSafetyCertificationOptions;
   serviceRunner?: ServiceCommandRunner;
   pairing?: () => Promise<InstallerPairingMutation>;
   promptFn?: (question: string) => Promise<boolean>;
@@ -424,6 +427,22 @@ export async function initCommand(
         });
       } catch {
         // Installation succeeded; a bounded health snapshot remains best-effort.
+      }
+      try {
+        await certifyRuntimeSafety({
+          resinHome: path.join(harnessHome, ".resin"),
+          env: harnessEnv,
+          fsBridge: options.customFsBridge ?? defaultFsBridge,
+          safetyCertification: options.safetyCertification,
+        });
+      } catch (certificationError: unknown) {
+        const detail =
+          certificationError instanceof Error
+            ? certificationError.message
+            : String(certificationError);
+        (options.stderr ?? process.stderr).write(
+          `Warning: ${detail}. Run \`resin doctor --fix\` to certify the local tool runtime.\n`,
+        );
       }
     }
 
