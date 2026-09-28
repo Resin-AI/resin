@@ -626,7 +626,7 @@ export async function createProductionProxyRuntime(
         lifecycleAbort.abort();
         unsubscribeCatalogWake?.();
         unsubscribeCatalogWake = undefined;
-        validationWorker.stop();
+        await validationWorker.stop();
         coordinator.stopPeriodicSync();
         if (backgroundTasks.size > 0) {
           await Promise.allSettled([...backgroundTasks]);
