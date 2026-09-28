@@ -515,7 +515,8 @@ describe("CloudCatalogSyncCoordinator", () => {
 
     const mockService = new MockCloudMcpService();
     const toolCalc = makeTool(TOOL_CALC, "calc_tool", "1.0.0");
-    mockService.seedTools([toolCalc]);
+    // The locked tool stays published; a tool the catalog drops is retired instead.
+    mockService.seedTools([toolCalc, toolV1]);
     const client = new CloudCatalogClient({
       workspaceId: "ws-1",
       deviceId: "dev-1",

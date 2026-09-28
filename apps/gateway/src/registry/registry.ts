@@ -481,6 +481,8 @@ export class ToolRegistry {
   private readonly sessionActiveTools = new Map<string, Map<string, string>>();
   // Workspace-bound V1ToolLocks: workspaceId -> V1ToolLock
   private readonly workspaceLocks = new Map<string, V1ToolLock>();
+  // Cloud tools the latest verified catalog snapshot dropped: toolId -> public name.
+  private readonly retiredCloudTools = new Map<string, string>();
 
   // Monotonic local revision counter per workspace
   private readonly workspaceRevisions = new Map<string, number>();
@@ -587,6 +589,60 @@ export class ToolRegistry {
   async removeManagedTool(entry: V1LockedToolEntry, workspaceId?: string): Promise<void> {
     this.forgetBlockedTools();
     await this.toolRepo?.removeManagedToolVersion?.(entry, workspaceId);
+  }
+
+  /**
+   * Evicts cloud tools the latest verified catalog snapshot no longer contains. Every version
+   * leaves discovery, handlers captured earlier refuse to run, and later registrations (store
+   * hydration, stale caches) are ignored until a snapshot carries the tool again.
+   */
+  retireCloudTools(workspaceId: string, tools: Array<{ toolId: string; name: string }>): void {
+    if (tools.length === 0) return;
+    for (const { toolId, name } of tools) {
+      this.retiredCloudTools.set(toolId, name);
+      this.registeredTools.delete(toolId);
+      this.latestVersions.delete(toolId);
+      for (const active of [
+        this.systemActiveTools,
+        ...this.workspaceActiveTools.values(),
+        ...this.accountActiveTools.values(),
+        ...this.sessionActiveTools.values(),
+      ]) {
+        active.delete(toolId);
+      }
+    }
+    this.snapshotHistory.clear();
+    this.cache.invalidateAll();
+    const revision = (this.workspaceRevisions.get(workspaceId) ?? 0) + 1;
+    this.workspaceRevisions.set(workspaceId, revision);
+    this.events.emit({
+      workspaceId,
+      revision,
+      snapshot: {
+        snapshotId: `snap_${Date.now()}`,
+        workspaceId,
+        timestamp: new Date().toISOString(),
+        tools: {},
+        digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      },
+      changedToolIds: tools.map((tool) => tool.toolId),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** Lets tools a newer verified snapshot carries again register and run. */
+  reinstateCloudTools(toolIds: Iterable<string>): void {
+    for (const toolId of toolIds) this.retiredCloudTools.delete(toolId);
+  }
+
+  /** The refusal for a retired cloud tool addressed by id or public name, if it is one. */
+  retiredToolMessage(identifier: string): string | undefined {
+    for (const [toolId, name] of this.retiredCloudTools) {
+      if (identifier === toolId || identifier === name) {
+        return `Tool '${name}' is no longer available: it was removed from this workspace's catalog.`;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -930,6 +986,7 @@ export class ToolRegistry {
    */
   registerToolSync(tool: RegistryTool): void {
     if (this.managedToolAccess?.isBlocked(tool)) return;
+    if (this.retiredCloudTools.has(tool.toolId)) return;
     let versions = this.registeredTools.get(tool.toolId);
     if (!versions) {
       versions = new Map();
@@ -957,6 +1014,8 @@ export class ToolRegistry {
     }
     const handler = tool.handler;
     tool.handler = async (context, params, options) => {
+      const retired = this.retiredToolMessage(tool.toolId);
+      if (retired) throw new Error(retired);
       this.managedToolAccess?.assertAllowed(tool);
       if (
         this.managedToolAccess?.isManaged(tool) &&

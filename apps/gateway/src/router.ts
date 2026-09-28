@@ -314,7 +314,10 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const tool = await this.registry.getTool(name, context.workspaceId, context.sessionId);
 
     if (!tool) {
-      throw new McpProtocolError(MCP_ERROR_CODES.TOOL_NOT_FOUND, `Tool '${name}' not found`);
+      throw new McpProtocolError(
+        MCP_ERROR_CODES.TOOL_NOT_FOUND,
+        this.registry.retiredToolMessage(name) ?? `Tool '${name}' not found`,
+      );
     }
     // `for_each` on a learned tool is one ordinary call per value: each run is gated,
     // executed, and recorded exactly as if the caller had made it alone.

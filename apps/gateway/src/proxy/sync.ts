@@ -658,7 +658,8 @@ export class CloudCatalogSyncCoordinator {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
 
-    let currentLock = this.lockManager.read();
+    this.registry?.reinstateCloudTools((snapshot.tools ?? []).map((tool) => tool.id));
+    let currentLock = this.retireToolsMissingFrom(this.lockManager.read(), snapshot);
     this.bindRegistryLock(currentLock);
 
     const newerAvailable: string[] = [];
@@ -818,8 +819,56 @@ export class CloudCatalogSyncCoordinator {
       return { activated: [], failed: [], degraded: [], newerAvailable: [] };
     }
 
+    // Offline, the last verified snapshot stays authoritative: a lock entry it no longer carries
+    // is not revived from local artifacts.
+    const verified = this.cache.getSnapshot(this.workspaceId);
+    if (verified) currentLock = this.retireToolsMissingFrom(currentLock, verified);
+
     this.bindRegistryLock(currentLock);
     return await this.activateLockedEntries(currentLock, undefined, false);
+  }
+
+  /**
+   * Removes every lock entry whose tool the verified snapshot no longer carries (at any version),
+   * evicts it from the registry, and releases its stored manifest and artifact reference. The
+   * lock only ever holds cloud-published tools, so this never touches local-only state.
+   */
+  private retireToolsMissingFrom(lock: V1ToolLock, snapshot: CatalogSnapshotResponse): V1ToolLock {
+    const lockManager = this.lockManager;
+    if (!lockManager) return lock;
+    const published = new Set((snapshot.tools ?? []).map((tool) => tool.id));
+    const dropped = Object.values(lock.tools).filter((entry) => !published.has(entry.toolId));
+    if (dropped.length === 0) return lock;
+
+    let nextLock = lock;
+    for (const entry of dropped) {
+      try {
+        nextLock = lockManager.remove(entry.name, entry);
+      } catch (error: unknown) {
+        this.options.onToolSyncError?.(
+          entry.name,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    const workspaceId = workspaceScopeId(this.workspaceId ?? lock.projectId);
+    this.registry?.retireCloudTools(
+      workspaceId,
+      dropped.map((entry) => ({ toolId: entry.toolId, name: entry.name })),
+    );
+    // Garbage collection is best effort: the lock and registry above already make the tool inert.
+    for (const entry of dropped) {
+      void this.registry?.removeManagedTool(entry, this.workspaceId).catch(() => {});
+      void this.artifactCache
+        ?.removeOwnedArtifactReference(
+          entry.artifactDigest,
+          `${lock.projectId}:${entry.name}`,
+          entry.toolId,
+          entry.version,
+        )
+        .catch(() => {});
+    }
+    return nextLock;
   }
 
   /**
@@ -1278,6 +1327,20 @@ export class CloudCatalogSyncCoordinator {
 
     const workspaceId = this.workspaceId;
     let allActivated = workspaceId !== undefined;
+    const published = new Set(tools.map((tool) => tool.id));
+    this.registry.reinstateCloudTools(published);
+    const dropped = this.registry
+      .getAllRegisteredTools()
+      .filter(
+        (registered) =>
+          registered.metadata?.source === "cloud" &&
+          registered.workspaceId === workspaceId &&
+          !published.has(registered.toolId),
+      );
+    this.registry.retireCloudTools(
+      workspaceScopeId(workspaceId),
+      dropped.map((registered) => ({ toolId: registered.toolId, name: registered.name })),
+    );
     for (const tool of tools) {
       const meta = tool.metadata && tool.metadata instanceof Object ? tool.metadata : undefined;
       const metaManifestDigest =
