@@ -304,6 +304,28 @@ describe("a value embedded in a recorded program", () => {
     expect(Object.values(named).filter((name) => /^text(_\d+)?$/u.test(name))).toEqual([]);
   });
 
+  it("names the file a job reads apart from the file it writes", () => {
+    // ProdE2E round 4's OpenCode job.
+    const derivation = deriveNativeCalls([
+      {
+        callId: "call_step0",
+        stepId: "step0",
+        toolName: "bash",
+        runtime: RESIN_PROCESS_RUNTIME,
+        arguments: { command: "sort -u words.txt > unique.txt; wc -l unique.txt" },
+        program: { kind: "shell" as const, argument: "command" },
+      },
+    ]);
+    const names = derivation.candidates.flatMap((candidate) =>
+      candidate.proposed.kind === "input" ? [[candidate.path[1], candidate.proposed.name]] : [],
+    );
+    expect(names).toEqual([
+      [2, "document_path"],
+      [4, "output_document_path"],
+      [8, "output_document_path"],
+    ]);
+  });
+
   it("offers a bare word the instruction named, from its first use", () => {
     const offered = (instruction: string) => {
       const { events } = record([

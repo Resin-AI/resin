@@ -132,6 +132,27 @@ export function inputRoleName(sites: readonly InputSite[]): string {
   return best.name;
 }
 
+/**
+ * The name for an input whose role is `base`, unique among `used` (which it is added to). When
+ * another input already holds `base` and this input is written by an output redirection
+ * (`sort -u {document_path} > {output_document_path}`), it is named `output_<base>` so a caller can
+ * tell the file read from the file written. Otherwise, as {@link uniqueInputName}: `base`,
+ * `base_2`, … Names that do not collide are never changed.
+ */
+export function uniqueRoleName(
+  base: string,
+  sites: readonly InputSite[],
+  used: Set<string>,
+): string {
+  const written = sites.some((site) => site.span === undefined && site.command?.redirect === true);
+  const output = `output_${base}`;
+  if (used.has(base) && written && INPUT_NAME.test(output) && !used.has(output)) {
+    used.add(output);
+    return output;
+  }
+  return uniqueInputName(base, used);
+}
+
 /** `base`, or `base_2`, `base_3`, … — the first not in `used`, which it is added to. */
 export function uniqueInputName(base: string, used: Set<string>): string {
   let name = base;
