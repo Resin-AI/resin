@@ -10,6 +10,7 @@ scrubbed with `scripts/harness-fixtures/scrub.mjs`. Driver scripts are in `0.87.
 | `rpc-branch-model-bash-abort-compaction.jsonl` | RPC run: `/tree` rewind with branch summary (`branch_summary`), `set_model` (`model_change`), user shell `bash` (`bashExecution`), abort mid tool call (`isError` result + `stopReason: "aborted"`), later resumed with `--session` for a manual `compact` (`compaction`) and one more turn |
 | `rpc-fork.jsonl` | RPC `fork` of the session above: new file with `parentSession`, copied parent entries, one new turn |
 | `rpc-tree-rewind.jsonl` | RPC `/tree` rewind without summary: an entry whose `parentId` points back to an earlier entry in the same file |
+| `du-report-assets.jsonl`, `du-report-builds.jsonl` | Two `-p` runs of one disk-usage job (`du -sh <dir>/* \| sort -h > <file>`) for different directories, with the Resin bridge loaded and no learned tools; built-in `bash` calls only |
 
 ## Authentication
 
