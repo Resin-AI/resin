@@ -8,7 +8,14 @@
  *
  * - Printable ASCII only; the only blanks are space and tab.
  * - Outside quotes, none of `$ \ `` # ! ( ) { } < > * ? [ ] ~ ; | % ^`, no `&` but the `&&`
- *   separators, and no word starting with `=`.
+ *   separators, and no word starting with `=` — except these redirections, each starting a word
+ *   after a segment's command word and staying inside that segment's text:
+ *   - `>`, `>>`, `<`, `2>` and `2>>`, each followed (after optional blanks) by one non-empty
+ *     target word in the same grammar;
+ *   - `2>&1`, `1>&2` and `>&2`, followed by a blank or the end.
+ *
+ *   `<<`, `<<<`, `<(`, `>(`, `>|`, `&>`, `&>>`, `<>`, `<&`, any other descriptor, `>&` of a word,
+ *   a redirection without a target and a redirection before the command word never split.
  * - Quotes are plain single-quoted strings (POSIX has no escapes inside them) and double-quoted
  *   strings drawn from the same safe set (no `$`, backtick, backslash or `!` inside).
  * - Every segment's first word, quotes removed, is an external command: never a builtin, keyword or
@@ -28,7 +35,7 @@
 import type { WorkflowStep } from "./recorded-workflow.js";
 
 /** The version of these splitting rules; bump it whenever a program would split differently. */
-export const SHELL_AND_CHAIN_SPLITTER_VERSION = 1 as const;
+export const SHELL_AND_CHAIN_SPLITTER_VERSION = 2 as const;
 
 /**
  * Shells whose `&&` lists these rules describe. zsh, PowerShell and any other shell never split.
@@ -156,41 +163,106 @@ export interface ShellAndChain {
   segments: ShellAndChainSegment[];
 }
 
-const isBlank = (char: string): boolean => char === " " || char === "\t";
+const isBlank = (char: string | undefined): boolean => char === " " || char === "\t";
 
 /**
- * A segment's words with their quotes removed, or undefined when the segment is not in the grammar.
- * Offsets outside quotes were already checked by the chain scan.
+ * The redirection operator starting at `index`, at the start of a word outside quotes: undefined
+ * when none starts there, null when one does but is not in the grammar, else the offset after the
+ * operator and whether a target word must follow it.
  */
-function segmentWords(text: string): string[] | undefined {
-  const words: string[] = [];
-  let word = "";
-  let inWord = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]!;
-    if (isBlank(char)) {
-      if (inWord) words.push(word);
-      word = "";
-      inWord = false;
-      continue;
-    }
-    inWord = true;
-    if (char === "'" || char === '"') {
-      const close = text.indexOf(char, index + 1);
-      if (close === -1) return undefined;
-      word += text.slice(index + 1, close);
-      index = close;
-      continue;
-    }
-    word += char;
+function redirectionAt(
+  text: string,
+  index: number,
+): { end: number; target: boolean } | null | undefined {
+  let at = index;
+  let descriptor: string | undefined;
+  if (/[0-9]/.test(text[at] ?? "")) {
+    if (text[at + 1] !== ">" && text[at + 1] !== "<") return undefined;
+    descriptor = text[at];
+    at += 1;
   }
-  if (inWord) words.push(word);
-  return words;
+  const operator = text[at];
+  const next = text[at + 1];
+  if (operator === "<") {
+    if (descriptor !== undefined || (next !== undefined && "<>&(|".includes(next))) return null;
+    return { end: at + 1, target: true };
+  }
+  if (operator !== ">") return undefined;
+  if (next === "&") {
+    const duplicated = `${descriptor ?? ""}>&${text[at + 2] ?? ""}`;
+    const after = text[at + 3];
+    if (!["2>&1", "1>&2", ">&2"].includes(duplicated) || (after !== undefined && !isBlank(after)))
+      return null;
+    return { end: at + 3, target: false };
+  }
+  if (descriptor !== undefined && descriptor !== "2") return null;
+  if (next === ">") {
+    const third = text[at + 2];
+    if (third !== undefined && ">&|(<".includes(third)) return null;
+    return { end: at + 2, target: true };
+  }
+  if (next !== undefined && "|(<".includes(next)) return null;
+  return { end: at + 1, target: true };
+}
+
+/**
+ * A segment's command and argument words with their quotes removed, and whether it redirects, or
+ * undefined when the segment is not in the grammar: an unquoted character outside it, a redirection
+ * outside it, before the command word, or without a non-empty target word.
+ */
+function segmentWords(text: string): { words: string[]; redirects: boolean } | undefined {
+  const words: string[] = [];
+  let redirects = false;
+  let index = 0;
+  /** The word starting at `index`, quotes removed, advancing past it; undefined when not safe. */
+  const word = (): string | undefined => {
+    let value = "";
+    if (text[index] === "=") return undefined;
+    while (index < text.length && !isBlank(text[index])) {
+      const char = text[index]!;
+      if (char === "'" || char === '"') {
+        const close = text.indexOf(char, index + 1);
+        if (close === -1) return undefined;
+        const quoted = text.slice(index + 1, close);
+        if (char === '"' && [...quoted].some((inner) => UNSAFE_IN_DOUBLE_QUOTES.has(inner)))
+          return undefined;
+        value += quoted;
+        index = close + 1;
+        continue;
+      }
+      if (UNSAFE.has(char) || char === "&") return undefined;
+      value += char;
+      index += 1;
+    }
+    return value;
+  };
+  while (index < text.length) {
+    if (isBlank(text[index])) {
+      index += 1;
+      continue;
+    }
+    const redirection = redirectionAt(text, index);
+    if (redirection === null || (redirection !== undefined && words.length === 0)) return undefined;
+    if (redirection !== undefined) {
+      redirects = true;
+      index = redirection.end;
+      if (!redirection.target) continue;
+      while (isBlank(text[index])) index += 1;
+      if (index === text.length || redirectionAt(text, index) !== undefined) return undefined;
+      const target = word();
+      if (target === undefined || target.length === 0) return undefined;
+      continue;
+    }
+    const next = word();
+    if (next === undefined) return undefined;
+    words.push(next);
+  }
+  return { words, redirects };
 }
 
 /** Whether a segment runs an external command, the only kind of segment a chain splits into. */
 function runsExternalCommand(text: string): boolean {
-  const first = segmentWords(text)?.[0];
+  const first = segmentWords(text)?.words[0];
   return (
     first !== undefined &&
     first.length > 0 &&
@@ -232,6 +304,15 @@ export function splitShellAndChain(shell: string, source: string): ShellAndChain
       index += 1;
       wordStart = true;
       continue;
+    }
+    if (wordStart) {
+      // A redirection stays inside its segment; `segmentWords` checks its place and its target.
+      const redirection = redirectionAt(source, index);
+      if (redirection === null) return undefined;
+      if (redirection !== undefined) {
+        index = redirection.end - 1;
+        continue;
+      }
     }
     if (UNSAFE.has(char) || (wordStart && char === "=")) return undefined;
     wordStart = false;
@@ -288,9 +369,10 @@ export function shellAndChainSegmentText(
  * chain may run or omit without changing what its other segments do.
  */
 export function isOptionalSetupSegment(text: string): boolean {
-  const words = segmentWords(text);
+  const parsed = segmentWords(text);
+  if (parsed === undefined || parsed.redirects) return false;
+  const { words } = parsed;
   return (
-    words !== undefined &&
     words.length >= 3 &&
     words[0] === "mkdir" &&
     words[1] === "-p" &&

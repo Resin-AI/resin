@@ -18,6 +18,10 @@ import {
 } from "../src/shell-and-chain.js";
 
 /** The report chains the monthly-report sessions ran, with their recorded values. */
+/** The backup job a demo session ran as one chain, writing its checksum through a redirection. */
+const BACKUP =
+  "mkdir -p backups/beta && tar -czf backups/beta/beta-2026-01-12.tar.gz -C data beta && sha256sum backups/beta/beta-2026-01-12.tar.gz > backups/beta/beta-2026-01-12.sha256 && sha256sum -c backups/beta/beta-2026-01-12.sha256 && tar -tzf backups/beta/beta-2026-01-12.tar.gz && cat backups/beta/beta-2026-01-12.sha256";
+
 const REPORT =
   "mkdir -p out/EMEA-2025-03 && ./reportctl extract --db data/sales.db --region EMEA --month 2025-03 --out out/EMEA-2025-03/orders.csv && ./reportctl summarize --currency EUR --out out/EMEA-2025-03/summary.json out/EMEA-2025-03/orders.csv && ./reportctl top --n 5 --out out/EMEA-2025-03/top.json out/EMEA-2025-03/orders.csv && ./reportctl render out/EMEA-2025-03";
 
@@ -41,6 +45,32 @@ describe("splitting a shell && chain", () => {
     ['git commit -m "ship it" && git push', ['git commit -m "ship it"', "git push"]],
     ["\tmake build \t&&  make test ", ["make build", "make test"]],
     ["npm run build --workspace=web && npm test", ["npm run build --workspace=web", "npm test"]],
+    [
+      BACKUP,
+      [
+        "mkdir -p backups/beta",
+        "tar -czf backups/beta/beta-2026-01-12.tar.gz -C data beta",
+        "sha256sum backups/beta/beta-2026-01-12.tar.gz > backups/beta/beta-2026-01-12.sha256",
+        "sha256sum -c backups/beta/beta-2026-01-12.sha256",
+        "tar -tzf backups/beta/beta-2026-01-12.tar.gz",
+        "cat backups/beta/beta-2026-01-12.sha256",
+      ],
+    ],
+    // Each redirection the grammar allows, attached to its segment.
+    ["make > log && ls", ["make > log", "ls"]],
+    ["make >log && ls", ["make >log", "ls"]],
+    ["make >> log && ls", ["make >> log", "ls"]],
+    ["sort < in && ls", ["sort < in", "ls"]],
+    ["make 2> err && ls", ["make 2> err", "ls"]],
+    ["make 2>> err && ls", ["make 2>> err", "ls"]],
+    ["make 2>&1 && ls", ["make 2>&1", "ls"]],
+    ["make 1>&2 && ls", ["make 1>&2", "ls"]],
+    ["make >&2 && ls", ["make >&2", "ls"]],
+    ["make > log 2>&1 && ls", ["make > log 2>&1", "ls"]],
+    ["sort < in > out && ls", ["sort < in > out", "ls"]],
+    ["make > 'my log' && ls", ["make > 'my log'", "ls"]],
+    // The hostile target: its quoted `&&` is part of the file name, never a separator.
+    ['make > "a && rm -rf b" && ls', ['make > "a && rm -rf b"', "ls"]],
   ])("splits %j at its top-level && only", (source, expected) => {
     const chain = splitShellAndChain("bash", source);
     expect(chain?.version).toBe(SHELL_AND_CHAIN_SPLITTER_VERSION);
@@ -85,9 +115,35 @@ describe("splitting a shell && chain", () => {
     ["brace expansion", "mkdir -p a/{b,c} && ls"],
     ["a background job", "make & ls && ls"],
     ["a trailing background job", "make && ls &"],
-    ["a redirection", "make > log && ls"],
-    ["a descriptor redirection", "make 2>&1 && ls"],
-    ["an input redirection", "sort < in && ls"],
+    // Redirections outside the grammar.
+    ["a heredoc string", "cat <<< x && ls"],
+    ["a quoted heredoc", "cat <<'EOF' && ls"],
+    ["a clobbering redirection", "make >| log && ls"],
+    ["an all-output redirection", "make &> log && ls"],
+    ["an appending all-output redirection", "make &>> log && ls"],
+    ["a read-write redirection", "sort <> f && ls"],
+    ["an input duplication", "sort <&3 && ls"],
+    ["another output descriptor", "make 3> log && ls"],
+    ["descriptor zero", "sort 0< in && ls"],
+    ["a two-digit descriptor", "make 12> log && ls"],
+    ["an explicit stdout descriptor", "make 1> log && ls"],
+    ["a stderr input", "make 2< in && ls"],
+    ["a duplication to a word", "make >&log && ls"],
+    ["a duplication to another descriptor", "make 2>&3 && ls"],
+    ["a duplication glued to a word", "make 2>&1x && ls"],
+    ["a duplication closing a descriptor", "make 2>&- && ls"],
+    ["a redirection without a target", "make > && ls"],
+    ["a trailing redirection without a target", "ls && make >"],
+    ["a redirection to a redirection", "make > > log && ls"],
+    ["an empty target", "make > '' && ls"],
+    ["a redirection as the first word", "> log make && ls"],
+    ["a redirection alone", "make && > log"],
+    ["a redirection glued to a word", "make x>log && ls"],
+    ["a parameter target", "make > $OUT && ls"],
+    ["a glob target", "make > *.log && ls"],
+    ["a tilde target", "make > ~/log && ls"],
+    ["an equals target", "make > =log && ls"],
+    ["a quoted parameter target", 'make > "$OUT" && ls'],
     ["a pipe", "make | tee log && ls"],
     ["an or-list", "make || ls && ls"],
     ["a semicolon", "make; ls && ls"],
@@ -131,7 +187,16 @@ describe("splitting a shell && chain", () => {
   it("offers only mkdir -p of plain paths as optional setup", () => {
     expect(isOptionalSetupSegment("mkdir -p out/EMEA-2025-03")).toBe(true);
     expect(isOptionalSetupSegment("mkdir -p out/a out/b")).toBe(true);
-    for (const text of ["mkdir out", "mkdir -p", "mkdir -p -m 700 out", "touch out", "cd out"])
+    for (const text of [
+      "mkdir out",
+      "mkdir -p",
+      "mkdir -p -m 700 out",
+      "touch out",
+      "cd out",
+      "mkdir -p out > log",
+      "mkdir -p out 2>&1",
+      "mkdir -p a;rm",
+    ])
       expect(isOptionalSetupSegment(text)).toBe(false);
   });
 });
@@ -140,7 +205,20 @@ const bashAvailable = spawnSync("bash", ["-c", "true"]).status === 0;
 
 describe.runIf(bashAvailable)("the allowlist against the commands bash runs", () => {
   /** External commands the corpus names: each is a stub that logs one line per run and succeeds. */
-  const STUBS = ["make", "git", "npm", "mkdir", "ls", "touch", "tool", "reportctl"];
+  const STUBS = [
+    "make",
+    "git",
+    "npm",
+    "mkdir",
+    "ls",
+    "touch",
+    "tool",
+    "reportctl",
+    "tar",
+    "sha256sum",
+    "cat",
+    "sort",
+  ];
   /** How many external commands bash actually runs for `source`, with every command stubbed. */
   function bashRuns(source: string): number {
     const root = mkdtempSync(path.join(tmpdir(), "resin-and-chain-runs-"));
@@ -151,6 +229,9 @@ describe.runIf(bashAvailable)("the allowlist against the commands bash runs", ()
       const stub = `#!/bin/sh\necho x >> '${log}'\n`;
       for (const name of STUBS) writeFileSync(path.join(bin, name), stub, { mode: 0o755 });
       writeFileSync(path.join(root, "reportctl"), stub, { mode: 0o755 });
+      // What the corpus's redirections read and write into; `mkdir` itself is a stub.
+      writeFileSync(path.join(root, "in"), "b\na\n");
+      mkdirSync(path.join(root, "backups", "beta"), { recursive: true });
       spawnSync("/bin/bash", ["--norc", "--noprofile", "-c", source], {
         cwd: root,
         env: { PATH: bin },
@@ -174,6 +255,14 @@ describe.runIf(bashAvailable)("the allowlist against the commands bash runs", ()
     "make && ls # c && d",
     "ls a\\&\\&b && ls",
     "x=1 && ls",
+    BACKUP,
+    "make > log 2>&1 && sort < in >> log && ls 1>&2",
+    "make 2> err && make 2>> err && ls >&2",
+    'make > "a && touch pwn" && ls',
+    "make >| log && ls",
+    "make &> log && ls",
+    "cat <<< x && ls",
+    "make 3> log && ls",
   ];
 
   it.each(CORPUS)("splits %j only into the commands bash runs", (source) => {
@@ -219,6 +308,10 @@ describe("running a split chain's segments one after another", () => {
     "mkdir -p a && cp -r a b && ls",
     "touch first && ls missing && touch never",
     "touch 'a && b' && ls",
+    "mkdir -p out && ls > out/list && sort < out/list > out/sorted && sha256sum out/sorted > out/sum && sha256sum -c out/sum && cat out/sum",
+    "ls > listed 2>&1 && ls missing 2> err && touch never",
+    "ls >> log && ls >> log 2>> err && ls 1>&2 && cat < log >&2",
+    'ls > "a && b" && cat "a && b"',
   ])("behaves as the chain did: %s", (chain) => {
     const segments = splitShellAndChain("sh", chain)!.segments.map((segment) => segment.text);
     expect(run(segments)).toEqual(run([chain]));

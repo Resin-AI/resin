@@ -14,6 +14,7 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   type RecordedWorkflow,
+  SHELL_AND_CHAIN_SPLITTER_VERSION as SPLITTER,
   type WorkflowBindingCandidate,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -709,7 +710,11 @@ describe("a held-out run of one segment of a recorded && chain", () => {
   ];
   const EMEA = "mkdir -p out && ./reportctl render --region EMEA";
   /** The plan's one chain step split into its segments, as the cloud projects and splits it. */
-  function segmented(plan: RecordedWorkflow, texts: string[], version = 1): RecordedWorkflow {
+  function segmented(
+    plan: RecordedWorkflow,
+    texts: string[],
+    version: number = SPLITTER,
+  ): RecordedWorkflow {
     const step = plan.steps[0]!;
     const argument = step.arguments.find((entry) => entry.name === "command")!;
     const source = argument.source as { kind: "template"; template: { reference: string } };
@@ -743,7 +748,7 @@ describe("a held-out run of one segment of a recorded && chain", () => {
    */
   async function ask(
     heldOut: Turn[],
-    version = 1,
+    version: number = SPLITTER,
     chain = EMEA,
     addresses?: Array<{ index: number; count: number; version: number }>,
   ) {
@@ -797,27 +802,27 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     [
       "the chain exited non-zero",
       report("apac", "mkdir -p out && ./reportctl render --region APAC", true),
-      1,
+      SPLITTER,
     ],
     [
       "the OMP run returned before it finished (async, backgrounded or a service)",
       report("apac", "mkdir -p out && ./reportctl render --region APAC", false, false),
-      1,
+      SPLITTER,
     ],
     [
       "the chain split into another count",
       report("apac", "mkdir -p out && ./reportctl render --region APAC && ls"),
-      1,
+      SPLITTER,
     ],
     [
       "the segment ran other text",
       report("apac", "mkdir -p out && ./reportctl draw --region APAC"),
-      1,
+      SPLITTER,
     ],
     [
       "the plan was split by another splitter version",
       report("apac", "mkdir -p out && ./reportctl render --region APAC"),
-      2,
+      SPLITTER - 1,
     ],
   ])("misses the segment when %s", async (_, heldOut, version) => {
     const answer = await ask(heldOut, version);
@@ -832,10 +837,11 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       "apac",
       "mkdir -p out/APAC && ./reportctl extract --region APAC && ./reportctl render --region APAC",
     );
-    const at = (...indexes: number[]) => indexes.map((index) => ({ index, count: 3, version: 1 }));
+    const at = (...indexes: number[]) =>
+      indexes.map((index) => ({ index, count: 3, version: SPLITTER }));
 
     it("confirms the region from that call's own segments", async () => {
-      const answer = await ask(APAC, 1, PLAN, at(1, 2));
+      const answer = await ask(APAC, SPLITTER, PLAN, at(1, 2));
       expect(answer.verification?.status).toBe("verified");
       expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true, true]);
     });
@@ -847,19 +853,19 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       [
         "the plan's own count",
         [
-          { index: 0, count: 2, version: 1 },
-          { index: 1, count: 2, version: 1 },
+          { index: 0, count: 2, version: SPLITTER },
+          { index: 1, count: 2, version: SPLITTER },
         ],
       ],
       [
         "another splitter version",
         [
-          { index: 1, count: 3, version: 2 },
-          { index: 2, count: 3, version: 2 },
+          { index: 1, count: 3, version: SPLITTER - 1 },
+          { index: 2, count: 3, version: SPLITTER - 1 },
         ],
       ],
     ])("misses the segments when the held-out address names %s", async (_, addresses) => {
-      const answer = await ask(APAC, 1, PLAN, addresses);
+      const answer = await ask(APAC, SPLITTER, PLAN, addresses);
       expect(answer.verification?.status).not.toBe("verified");
       expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
     });
@@ -871,9 +877,9 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       "apac",
       "./reportctl extract --region APAC && rm -f cache.db && ./reportctl render --region APAC",
     );
-    const answer = await ask(SKIPPED, 1, PLAN, [
-      { index: 0, count: 3, version: 1 },
-      { index: 2, count: 3, version: 1 },
+    const answer = await ask(SKIPPED, SPLITTER, PLAN, [
+      { index: 0, count: 3, version: SPLITTER },
+      { index: 2, count: 3, version: SPLITTER },
     ]);
     expect(answer.verification?.status).not.toBe("verified");
     expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
@@ -948,7 +954,7 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     }
     const WHOLE = "./reportctl render --region EMEA";
     const CHAIN = report("apac", "mkdir -p out && ./reportctl render --region APAC");
-    const at = (index: number) => ({ index, count: 2, version: 1 });
+    const at = (index: number) => ({ index, count: 2, version: SPLITTER });
     const whole = (callId: string, command: string): Turn => ({
       callId,
       toolName: "bash",
