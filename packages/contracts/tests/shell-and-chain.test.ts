@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { tokenizeProgram } from "../src/program-tokens.js";
 import {
   SHELL_AND_CHAIN_SPLITTER_VERSION,
   isOptionalSetupSegment,
@@ -18,7 +19,6 @@ import {
   shellAndChainSegmentText,
   splitShellAndChain,
 } from "../src/shell-and-chain.js";
-import { tokenizeProgram } from "../src/program-tokens.js";
 
 /** The report chains the monthly-report sessions ran, with their recorded values. */
 /** The backup job a demo session ran as one chain, writing its checksum through a redirection. */

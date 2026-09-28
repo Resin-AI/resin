@@ -43,6 +43,20 @@ turn late; the adapter therefore relies on native list_changed (no restart, no n
 | `aabf7bd1-e888-432f-bca8-414de2b191d2` | Ctrl+C (SIGINT to the native agent process) during a 40 s shell call: `abort` (`user_initiated`), no tool completion, clean `session.shutdown` with usage |
 | `56ef3192-776c-4782-b447-0a3701dc9dd8` | agent process SIGKILLed mid tool call: log ends at `tool.execution_start`, no shutdown, no usage |
 
+`1.0.88/changelog-job/` holds two headless runs of one job with other values, kept apart from
+`session-state/` so the discovery tests above see only their own sessions. They back
+`apps/observer/tests/analytics/harness-shell-capture.test.ts` (built-in `bash` shared as a program
+view, its `description` label dropped, exit status kept):
+
+| Directory | What it covers |
+| --- | --- |
+| `changelog-job/1329e50b-7e40-44e1-9b12-6d0e57fb9e23` | `git status --short -- CHANGES.md`, then `git log --oneline v0.1..HEAD > CHANGES.md && wc -l CHANGES.md` |
+| `changelog-job/473e9fef-7357-405f-8f85-030de73251e5` | the same job for `HEAD~2..HEAD` into `NOTES.md` |
+
+Captured in a 7-commit repository tagged `v0.1` after 3 commits, with
+`copilot -p "Using only the shell (no file-editing tools), run git log --oneline for the commits in <range> redirected into <file>, then run wc -l on <file> and report the count." --allow-all-tools`,
+then prepared and scrubbed as below with `--project <repo> --replace <home>=/home/user`.
+
 Signals sent to the `copilot` npm launcher (node) are not forwarded to the native agent process:
 SIGINT/SIGTERM/SIGKILL on the launcher's process group left the agent running to completion. The
 abort and kill captures therefore signal the launcher's child process directly.

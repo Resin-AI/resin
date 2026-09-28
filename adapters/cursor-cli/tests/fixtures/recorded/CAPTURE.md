@@ -11,6 +11,7 @@
 | `1d62dbba-…`, `6f7df196-…` | interactive (pty) | `beforeSubmitPrompt`, MCP + shell, `stop` with turn usage (status `error` from this model), list_changed ignored on a second prompt |
 | `1e94d25f-…` | interactive (pty) + `/compact` | `stop` completed, `afterAgentResponse` (same usage as `stop`), `preCompact` manual |
 | `de81f9d2-…` | headless `-p` against Resin's own `resin mcp` (`resin init` registration) | `MCP:manage_tools` calls (no server name in the hook), chained shell with a failing `cat`, fractional `duration` ms |
+| `2e052cec-…`, `7ee5e2f5-…` | headless `-p` against `resin mcp`, one job twice with other values | chained `Shell` pipelines `find <dir> -name '<glob>' -type f \| sort \| xargs -r sha256sum > <file> && wc -l <file> …` for `assets`/`*.png` and `photos`/`*.jpg`; back `apps/observer/tests/analytics/harness-shell-capture.test.ts` |
 
 Observed contract facts (2026.09.26): headless runs fire no `beforeSubmitPrompt`, `afterAgentResponse` or `stop`; interactive runs fire two `afterAgentThought` per thought (model `default` and the served model); `subagentStart`/`subagentStop` never fired.
 

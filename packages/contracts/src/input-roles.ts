@@ -178,7 +178,8 @@ export function valueFlag(tokens: readonly ProgramToken[], index: number): strin
   const short = /^-([A-Za-z])$/u.exec(raw)?.[1];
   if (short !== undefined) return SHORT_FLAG_ROLES[short];
   const long = /^--([A-Za-z][A-Za-z0-9-]*)$/u.exec(raw)?.[1];
-  if (long === undefined || BOOLEAN_FLAGS[long] === true || long.startsWith("no-")) return undefined;
+  if (long === undefined || BOOLEAN_FLAGS[long] === true || long.startsWith("no-"))
+    return undefined;
   const switchElsewhere = tokens.some(
     (token, at) =>
       at !== index - 1 &&

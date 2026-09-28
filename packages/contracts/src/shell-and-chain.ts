@@ -533,9 +533,7 @@ export function isSkippableSegment(
 ): boolean {
   return (
     isOptionalSetupSegment(text) ||
-    (position.trailing &&
-      version >= 2 &&
-      isReadOnlyInspectionSegment(text))
+    (position.trailing && version >= 2 && isReadOnlyInspectionSegment(text))
   );
 }
 

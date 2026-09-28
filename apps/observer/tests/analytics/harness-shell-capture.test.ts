@@ -2,7 +2,7 @@
  * Real Cursor 2026.09.26 and GitHub Copilot 1.0.88 sessions of one job each, recorded twice with
  * other values: Cursor's manifest job (adapters/cursor-cli/tests/fixtures/recorded/
  * 2026.9.26-dd393fe, `2e052cec-…` and `7ee5e2f5-…`) and Copilot's changelog job
- * (adapters/copilot-cli/tests/fixtures/recorded/1.0.88/session-state, `1329e50b-…` and
+ * (adapters/copilot-cli/tests/fixtures/recorded/1.0.88/changelog-job, `1329e50b-…` and
  * `473e9fef-…`). Their built-in shell calls reach the cloud as scrubbed program views, so the two
  * runs name one job; the device keeps each call's exit status, which a split chain's segments need;
  * and the device finds a run recorded after it last listed its sessions.
@@ -26,7 +26,7 @@ import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
 const ADAPTERS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../adapters");
 const CURSOR = path.join(ADAPTERS, "cursor-cli/tests/fixtures/recorded/2026.9.26-dd393fe");
-const COPILOT = path.join(ADAPTERS, "copilot-cli/tests/fixtures/recorded/1.0.88/session-state");
+const COPILOT = path.join(ADAPTERS, "copilot-cli/tests/fixtures/recorded/1.0.88/changelog-job");
 const WORKSPACE = "workspace-harness-shell-capture";
 
 async function cursorRecords(sessionId: string): Promise<RawHarnessRecord[]> {

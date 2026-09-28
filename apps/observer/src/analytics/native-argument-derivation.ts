@@ -35,11 +35,11 @@ import {
   extractCharsetOf,
   extractPrintedValue,
   inputRoleName,
-  valueFlag,
   programTokenPath,
   scriptRecordFieldKeys,
   scriptTokenContextName,
   tokenizeProgram,
+  valueFlag,
 } from "@resin/contracts";
 
 /** Local identities of the resources one call declared it would read and write. */
