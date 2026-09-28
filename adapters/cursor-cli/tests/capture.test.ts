@@ -124,7 +124,7 @@ describe("decoder", () => {
       "Shell",
       "Read",
       "Read",
-      "MCP:echo",
+      "echo",
       "Write",
       "Write",
     ]);
@@ -140,6 +140,28 @@ describe("decoder", () => {
       ["/workspace/project/notes.txt", "create"],
       ["/workspace/project/hello.py", "patch"],
     ]);
+
+    // Headless run through Resin's own MCP server: `MCP:<tool>` decodes to the bare tool name, so
+    // Resin's meta tools stay reserved; hook durations are fractional milliseconds.
+    const resin = await decode("de81f9d2-44e6-4e1d-8fa1-520818103c30");
+    expect(
+      resin.flatMap((e) =>
+        e.type === "tool_call" ? [[e.toolName, e.metadata?.cursorToolName]] : [],
+      ),
+    ).toEqual([
+      ["manage_tools", "MCP:manage_tools"],
+      ["manage_tools", "MCP:manage_tools"],
+      ["manage_tools", "MCP:manage_tools"],
+      ["Shell", undefined],
+    ]);
+    expect(resin.find((e) => e.type === "tool_result" && e.toolName === "Shell")).toMatchObject({
+      isError: false,
+      executionDurationMs: 175,
+      result: {
+        output: "cat: missing.txt: No such file or directory\n4 manifest.txt\n",
+        exitCode: 0,
+      },
+    });
 
     // Interactive run with /compact: usage from `stop`, counted once per turn.
     const interactive = await decode("1e94d25f-abf7-4a83-9810-9fed67a25942");

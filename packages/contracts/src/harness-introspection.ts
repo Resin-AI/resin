@@ -237,3 +237,26 @@ export function isHarnessIntrospectionProgram(
   if (referencesHarnessState(source)) return true;
   return language === "shell" && shellIntrospects(source, 0);
 }
+
+/** Resin's own discovery meta tools; `invoke_tool` is the invocation surface and stays recorded. */
+const RESIN_DISCOVERY_TOOLS: Readonly<Record<string, true>> = {
+  search_tools: true,
+  get_tool_schema: true,
+  manage_tools: true,
+};
+
+/**
+ * Whether a tool call is a call to one of Resin's own discovery meta tools, however the harness
+ * names it: `mcp__resin__<tool>` (Codex, Claude), `mcp__resin_<tool>` (OMP), `resin_<tool>`
+ * (OpenCode), `resin-<tool>`, or the bare name with connection `resin` (Copilot) or no reported
+ * connection (Cursor names MCP calls without their server). Listing Resin's catalog is not the
+ * user's work; recorded as a step, it varies run to run and keeps repeated runs apart.
+ */
+export function isResinDiscoveryToolCall(toolName: string, connection?: string): boolean {
+  const bare = /^(?:mcp__resin__?|resin[_-])(.+)$/.exec(toolName)?.[1];
+  if (bare !== undefined) return Object.hasOwn(RESIN_DISCOVERY_TOOLS, bare);
+  return (
+    Object.hasOwn(RESIN_DISCOVERY_TOOLS, toolName) &&
+    (connection === undefined || connection === "resin")
+  );
+}

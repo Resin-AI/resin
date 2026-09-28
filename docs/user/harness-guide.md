@@ -262,7 +262,8 @@ Each payload is checked against the field contract pinned in `adapters/cursor-cl
 - Headless `cursor-agent -p` runs fire no `beforeSubmitPrompt`, `afterAgentResponse` or `stop` hook, so their prompt, final answer and token usage are not captured. Their tool calls, edits and session end are.
 - One model edit is reported as a Read and a Write sharing one `tool_use_id`; call ids therefore include the tool name. `afterFileEdit` carries no `tool_use_id` and fires before its Write's `postToolUse`, so file edits are not linked to their call.
 - Task subagents run as separate conversations. No `subagentStart`/`subagentStop` hook fires and the Task call itself reaches no `postToolUse`, so subagent sessions are captured on their own, unlinked to their parent.
-- cursor-agent ignores an MCP server's `tools/list_changed` for the rest of the session (a tool added mid-session was never offered), so new Resin tools reach the next session. Whether it applies user rules from `~/.cursor/rules` is unverified.
+- cursor-agent ignores an MCP server's `tools/list_changed` for the rest of the session (a tool added mid-session was never offered), so new Resin tools reach the next session.
+- cursor-agent has no user-level rules directory: it loads `.cursor/rules` from the workspace and each ancestor directory, so Resin's guidance rule in `~/.cursor/rules/resin.mdc` reaches projects under your home directory only (verified with 2026.09.26). Projects elsewhere still get Resin's MCP server instructions.
 
 ---
 

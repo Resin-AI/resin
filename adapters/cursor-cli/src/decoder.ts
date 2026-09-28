@@ -20,6 +20,7 @@ export const CURSOR_USAGE_ACCOUNTING_VERSION = "cursor-hooks-v1";
 
 /** cursor-agent's built-in shell tool name in hook payloads. */
 const SHELL_TOOL_NAMES: Record<string, true> = { Shell: true, run_terminal_cmd: true };
+const MCP_TOOL_PREFIX = "MCP:";
 
 export interface CursorDriftRecord extends CursorHookDriftIssue {
   readonly recordId: string;
@@ -43,6 +44,13 @@ function toMetadata(value: unknown): DecoderMetadataRecord | undefined {
 
 function nonNegativeInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** Hook `duration` is fractional milliseconds (`175.144`); events carry whole milliseconds. */
+function durationMillis(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : undefined;
 }
 
 function stringField(payload: Record<string, unknown>, key: string): string | undefined {
@@ -301,14 +309,20 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
     failed: boolean,
     base: EventBaseFactory,
   ): IntermediateSessionEvent[] {
-    const toolName = payload.tool_name as string;
+    const cursorToolName = payload.tool_name as string;
+    // cursor-agent names an MCP call `MCP:<tool>` without its server (2026.09.26-dd393fe); the
+    // tool is the callable's own name, as other adapters report MCP tools, so Resin's meta tools
+    // (`MCP:manage_tools`) are recognized as such and never learned as user work.
+    const toolName = cursorToolName.startsWith(MCP_TOOL_PREFIX)
+      ? cursorToolName.slice(MCP_TOOL_PREFIX.length)
+      : cursorToolName;
     // cursor-agent reports one model edit as a Read and a Write postToolUse sharing one
     // tool_use_id (observed with 2026.09.26-dd393fe), so the id alone is not unique per call.
-    const toolCallId = cursorCallId(toolName, payload.tool_use_id as string);
+    const toolCallId = cursorCallId(cursorToolName, payload.tool_use_id as string);
     const nativeToolUseId = payload.tool_use_id as string;
     const input = decodeMaybeJson(payload.tool_input);
     const output = decodeMaybeJson(payload.tool_output);
-    const durationMs = nonNegativeInt(payload.duration);
+    const durationMs = durationMillis(payload.duration);
     // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
     const exitCode =
       SHELL_TOOL_NAMES[toolName] && !failed ? shellOutcome(output).exitCode : undefined;
@@ -321,6 +335,9 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
         toolName,
         parameters: toMetadata(input) ?? {},
         rawInput: typeof payload.tool_input === "string" ? payload.tool_input : undefined,
+        ...(toolName !== cursorToolName
+          ? { metadata: { ...base("call").metadata, cursorToolName } }
+          : {}),
       },
       {
         ...base("result", 1),

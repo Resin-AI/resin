@@ -3,6 +3,7 @@ import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
   isHarnessIntrospectionProgram,
+  isResinDiscoveryToolCall,
   readCodexCommandMetadata,
   referencesHarnessState,
 } from "@resin/contracts";
@@ -490,13 +491,15 @@ export class TrajectoryCaptureCoordinator {
     const language =
       typeof parameters?.language === "string" ? parameters.language.trim().toLowerCase() : "";
     const introspects =
-      command !== null
+      (original.type === "tool_call" &&
+        isResinDiscoveryToolCall(original.toolName, original.connection)) ||
+      (command !== null
         ? isHarnessIntrospectionProgram(command, "shell")
         : typeof parameters?.code === "string" &&
           isHarnessIntrospectionProgram(
             parameters.code,
             language === "py" || language === "python" ? "python" : "javascript",
-          );
+          ));
     const codex =
       original.type === "command_exec" ? readCodexCommandMetadata(original.metadata) : undefined;
     const callIds =
