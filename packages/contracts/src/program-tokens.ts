@@ -1458,7 +1458,7 @@ export function demonstratedProgramTokenSpanValue(
     if (!programTokenSpanFits(span, recorded.length)) return undefined;
     if (index > 0 && span.start < spans[index - 1]!.end) return undefined;
   }
-  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+  const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
   const charClass = (value: string): string => {
     let members = "";
     if (/[a-z]/.test(value)) members += "a-z";
