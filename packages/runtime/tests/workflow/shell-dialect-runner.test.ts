@@ -336,48 +336,58 @@ describe.runIf(!ON_WINDOWS)("running a POSIX program on this host", () => {
   });
 });
 
-describe.runIf(ON_WINDOWS)("running a Windows PowerShell 5.1 program for real", () => {
-  const ps = (source: string, env?: Record<string, string>) =>
-    runRecordedProgram({ kind: "shell", dialect: "powershell", source }, env ? { env } : {});
+/**
+ * A freshly provisioned image without precompiled .NET Framework assemblies (e.g. GitHub's
+ * windows-11-arm) spends ~20 s starting each powershell.exe; some tests here start several.
+ */
+describe.runIf(ON_WINDOWS)(
+  "running a Windows PowerShell 5.1 program for real",
+  { timeout: 180_000 },
+  () => {
+    const ps = (source: string, env?: Record<string, string>) =>
+      runRecordedProgram({ kind: "shell", dialect: "powershell", source }, env ? { env } : {});
 
-  it("prints UTF-8 and exits 0", async () => {
-    const run = await ps("$name = 'wörld ✓'\nWrite-Output \"hello $name\"");
-    expect(run.exitCode).toBe(0);
-    expect(run.stdout.trim()).toBe("hello wörld ✓");
-  });
-
-  it("maps a failed last native command, a throw and exit to non-zero exit codes", async () => {
-    expect((await ps("Write-Output a\ncmd /c exit 3")).exitCode).toBe(3);
-    expect((await ps("throw 'broken'")).exitCode).toBe(1);
-    expect((await ps("Write-Output a; exit 7")).exitCode).toBe(7);
-    expect((await ps("Get-Item -Path does-not-exist.txt")).exitCode).toBe(1);
-    // A native failure earlier in the program does not fail a program whose last statement succeeded.
-    expect((await ps("cmd /c exit 2\nWrite-Output done")).exitCode).toBe(0);
-  });
-
-  it("does not inherit PowerShell 7's module path", async () => {
-    const run = await ps("Write-Output $env:PSModulePath", {
-      PSModulePath: "C:\\resin-not-a-module-path",
+    it("prints UTF-8 and exits 0", async () => {
+      const run = await ps("$name = 'wörld ✓'\nWrite-Output \"hello $name\"");
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout.trim()).toBe("hello wörld ✓");
     });
-    expect(run.stdout).not.toContain("resin-not-a-module-path");
-    expect(
-      (await ps("(Get-FileHash -InputStream ([IO.MemoryStream]::new())).Algorithm")).stdout.trim(),
-    ).toBe("SHA256");
-  });
 
-  it("runs a POSIX program in Git Bash, not cmd.exe", async () => {
-    const bash = resolveGitBash({ platform: "win32", env: process.env });
-    if (bash === undefined) return;
-    const run = await runRecordedProgram({
-      kind: "shell",
-      dialect: "bash",
-      source: "echo $((1 + 2)) \"a b\" 'c'",
+    it("maps a failed last native command, a throw and exit to non-zero exit codes", async () => {
+      expect((await ps("Write-Output a\ncmd /c exit 3")).exitCode).toBe(3);
+      expect((await ps("throw 'broken'")).exitCode).toBe(1);
+      expect((await ps("Write-Output a; exit 7")).exitCode).toBe(7);
+      expect((await ps("Get-Item -Path does-not-exist.txt")).exitCode).toBe(1);
+      // A native failure earlier in the program does not fail a program whose last statement succeeded.
+      expect((await ps("cmd /c exit 2\nWrite-Output done")).exitCode).toBe(0);
     });
-    expect(run).toMatchObject({ exitCode: 0 });
-    expect(run.stdout.trim()).toBe("3 a b c");
-    expect(path.win32.basename(bash).toLowerCase()).toBe("bash.exe");
-  });
-});
+
+    it("does not inherit PowerShell 7's module path", async () => {
+      const run = await ps("Write-Output $env:PSModulePath", {
+        PSModulePath: "C:\\resin-not-a-module-path",
+      });
+      expect(run.stdout).not.toContain("resin-not-a-module-path");
+      expect(
+        (
+          await ps("(Get-FileHash -InputStream ([IO.MemoryStream]::new())).Algorithm")
+        ).stdout.trim(),
+      ).toBe("SHA256");
+    });
+
+    it("runs a POSIX program in Git Bash, not cmd.exe", async () => {
+      const bash = resolveGitBash({ platform: "win32", env: process.env });
+      if (bash === undefined) return;
+      const run = await runRecordedProgram({
+        kind: "shell",
+        dialect: "bash",
+        source: "echo $((1 + 2)) \"a b\" 'c'",
+      });
+      expect(run).toMatchObject({ exitCode: 0 });
+      expect(run.stdout.trim()).toBe("3 a b c");
+      expect(path.win32.basename(bash).toLowerCase()).toBe("bash.exe");
+    });
+  },
+);
 
 describe.runIf(HAS_PWSH)("running a PowerShell 7 program for real", () => {
   it("runs && chains and maps a failure", async () => {

@@ -39,6 +39,12 @@ import { localCallsFor } from "./recorded-sessions.js";
 
 const WORKSPACE = "workspace-powershell-learn-replay";
 const WINDOWS = process.platform === "win32";
+/**
+ * Tests that replay through real Windows PowerShell 5.1. A freshly provisioned image without
+ * precompiled .NET Framework assemblies (e.g. GitHub's windows-11-arm) spends ~20 s starting each
+ * powershell.exe, within the replay's own 120 s budget but past vitest's 30 s default.
+ */
+const REAL_POWERSHELL_TIMEOUT_MS = 180_000;
 const POWERSHELL = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 
@@ -180,87 +186,91 @@ describe("a PowerShell job run twice", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("becomes one tool with named inputs that runs in Windows PowerShell", async () => {
-    const store = new InMemoryPrivateValueStore();
-    const plan = await record(store, {
-      id: "ps-emea",
-      root,
-      executable: POWERSHELL,
-      region: "emea",
-      month: "2025-03",
-    });
-    await record(store, {
-      id: "ps-apac",
-      root,
-      executable: POWERSHELL,
-      region: "apac",
-      month: "2025-04",
-    });
+  it(
+    "becomes one tool with named inputs that runs in Windows PowerShell",
+    async () => {
+      const store = new InMemoryPrivateValueStore();
+      const plan = await record(store, {
+        id: "ps-emea",
+        root,
+        executable: POWERSHELL,
+        region: "emea",
+        month: "2025-03",
+      });
+      await record(store, {
+        id: "ps-apac",
+        root,
+        executable: POWERSHELL,
+        region: "apac",
+        month: "2025-04",
+      });
 
-    // One recorded step, proven Windows PowerShell 5.1, read in its own grammar.
-    expect(plan.steps).toHaveLength(1);
-    const step = plan.steps[0]!;
-    expect(step.callable.program).toMatchObject({ kind: "shell", dialect: "powershell" });
-    const template = step.arguments.find((argument) => argument.name === "cmd")?.source;
-    expect(template).toMatchObject({ kind: "template", template: { language: "powershell" } });
-    const offered = inputCandidates(plan);
-    expect(
-      offered
-        .map((candidate) => candidate.proposed.kind === "input" && candidate.proposed.name)
-        .sort(),
-    ).toEqual(["month", "region"]);
+      // One recorded step, proven Windows PowerShell 5.1, read in its own grammar.
+      expect(plan.steps).toHaveLength(1);
+      const step = plan.steps[0]!;
+      expect(step.callable.program).toMatchObject({ kind: "shell", dialect: "powershell" });
+      const template = step.arguments.find((argument) => argument.name === "cmd")?.source;
+      expect(template).toMatchObject({ kind: "template", template: { language: "powershell" } });
+      const offered = inputCandidates(plan);
+      expect(
+        offered
+          .map((candidate) => candidate.proposed.kind === "input" && candidate.proposed.name)
+          .sort(),
+      ).toEqual(["month", "region"]);
 
-    // The other run confirms both inputs.
-    const answer = await createRecordingCheckValidator({
-      workspaceId: WORKSPACE,
-      privateValues: store,
-      localCalls: localCallsFor(store, WORKSPACE, ["ps-emea", "ps-apac"]),
-    })(asked(plan, "exec-ps-apac"));
-    expect(answer.unavailable).toBeUndefined();
-    expect(answer.verification?.status, JSON.stringify(answer)).toBe("verified");
-    const confirmed = answer.verdicts.filter((verdict) => verdict.confirmed);
-    expect(
-      confirmed
-        .map(
-          (verdict) =>
-            verdict.candidate.proposed.kind === "input" && verdict.candidate.proposed.name,
-        )
-        .sort(),
-    ).toEqual(["month", "region"]);
+      // The other run confirms both inputs.
+      const answer = await createRecordingCheckValidator({
+        workspaceId: WORKSPACE,
+        privateValues: store,
+        localCalls: localCallsFor(store, WORKSPACE, ["ps-emea", "ps-apac"]),
+      })(asked(plan, "exec-ps-apac"));
+      expect(answer.unavailable).toBeUndefined();
+      expect(answer.verification?.status, JSON.stringify(answer)).toBe("verified");
+      const confirmed = answer.verdicts.filter((verdict) => verdict.confirmed);
+      expect(
+        confirmed
+          .map(
+            (verdict) =>
+              verdict.candidate.proposed.kind === "input" && verdict.candidate.proposed.name,
+          )
+          .sort(),
+      ).toEqual(["month", "region"]);
 
-    const tool = applyAcceptedBindings(
-      plan,
-      offered.filter((candidate) =>
-        confirmed.some(
-          (verdict) =>
-            verdict.candidate.stepId === candidate.stepId &&
-            JSON.stringify(verdict.candidate.path) === JSON.stringify(candidate.path),
+      const tool = applyAcceptedBindings(
+        plan,
+        offered.filter((candidate) =>
+          confirmed.some(
+            (verdict) =>
+              verdict.candidate.stepId === candidate.stepId &&
+              JSON.stringify(verdict.candidate.path) === JSON.stringify(candidate.path),
+          ),
         ),
-      ),
-    );
-    expect(tool.inputs.map((input) => input.name).sort()).toEqual(["month", "region"]);
-    expect(validateRecordedWorkflow(tool)).toEqual({ valid: true, errors: [] });
-
-    const adapters = new RuntimeAdapterRegistry();
-    adapters.register(createProcessAdapter({ cwd: root }));
-    const called = await executeRecordedWorkflow(tool, {
-      inputs: { region: "latam", month: "2026-01" },
-      adapters,
-      resolvePrivate: (reference) => resolvePrivateReference(store, reference) as never,
-      access: { workspaceId: WORKSPACE },
-    });
-    if (WINDOWS) {
-      expect(called.status, JSON.stringify(called.steps)).toBe("completed");
-      expect(String(called.result).trim()).toBe("report region=latam month=2026-01");
-      expect(fs.readFileSync(path.join(root, "out", "latam-2026-01.txt"), "utf8").trim()).toBe(
-        "report region=latam month=2026-01",
       );
-    } else {
-      // Windows PowerShell 5.1 exists only on Windows; the tool is refused, never run in a POSIX shell.
-      expect(called.status).not.toBe("completed");
-      expect(JSON.stringify(called.steps)).toMatch(/runs only on Windows/);
-    }
-  });
+      expect(tool.inputs.map((input) => input.name).sort()).toEqual(["month", "region"]);
+      expect(validateRecordedWorkflow(tool)).toEqual({ valid: true, errors: [] });
+
+      const adapters = new RuntimeAdapterRegistry();
+      adapters.register(createProcessAdapter({ cwd: root }));
+      const called = await executeRecordedWorkflow(tool, {
+        inputs: { region: "latam", month: "2026-01" },
+        adapters,
+        resolvePrivate: (reference) => resolvePrivateReference(store, reference) as never,
+        access: { workspaceId: WORKSPACE },
+      });
+      if (WINDOWS) {
+        expect(called.status, JSON.stringify(called.steps)).toBe("completed");
+        expect(String(called.result).trim()).toBe("report region=latam month=2026-01");
+        expect(fs.readFileSync(path.join(root, "out", "latam-2026-01.txt"), "utf8").trim()).toBe(
+          "report region=latam month=2026-01",
+        );
+      } else {
+        // Windows PowerShell 5.1 exists only on Windows; the tool is refused, never run in a POSIX shell.
+        expect(called.status).not.toBe("completed");
+        expect(JSON.stringify(called.steps)).toMatch(/runs only on Windows/);
+      }
+    },
+    REAL_POWERSHELL_TIMEOUT_MS,
+  );
 
   it.each([
     ["PowerShell 7", PWSH, [], "pwsh"],
@@ -483,68 +493,72 @@ describe("a Codex shell tool call on Windows", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("learns shell_command run twice in Windows PowerShell 5.1, as its end events prove, and replays it there", async () => {
-    const store = new InMemoryPrivateValueStore();
-    const plan = await recordToolCall(store, {
-      id: "sc-emea",
-      root,
-      tool: "shell_command",
-      region: "emea",
-      month: "2025-03",
-      executable: POWERSHELL,
-    });
-    await recordToolCall(store, {
-      id: "sc-apac",
-      root,
-      tool: "shell_command",
-      region: "apac",
-      month: "2025-04",
-      executable: POWERSHELL,
-    });
-    expect(plan.steps).toHaveLength(1);
-    const step = plan.steps[0]!;
-    expect(step.callable).toMatchObject({
-      name: "shell_command",
-      program: { kind: "shell", argument: "command", dialect: "powershell" },
-    });
-    expect(step.callable.program).not.toHaveProperty("unprovenDialect");
-    const offered = inputCandidates(plan);
-    expect(
-      offered
-        .map((candidate) => candidate.proposed.kind === "input" && candidate.proposed.name)
-        .sort(),
-    ).toEqual(["month", "region"]);
+  it(
+    "learns shell_command run twice in Windows PowerShell 5.1, as its end events prove, and replays it there",
+    async () => {
+      const store = new InMemoryPrivateValueStore();
+      const plan = await recordToolCall(store, {
+        id: "sc-emea",
+        root,
+        tool: "shell_command",
+        region: "emea",
+        month: "2025-03",
+        executable: POWERSHELL,
+      });
+      await recordToolCall(store, {
+        id: "sc-apac",
+        root,
+        tool: "shell_command",
+        region: "apac",
+        month: "2025-04",
+        executable: POWERSHELL,
+      });
+      expect(plan.steps).toHaveLength(1);
+      const step = plan.steps[0]!;
+      expect(step.callable).toMatchObject({
+        name: "shell_command",
+        program: { kind: "shell", argument: "command", dialect: "powershell" },
+      });
+      expect(step.callable.program).not.toHaveProperty("unprovenDialect");
+      const offered = inputCandidates(plan);
+      expect(
+        offered
+          .map((candidate) => candidate.proposed.kind === "input" && candidate.proposed.name)
+          .sort(),
+      ).toEqual(["month", "region"]);
 
-    const answer = await createRecordingCheckValidator({
-      workspaceId: WORKSPACE,
-      privateValues: store,
-      localCalls: localCallsFor(store, WORKSPACE, ["sc-emea", "sc-apac"]),
-    })(asked(plan, "call-sc-apac"));
-    expect(answer.verification?.status, JSON.stringify(answer)).toBe("verified");
-    const confirmed = answer.verdicts.filter((verdict) => verdict.confirmed);
-    expect(confirmed).toHaveLength(2);
+      const answer = await createRecordingCheckValidator({
+        workspaceId: WORKSPACE,
+        privateValues: store,
+        localCalls: localCallsFor(store, WORKSPACE, ["sc-emea", "sc-apac"]),
+      })(asked(plan, "call-sc-apac"));
+      expect(answer.verification?.status, JSON.stringify(answer)).toBe("verified");
+      const confirmed = answer.verdicts.filter((verdict) => verdict.confirmed);
+      expect(confirmed).toHaveLength(2);
 
-    const tool = applyAcceptedBindings(plan, offered);
-    expect(tool.inputs.map((input) => input.name).sort()).toEqual(["month", "region"]);
-    const adapters = new RuntimeAdapterRegistry();
-    adapters.register(createProcessAdapter({ cwd: root }));
-    const called = await executeRecordedWorkflow(tool, {
-      inputs: { region: "latam", month: "2026-01" },
-      adapters,
-      resolvePrivate: (reference) => resolvePrivateReference(store, reference) as never,
-      access: { workspaceId: WORKSPACE },
-    });
-    if (WINDOWS) {
-      expect(called.status, JSON.stringify(called.steps)).toBe("completed");
-      expect(String(called.result).trim()).toBe("report region=latam month=2026-01");
-      expect(fs.readFileSync(path.join(root, "out", "latam-2026-01.txt"), "utf8").trim()).toBe(
-        "report region=latam month=2026-01",
-      );
-    } else {
-      expect(called.status).not.toBe("completed");
-      expect(JSON.stringify(called.steps)).toMatch(/runs only on Windows/);
-    }
-  });
+      const tool = applyAcceptedBindings(plan, offered);
+      expect(tool.inputs.map((input) => input.name).sort()).toEqual(["month", "region"]);
+      const adapters = new RuntimeAdapterRegistry();
+      adapters.register(createProcessAdapter({ cwd: root }));
+      const called = await executeRecordedWorkflow(tool, {
+        inputs: { region: "latam", month: "2026-01" },
+        adapters,
+        resolvePrivate: (reference) => resolvePrivateReference(store, reference) as never,
+        access: { workspaceId: WORKSPACE },
+      });
+      if (WINDOWS) {
+        expect(called.status, JSON.stringify(called.steps)).toBe("completed");
+        expect(String(called.result).trim()).toBe("report region=latam month=2026-01");
+        expect(fs.readFileSync(path.join(root, "out", "latam-2026-01.txt"), "utf8").trim()).toBe(
+          "report region=latam month=2026-01",
+        );
+      } else {
+        expect(called.status).not.toBe("completed");
+        expect(JSON.stringify(called.steps)).toMatch(/runs only on Windows/);
+      }
+    },
+    REAL_POWERSHELL_TIMEOUT_MS,
+  );
 
   it("proves PowerShell 7 from an exec_command end event", async () => {
     const plan = await recordToolCall(new InMemoryPrivateValueStore(), {
