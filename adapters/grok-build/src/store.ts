@@ -230,9 +230,10 @@ export async function isGrokTurnOpen(updatesPath: string): Promise<boolean> {
     while (end > 0) {
       const start = Math.max(0, end - TAIL_READ_BYTES);
       const chunk = Buffer.alloc(end - start);
-      await handle.read(chunk, 0, chunk.length, start);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
       end = start;
-      let block = Buffer.concat([chunk, carry]);
+      // A short read (the file shrank since stat) must not splice unread zero bytes into a line.
+      let block = Buffer.concat([chunk.subarray(0, bytesRead), carry]);
       let newline = block.lastIndexOf(0x0a, block.length - 1);
       // The first (partial) line of this block is completed by the next read.
       while (newline >= 0) {

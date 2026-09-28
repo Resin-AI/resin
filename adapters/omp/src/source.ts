@@ -532,9 +532,10 @@ export class OmpSessionEventSource implements SessionEventSource {
         }
 
         if (lineStart === 0) {
-          // No complete line in this chunk: stop at an incomplete trailing line, otherwise
-          // the line is longer than the chunk, so widen the window until it fits.
-          if (bytesRead === remaining) break;
+          // No complete line in this chunk. A short read means the file ends here (it may have
+          // shrunk since stat), so the line is incomplete: stop. Otherwise the line is longer
+          // than the chunk, so widen the window until it fits.
+          if (bytesRead < toRead || bytesRead === remaining) break;
           chunkBytes *= 2;
         }
       }
