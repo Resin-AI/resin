@@ -31,6 +31,7 @@ import {
   CODEX_DISPLAY_NAME,
   CODEX_HARNESS_ID,
   CODEX_TESTED_VERSIONS,
+  type CodexInspectionCache,
   type CodexTranscriptInspection,
   type CommandExecutor,
   type PathLookupFn,
@@ -172,6 +173,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   private readonly pathLookup?: PathLookupFn;
   private readonly capabilities: AdapterCapabilities;
   private cachedCatalog?: CodexSessionCatalog;
+  private readonly inspectionCache: CodexInspectionCache = new Map();
 
   constructor(options?: CodexHarnessAdapterOptions) {
     this.fsBridge = options?.fsBridge ?? defaultFsBridge;
@@ -215,7 +217,9 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       customSessionRoot: this.customSessionRoot,
     });
     const sessionRoot = path.resolve(sessionRootOverride ?? resolved.sessionRoot);
-    const inspections = await discoverCodexTranscripts(sessionRoot);
+    const inspections = await discoverCodexTranscripts(sessionRoot, {
+      cache: this.inspectionCache,
+    });
     const workspacesByRoot = new Map<string, HarnessWorkspace>();
     const sessionsByWorkspaceId = new Map<string, HarnessSession[]>();
     const sessionsByRoot = new Map<string, HarnessSession[]>();

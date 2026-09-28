@@ -672,9 +672,19 @@ async function collectCodexTranscriptFiles(sessionRoot: string): Promise<string[
  * Inspects bounded rollout prefixes and tails once per discovery cycle.
  * Callers own only the returned, capped snapshot; transcripts are never read whole.
  */
+/**
+ * Inspections of settled transcripts from earlier scans, keyed by path. An entry is reused only
+ * while the file's identity (inode, size, mtime, ctime) is unchanged and the file was already past
+ * the active grace window when inspected, so neither its content nor its derived status can differ.
+ */
+export type CodexInspectionCache = Map<
+  string,
+  { identity: string; inspection: CodexTranscriptInspection }
+>;
+
 export async function discoverCodexTranscripts(
   sessionRoot: string,
-  options?: { now?: number | Date },
+  options?: { now?: number | Date; cache?: CodexInspectionCache },
 ): Promise<CodexTranscriptInspection[]> {
   const nowMs =
     options?.now instanceof Date
@@ -684,14 +694,35 @@ export async function discoverCodexTranscripts(
         : Date.now();
   const filePaths = await collectCodexTranscriptFiles(sessionRoot);
   const results: CodexTranscriptInspection[] = [];
+  const cache = options?.cache;
+  const previous = cache ? new Map(cache) : undefined;
+  cache?.clear();
   let nextIndex = 0;
   const worker = async (): Promise<void> => {
     while (nextIndex < filePaths.length) {
       const index = nextIndex++;
       const filePath = filePaths[index];
       if (!filePath) continue;
+      let identity: string | undefined;
+      if (cache) {
+        const stat = await fs.lstat(filePath).catch(() => null);
+        if (stat?.isFile()) {
+          identity = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+          const cached = previous?.get(filePath);
+          if (cached && cached.identity === identity) {
+            cache.set(filePath, cached);
+            results.push(cached.inspection);
+            continue;
+          }
+          // Only files already past the active grace window keep a stable status.
+          if (nowMs - stat.mtimeMs <= CODEX_ACTIVE_GRACE_MS) identity = undefined;
+        }
+      }
       const inspected = await inspectCodexTranscript(filePath, nowMs);
-      if (inspected) results.push(inspected);
+      if (inspected) {
+        results.push(inspected);
+        if (cache && identity) cache.set(filePath, { identity, inspection: inspected });
+      }
     }
   };
   await Promise.all(
