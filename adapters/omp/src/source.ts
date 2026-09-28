@@ -409,6 +409,8 @@ export class OmpSessionEventSource implements SessionEventSource {
   private isClosed = false;
   private lastInode: number | null = null;
   private lastFileSize = 0;
+  /** Tail of the serialized readNext chain. */
+  private readQueue: Promise<void> = Promise.resolve();
   /**
    * When this transcript was forked from a parent session, the fork's own start: OMP copies the
    * parent's history into the new file verbatim (same entry ids, earlier timestamps), and those
@@ -422,7 +424,10 @@ export class OmpSessionEventSource implements SessionEventSource {
     options?: OmpEventSourceOptions,
   ) {
     this.session = session;
-    this.pollIntervalMs = options?.pollIntervalMs ?? 100;
+    // Each attached session polls its transcript on its own timer; with dozens of sessions open a
+    // 100 ms tick kept the daemon near 4% CPU while nothing was written. A second is prompt
+    // enough for capture and costs a tenth of that.
+    this.pollIntervalMs = options?.pollIntervalMs ?? 1000;
     this.maxBatchSize = options?.maxBatchSize ?? 50;
 
     this.currentCursor = initialCursor
@@ -455,8 +460,19 @@ export class OmpSessionEventSource implements SessionEventSource {
 
   /**
    * Pulls the next batch of raw harness records from the current cursor position in the JSONL file.
+   * Calls run one at a time: the tailer both pulls batches and listens to this source's own poll,
+   * and two reads from the same cursor would deliver the same lines twice.
    */
-  async readNext(batchSize?: number): Promise<RawHarnessRecord[]> {
+  readNext(batchSize?: number): Promise<RawHarnessRecord[]> {
+    const read = this.readQueue.then(() => this.readNextFromCursor(batchSize));
+    this.readQueue = read.then(
+      () => undefined,
+      () => undefined,
+    );
+    return read;
+  }
+
+  private async readNextFromCursor(batchSize?: number): Promise<RawHarnessRecord[]> {
     if (this.isClosed) {
       return [];
     }
@@ -678,11 +694,16 @@ export class OmpSessionEventSource implements SessionEventSource {
       return;
     }
 
+    // Skip a tick while the previous one is still reading, so a slow read (a large backlog)
+    // does not queue another behind it every interval.
+    let reading = false;
     this.pollTimer = setInterval(async () => {
       if (this.isClosed || this.listeners.size === 0) {
         this.stopPolling();
         return;
       }
+      if (reading) return;
+      reading = true;
 
       try {
         const records = await this.readNext();
@@ -697,6 +718,8 @@ export class OmpSessionEventSource implements SessionEventSource {
         }
       } catch {
         // Ignore read errors during background polling
+      } finally {
+        reading = false;
       }
     }, this.pollIntervalMs);
   }

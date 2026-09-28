@@ -33,8 +33,8 @@ afterEach(() => {
 });
 
 // The daemon rescans every 10 s with activeOnly: false; a long-lived OMP home holds tens of
-// thousands of settled transcripts. Most scans must not touch them at all, yet new sessions must
-// be found on the next scan and resumed ones within the settled re-check window.
+// thousands of finished transcripts. Most scans must not touch them at all, yet new sessions must
+// be found on the next scan and resumed ones within the re-check window.
 describe("OMP discovery scan cost", () => {
   it("leaves settled transcripts alone between re-checks while finding new and resumed sessions", async () => {
     const ompHome = path.join(tmpDir, ".omp");
@@ -45,11 +45,13 @@ describe("OMP discovery scan cost", () => {
     const dayAgo = new Date(Date.now() - 86_400_000);
     const header = (id: string, at: Date) =>
       `${JSON.stringify({ type: "session", version: 3, id, cwd: wsPath, timestamp: at.toISOString() })}\n`;
+    const exit = (at: Date) =>
+      `${JSON.stringify({ type: "custom", customType: "session_exit", id: "exit", timestamp: at.toISOString(), data: { reason: "dispose", kind: "normal", recordedAt: at.toISOString() } })}\n`;
 
     const settledPaths: string[] = [];
     for (let i = 0; i < 40; i++) {
       const filePath = path.join(sessionsDir, `settled-${i}.jsonl`);
-      fs.writeFileSync(filePath, header(`settled-${i}`, dayAgo));
+      fs.writeFileSync(filePath, header(`settled-${i}`, dayAgo) + exit(dayAgo));
       fs.utimesSync(filePath, dayAgo, dayAgo);
       settledPaths.push(filePath);
     }
@@ -80,8 +82,6 @@ describe("OMP discovery scan cost", () => {
     const sizeBefore = Number(second.get("settled-7")?.metadata?.fileSize);
     fs.appendFileSync(settledPaths[7], header("settled-7", new Date()));
     await scan();
-    expect(Number((await scan()).get("settled-7")?.metadata?.fileSize)).toBeGreaterThan(
-      sizeBefore,
-    );
+    expect(Number((await scan()).get("settled-7")?.metadata?.fileSize)).toBeGreaterThan(sizeBefore);
   });
 });

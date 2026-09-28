@@ -77,7 +77,8 @@ export class CodexSessionEventSource implements SessionEventSource {
   constructor(options: CodexSessionEventSourceOptions) {
     this.filePath = options.filePath;
     this.sessionId = options.sessionId;
-    this.pollIntervalMs = options.pollIntervalMs ?? 100;
+    // One poll timer per attached session: a 1 s tick keeps an idle daemon near zero CPU.
+    this.pollIntervalMs = options.pollIntervalMs ?? 1000;
     this.cursor = {
       offset: options.initialCursor?.offset ?? 0,
       line: options.initialCursor?.line ?? 1,

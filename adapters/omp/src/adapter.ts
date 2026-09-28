@@ -77,8 +77,9 @@ const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
 // (a scan runs every 10 s). Only symlink changes and new subagent files in long-quiet session
 // folders wait for one; the latter are still captured whole, from their cursor.
 const FULL_SWEEP_EVERY_SCANS = 12;
-// Scans between re-stats of settled transcripts. A resumed session is seen within this many
-// scans and, like any OMP session, captured from its cursor, so the wait delays but loses nothing.
+// Scans between re-stats of finished (completed, failed, interrupted) transcripts. A resumed one
+// is seen within this many scans and, like any OMP session, captured from its cursor, so the wait
+// delays capture but loses nothing.
 const SETTLED_RECHECK_EVERY_SCANS = 3;
 
 async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
@@ -213,7 +214,14 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
       ...discoveryOptions,
       inspectTranscript: async (filePath, options) => {
         const cached = this.transcriptCache.get(filePath);
-        if (cached && !recheckSettled) {
+        // Only finished sessions wait for the re-check: an idle one may still be attached, and its
+        // exit or next turn must be seen on the next scan.
+        const status = cached?.transcript.status;
+        if (
+          cached &&
+          !recheckSettled &&
+          (status === "completed" || status === "failed" || status === "interrupted")
+        ) {
           cycleCache.set(filePath, cached);
           return cached.transcript;
         }

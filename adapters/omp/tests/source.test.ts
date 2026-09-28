@@ -400,6 +400,35 @@ describe("OmpSessionEventSource (Transcript Tailing & Streaming)", () => {
     }
   });
 
+  it("delivers each line once when reads overlap", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-overlap-"));
+    try {
+      const transcriptPath = path.join(tmpDir, "session.jsonl");
+      const lines = Array.from({ length: 10 }, (_, i) =>
+        JSON.stringify({ type: "message", role: "user", content: `line-${i}` }),
+      );
+      await fsp.writeFile(transcriptPath, `${lines.join("\n")}\n`);
+      const source = new OmpSessionEventSource({
+        sessionId: "session-overlap",
+        workspaceId: "ws-1",
+        harnessId: "omp",
+        transcriptPath,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      });
+
+      // The tailer pulls batches while the source's own poll reads too.
+      const [first, second] = await Promise.all([source.readNext(5), source.readNext(5)]);
+      expect([...first, ...second].map((r) => r.rawPayload)).toEqual(lines);
+      expect(second[4]?.cursor.line).toBe(10);
+      await source.close();
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("detects file truncation / rotation and resets offset", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-source-trunc-"));
     try {
