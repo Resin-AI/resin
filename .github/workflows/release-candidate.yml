@@ -525,7 +525,7 @@ jobs:
   build-and-sign:
     name: Build and Sign Candidate
     needs: [platform-qualification, windows-qualification, system-qualification]
-    runs-on: resin-vm-linux-arm64
+    runs-on: resin-ovh-linux-x64
     environment: production
     permissions:
       contents: read

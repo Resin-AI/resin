@@ -46,7 +46,7 @@ describe("Public Release Workflows Contract", () => {
       expect(production.doc.jobs).toBeDefined();
     });
 
-    it("signs on the ARM64 self-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
+    it("signs on the OVH x64 self-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
       const qualificationJobs = [
         "platform-qualification",
         "windows-qualification",
@@ -68,17 +68,17 @@ describe("Public Release Workflows Contract", () => {
             );
           }
         } else {
-          expect(job["runs-on"], `Job ${jobId} must run on resin-vm-linux-arm64`).toBe(
-            "resin-vm-linux-arm64",
+          expect(job["runs-on"], `Job ${jobId} must run on resin-ovh-linux-x64`).toBe(
+            "resin-ovh-linux-x64",
           );
         }
       }
     });
 
-    it("requires the ARM64 self-hosted runner for every production job", () => {
+    it("requires the OVH x64 self-hosted runner for every production job", () => {
       for (const [jobId, job] of Object.entries(production.doc.jobs)) {
-        expect(job["runs-on"], `Job ${jobId} must run on resin-vm-linux-arm64`).toBe(
-          "resin-vm-linux-arm64",
+        expect(job["runs-on"], `Job ${jobId} must run on resin-ovh-linux-x64`).toBe(
+          "resin-ovh-linux-x64",
         );
       }
     });
@@ -1549,12 +1549,12 @@ with patch("subprocess.run", side_effect=publish):
       }
     });
 
-    it("strictly prohibits self-hosted runners and resin-vm infrastructure on all PR workflows", () => {
+    it("strictly prohibits self-hosted runners and resin-ovh infrastructure on all PR workflows", () => {
       for (const { name, data } of prWorkflows) {
         expect(
           data.raw,
-          `${name} must not mention resin-vm-linux-arm64 or self-hosted runners`,
-        ).not.toContain("resin-vm");
+          `${name} must not mention the resin-ovh runner label or self-hosted runners`,
+        ).not.toContain("resin-ovh");
         expect(data.raw, `${name} must not reference self-hosted label`).not.toMatch(
           /runs-on:\s*.*self-hosted/,
         );

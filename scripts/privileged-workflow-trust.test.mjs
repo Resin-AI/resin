@@ -210,7 +210,7 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
         }
       }
     });
-    it("publishes the web image on the private runner's native ARM64 architecture", () => {
+    it("publishes the web image on the private runner's native x64 architecture", () => {
       const workflowEntry = allWorkflows[".github/workflows/web-deploy.yml"];
       if (!workflowEntry) {
         expect(fs.existsSync(path.join(ROOT_DIR, "apps/web"))).toBe(false);
@@ -223,8 +223,8 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       );
 
       expect(workflow.env.IMAGE_NAME).toBe("ghcr.io/resin-ai/resin-cloud-web");
-      expect(publishJob["runs-on"]).toBe("resin-vm-linux-arm64");
-      expect(imageStep.with.platforms).toBe("linux/arm64");
+      expect(publishJob["runs-on"]).toBe("resin-ovh-linux-x64");
+      expect(imageStep.with.platforms).toBe("linux/amd64");
       expect(
         publishJob.steps.some((step) => step.uses?.startsWith("docker/setup-qemu-action@")),
       ).toBe(false);
