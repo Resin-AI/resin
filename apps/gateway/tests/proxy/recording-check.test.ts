@@ -918,8 +918,8 @@ describe("a held-out run of one segment of a recorded && chain", () => {
 
     it.each([
       ["a trailing cat of what it wrote", [EXTRACT, RENDER, "cat out/sum"], [0, 1]],
-      ["a checksum check", [EXTRACT, "sha256sum -c out/sum", RENDER], [0, 2]],
-      ["a mid-chain ls", [EXTRACT, "ls out", RENDER], [0, 2]],
+      ["a trailing checksum check", [EXTRACT, RENDER, "sha256sum -c out/sum"], [0, 1]],
+      ["a leading mkdir -p", ["mkdir -p out", EXTRACT, RENDER], [1, 2]],
     ])("confirms the region when it skips %s", async (_, segments, named) => {
       const answer = await skipping(segments, named);
       expect(answer.verification?.status).toBe("verified");
@@ -934,6 +934,8 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       ["a sort writing its output file", "sort -o f g"],
       ["a removal", "rm f"],
       ["a removal of a cache", "rm -f cache.db"],
+      ["a mid-chain checksum check, which decided whether the render ran", "sha256sum -c out/sum"],
+      ["a mid-chain ls", "ls out"],
     ])("misses the segments when they skip %s", async (_, skipped) => {
       const answer = await skipping([EXTRACT, skipped, RENDER], [0, 2]);
       expect(answer.verification?.status).not.toBe("verified");

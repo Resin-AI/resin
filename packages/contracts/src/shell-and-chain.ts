@@ -437,31 +437,44 @@ const READ_ONLY_INSPECTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether a segment only inspects files: no redirection, no assignment prefix, and a first word
- * (quotes removed, no `/`) in the closed read-only list.
+ * Whether a segment only inspects named files: no redirection, no assignment prefix, a first word
+ * (quotes removed, no `/`) in the closed read-only list, and at least one file operand — never `-`
+ * and never a special file — so it reads no stdin. `grep`'s first operand is its pattern.
  */
 export function isReadOnlyInspectionSegment(text: string): boolean {
   const parsed = segmentWords(text);
   const first = parsed?.words[0];
-  return (
-    parsed !== undefined &&
-    !parsed.redirects &&
-    first !== undefined &&
-    !first.includes("/") &&
-    !first.includes("=") &&
-    READ_ONLY_INSPECTIONS.has(first)
-  );
+  if (
+    parsed === undefined ||
+    parsed.redirects ||
+    first === undefined ||
+    first.includes("/") ||
+    first.includes("=") ||
+    !READ_ONLY_INSPECTIONS.has(first)
+  )
+    return false;
+  const operands = parsed.words.slice(1).filter((word) => word === "-" || !word.startsWith("-"));
+  const files = first === "grep" ? operands.slice(1) : operands;
+  return files.length > 0 && files.every((file) => file !== "-" && isPlainFileTarget(file));
 }
 
 /**
  * Whether a chain's segment, as this device re-split it, may go unnamed by a plan's steps: its
- * `mkdir -p` setup under any splitter version, and from version 2 also a read-only inspection.
- * The cloud mirrors this rule for plans it addresses under `and-chain-segments-v2`.
+ * `mkdir -p` setup anywhere under any splitter version, and from version 2 also a read-only
+ * inspection `trailing` every named segment of the chain — a check before a named segment decided
+ * whether that segment ran, so leaving it out would change what the chain did. The cloud mirrors
+ * this rule for plans it addresses under `and-chain-segments-v2`.
  */
-export function isSkippableSegment(text: string, version: number): boolean {
+export function isSkippableSegment(
+  text: string,
+  version: number,
+  position: { trailing: boolean },
+): boolean {
   return (
     isOptionalSetupSegment(text) ||
-    (version >= SHELL_AND_CHAIN_SPLITTER_VERSION && isReadOnlyInspectionSegment(text))
+    (position.trailing &&
+      version >= SHELL_AND_CHAIN_SPLITTER_VERSION &&
+      isReadOnlyInspectionSegment(text))
   );
 }
 

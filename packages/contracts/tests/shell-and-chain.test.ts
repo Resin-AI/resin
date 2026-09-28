@@ -211,12 +211,20 @@ describe("splitting a shell && chain", () => {
     ).toBeUndefined();
   });
 
-  it("lets a version-2 chain skip only mkdir -p setup and closed-list read-only inspections", () => {
-    for (const text of ["cat out/sum", "sha256sum -c out/sum", "ls", "'cat' f", "grep -c x f"]) {
-      expect(isSkippableSegment(text, 2)).toBe(true);
-      expect(isSkippableSegment(text, 1)).toBe(false);
+  it("lets a version-2 chain skip mkdir -p anywhere and a file inspection only when trailing", () => {
+    const trailing = { trailing: true };
+    for (const text of [
+      "cat out/sum",
+      "sha256sum -c out/sum",
+      "ls out",
+      "'cat' f",
+      "grep -c x f",
+    ]) {
+      expect(isSkippableSegment(text, 2, trailing)).toBe(true);
+      expect(isSkippableSegment(text, 2, { trailing: false })).toBe(false);
+      expect(isSkippableSegment(text, 1, trailing)).toBe(false);
     }
-    expect(isSkippableSegment("mkdir -p out", 1)).toBe(true);
+    expect(isSkippableSegment("mkdir -p out", 1, { trailing: false })).toBe(true);
     for (const text of [
       "cat a > b",
       "cat f 2>&1",
@@ -227,8 +235,17 @@ describe("splitting a shell && chain", () => {
       "sort -o f g",
       "find . -delete",
       "rm f",
+      // Inspections reading stdin or a special file.
+      "cat",
+      "ls",
+      "cat -",
+      "cat f -",
+      "head /dev/stdin",
+      "cat /proc/self/environ",
+      "grep -q x",
+      "sha256sum -c",
     ])
-      expect(isSkippableSegment(text, 2)).toBe(false);
+      expect(isSkippableSegment(text, 2, trailing)).toBe(false);
   });
 
   it("splits only in POSIX shells", () => {

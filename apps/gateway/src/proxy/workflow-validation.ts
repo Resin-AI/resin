@@ -228,7 +228,8 @@ async function localDemonstration(
     for (let index = 0; index < address.count; index += 1) {
       if (indices.has(index)) continue;
       const text = segmentText({ ...address, index }, call);
-      if (text === undefined || !isSkippableSegment(text, address.version)) {
+      const trailing = index > Math.max(...indices);
+      if (text === undefined || !isSkippableSegment(text, address.version, { trailing })) {
         for (const stepId of steps) incoherent.add(stepId);
       }
     }
