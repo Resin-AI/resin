@@ -1,0 +1,4 @@
+# Check out text with LF on every platform. Release artifacts are built from LF sources and
+# pinned by SHA-256 (install-helper-v1.mjs), shebang scripts must keep `#!…\n`, and tests
+# compare exact bytes, so Windows checkouts must not convert to CRLF (core.autocrlf).
+* text=auto eol=lf
