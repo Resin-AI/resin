@@ -198,6 +198,13 @@ const KNOWN_SHELL_COMMANDS: readonly {
       event.connection === undefined &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "copilot-bash",
   },
+  {
+    argument: "command",
+    proves: (event) =>
+      event.toolName === "bash" &&
+      event.connection === undefined &&
+      event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "pi-bash",
+  },
 ];
 
 /** One observed call kept locally: its real values never leave this machine. */

@@ -8,6 +8,7 @@ import type {
   RawHarnessRecord,
   SourceCursor,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { PiRecordDecoder } from "../src/decoder.js";
 import { PiSessionEventSource } from "../src/source.js";
@@ -286,6 +287,21 @@ describe("PiRecordDecoder on recorded 0.87.1 sessions", () => {
     );
     // Written 22:58:40.738 (call) → 22:58:42.245 (result).
     expect(abortedResult).toMatchObject({ isError: true, executionDurationMs: 1507 });
+  });
+
+  it("marks only a built-in bash result that exited 0 as exited 0", async () => {
+    const results = (await decodeFixture("rpc-branch-model-bash-abort-compaction.jsonl")).filter(
+      (event) => event.type === "tool_result" && event.toolName === "bash",
+    );
+    expect(
+      results.map((event) => [
+        event.type === "tool_result" && event.isError,
+        event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY],
+      ]),
+    ).toEqual([
+      [false, "shell-exited-0"],
+      [true, undefined],
+    ]);
   });
 
   it("assigns unique, increasing causal sequences", async () => {

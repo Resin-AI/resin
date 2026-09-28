@@ -7,6 +7,7 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { piSessionIdFromPath, toPiSessionId } from "./discovery.js";
 import { parsePiMcpToolName } from "./extension.js";
 import { PI_HARNESS_ID } from "./paths.js";
@@ -438,13 +439,20 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
         const toolCallId = str(part.id) ?? "";
         const toolName = str(part.name) || "unknown";
         const mcp = parsePiMcpToolName(toolName);
+        const parameters = isRecord(part.arguments) ? part.arguments : {};
+        // MCP tools reach Pi through the bridge as `mcp__<server>__<tool>`, so a `bash` call with a
+        // command is Pi's built-in shell; only this decoder proves that, with a local-only marker.
+        const builtinShell = !mcp && toolName === "bash" && typeof parameters.command === "string";
         events.push({
-          ...this.base(ctx, { toolCallId }),
+          ...this.base(ctx, {
+            toolCallId,
+            ...(builtinShell ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "pi-bash" } : {}),
+          }),
           type: "tool_call",
           callId: piCallId(toolCallId),
           toolCallId,
           toolName,
-          parameters: isRecord(part.arguments) ? part.arguments : {},
+          parameters,
           ...(mcp ? { connection: mcp.server } : {}),
         });
       }
@@ -503,6 +511,11 @@ export class PiRecordDecoder implements HarnessRecordDecoder {
           ...(Number.isFinite(startedAt) ? {} : { executionDurationUnknown: true }),
           ...(details?.mcpServer ? { mcpServer: toJson(details.mcpServer) } : {}),
           ...(details?.mcpTool ? { mcpTool: toJson(details.mcpTool) } : {}),
+          // Pi's shell runs in the foreground and reports any non-zero exit, timeout or abort as
+          // an error, so a successful built-in `bash` result exited 0.
+          ...(toolName === "bash" && !details?.mcpServer && !isError
+            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+            : {}),
         }),
         type: "tool_result",
         callId: piCallId(toolCallId),
