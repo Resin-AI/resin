@@ -38,6 +38,7 @@ import {
   programTokenPath,
   scriptRecordFieldKeys,
   scriptTokenContextName,
+  shellCommandSite,
   tokenizeProgram,
   valueFlag,
 } from "@resin/contracts";
@@ -291,9 +292,17 @@ function programInputBaseName(
   value: string,
   tokens: readonly ProgramToken[],
   index: number,
+  language: ProgramLanguage,
 ): string {
   const flag = valueFlag(tokens, index);
-  return inputRoleName([{ value, ...(flag === undefined ? {} : { flag }) }]);
+  const command = language === "shell" ? shellCommandSite(tokens, index) : undefined;
+  return inputRoleName([
+    {
+      value,
+      ...(flag === undefined ? {} : { flag }),
+      ...(command === undefined ? {} : { command }),
+    },
+  ]);
 }
 
 /**
@@ -543,7 +552,7 @@ export function deriveNativeCalls(
           if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
           const base =
             (script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined) ??
-            programInputBaseName(token.value, tokens, tokenIndex);
+            programInputBaseName(token.value, tokens, tokenIndex, call.program.kind);
           name = base;
           for (let suffix = 2; programInputNames.has(name); suffix += 1) name = `${base}_${suffix}`;
           programInputs.set(key, name);
@@ -628,7 +637,7 @@ export function deriveNativeCalls(
               if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
               const base =
                 scriptTokenContextName(text, program.tokens, embeddedIndex) ??
-                programInputBaseName(value, program.tokens, embeddedIndex);
+                programInputBaseName(value, program.tokens, embeddedIndex, program.language);
               name = base;
               for (let suffix = 2; programInputNames.has(name); suffix += 1) {
                 name = `${base}_${suffix}`;
