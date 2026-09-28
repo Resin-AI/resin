@@ -865,6 +865,20 @@ describe("a held-out run of one segment of a recorded && chain", () => {
     });
   });
 
+  it("misses the segments when the held-out addresses skip a segment that is not mkdir -p setup", async () => {
+    const PLAN = "./reportctl extract --region EMEA && ./reportctl render --region EMEA";
+    const SKIPPED = report(
+      "apac",
+      "./reportctl extract --region APAC && rm -f cache.db && ./reportctl render --region APAC",
+    );
+    const answer = await ask(SKIPPED, 1, PLAN, [
+      { index: 0, count: 3, version: 1 },
+      { index: 2, count: 3, version: 1 },
+    ]);
+    expect(answer.verification?.status).not.toBe("verified");
+    expect(answer.verdicts.some((verdict) => verdict.confirmed)).toBe(false);
+  });
+
   it("misses the segment when the other chain recorded no exit code", async () => {
     // Not recorded through OMP's proven bash interface: nothing tells how the chain exited.
     const unproven: Turn[] = [

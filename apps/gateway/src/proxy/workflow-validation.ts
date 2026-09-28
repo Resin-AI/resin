@@ -23,6 +23,7 @@ import {
   type WorkflowJsonValue,
   type WorkflowStep,
   type WorkflowValuePath,
+  isOptionalSetupSegment,
   recordedPosixShell,
   shellAndChainSegmentText,
   workflowValidationPlanDigest,
@@ -176,6 +177,11 @@ async function localDemonstration(
   const named = new Set<string>();
   // A chain's segments name its one call in turn, each a later segment of it than the one before.
   const segmentNamed = new Map<string, SegmentAddress>();
+  // Each named chain's call, the segments of it the plan's steps ran, and those steps.
+  const chains = new Map<
+    string,
+    { call: LocalRecordedCall; address: SegmentAddress; indices: Set<number>; steps: string[] }
+  >();
   for (const step of recordedSteps) {
     const callIds = callIdsByStep.get(step.id);
     if (callIds === undefined) continue;
@@ -204,10 +210,28 @@ async function localDemonstration(
       if (address !== undefined && address !== null) segmentNamed.set(callId, address);
       const call = await localCalls.lookup(callId);
       if (call === undefined) return undefined;
+      if (address !== undefined && address !== null) {
+        const chain = chains.get(callId) ?? { call, address, indices: new Set(), steps: [] };
+        chain.indices.add(address.index);
+        chain.steps.push(step.id);
+        chains.set(callId, chain);
+      }
       calls.push(call);
       addresses.push(address ?? null);
     }
     located.push({ step, calls, addresses });
+  }
+  // The named segments of a chain are all of it: the plan may leave out only a segment that this
+  // device's own re-split shows to be `mkdir -p` setup. Leaving out anything else would let the plan
+  // stand for a run that did more than the plan does.
+  for (const { call, address, indices, steps } of chains.values()) {
+    for (let index = 0; index < address.count; index += 1) {
+      if (indices.has(index)) continue;
+      const text = segmentText({ ...address, index }, call);
+      if (text === undefined || !isOptionalSetupSegment(text)) {
+        for (const stepId of steps) incoherent.add(stepId);
+      }
+    }
   }
   if (located.length === 0) return undefined;
   // Where the plan's own calls ran: what the plan's working directories stand for.
@@ -356,14 +380,20 @@ function segmentCall(
   address: SegmentAddress,
   call: LocalRecordedCall,
 ): LocalRecordedCall | undefined {
+  const text = segmentText(address, call);
+  const program = call.callable.program;
+  if (text === undefined || program === undefined) return undefined;
+  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
+}
+
+/** A completed POSIX chain's segment text at `address`, as this device re-splits its recording. */
+function segmentText(address: SegmentAddress, call: LocalRecordedCall): string | undefined {
   const program = call.callable.program;
   if (call.exitCode !== 0 || call.result === undefined || program?.kind !== "shell")
     return undefined;
   const shell = recordedPosixShell(call.callable.name, call.arguments);
   if (shell === undefined) return undefined;
-  const text = shellAndChainSegmentText(shell, call.arguments[program.argument], address);
-  if (text === undefined) return undefined;
-  return { ...call, arguments: { ...call.arguments, [program.argument]: text } };
+  return shellAndChainSegmentText(shell, call.arguments[program.argument], address);
 }
 
 /** The JSON type of the value at `path`; undefined when absent, null, or not a declarable type. */

@@ -20,6 +20,7 @@ import {
   programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
+import { isOptionalSetupSegment } from "./shell-and-chain.js";
 
 export const RECORDED_WORKFLOW_SCHEMA_VERSION = 1 as const;
 /** Maximum setup cells a captured Python closure may require before it fails closed. */
@@ -895,6 +896,17 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
       errors.push(`step ${stepId} is toggled by unknown input ${name}`);
     } else if (input.type !== "boolean" || input.default !== true) {
       errors.push(`step ${stepId} toggle input ${name} must be a boolean defaulting to true`);
+    }
+    // A segment step may be skipped only when it is the chain's one setup that nothing else needs.
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    if (
+      Object.hasOwn(step, "segment") &&
+      (typeof program?.source !== "string" || !isOptionalSetupSegment(program.source))
+    ) {
+      errors.push(
+        `step ${stepId} is a segment that only a mkdir -p setup segment may make optional`,
+      );
     }
     const other = toggles.get(name);
     if (other !== undefined) {

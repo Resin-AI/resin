@@ -117,4 +117,18 @@ describe("segment steps of a recorded chain", () => {
     expect(withSegments([{ index: 2, count: 2, version: 1 }])).toBe(false);
     expect(withSegments([])).toBe(false);
   });
+
+  it("lets only a mkdir -p setup segment be optional", () => {
+    const toggled = (index: number) =>
+      validateRecordedWorkflow({
+        ...plan(
+          chain.map((step, at) =>
+            at === index ? { ...step, optional: { input: "setup" } } : step,
+          ),
+        ),
+        inputs: [{ name: "setup", type: "boolean", default: true }],
+      }).valid;
+    expect(toggled(0)).toBe(true);
+    expect(toggled(1)).toBe(false);
+  });
 });
