@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
   OpencodeRecordDecoder,
@@ -14,7 +15,6 @@ import {
 } from "@resin/adapter-opencode";
 import type { NormalizedSessionEvent } from "@resin/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { drain, rebuildSqliteStore } from "../../../../adapters/opencode/tests/helpers.js";
 import { InMemoryPrivateValueStore } from "../../src/analytics/private-value-store.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
@@ -30,13 +30,44 @@ const EXPORT = path.resolve(
 const SESSION = "ses_f19f661f4ffey02KX6HUoa2gMu";
 const WORKSPACE = "workspace-opencode-tool-capture";
 
+/** Rebuilds the OpenCode store (WAL, like OpenCode) from its `scripts/export-db.mjs` export. */
+function rebuildStore(dbPath: string): void {
+  const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  for (const line of fs.readFileSync(EXPORT, "utf8").split("\n")) {
+    if (line.trim().length === 0) continue;
+    const entry = JSON.parse(line) as {
+      schema?: string;
+      table?: string;
+      row?: Record<string, unknown>;
+    };
+    if (entry.schema) {
+      db.exec(entry.schema);
+      continue;
+    }
+    if (!entry.row) continue;
+    const columns = Object.keys(entry.row);
+    db.prepare(
+      `INSERT INTO "${entry.table}" (${columns.map((column) => `"${column}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    ).run(
+      ...columns.map((column) => {
+        const value = entry.row![column];
+        return typeof value === "object" && value !== null
+          ? JSON.stringify(value)
+          : (value as string | number | null);
+      }),
+    );
+  }
+  db.close();
+}
+
 let dir: string;
 let store: OpencodeSqliteStore;
 
 beforeAll(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-opencode-capture-"));
   const dbPath = path.join(dir, "opencode.db");
-  rebuildSqliteStore(dbPath, EXPORT);
+  rebuildStore(dbPath);
   store = new OpencodeSqliteStore(dbPath);
 });
 
@@ -56,7 +87,10 @@ async function capture(): Promise<NormalizedSessionEvent[]> {
     updatedAt: new Date(0).toISOString(),
     metadata: {},
   });
-  const records = await drain(source);
+  const records = [];
+  for (let batch = await source.readNext(50); batch.length > 0; batch = await source.readNext(50)) {
+    records.push(...batch);
+  }
   await source.close();
   const privateValues = new InMemoryPrivateValueStore();
   const pipeline = new NormalizationPipeline({ privateValueStore: privateValues });
