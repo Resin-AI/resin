@@ -157,9 +157,11 @@ function createEngineFixture(
     onSnapshot?: UpdateEngineOptions["onSnapshot"];
     useDefaultHealthProbe?: boolean;
     failStatusAfter?: number;
+    homeDir?: string;
+    customFetch?: typeof fetch;
   } = {},
 ) {
-  const homeDir = "/home/update-test";
+  const homeDir = options.homeDir ?? "/home/update-test";
   const resinHome = path.join(homeDir, ".resin");
   const versionPath = path.join(resinHome, "version.json");
   const configPath = path.join(resinHome, "config.json");
@@ -291,6 +293,7 @@ function createEngineFixture(
     probationMs: 0,
     clock: () => Date.parse("2026-08-28T00:00:00.000Z"),
     onSnapshot: options.onSnapshot,
+    customFetch: options.customFetch,
   });
   return {
     engine,
@@ -575,6 +578,61 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     const retry = await fixture.engine.run({ mode: "background" });
     expect(retry.status).toBe("quarantined");
     expect(fixture.events.filter((event) => event === "switch:1.1.0")).toHaveLength(1);
+  });
+
+  describe("probation health gate against a real daemon IPC health response", () => {
+    async function runAgainstCandidateReporting(daemonVersion: string) {
+      const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-health-gate-"));
+      const platformInfo = detectPlatform({ platform: "linux", arch: "x64", release: "6.8.0" });
+      // SAFETY: Mock supervisor implements the subset of DaemonSupervisor the IPC health path reads.
+      const supervisor = {
+        getConfig() {
+          return {};
+        },
+        async getHealth() {
+          return {
+            status: "fully-ready",
+            uptimeSeconds: 1,
+            startedAt: Date.now(),
+            version: daemonVersion,
+            modules: {},
+            timestamp: Date.now(),
+          };
+        },
+      } as unknown as DaemonSupervisor;
+      const server = new IpcServer({
+        supervisor,
+        socketPath: resolvePlatformPaths({ home: homeDir, platformInfo }).socketPath,
+      });
+      try {
+        await server.start();
+        const fixture = createEngineFixture({
+          useDefaultHealthProbe: true,
+          homeDir,
+          currentVersion: "1.0.92",
+          targetVersion: "1.0.93",
+          customFetch: (async () => Response.json({ status: "ok" })) as typeof fetch,
+        });
+        return await fixture.engine.run({ mode: "manual" });
+      } finally {
+        await server.stop().catch(() => {});
+        await fs.rm(homeDir, { recursive: true, force: true });
+      }
+    }
+
+    it("activates a candidate whose daemon reports the target release version", async () => {
+      const result = await runAgainstCandidateReporting("1.0.93");
+
+      expect(result.status).toBe("activated");
+      expect(result.error).toBeUndefined();
+    });
+
+    it("rolls back a candidate whose daemon reports a package version instead of the release", async () => {
+      const result = await runAgainstCandidateReporting("0.1.0");
+
+      expect(result).toMatchObject({ status: "rolled-back", rolledBack: true });
+      expect(result.error).toContain("daemon reports v0.1.0 instead of v1.0.93");
+    });
   });
 
   it("preserves and reports concurrent configuration changes during rollback", async () => {

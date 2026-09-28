@@ -51,24 +51,8 @@ import {
   TrajectoryCaptureRuntimeModule,
 } from "../trajectory-capture-module.js";
 
-function resolveVersion(): string {
-  const candidates = [
-    new URL("../../../../package.json", import.meta.url),
-    new URL("../../package.json", import.meta.url),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8"));
-      const parsedObj = z.object({ version: z.string().min(1) }).safeParse(parsed);
-      if (parsedObj.success) {
-        return parsedObj.data.version;
-      }
-    } catch {
-      // Continue to the next enclosing package candidate.
-    }
-  }
-  return "0.1.0";
-}
+/** The release version reported over IPC; set by `runDaemonCli` from the packaged entry. */
+let VERSION = "";
 
 const CloudPrivacySettingsSchema = z
   .object({
@@ -156,8 +140,6 @@ export async function readCloudTelemetryConsent(
   }
   return null;
 }
-
-const VERSION = process.env.RESIN_RELEASE_VERSION ?? resolveVersion();
 
 const RecoveryCircuitBreakerSchema = z.enum(["HEALTHY", "DEGRADED", "TRIPPED"]);
 type RecoveryCircuitBreaker = z.infer<typeof RecoveryCircuitBreakerSchema>;
@@ -1501,7 +1483,13 @@ async function main(entryFile: string): Promise<void> {
 export async function runDaemonCli(options: {
   /** The entry file the background child re-runs, so the registered modules come with it. */
   entryFile: string;
+  /**
+   * The release version the daemon reports (help, `--version`, IPC health). The entry resolves it
+   * from the release that contains it: this package's own version is not the release version.
+   */
+  version: string;
 }): Promise<void> {
+  VERSION = options.version;
   await main(options.entryFile).catch((err) => {
     const message = sanitizeStartupError(err);
     sendStartupMessage({

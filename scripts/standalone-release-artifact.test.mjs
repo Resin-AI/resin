@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -142,5 +142,55 @@ describe("standalone platform release artifact", () => {
     });
     expect(help).toContain("Resin CLI");
     expect(help).toContain("upgrade");
+  });
+
+  it("reports the release version over IPC from a daemon started through the packaged entry", async () => {
+    const hostAsset =
+      PLATFORMS.find(
+        (candidate) =>
+          candidate.os === process.platform && candidate.arch === process.arch && !candidate.isWsl,
+      ) ?? PLATFORMS.find((candidate) => candidate.id === "linux-x64");
+    const daemonExtractDir = path.join(tempRoot, "daemon-extract");
+    const home = path.join(tempRoot, "daemon-home");
+    fs.mkdirSync(daemonExtractDir, { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    execFileSync("tar", [
+      "-xzf",
+      path.join(releaseDir, hostAsset.filename),
+      "-C",
+      daemonExtractDir,
+    ]);
+    const daemon = path.join(daemonExtractDir, "resin", "bin", "resin-daemon");
+    // The daemon must not borrow a version from its environment: the release it runs from decides.
+    const env = { ...process.env, NODE_ENV: "production", HOME: home };
+    delete env.NODE_PATH;
+    delete env.RESIN_RELEASE_VERSION;
+    delete env.RESIN_HOME;
+    const run = (args) =>
+      promisify(execFile)(process.execPath, [daemon, ...args, "--home", home], {
+        cwd: outsideCwd,
+        env,
+      });
+
+    // A package version (0.1.0) here fails the update engine's probation health gate.
+    expect(RELEASE_VERSION).not.toBe("0.1.0");
+    const child = spawn(process.execPath, [daemon, "--foreground", "--home", home], {
+      cwd: outsideCwd,
+      env,
+      stdio: "ignore",
+    });
+    try {
+      let health;
+      for (let attempt = 0; attempt < 100 && !health; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const { stdout } = await run(["--status"]).catch(() => ({ stdout: "" }));
+        const start = stdout.indexOf("{");
+        if (start >= 0) health = JSON.parse(stdout.slice(start));
+      }
+      expect(health).toMatchObject({ status: "fully-ready", version: RELEASE_VERSION });
+    } finally {
+      await run(["--stop"]).catch(() => {});
+      if (child.exitCode === null) child.kill();
+    }
   });
 });
