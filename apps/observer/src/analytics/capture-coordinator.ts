@@ -283,7 +283,6 @@ interface GenericCoalescingBuffer {
   session: HarnessSession;
   validEvents: NormalizedSessionEvent[];
   projectedEvents: NormalizedSessionEvent[];
-  rawRecords: RawHarnessRecord[];
   acks: Array<() => Promise<void>>;
   timer: NodeJS.Timeout | null;
   /** Wall-clock time the pending timer fires; null when no timer is pending. */
@@ -1073,7 +1072,6 @@ export class TrajectoryCaptureCoordinator {
             session,
             validEvents: [],
             projectedEvents: [],
-            rawRecords: [],
             acks: [],
             timer: null,
             flushDueAtMs: null,
@@ -1092,7 +1090,6 @@ export class TrajectoryCaptureCoordinator {
         for (const event of projectedEvents) {
           buffer.projectedBytes += serializedByteLength(event);
         }
-        buffer.rawRecords.push(...records);
         buffer.acks.push(ack);
         buffer.telemetryRecordTimestampMs.push(...telemetryRecordTimestampMs);
         if (latestTail) {
