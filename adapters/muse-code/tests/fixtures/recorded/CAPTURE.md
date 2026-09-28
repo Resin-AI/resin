@@ -39,6 +39,7 @@ because the subagent's own log already counts those calls.
 | `1.4.0/full` | `bash` (`ls && git status`), `read_file`, `edit_file`, `write_file`, MCP `mcp__demo__add` on a local stdio server, a failing `bash` (`exit 3`), `subagent_spawn` + `subagent_wait`. Includes the explorer subagent log (2 model calls) and the `verify-reminder` observer log (1 model call). |
 | `1.4.0/abort` | A side-effecting `bash` (`echo start > started.txt && sleep 30 …`) sent SIGINT once `started.txt` exists; muse records the call as cancelled. |
 | `1.4.0/kill` | The same command with muse killed by SIGKILL once `started.txt` exists (`session.before-resume.jsonl` is the log at that moment: an effect started with no terminal record), then `muse exec --session-id <id>` resumes it (telling the model not to rerun it) and muse records "The outcome is unknown". |
+| `1.4.0/normalize` | Recorded 2026-09-28 with `muse exec --approval-mode never` (not by `capture.sh`), scrubbed with `scripts/harness-fixtures/scrub.mjs`: a text-normalization job (`tr` lowercase piped to `sed` whitespace collapse into `out1.txt`). The lead log only; muse linked `skill-reminder` observers before model turns and a `verify-reminder` at the end, none of which is a step the agent took. |
 
 ## Regenerate
 

@@ -127,7 +127,7 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
     ).toContain("Do these steps in order");
   });
 
-  it("links the spawned subagent and background observers to the lead session", async () => {
+  it("links the spawned subagent to the lead session and keeps background observers out of it", async () => {
     const events = await decodeLog(logPath("full", FULL_ID), FULL_ID);
     const lifecycle = ofType(events, "subagent_lifecycle");
     expect(lifecycle).toContainEqual(
@@ -138,15 +138,8 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
         parentId: FULL_ID,
       }),
     );
-    expect(lifecycle).toContainEqual(
-      expect.objectContaining({
-        subagentId: VERIFY_OBSERVER_ID,
-        lifecycleType: "spawn",
-        role: "observer:verify-reminder",
-      }),
-    );
-    expect(lifecycle.some((event) => event.role === "observer:skill-reminder")).toBe(true);
     expect(lifecycle.some((event) => event.lifecycleType === "settle")).toBe(true);
+    expect(lifecycle.map((event) => event.subagentId)).not.toContain(VERIFY_OBSERVER_ID);
   });
 
   it("counts every model call once, in the lead session and in subagent and observer logs", async () => {
@@ -166,6 +159,36 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
         expect(entry.totalTokens).toBe((entry.inputTokens ?? 0) + (entry.outputTokens ?? 0));
       }
     }
+  });
+});
+
+describe("muse 1.4.0 recorded text-normalization run: only the agent's own steps", () => {
+  const NORMALIZE_ID = "01a0e645-0cc9-78d0-a3ae-016e8021d2b6";
+  const normalizeLog = path.join(
+    RECORDED,
+    "normalize",
+    "sessions",
+    "2026",
+    "09",
+    "28",
+    NORMALIZE_ID,
+    "session.jsonl",
+  );
+
+  // Muse links a skill-reminder observer before most model turns and a verify-reminder at the end.
+  // Decoded as spawns, each became a standalone step of the learned workflow with no call behind it,
+  // so no muse run could reconcile with its recording and nothing was ever learned from muse.
+  it("decodes the bash steps with their results and no observer spawns between them", async () => {
+    const events = await decodeLog(normalizeLog, NORMALIZE_ID);
+    expect(ofType(events, "subagent_lifecycle")).toEqual([]);
+    const calls = ofType(events, "tool_call");
+    expect(calls.map((call) => call.toolName)).toEqual(["bash", "bash"]);
+    expect(String(calls[1]?.parameters.command)).toMatch(/^tr .* \| sed .* > out1\.txt/);
+    const results = ofType(events, "tool_result");
+    expect(results.map((result) => [result.callId, result.isError])).toEqual(
+      calls.map((call) => [call.callId, false]),
+    );
+    expect(String(results[1]?.result)).toContain('"exit_code": 0');
   });
 });
 

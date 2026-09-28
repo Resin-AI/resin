@@ -329,21 +329,11 @@ export class MuseRecordDecoder implements HarnessRecordDecoder {
         if (callId) state.outcomes.set(callId, "failed");
         return [];
       }
-      case "memory_reminder_child_session_linked": {
-        const child = asString(event.child_session_id);
-        if (!child) return [];
-        const agent = asString(event.reminder_agent_id);
-        return [
-          {
-            ...base,
-            type: "subagent_lifecycle",
-            subagentId: child,
-            lifecycleType: "spawn",
-            parentId: sessionId,
-            role: agent ? `observer:${agent}` : "observer",
-          },
-        ];
-      }
+      case "memory_reminder_child_session_linked":
+        // Muse starts background reminder observers on its own, not as a step the agent took. As
+        // spawns they became workflow steps with no call behind them, so no muse run could reconcile
+        // with its recording. Their logs are still discovered, and their usage counted, as children.
+        return [];
       case "terminal": {
         const flushed = this.flushUsage(state, base);
         if (event.terminal === "completed") {
