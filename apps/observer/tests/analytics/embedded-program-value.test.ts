@@ -267,6 +267,43 @@ describe("a value embedded in a recorded program", () => {
     ]);
   });
 
+  it("names the production backup pair's inputs by what each command does with them", () => {
+    const shell = (stepId: string, command: string) => ({
+      callId: `call_${stepId}`,
+      stepId,
+      toolName: "bash",
+      runtime: RESIN_PROCESS_RUNTIME,
+      arguments: { command },
+      program: { kind: "shell" as const, argument: "command" },
+    });
+    // Run A of the backup pair ReportPairing matched on production. `backups`, `data` and `zeta`
+    // are bare words the steps share, so they are offered; the commands say what each one is.
+    const commands = [
+      "mkdir -p backups",
+      "tar -czf backups/zeta-2025-11-19.tar.gz -C data zeta",
+      "sha256sum backups/zeta-2025-11-19.tar.gz > backups/zeta-2025-11-19.sha256",
+      "ls -l backups",
+      "tar -tzf backups/zeta-2025-11-19.tar.gz -C data zeta",
+    ];
+    const derivation = deriveNativeCalls(
+      commands.map((command, index) => shell(`step${index}`, command)),
+    );
+    const tokens = (stepId: string) => commands[Number(stepId.slice(4))]!.split(" ");
+    const named = Object.fromEntries(
+      derivation.candidates.flatMap((candidate) =>
+        candidate.proposed.kind === "input" && candidate.path.length === 2
+          ? [[tokens(candidate.stepId)[candidate.path[1] as number], candidate.proposed.name]]
+          : [],
+      ),
+    );
+    expect(named).toMatchObject({
+      backups: "directory",
+      data: "directory_2",
+      zeta: "folder",
+    });
+    expect(Object.values(named).filter((name) => /^text(_\d+)?$/u.test(name))).toEqual([]);
+  });
+
   it("offers a bare word the instruction named, from its first use", () => {
     const offered = (instruction: string) => {
       const { events } = record([

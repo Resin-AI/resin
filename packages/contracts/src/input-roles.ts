@@ -25,6 +25,24 @@ export interface InputSite {
   span?: { start: number; end: number };
   /** A harness-tool argument name the whole value is passed as. */
   argument?: string;
+  /** The shell command the whole token sits in, when the value is a shell word. */
+  command?: CommandSite;
+}
+
+/** Where a shell word sits in its simple command, read from the recorded program's tokens. */
+export interface CommandSite {
+  /** The executable's basename (`tar` for `/usr/bin/tar`). */
+  name: string;
+  /** The option whose value the word is (`-C`, `--directory`), if any. */
+  option?: string;
+  /** The word's 1-based position among the command's operands, if it is one. */
+  operand?: number;
+  /** How many operands the command has. */
+  operands: number;
+  /** The options that appear before the word. */
+  before: readonly string[];
+  /** The word is the target of an output redirection (`> sums.sha256`). */
+  redirect?: true;
 }
 
 /** A well-formed input name. */
@@ -72,6 +90,10 @@ function siteRole(site: InputSite): Role {
     const name = snake(site.flag);
     if (INPUT_NAME.test(name)) return { name, rank: 0 };
   }
+  // The command says what a whole word is for; a span is only part of the word it names.
+  const command = site.span === undefined ? site.command : undefined;
+  const commandRole = command === undefined ? undefined : commandSiteRole(command, site.value);
+  if (commandRole !== undefined) return { name: commandRole, rank: 1 };
   if (site.argument !== undefined) {
     const name = snake(site.argument);
     if (INPUT_NAME.test(name) && name !== "value" && name !== "input") return { name, rank: 1 };
@@ -190,4 +212,147 @@ export function valueFlag(tokens: readonly ProgramToken[], index: number): strin
         flagWord(tokens[at + 1]) !== undefined),
   );
   return switchElsewhere ? undefined : long;
+}
+
+const SHELL_SEPARATORS: Readonly<Record<string, true>> = {
+  "&&": true,
+  "||": true,
+  ";": true,
+  "|": true,
+  "|&": true,
+  "(": true,
+  ")": true,
+  "&": true,
+  "\n": true,
+};
+
+/** Short options that take the next word as their value, per command. */
+const VALUE_OPTIONS: Readonly<Record<string, string>> = {
+  tar: "CfTXbK",
+  mkdir: "m",
+  cp: "tS",
+  mv: "tS",
+};
+
+const CHECKSUM_COMMANDS: Readonly<Record<string, true>> = {
+  md5sum: true,
+  sha1sum: true,
+  sha224sum: true,
+  sha256sum: true,
+  sha384sum: true,
+  sha512sum: true,
+  b2sum: true,
+  cksum: true,
+};
+
+/**
+ * The role a command's own semantics give a word. Only clear cases: a directory `mkdir` creates,
+ * the directory `tar -C` changes to and the member it then archives, the file a checksum command
+ * checks, the source and destination of a copy or move, and a redirect written as a checksum file.
+ */
+function commandSiteRole(command: CommandSite, value: string | undefined): string | undefined {
+  const { name, option, operand, operands, before } = command;
+  if (command.redirect) {
+    return value !== undefined && /\.(sha(1|224|256|384|512)(sum)?|md5(sum)?)$/iu.test(value)
+      ? "checksum_path"
+      : undefined;
+  }
+  if (name === "mkdir" && operand !== undefined) return "directory";
+  if (name === "tar") {
+    if (option === "-C" || option === "--directory") return "directory";
+    if (operand !== undefined && before.some((word) => word === "-C" || word === "--directory")) {
+      return "folder";
+    }
+    return undefined;
+  }
+  if (CHECKSUM_COMMANDS[name] === true && operand !== undefined) {
+    return before.some((word) => word === "--check" || /^-[A-Za-z]*c[A-Za-z]*$/u.test(word))
+      ? "checksum_path"
+      : undefined;
+  }
+  if (name === "cp" || name === "mv") {
+    if (option === "-t" || option === "--target-directory") return "destination_path";
+    if (operand === undefined || operands < 2) return undefined;
+    if (before.some((word) => word === "-t" || word.startsWith("--target-directory"))) {
+      return "source_path";
+    }
+    return operand === operands ? "destination_path" : "source_path";
+  }
+  return undefined;
+}
+
+/**
+ * Where the shell word at `index` sits in its simple command: the command's name, the option it is
+ * the value of or its operand position, and the options before it. `undefined` for the command word
+ * itself, an assignment, an operator, or a word outside any command.
+ */
+export function shellCommandSite(
+  tokens: readonly ProgramToken[],
+  index: number,
+): CommandSite | undefined {
+  if (tokens[index]?.kind === "operator") return undefined;
+  let start = index;
+  while (start > 0 && SHELL_SEPARATORS[tokens[start - 1]!.raw] !== true) start -= 1;
+  let end = index;
+  while (end + 1 < tokens.length && SHELL_SEPARATORS[tokens[end + 1]!.raw] !== true) end += 1;
+  let at = start;
+  while (at <= end && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[at]!.raw)) at += 1;
+  const commandWord = tokens[at];
+  if (at >= index || commandWord === undefined || typeof commandWord.value !== "string") {
+    return undefined;
+  }
+  const name = commandWord.value.split("/").at(-1) ?? commandWord.value;
+  const valueOptions = VALUE_OPTIONS[name] ?? "";
+  const before: string[] = [];
+  const operandIndexes: number[] = [];
+  let found: { option?: string; redirect?: true; before: string[] } | undefined;
+  let endOfOptions = false;
+  for (let position = at + 1; position <= end; position += 1) {
+    const token = tokens[position]!;
+    if (token.kind === "operator") {
+      // A redirection's target is the next word; it is neither an option nor an operand.
+      if (/^\d*(>|>>|>\||&>)$/u.test(token.raw) && position + 1 <= end) {
+        if (position + 1 === index) found = { redirect: true, before: [...before] };
+        position += 1;
+      } else if (/^\d*</u.test(token.raw)) {
+        position += 1;
+      }
+      continue;
+    }
+    const raw = token.raw;
+    if (!endOfOptions && raw === "--") {
+      endOfOptions = true;
+      continue;
+    }
+    if (!endOfOptions && raw.startsWith("-") && raw.length > 1) {
+      if (position === index) return undefined;
+      before.push(raw);
+      const long = /^--([A-Za-z][A-Za-z0-9-]*)$/u.exec(raw)?.[1];
+      const takesValue =
+        long !== undefined
+          ? (name === "tar" && (long === "directory" || long === "file")) ||
+            ((name === "cp" || name === "mv") && long === "target-directory")
+          : !raw.startsWith("--") && valueOptions.includes(raw.at(-1)!);
+      if (takesValue && position + 1 <= end) {
+        const option = long === undefined ? `-${raw.at(-1)}` : raw;
+        if (position + 1 === index) found = { option, before: [...before] };
+        position += 1;
+      }
+      continue;
+    }
+    if (position === index) found = { before: [...before] };
+    operandIndexes.push(position);
+  }
+  if (found === undefined) return undefined;
+  const operand = operandIndexes.indexOf(index);
+  return {
+    name,
+    operands: operandIndexes.length,
+    before: found.before,
+    ...(found.option === undefined ? {} : { option: found.option }),
+    ...(operand < 0 || found.option !== undefined || found.redirect
+      ? {}
+      : { operand: operand + 1 }),
+    ...(found.redirect ? { redirect: true as const } : {}),
+  };
 }
