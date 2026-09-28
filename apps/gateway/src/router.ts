@@ -316,7 +316,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     if (!tool) {
       throw new McpProtocolError(
         MCP_ERROR_CODES.TOOL_NOT_FOUND,
-        this.registry.retiredToolMessage(name) ?? `Tool '${name}' not found`,
+        this.registry.retiredToolMessage(name, context.workspaceId) ?? `Tool '${name}' not found`,
       );
     }
     // `for_each` on a learned tool is one ordinary call per value: each run is gated,

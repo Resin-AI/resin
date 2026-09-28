@@ -879,6 +879,24 @@ export class ManagedToolAccess {
     return this.entries(tool).some((record) => sameEntry(tool, record.entry));
   }
 
+  /**
+   * Whether this account recorded exactly `entry` into the lock at `lockPath` while syncing
+   * `workspaceId`: only then is the entry that workspace's catalog to retire. A lock written
+   * under another account or workspace has no such receipt.
+   */
+  ownsLockEntry(entry: V1LockedToolEntry, workspaceId: string, lockPath: string): boolean {
+    const identity = this.identity;
+    if (!identity) return false;
+    const owner = this.ownerKey(identity);
+    return this.entries(entry).some(
+      (record) =>
+        record.owner === owner &&
+        record.workspaceId === workspaceId &&
+        record.lockPath === lockPath &&
+        sameEntry(entry, record.entry),
+    );
+  }
+
   private identityMatchesConfirmation(confirmation: ManagedToolConfirmation): boolean {
     const identity = this.identity;
     if (!identity) return false;
