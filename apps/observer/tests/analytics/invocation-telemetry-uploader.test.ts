@@ -338,47 +338,118 @@ describe("InvocationTelemetryUploader", () => {
 
     vi.useRealTimers();
   });
-  it("dead-letters a batch the cloud rejects with HTTP 400 so later telemetry still uploads", async () => {
-    await store.audit.recordInvocation(
-      makeInvocation({ invocationId: "inv_poison_1", workspaceId: "ws_poison" }),
-    );
-    const sendTelemetryBatch = vi
-      .fn()
-      .mockImplementation(
-        async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
-          if (input.invocations.some((inv) => inv.invocationId === "inv_poison_1")) {
-            throw new ProtocolError("validation", "Telemetry batch request failed with HTTP 400", {
-              status: 400,
-            });
-          }
-          return {
-            batchId: "tb_ok",
-            status: "accepted",
-            processedCount: input.invocations.length,
-          };
-        },
+  it("retires every pending record of a forbidden workspace in one cycle, sends it no more, and logs one summary", async () => {
+    for (let i = 1; i <= 3; i++) {
+      await store.audit.recordInvocation(
+        makeInvocation({
+          invocationId: `inv_forbidden_${i}`,
+          workspaceId: "ws_forbidden",
+          startedAt: `2026-08-27T10:00:0${i}.000Z`,
+        }),
       );
+    }
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_healthy_1",
+        workspaceId: "ws_healthy",
+        startedAt: "2026-08-27T10:00:09.000Z",
+      }),
+    );
+
+    const sentWorkspaces: string[] = [];
+    const mockCloudClient = {
+      sendTelemetryBatch: vi
+        .fn()
+        .mockImplementation(
+          async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
+            const localWorkspace = input.invocations[0]?.workspaceId ?? "";
+            sentWorkspaces.push(localWorkspace);
+            if (localWorkspace === "ws_forbidden") {
+              throw new ResourceForbiddenError(
+                `Cloud request forbidden for workspace ${localWorkspace}`,
+                { workspaceId: localWorkspace },
+              );
+            }
+            return {
+              batchId: `tb_${localWorkspace}`,
+              status: "accepted",
+              processedCount: input.invocations.length,
+            };
+          },
+        ),
+    } as unknown as CloudObservationClient;
+
+    // A batch smaller than the backlog: the forbidden workspace's unread rows must go too.
     const uploader = new InvocationTelemetryUploader({
       auditRepository: store.audit,
-      cloudClient: { sendTelemetryBatch } as unknown as CloudObservationClient,
+      cloudClient: mockCloudClient,
+      logger: mockLogger,
+      batchSize: 2,
+    });
+
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
+    expect(sentWorkspaces).toEqual(["ws_forbidden"]);
+    expect(store.audit.listPendingInvocationUploads(10).map((r) => r.invocationId)).toEqual([
+      "inv_healthy_1",
+    ]);
+    expect((await store.audit.getInvocation("inv_forbidden_3"))?.status).toBe("success");
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Dropped invocation telemetry for workspaces this device is not enrolled in",
+      { workspaces: 1, records: 3 },
+    );
+
+    // New records for the refused workspace are retired without another request.
+    await store.audit.recordInvocation(
+      makeInvocation({ invocationId: "inv_forbidden_4", workspaceId: "ws_forbidden" }),
+    );
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+    expect(sentWorkspaces).toEqual(["ws_forbidden", "ws_healthy"]);
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+  });
+
+  it("sends error details within the cloud's limits and dead-letters a batch the cloud permanently rejects", async () => {
+    const longMessage =
+      "Missing required parameter 'cwd'; Missing required parameter 'arg0'; Unrecognized parameter 'executable' (additional properties not allowed)";
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_long_error",
+        workspaceId: "ws_alpha",
+        status: "error",
+        errorDetails: { errorType: "E".repeat(80), message: longMessage, stack: "at x (y.ts:1)" },
+      }),
+    );
+
+    const sent: SendTelemetryBatchInput[] = [];
+    const mockCloudClient = {
+      sendTelemetryBatch: vi.fn().mockImplementation(async (input: SendTelemetryBatchInput) => {
+        sent.push(input);
+        throw new ProtocolError("validation", "Telemetry batch request failed with HTTP 400", {
+          status: 400,
+        });
+      }),
+    } as unknown as CloudObservationClient;
+    const uploader = new InvocationTelemetryUploader({
+      auditRepository: store.audit,
+      cloudClient: mockCloudClient,
       logger: mockLogger,
     });
 
-    for (let cycle = 0; cycle < 3; cycle++) {
-      expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
-    }
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
-    expect((await store.audit.getInvocation("inv_poison_1"))?.status).toBe("error");
-    const deadLetters = store.conn.all<{ error_reason: string }>(
-      "SELECT error_reason FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch'",
-    );
-    expect(deadLetters).toHaveLength(1);
-    expect(deadLetters[0]?.error_reason).toContain("HTTP 400");
+    await uploader.flushOnce();
+    const details = sent[0]?.invocations[0]?.errorDetails;
+    expect(details?.errorType.length).toBe(64);
+    expect(details?.message.length).toBeLessThanOrEqual(128);
+    expect(details?.message.startsWith("Missing required parameter 'cwd'")).toBe(true);
+    expect(details?.stack).toBeUndefined();
 
-    await store.audit.recordInvocation(
-      makeInvocation({ invocationId: "inv_after_1", workspaceId: "ws_poison" }),
+    // One attempt, then dead-lettered: the next cycle sends nothing.
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+    await uploader.flushOnce();
+    expect(mockCloudClient.sendTelemetryBatch).toHaveBeenCalledTimes(1);
+    const deadLetters = store.conn.all<{ status: string }>(
+      "SELECT status FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';",
     );
-    expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+    expect(deadLetters).toEqual([{ status: "exhausted" }]);
   });
 
   it("keeps retrying a batch rate limited with HTTP 429", async () => {
@@ -400,103 +471,5 @@ describe("InvocationTelemetryUploader", () => {
       await uploader.flushOnce();
     }
     expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
-  });
-
-  it("dead-letters after bounded retries on ResourceForbiddenError and continues with the next batch", async () => {
-    await store.audit.recordInvocation(
-      makeInvocation({
-        invocationId: "inv_forbidden_1",
-        workspaceId: "ws_forbidden",
-      }),
-    );
-    await store.audit.recordInvocation(
-      makeInvocation({
-        invocationId: "inv_healthy_1",
-        workspaceId: "ws_healthy",
-      }),
-    );
-
-    const mockCloudClient = {
-      sendTelemetryBatch: vi
-        .fn()
-        .mockImplementation(
-          async (input: SendTelemetryBatchInput): Promise<TelemetryBatchResponse> => {
-            const localWorkspace = input.invocations[0]?.workspaceId;
-            if (localWorkspace === "ws_forbidden") {
-              throw new ResourceForbiddenError(
-                `Cloud request forbidden for workspace ${localWorkspace}`,
-                { workspaceId: localWorkspace },
-              );
-            }
-            return {
-              batchId: `tb_${input.workspaceId}`,
-              status: "accepted",
-              processedCount: input.invocations.length,
-            };
-          },
-        ),
-    } as unknown as CloudObservationClient;
-
-    const uploader = new InvocationTelemetryUploader({
-      auditRepository: store.audit,
-      cloudClient: mockCloudClient,
-      logger: mockLogger,
-    });
-
-    // Cycle 1: ws_forbidden fails (attempt 1/3); ws_healthy succeeds
-    const first = await uploader.flushOnce();
-    expect(first).toEqual({ uploaded: 1 });
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      "Failed to upload invocation telemetry batch for workspace",
-      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 1 }),
-    );
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
-
-    // Cycle 2: ws_forbidden fails (attempt 2/3)
-    const second = await uploader.flushOnce();
-    expect(second).toEqual({ uploaded: 0 });
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      "Failed to upload invocation telemetry batch for workspace",
-      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 2 }),
-    );
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
-
-    // Cycle 3: ws_forbidden fails (attempt 3/3) -> dead-lettered and marked failed
-    const third = await uploader.flushOnce();
-    expect(third).toEqual({ uploaded: 0 });
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      "Failed to upload invocation telemetry batch for workspace",
-      expect.objectContaining({ workspaceId: "ws_forbidden", retries: 3, exhausted: true }),
-    );
-
-    // No rows remain pending!
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
-
-    // Verify row status in database was marked as error
-    const invRow = await store.audit.getInvocation("inv_forbidden_1");
-    expect(invRow?.status).toBe("error");
-
-    // Verify dead letter was recorded
-    const deadLetters = store.conn.all<{
-      dead_letter_id: string;
-      original_event_type: string;
-      status: string;
-      retry_count: number;
-    }>("SELECT * FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';");
-    expect(deadLetters).toHaveLength(1);
-    expect(deadLetters[0].original_event_type).toBe("invocation_telemetry_batch");
-    expect(deadLetters[0].status).toBe("exhausted");
-    expect(deadLetters[0].retry_count).toBe(3);
-
-    // Cycle 4: a new batch for ws_next succeeds without being blocked by previous dead-letter
-    await store.audit.recordInvocation(
-      makeInvocation({
-        invocationId: "inv_next_1",
-        workspaceId: "ws_next",
-      }),
-    );
-    const fourth = await uploader.flushOnce();
-    expect(fourth).toEqual({ uploaded: 1 });
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
   });
 });

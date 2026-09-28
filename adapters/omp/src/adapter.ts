@@ -30,6 +30,7 @@ import {
   type OmpDiscoveryCatalog,
   type OmpDiscoveryOptions,
   type ParsedTranscript,
+  type TranscriptDirectoryCache,
   buildOmpDiscoveryCatalog,
   discoverOmpSessions,
   discoverOmpWorkspaces,
@@ -72,6 +73,8 @@ interface TranscriptInspectionCacheEntry {
 
 // Matches inspectTranscriptFile's stale-to-idle threshold.
 const TRANSCRIPT_STATUS_SETTLE_MS = 60_000;
+// Scans between full sweeps of dormant transcripts and quiet directories (a scan runs every 10 s).
+const FULL_SWEEP_EVERY_SCANS = 6;
 
 async function getTranscriptFileIdentity(filePath: string): Promise<TranscriptFileIdentity | null> {
   try {
@@ -125,6 +128,13 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   private discoveryOptions?: OmpDiscoveryOptions;
   private cachedCatalog?: OmpDiscoveryCatalog;
   private readonly transcriptCache = new Map<string, TranscriptInspectionCacheEntry>();
+  private readonly directoryCache: TranscriptDirectoryCache = {
+    listings: new Map(),
+    missing: new Set(),
+    revalidateQuiet: true,
+  };
+  private dormantTranscripts = new Set<string>();
+  private scansSinceFullSweep = 0;
   private workspaceListInFlight?: Promise<HarnessWorkspace[]>;
   constructor(options?: OmpHarnessAdapterOptions & OmpDiscoveryOptions) {
     this.fsBridge = options?.fsBridge;
@@ -169,13 +179,35 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
   }
 
   private async refreshWorkspaceCatalog(): Promise<HarnessWorkspace[]> {
-    const discoveryOptions = this.discoveryOptions;
+    // Dormant transcripts and quiet directories dominate a long-lived OMP home. Re-checking every
+    // one of them on every scan costs a stat each; revisit them only on a periodic full sweep.
+    // New files and changed directories are never skipped, so new sessions appear next scan.
+    const fullSweep = this.scansSinceFullSweep === 0;
+    this.scansSinceFullSweep = (this.scansSinceFullSweep + 1) % FULL_SWEEP_EVERY_SCANS;
+    this.directoryCache.revalidateQuiet = fullSweep;
+    const discoveryOptions = { ...this.discoveryOptions, directoryCache: this.directoryCache };
     if (
-      discoveryOptions?.activeOnly !== false ||
+      discoveryOptions.activeOnly !== false ||
       discoveryOptions.inspectTranscript ||
       discoveryOptions.onInspectTranscript
     ) {
-      const catalog = await buildOmpDiscoveryCatalog(discoveryOptions);
+      const inspectTranscript = discoveryOptions.inspectTranscript ?? inspectTranscriptFile;
+      // A transcript is dormant when inspection found nothing to follow, e.g. it has been
+      // untouched for longer than the active window.
+      const dormant = new Set<string>();
+      const catalog = await buildOmpDiscoveryCatalog({
+        ...discoveryOptions,
+        inspectTranscript: async (filePath, options) => {
+          if (!fullSweep && this.dormantTranscripts.has(filePath)) {
+            dormant.add(filePath);
+            return null;
+          }
+          const transcript = await inspectTranscript(filePath, options);
+          if (transcript === null) dormant.add(filePath);
+          return transcript;
+        },
+      });
+      this.dormantTranscripts = dormant;
       this.transcriptCache.clear();
       this.cachedCatalog = catalog;
       return catalog.workspaces;

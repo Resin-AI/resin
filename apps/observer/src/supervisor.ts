@@ -79,11 +79,18 @@ export interface DaemonSupervisorOptions {
   enableSignalHandlers?: boolean;
 }
 
+/** Identical warnings (same message text) are emitted at most once per window. */
+export const WARNING_REPEAT_WINDOW_MS = 10 * 60_000;
+const MAX_TRACKED_WARNINGS = 512;
+
 export class DefaultLogger implements Logger {
   private logLevel: string;
+  private readonly now: () => number;
+  private readonly recentWarnings = new Map<string, { emittedAt: number; suppressed: number }>();
 
-  constructor(logLevel = "info") {
+  constructor(logLevel = "info", now: () => number = Date.now) {
     this.logLevel = logLevel;
+    this.now = now;
   }
 
   setLogLevel(level: string): void {
@@ -103,9 +110,27 @@ export class DefaultLogger implements Logger {
   }
 
   warn(msg: string, meta?: JsonObject): void {
-    if (this.logLevel !== "silent" && this.logLevel !== "error") {
-      console.warn(`[WARN] ${msg}`, meta ?? "");
+    if (this.logLevel === "silent" || this.logLevel === "error") {
+      return;
     }
+    const now = this.now();
+    const recent = this.recentWarnings.get(msg);
+    if (recent && now - recent.emittedAt < WARNING_REPEAT_WINDOW_MS) {
+      recent.suppressed += 1;
+      return;
+    }
+    this.recentWarnings.delete(msg);
+    if (this.recentWarnings.size >= MAX_TRACKED_WARNINGS) {
+      // Map iteration is insertion order, so the first key is the oldest emission.
+      const oldest = this.recentWarnings.keys().next().value;
+      if (oldest !== undefined) this.recentWarnings.delete(oldest);
+    }
+    this.recentWarnings.set(msg, { emittedAt: now, suppressed: 0 });
+    const repeats = recent?.suppressed ?? 0;
+    console.warn(
+      `[WARN] ${msg}`,
+      repeats > 0 ? { ...meta, suppressedRepeats: repeats } : (meta ?? ""),
+    );
   }
 
   error(msg: string, meta?: JsonObject): void {

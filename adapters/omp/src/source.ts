@@ -21,6 +21,8 @@ const MAX_OMP_PROGRAM_ARTIFACT_BYTES = 1 * 1024 * 1024;
 const MAX_OMP_PROGRAM_ARTIFACT_ID_LENGTH = 20;
 const OMP_PROGRAM_ARTIFACT_SUFFIX = ".eval.log";
 const OMP_PROGRAM_ARTIFACT_ID_RE = /^(?:0|[1-9]\d*)$/u;
+/** Initial read window per readNext; widened only for a single line longer than it. */
+const OMP_READ_CHUNK_BYTES = 64 * 1024;
 
 export type OmpProgramObservation =
   | {
@@ -481,103 +483,112 @@ export class OmpSessionEventSource implements SessionEventSource {
     }
     if (this.forkedAt === undefined) this.forkedAt = await readOmpForkStart(filePath);
 
-    const bytesAvailable = stat.size - this.currentCursor.offset;
-    if (bytesAvailable <= 0) {
-      return [];
-    }
-
-    const fd = await fsp.open(filePath, "r");
-    let rawChunk = "";
-    try {
-      const buffer = Buffer.alloc(bytesAvailable);
-      const { bytesRead } = await fd.read(buffer, 0, bytesAvailable, this.currentCursor.offset);
-      rawChunk = buffer.toString("utf8", 0, bytesRead);
-    } finally {
-      await fd.close();
-    }
-
-    if (rawChunk.length === 0) {
+    if (stat.size - this.currentCursor.offset <= 0) {
       return [];
     }
 
     const records: RawHarnessRecord[] = [];
-    let lineStart = 0;
+    const fd = await fsp.open(filePath, "r");
+    try {
+      // Read only as far as the batch needs: a large backlog is walked one bounded chunk per
+      // call instead of re-reading everything to EOF, and each line is decoded from its own
+      // bytes so records never pin a whole-backlog string.
+      let chunkBytes = OMP_READ_CHUNK_BYTES;
+      while (records.length < limit) {
+        const remaining = stat.size - this.currentCursor.offset;
+        if (remaining <= 0) break;
+        const toRead = Math.min(remaining, chunkBytes);
+        const buffer = Buffer.allocUnsafe(toRead);
+        const { bytesRead } = await fd.read(buffer, 0, toRead, this.currentCursor.offset);
+        if (bytesRead === 0) break;
+        const chunk = buffer.subarray(0, bytesRead);
 
-    while (lineStart < rawChunk.length && records.length < limit) {
-      const newlineIndex = rawChunk.indexOf("\n", lineStart);
-      if (newlineIndex === -1) {
-        // Trailing line fragment is incomplete, leave for next read
-        break;
-      }
-
-      const line = rawChunk.slice(lineStart, newlineIndex);
-      const lineSliceWithNewline = rawChunk.slice(lineStart, newlineIndex + 1);
-      const lineByteLength = Buffer.byteLength(lineSliceWithNewline, "utf8");
-
-      lineStart = newlineIndex + 1;
-      this.currentCursor.offset += lineByteLength;
-      this.currentCursor.sequence += 1;
-      this.currentCursor.timestamp = new Date().toISOString();
-
-      const trimmed = line.trim();
-      if (trimmed.length > 0 && !this.isInheritedEntry(trimmed)) {
-        const recordId = `${this.session.sessionId}-rec-${this.currentCursor.sequence}`;
-        let parsedPayload: unknown = trimmed;
-        let timestamp = new Date().toISOString();
-        let recordType: RecordType = "transcript_line";
-
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed instanceof Object && !Array.isArray(parsed)) {
-            // SAFETY: Parsed JSON represents a structured transcript record object.
-            const obj = parsed as {
-              timestamp?: string | number;
-              updatedAt?: string | number;
-              time?: string | number;
-              ts?: string | number;
-              role?: string;
-              type?: string;
-              event?: string;
-              kind?: string;
-              toolCall?: object;
-              tool_call?: object;
-              toolResult?: object;
-              tool_result?: object;
-            };
-            parsedPayload = parsed;
-            const ts = obj.timestamp ?? obj.updatedAt ?? obj.time ?? obj.ts;
-            if (ts !== undefined) {
-              timestamp = String(ts);
-            }
-            recordType = this.classifyRecordType(obj);
-          }
-        } catch {
-          parsedPayload = trimmed;
-          recordType = "transcript_line";
+        let lineStart = 0;
+        while (lineStart < chunk.length && records.length < limit) {
+          const newlineIndex = chunk.indexOf(0x0a, lineStart);
+          if (newlineIndex === -1) break;
+          const line = chunk.toString("utf8", lineStart, newlineIndex);
+          this.currentCursor.offset += newlineIndex + 1 - lineStart;
+          lineStart = newlineIndex + 1;
+          const record = await this.toRecord(line, filePath);
+          if (record) records.push(record);
+          this.currentCursor.line += 1;
         }
-        const record: RawHarnessRecord = {
-          recordId,
-          sessionId: this.session.sessionId,
-          harnessId: "omp",
-          sequenceNumber: this.currentCursor.sequence,
-          timestamp,
-          cursor: { ...this.currentCursor },
-          rawPayload: trimmed,
-          recordType,
-          metadata: {
-            transcriptPath: filePath,
-            lineNumber: this.currentCursor.line,
-            byteOffset: this.currentCursor.offset,
-          },
-        };
-        await populateOmpProgramObservation(record, parsedPayload, filePath);
-        records.push(record);
-      }
 
-      this.currentCursor.line += 1;
+        if (lineStart === 0) {
+          // No complete line in this chunk: stop at an incomplete trailing line, otherwise
+          // the line is longer than the chunk, so widen the window until it fits.
+          if (bytesRead === remaining) break;
+          chunkBytes *= 2;
+        }
+      }
+    } finally {
+      await fd.close();
     }
 
     return records;
+  }
+
+  /** Builds the record for one complete transcript line, or null for blank/inherited lines. */
+  private async toRecord(line: string, filePath: string): Promise<RawHarnessRecord | null> {
+    this.currentCursor.sequence += 1;
+    this.currentCursor.timestamp = new Date().toISOString();
+
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || this.isInheritedEntry(trimmed)) {
+      return null;
+    }
+    const recordId = `${this.session.sessionId}-rec-${this.currentCursor.sequence}`;
+    let parsedPayload: unknown = trimmed;
+    let timestamp = new Date().toISOString();
+    let recordType: RecordType = "transcript_line";
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed instanceof Object && !Array.isArray(parsed)) {
+        // SAFETY: Parsed JSON represents a structured transcript record object.
+        const obj = parsed as {
+          timestamp?: string | number;
+          updatedAt?: string | number;
+          time?: string | number;
+          ts?: string | number;
+          role?: string;
+          type?: string;
+          event?: string;
+          kind?: string;
+          toolCall?: object;
+          tool_call?: object;
+          toolResult?: object;
+          tool_result?: object;
+        };
+        parsedPayload = parsed;
+        const ts = obj.timestamp ?? obj.updatedAt ?? obj.time ?? obj.ts;
+        if (ts !== undefined) {
+          timestamp = String(ts);
+        }
+        recordType = this.classifyRecordType(obj);
+      }
+    } catch {
+      parsedPayload = trimmed;
+      recordType = "transcript_line";
+    }
+    const record: RawHarnessRecord = {
+      recordId,
+      sessionId: this.session.sessionId,
+      harnessId: "omp",
+      sequenceNumber: this.currentCursor.sequence,
+      timestamp,
+      cursor: { ...this.currentCursor },
+      rawPayload: trimmed,
+      recordType,
+      metadata: {
+        transcriptPath: filePath,
+        lineNumber: this.currentCursor.line,
+        byteOffset: this.currentCursor.offset,
+      },
+    };
+    await populateOmpProgramObservation(record, parsedPayload, filePath);
+    return record;
   }
 
   /** A copied parent entry: a non-header record timestamped before this fork began. */

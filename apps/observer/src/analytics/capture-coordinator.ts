@@ -750,7 +750,7 @@ export class TrajectoryCaptureCoordinator {
             this.activeGenericSessions.add(sessionId);
           }
         } else {
-          this.logger?.info(
+          this.logger?.debug(
             `Session ${sessionId} has no trajectory attribution; processing as generic observation session`,
           );
           this.genericSessions.add(sessionId);

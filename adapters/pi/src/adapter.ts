@@ -23,6 +23,7 @@ import {
 } from "@resin/harness-contracts";
 import {
   PI_TESTED_VERSIONS,
+  type PiHeaderCache,
   piWorkspaceId,
   probePiInstallation,
   scanPiTranscripts,
@@ -55,6 +56,7 @@ export class PiHarnessAdapter implements StrictHarnessAdapter {
   private readonly extraSessionDirs: readonly string[];
   private readonly fsBridge: ConfigFsBridge;
   private readonly now: () => number;
+  private readonly headerCache: PiHeaderCache = new Map();
 
   constructor(options: PiHarnessAdapterOptions = {}) {
     this.home = options.home ?? os.homedir();
@@ -79,6 +81,7 @@ export class PiHarnessAdapter implements StrictHarnessAdapter {
         extraSessionDirs: this.extraSessionDirs,
         workspaceRoots,
       }),
+      this.headerCache,
     );
   }
 

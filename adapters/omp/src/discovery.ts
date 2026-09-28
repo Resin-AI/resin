@@ -51,6 +51,8 @@ export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
     },
   ) => Promise<ParsedTranscript | null>;
   onInspectTranscript?: (filePath: string) => void;
+  /** Directory listings carried between scans; see {@link collectTranscriptFiles}. */
+  directoryCache?: TranscriptDirectoryCache;
 }
 
 /**
@@ -989,15 +991,115 @@ export function isKnownInternalCacheSubtree(
   return false;
 }
 
+/** One directory's traversal result, reused while the directory itself is unchanged. */
+interface CachedDirectoryListing {
+  readonly mtimeMs: number;
+  readonly ino: number;
+  readonly realDir: string;
+  /** Transcript files and child directories, in traversal order. */
+  readonly children: ReadonlyArray<{ readonly path: string; readonly isDirectory: boolean }>;
+}
+
+/**
+ * Directory traversal results carried between scans. Transcript files themselves are still
+ * inspected by the caller: appends change a file's mtime but never its directory's.
+ */
+export interface TranscriptDirectoryCache {
+  readonly listings: Map<string, CachedDirectoryListing>;
+  /** Candidate roots that did not exist (most workspaces have no project-local `.omp`). */
+  readonly missing: Set<string>;
+  /** Explicit roots the listings were computed for; cache-subtree exclusion depends on them. */
+  rootsKey?: string;
+  /**
+   * When false, a directory unmodified for {@link QUIET_DIRECTORY_MS} reuses its listing without
+   * even a stat; the caller sets it on a periodic full sweep so quiet directories still refresh.
+   */
+  revalidateQuiet: boolean;
+}
+
+/** A listing is reused only once its directory has been quiet this long (mtime tick safety). */
+const DIRECTORY_CACHE_SETTLE_MS = 2_000;
+/** Directories untouched this long are only re-checked on a full sweep. */
+const QUIET_DIRECTORY_MS = 10 * 60_000;
+const transcriptPathCollator = new Intl.Collator();
+
 /**
  * Traverses directory roots with bounded concurrency (breadth-first in waves) up to depth 4
- * to collect .jsonl transcript files without cyclic loops.
+ * to collect .jsonl transcript files without cyclic loops. With a `cache`, a directory whose
+ * inode and mtime are unchanged since the previous scan is not resolved or listed again; the
+ * cache is rewritten to hold exactly the directories this scan visited.
  */
-export async function collectTranscriptFiles(roots: string[], concurrency = 32): Promise<string[]> {
+export async function collectTranscriptFiles(
+  roots: string[],
+  concurrency = 32,
+  cache?: TranscriptDirectoryCache,
+): Promise<string[]> {
   const discoveredFiles: string[] = [];
   const discoveredFileSet = new Set<string>();
   const visitedDirs = new Set<string>();
   const explicitRootPaths = roots.map((r) => path.resolve(r));
+  const rootsKey = JSON.stringify(explicitRootPaths);
+  const previousListings =
+    cache && cache.rootsKey === rootsKey ? new Map(cache.listings) : undefined;
+  const previousMissing = cache ? new Set(cache.missing) : undefined;
+  const now = Date.now();
+  if (cache) {
+    cache.listings.clear();
+    cache.missing.clear();
+    cache.rootsKey = rootsKey;
+  }
+
+  const listDirectory = async (
+    dir: string,
+    depth: number,
+  ): Promise<CachedDirectoryListing | null> => {
+    const dirStat = await fsp.stat(dir).catch(() => null);
+    if (!dirStat?.isDirectory()) {
+      cache?.missing.add(dir);
+      return null;
+    }
+    const cached = previousListings?.get(dir);
+    if (cached && cached.mtimeMs === dirStat.mtimeMs && cached.ino === dirStat.ino) return cached;
+    const realDir = await fsp.realpath(dir).catch(() => null);
+    if (!realDir) return null;
+    // Session directories also hold every tool artifact (hundreds of thousands of files on a
+    // busy machine); drop those before any per-entry path work or sorting.
+    const entries = (await fsp.readdir(dir, { withFileTypes: true }))
+      .filter(
+        (entry) => entry.isDirectory() || entry.isSymbolicLink() || entry.name.endsWith(".jsonl"),
+      )
+      .sort((a, b) => transcriptPathCollator.compare(a.name, b.name));
+    const children: Array<{ path: string; isDirectory: boolean }> = [];
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const resolvedPath = path.resolve(fullPath);
+
+      // Exclude known internal cache subtrees (e.g. agent/cache) when traversing OMP roots,
+      // unless the caller explicitly passed a custom transcript root targeting that cache path.
+      if (isKnownInternalCacheSubtree(entry.name, dir, fullPath)) {
+        const isExplicitCacheTarget = explicitRootPaths.some(
+          (root) =>
+            isKnownInternalCacheSubtree(path.basename(root), path.dirname(root), root) &&
+            (resolvedPath === root ||
+              resolvedPath.startsWith(root + path.sep) ||
+              root.startsWith(resolvedPath + path.sep)),
+        );
+        if (!isExplicitCacheTarget) {
+          continue;
+        }
+      }
+
+      if (entry.name.endsWith(".jsonl") && (entry.isFile() || entry.isSymbolicLink())) {
+        children.push({ path: fullPath, isDirectory: false });
+      } else if (entry.isDirectory()) {
+        children.push({ path: fullPath, isDirectory: true });
+      } else if (entry.isSymbolicLink() && depth + 1 <= 4) {
+        const target = await fsp.stat(fullPath).catch(() => null);
+        if (target?.isDirectory()) children.push({ path: fullPath, isDirectory: true });
+      }
+    }
+    return { mtimeMs: dirStat.mtimeMs, ino: dirStat.ino, realDir, children };
+  };
 
   let currentLevel: TraversalTask[] = roots.map((dir) => ({ dir, depth: 0 }));
   while (currentLevel.length > 0) {
@@ -1010,60 +1112,35 @@ export async function collectTranscriptFiles(roots: string[], concurrency = 32):
         if (item.depth > 4) continue;
 
         try {
-          const realDir = await fsp.realpath(item.dir).catch(() => null);
-          if (!realDir) continue;
-          if (visitedDirs.has(realDir)) continue;
-          visitedDirs.add(realDir);
+          if (!cache?.revalidateQuiet && previousMissing?.has(item.dir)) {
+            cache?.missing.add(item.dir);
+            continue;
+          }
+          const previous = previousListings?.get(item.dir);
+          // Roots and workspace directories (where new sessions appear) are checked every scan;
+          // only deeper quiet directories (per-session subagent folders) wait for a full sweep.
+          const listing =
+            previous &&
+            item.depth >= 2 &&
+            !cache?.revalidateQuiet &&
+            now - previous.mtimeMs > QUIET_DIRECTORY_MS
+              ? previous
+              : await listDirectory(item.dir, item.depth);
+          if (!listing) continue;
+          if (now - listing.mtimeMs > DIRECTORY_CACHE_SETTLE_MS) {
+            cache?.listings.set(item.dir, listing);
+          }
+          if (visitedDirs.has(listing.realDir)) continue;
+          visitedDirs.add(listing.realDir);
 
-          const entries = await fsp.readdir(item.dir, { withFileTypes: true });
-          entries.sort((a, b) => a.name.localeCompare(b.name));
-
-          for (const entry of entries) {
-            const fullPath = path.join(item.dir, entry.name);
-            const resolvedPath = path.resolve(fullPath);
-
-            // Exclude known internal cache subtrees (e.g. agent/cache) when traversing OMP roots,
-            // unless the caller explicitly passed a custom transcript root targeting that cache path.
-            if (isKnownInternalCacheSubtree(entry.name, item.dir, fullPath)) {
-              const isExplicitCacheTarget = explicitRootPaths.some(
-                (root) =>
-                  isKnownInternalCacheSubtree(path.basename(root), path.dirname(root), root) &&
-                  (resolvedPath === root ||
-                    resolvedPath.startsWith(root + path.sep) ||
-                    root.startsWith(resolvedPath + path.sep)),
-              );
-              if (!isExplicitCacheTarget) {
-                continue;
-              }
-            }
-
-            if (entry.isDirectory()) {
+          for (const child of listing.children) {
+            if (child.isDirectory) {
               if (item.depth + 1 <= 4) {
-                nextLevel.push({ dir: fullPath, depth: item.depth + 1 });
+                nextLevel.push({ dir: child.path, depth: item.depth + 1 });
               }
-            } else if (entry.isFile()) {
-              if (entry.name.endsWith(".jsonl")) {
-                if (!discoveredFileSet.has(fullPath)) {
-                  discoveredFileSet.add(fullPath);
-                  discoveredFiles.push(fullPath);
-                }
-              }
-            } else if (entry.isSymbolicLink()) {
-              if (entry.name.endsWith(".jsonl")) {
-                if (!discoveredFileSet.has(fullPath)) {
-                  discoveredFileSet.add(fullPath);
-                  discoveredFiles.push(fullPath);
-                }
-              } else if (item.depth + 1 <= 4) {
-                try {
-                  const st = await fsp.stat(fullPath);
-                  if (st.isDirectory()) {
-                    nextLevel.push({ dir: fullPath, depth: item.depth + 1 });
-                  }
-                } catch {
-                  // ignore broken symlink or inaccessible target
-                }
-              }
+            } else if (!discoveredFileSet.has(child.path)) {
+              discoveredFileSet.add(child.path);
+              discoveredFiles.push(child.path);
             }
           }
         } catch {
@@ -1081,7 +1158,7 @@ export async function collectTranscriptFiles(roots: string[], concurrency = 32):
     currentLevel = nextLevel;
   }
 
-  discoveredFiles.sort((a, b) => a.localeCompare(b));
+  discoveredFiles.sort(transcriptPathCollator.compare);
   return discoveredFiles;
 }
 
@@ -1246,7 +1323,11 @@ export async function buildOmpDiscoveryCatalog(
     candidateRoots.push(path.join(ws.rootPath, ".omp"));
   }
 
-  const transcriptFiles = await collectTranscriptFiles(candidateRoots);
+  const transcriptFiles = await collectTranscriptFiles(
+    candidateRoots,
+    undefined,
+    options?.directoryCache,
+  );
 
   const inspectedFilePaths: string[] = [];
   const inspectedTranscripts: ParsedTranscript[] = [];

@@ -225,15 +225,16 @@ export class AuditRepository {
       [uploadedAt, ...invocationIds],
     );
   }
-  markInvocationsFailed(invocationIds: string[], failedAt: string): void {
-    if (invocationIds.length === 0) {
-      return;
-    }
-    const placeholders = invocationIds.map(() => "?").join(", ");
-    this.conn.run(
-      `UPDATE invocation_records SET status = 'error', uploaded_at = ? WHERE invocation_id IN (${placeholders});`,
-      [failedAt, ...invocationIds],
-    );
+  /**
+   * Retires every pending invocation upload for one workspace in a single statement and
+   * returns how many rows it retired. Status is left untouched: the invocation itself did
+   * not fail, only its telemetry upload was refused.
+   */
+  dropPendingInvocationUploadsForWorkspace(workspaceId: string, droppedAt: string): number {
+    return this.conn.run(
+      "UPDATE invocation_records SET uploaded_at = ? WHERE uploaded_at IS NULL AND workspace_id = ?;",
+      [droppedAt, workspaceId],
+    ).changes;
   }
 
   saveDeadLetter(deadLetter: DeadLetterRecord): void {
