@@ -11,6 +11,7 @@ import {
   CursorHarnessAdapter,
   CursorRecordDecoder,
   CursorSessionEventSource,
+  cursorCatalogModel,
   cursorProjectSlug,
   inspectCursorHookPayload,
   normalizeCursorVersion,
@@ -124,7 +125,7 @@ describe("decoder", () => {
       "Shell",
       "Read",
       "Read",
-      "MCP:echo",
+      "echo",
       "Write",
       "Write",
     ]);
@@ -141,6 +142,28 @@ describe("decoder", () => {
       ["/workspace/project/hello.py", "patch"],
     ]);
 
+    // Headless run through Resin's own MCP server: `MCP:<tool>` decodes to the bare tool name, so
+    // Resin's meta tools stay reserved; hook durations are fractional milliseconds.
+    const resin = await decode("de81f9d2-44e6-4e1d-8fa1-520818103c30");
+    expect(
+      resin.flatMap((e) =>
+        e.type === "tool_call" ? [[e.toolName, e.metadata?.cursorToolName]] : [],
+      ),
+    ).toEqual([
+      ["manage_tools", "MCP:manage_tools"],
+      ["manage_tools", "MCP:manage_tools"],
+      ["manage_tools", "MCP:manage_tools"],
+      ["Shell", undefined],
+    ]);
+    expect(resin.find((e) => e.type === "tool_result" && e.toolName === "Shell")).toMatchObject({
+      isError: false,
+      executionDurationMs: 175,
+      result: {
+        output: "cat: missing.txt: No such file or directory\n4 manifest.txt\n",
+        exitCode: 0,
+      },
+    });
+
     // Interactive run with /compact: usage from `stop`, counted once per turn.
     const interactive = await decode("1e94d25f-abf7-4a83-9810-9fed67a25942");
     expect(interactive.find((e) => e.type === "compaction")).toMatchObject({
@@ -149,7 +172,12 @@ describe("decoder", () => {
     });
     const usage = interactive.flatMap((e) => (e.providerUsage ? [e.providerUsage] : []));
     expect(usage).toEqual([
-      expect.objectContaining({ inputTokens: 9559, outputTokens: 194, cachedInputTokens: 9344 }),
+      expect.objectContaining({
+        model: null,
+        inputTokens: 9559,
+        outputTokens: 194,
+        cachedInputTokens: 9344,
+      }),
     ]);
     expect(interactive.at(-1)).toMatchObject({ type: "session_lifecycle", lifecycleType: "end" });
 
@@ -248,5 +276,19 @@ describe("cursor-agent installation probe", () => {
       version: UNKNOWN_HARNESS_VERSION,
       metadata: { rawVersion: null },
     });
+  });
+});
+
+describe("model identity", () => {
+  it.each([
+    ["cursor-grok-4.5-high", "grok-4.5"],
+    ["cursor-grok-4.5-high-fast", "grok-4.5"],
+    ["claude-opus-5-thinking-high", "claude-opus-5"],
+    ["gpt-5.3-codex-xhigh-fast", "gpt-5.3-codex"],
+    ["gemini-3.7-flash-low", "gemini-3.7-flash"],
+    ["composer-2.5", "composer-2.5"],
+    ["default", undefined],
+  ])("prices cursor-agent's %s as %s", (raw, model) => {
+    expect(cursorCatalogModel(raw)).toBe(model);
   });
 });

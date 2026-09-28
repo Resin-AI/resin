@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isHarnessIntrospectionProgram, referencesHarnessState } from "../src/index.js";
+import {
+  isHarnessIntrospectionProgram,
+  isResinDiscoveryToolCall,
+  referencesHarnessState,
+} from "../src/index.js";
 
 describe("isHarnessIntrospectionProgram", () => {
   it.each([
@@ -59,5 +63,29 @@ describe("isHarnessIntrospectionProgram", () => {
   it("finds harness state in output text, not the word resin", () => {
     expect(referencesHarnessState("mcp__resin__invoke_tool\nInvokes a tool")).toBe(true);
     expect(referencesHarnessState("resin_orders -> backups/resin_orders.sql")).toBe(false);
+  });
+});
+
+describe("isResinDiscoveryToolCall", () => {
+  it.each([
+    ["mcp__resin__manage_tools", undefined],
+    ["mcp__resin_search_tools", undefined],
+    ["resin_get_tool_schema", undefined],
+    ["resin-manage_tools", undefined],
+    ["manage_tools", "resin"],
+    ["manage_tools", undefined],
+  ])("drops %s over %s", (name, connection) => {
+    expect(isResinDiscoveryToolCall(name, connection)).toBe(true);
+  });
+
+  it.each([
+    ["mcp__resin__invoke_tool", undefined],
+    ["invoke_tool", "resin"],
+    ["mcp__resin__backup_orders", undefined],
+    ["manage_tools", "fixture"],
+    ["resin_orders", undefined],
+    ["Shell", undefined],
+  ])("keeps %s over %s", (name, connection) => {
+    expect(isResinDiscoveryToolCall(name, connection)).toBe(false);
   });
 });

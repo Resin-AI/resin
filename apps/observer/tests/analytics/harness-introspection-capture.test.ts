@@ -3,8 +3,14 @@
  * its call and result out of the recorders and the upload, while ordinary project work that merely
  * mentions "resin" in its data still learns.
  */
+import * as fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CodexRecordDecoder } from "@resin/adapter-codex";
+import { CursorHarnessAdapter, CursorRecordDecoder } from "@resin/adapter-cursor-cli";
 import type { NormalizedSessionEvent } from "@resin/contracts";
+import type { HarnessRecordDecoder, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
@@ -44,10 +50,34 @@ function execCall(callId: string, cmd: string, output: string) {
 }
 
 async function capture(sessionId: string, native: readonly object[]) {
+  const timestamp = "2026-09-27T12:00:00.000Z";
+  return captureRecords(
+    new CodexRecordDecoder(),
+    { sessionId, harnessId: "codex-cli", timestamp },
+    native.map((entry, index) => ({
+      recordId: `rec_${index + 1}`,
+      sessionId,
+      harnessId: "codex-cli",
+      sequenceNumber: index + 1,
+      recordType: "transcript_line" as const,
+      timestamp,
+      rawPayload: JSON.stringify({ timestamp, ordinal: index + 1, ...entry }),
+      cursor: { offset: index + 1, line: index + 1, sequence: index + 1, timestamp },
+      metadata: {},
+    })),
+  );
+}
+
+async function captureRecords(
+  decoder: HarnessRecordDecoder,
+  session: { sessionId: string; harnessId: string; timestamp: string },
+  records: RawHarnessRecord[],
+) {
+  const { sessionId, harnessId, timestamp } = session;
   const pipeline = new NormalizationPipeline({
     redactionConfig: { customSecrets: [], sensitiveEnvVars: [] },
   });
-  pipeline.registerDecoder(new CodexRecordDecoder());
+  pipeline.registerDecoder(decoder);
   const submitted: NormalizedSessionEvent[] = [];
   const client = Object.assign(Object.create(CloudObservationClient.prototype), {
     sendObservationBatch: vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
@@ -60,29 +90,18 @@ async function capture(sessionId: string, native: readonly object[]) {
     observationClient: client,
     coalesceDwellMs: 0,
   });
-  const timestamp = "2026-09-27T12:00:00.000Z";
   await coordinator.handleRecords(
     {
       sessionId,
       workspaceId: "ws_introspection",
-      harnessId: "codex-cli",
+      harnessId,
       transcriptPath: `/tmp/${sessionId}.jsonl`,
       status: "completed",
       createdAt: timestamp,
       updatedAt: timestamp,
       metadata: {},
     },
-    native.map((entry, index) => ({
-      recordId: `rec_${index + 1}`,
-      sessionId,
-      harnessId: "codex-cli",
-      sequenceNumber: index + 1,
-      recordType: "transcript_line" as const,
-      timestamp,
-      rawPayload: JSON.stringify({ timestamp, ordinal: index + 1, ...entry }),
-      cursor: { offset: index + 1, line: index + 1, sequence: index + 1, timestamp },
-      metadata: {},
-    })),
+    records,
     async () => {},
   );
   coordinator.dispose();
@@ -156,5 +175,36 @@ describe("harness introspection capture", () => {
       projectResult!,
     ]);
     expect(callIdsOf(submitted)).toEqual(["call-dump"]);
+  });
+
+  it("drops a recorded Cursor session's calls to Resin's discovery tools and keeps its shell work", async () => {
+    // cursor-agent 2026.09.26 headless run that listed Resin's catalog (`MCP:manage_tools`, no
+    // server name in the hook) three times before its one shell call.
+    const sessionId = "de81f9d2-44e6-4e1d-8fa1-520818103c30";
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-cursor-introspection-"));
+    const spool = path.join(home, ".resin", "capture", "cursor-cli");
+    fs.mkdirSync(spool, { recursive: true });
+    fs.copyFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "../../../../adapters/cursor-cli/tests/fixtures/recorded/2026.9.26-dd393fe",
+        `${sessionId}.jsonl`,
+      ),
+      path.join(spool, `${sessionId}.jsonl`),
+    );
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const [session] = await adapter.listSessions(workspace!);
+    const records = await (await adapter.openEventSource(session!)).readNext(1000);
+
+    const submitted = await captureRecords(
+      new CursorRecordDecoder(),
+      { sessionId, harnessId: "cursor-cli", timestamp: "2026-09-28T03:21:20.464Z" },
+      records,
+    );
+    const tools = submitted.flatMap((event) =>
+      event.type === "tool_call" || event.type === "tool_result" ? [event.toolName] : [],
+    );
+    expect(tools).toEqual(["Shell", "Shell"]);
   });
 });

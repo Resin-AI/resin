@@ -10,6 +10,7 @@
 | `a2d415bc-…` | headless `-p`, SIGINT after 12 s | abort: running `sleep 60` never reported, `sessionEnd` reason `error` |
 | `1d62dbba-…`, `6f7df196-…` | interactive (pty) | `beforeSubmitPrompt`, MCP + shell, `stop` with turn usage (status `error` from this model), list_changed ignored on a second prompt |
 | `1e94d25f-…` | interactive (pty) + `/compact` | `stop` completed, `afterAgentResponse` (same usage as `stop`), `preCompact` manual |
+| `de81f9d2-…` | headless `-p` against Resin's own `resin mcp` (`resin init` registration) | `MCP:manage_tools` calls (no server name in the hook), chained shell with a failing `cat`, fractional `duration` ms |
 
 Observed contract facts (2026.09.26): headless runs fire no `beforeSubmitPrompt`, `afterAgentResponse` or `stop`; interactive runs fire two `afterAgentThought` per thought (model `default` and the served model); `subagentStart`/`subagentStop` never fired.
 
