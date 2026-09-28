@@ -259,3 +259,11 @@ export class DecodeError extends Error {
     }
   }
 }
+
+/**
+ * Local-only proof, set only by a harness's own decoder, of which native interface a call used
+ * (`omp-bash`, `claude-bash`, `opencode-bash`, …) and, on a result, that it completed in the
+ * foreground (`omp-bash-completed`). A decoder drops the key from any record that carried it
+ * itself; the recorder consumes it and metadata projection never uploads it.
+ */
+export const RESIN_LOCAL_SOURCE_INTERFACE_KEY = "__resinLocalSourceInterfaceV1";

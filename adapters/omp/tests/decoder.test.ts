@@ -18,16 +18,13 @@ import type {
   IntermediateUnknownPassthroughEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
   RESIN_PARAMETER_SHAPE_KEY,
   projectToolParameters,
 } from "../../../apps/observer/src/analytics/metadata-projection.js";
-import {
-  OmpRecordDecoder,
-  RESIN_LOCAL_OMP_NATIVE_CALL_KEY,
-  RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY,
-} from "../src/decoder.js";
+import { OmpRecordDecoder, RESIN_LOCAL_OMP_NATIVE_CALL_KEY } from "../src/decoder.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "../fixtures");
 
@@ -1236,7 +1233,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
             },
           }),
         ) as IntermediateToolResultEvent;
-        expect(result.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe(marker);
+        expect(result.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe(marker);
       },
     );
 
@@ -1700,13 +1697,13 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           ],
         },
       });
-      pythonRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      pythonRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" };
       const pythonEvents = decoder.decode(pythonRecord) as IntermediateSessionEvent[];
       const pythonCall = pythonEvents.find(
         (entry): entry is IntermediateToolCallEvent => entry.type === "tool_call",
       );
-      expect(pythonCall?.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("python-eval");
-      expect(pythonRecord.metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("forged");
+      expect(pythonCall?.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("python-eval");
+      expect(pythonRecord.metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("forged");
 
       const javascriptRecord = makeRecord("session-python-eval-interface", 2, {
         type: "tool_call",
@@ -1716,12 +1713,10 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           arguments: { language: " javascript ", code: "console.log(1)" },
         },
       });
-      javascriptRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      javascriptRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" };
       const javascriptCall = decoder.decode(javascriptRecord) as IntermediateToolCallEvent;
-      expect(javascriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe(
-        "javascript-eval",
-      );
-      expect(javascriptRecord.metadata[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("forged");
+      expect(javascriptCall.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
+      expect(javascriptRecord.metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("forged");
 
       const jsAliasRecord = makeRecord("session-python-eval-interface", 3, {
         type: "tool_call",
@@ -1732,7 +1727,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         },
       });
       const jsAliasCall = decoder.decode(jsAliasRecord) as IntermediateToolCallEvent;
-      expect(jsAliasCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
+      expect(jsAliasCall.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("javascript-eval");
 
       const typescriptRecord = makeRecord("session-python-eval-interface", 4, {
         type: "tool_call",
@@ -1742,9 +1737,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           arguments: { language: "typescript", code: "const value: number = 1" },
         },
       });
-      typescriptRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      typescriptRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" };
       const typescriptCall = decoder.decode(typescriptRecord) as IntermediateToolCallEvent;
-      expect(typescriptCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+      expect(typescriptCall.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
 
       const otherToolRecord = makeRecord("session-python-eval-interface", 5, {
         type: "tool_call",
@@ -1754,9 +1749,9 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           arguments: { language: "python", code: "print(1)" },
         },
       });
-      otherToolRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      otherToolRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" };
       const otherToolCall = decoder.decode(otherToolRecord) as IntermediateToolCallEvent;
-      expect(otherToolCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+      expect(otherToolCall.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     });
 
     it("marks native bash commands and never a forged or command-less bash call", () => {
@@ -1764,24 +1759,24 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         type: "tool_call",
         toolCall: { id: "call-bash", toolName: "bash", arguments: { command: "ls", cwd: "/w" } },
       });
-      bashRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "forged" };
+      bashRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "forged" };
       const bashCall = decoder.decode(bashRecord) as IntermediateToolCallEvent;
-      expect(bashCall.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBe("omp-bash");
+      expect(bashCall.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("omp-bash");
 
       const forgedRecord = makeRecord("session-bash-interface", 2, {
         type: "tool_call",
         toolCall: { id: "call-not-bash", toolName: "shell", arguments: { command: "ls" } },
       });
-      forgedRecord.metadata = { [RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]: "omp-bash" };
+      forgedRecord.metadata = { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash" };
       const forged = decoder.decode(forgedRecord) as IntermediateToolCallEvent;
-      expect(forged.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+      expect(forged.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
 
       const argvRecord = makeRecord("session-bash-interface", 3, {
         type: "tool_call",
         toolCall: { id: "call-bash-argv", toolName: "bash", arguments: { command: ["ls"] } },
       });
       const argv = decoder.decode(argvRecord) as IntermediateToolCallEvent;
-      expect(argv.metadata?.[RESIN_LOCAL_OMP_SOURCE_INTERFACE_KEY]).toBeUndefined();
+      expect(argv.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     });
 
     it("announces every embedded request with matched results and single provider accounting", () => {

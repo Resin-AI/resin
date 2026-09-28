@@ -29,6 +29,7 @@ import type {
   RawHarnessRecord,
   RecordDecoderContext,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { z } from "zod";
 import { claudeFileEdit } from "./file-change.js";
 
@@ -329,6 +330,20 @@ export interface PendingClaudeToolCall {
 export type PendingClaudeToolCalls = Map<string, PendingClaudeToolCall>;
 
 /** Canonical call id for a Claude `tool_use` id (`toolu_…`), constrained to identifier characters. */
+/**
+ * Claude Code names every MCP tool `mcp__<server>__<tool>`, so a call named exactly `Bash` with a
+ * command is its built-in shell tool. Only this decoder proves that, with the local-only marker the
+ * recorder trusts to share the command as a scrubbed program view.
+ */
+function claudeSourceInterface(
+  toolName: string,
+  input: ClaudeTranscriptPayload,
+): { metadata: DecoderMetadataRecord } | Record<string, never> {
+  return toolName === "Bash" && typeof input.command === "string"
+    ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "claude-bash" } }
+    : {};
+}
+
 export function claudeCallId(toolCallId: string): string {
   const sanitized = toolCallId.replace(/[^a-zA-Z0-9_.:-]/g, "_");
   const safe = /^[a-zA-Z0-9_-]/.test(sanitized) ? sanitized : `_${sanitized}`;
@@ -886,6 +901,7 @@ function decodeLineEvents(
                   toolCallId,
                   toolName,
                   parameters: inputRecord,
+                  ...claudeSourceInterface(toolName, inputRecord),
                 },
                 sessionId,
                 recordTime,
@@ -951,6 +967,7 @@ function decodeLineEvents(
       toolName,
       input: inputRecord,
       rawInput: rawInputStr,
+      ...claudeSourceInterface(toolName, inputRecord),
     };
     if (providerUsage) {
       toolCallEvent.providerUsage = providerUsage;

@@ -16,16 +16,20 @@ import {
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
   WorkflowCallRecorder,
 } from "../../src/analytics/workflow-call-recorder.js";
+import { readWorkflowCallCarrier } from "../../src/analytics/workflow-carrier.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
-const SESSION = path.resolve(
+const RECORDED = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../../adapters/claude-code/tests/fixtures/recorded/2.1.283/projects/-workspace-project/8ea90a99-82b6-4c6c-b8cb-4fa5f5dee9dd.jsonl",
+  "../../../../adapters/claude-code/tests/fixtures/recorded/2.1.283/projects",
 );
 const WORKSPACE = "workspace-claude-tool-capture";
 
-async function capture() {
-  const sessionId = "8ea90a99-82b6-4c6c-b8cb-4fa5f5dee9dd";
+async function capture(
+  sessionId = "8ea90a99-82b6-4c6c-b8cb-4fa5f5dee9dd",
+  project = "-workspace-project",
+) {
+  const SESSION = path.join(RECORDED, project, `${sessionId}.jsonl`);
   const store = new InMemoryPrivateValueStore();
   const pipeline = new NormalizationPipeline({ privateValueStore: store });
   pipeline.registerDecoder(new ClaudeRecordDecoder());
@@ -61,7 +65,11 @@ async function capture() {
       observed.push(recorder.observe(result.event, { workspaceId: WORKSPACE }));
     }
   }
-  return { rejected, projected: observed.map((entry) => projectEventToMetadataOnly(entry)) };
+  return {
+    rejected,
+    observed,
+    projected: observed.map((entry) => projectEventToMetadataOnly(entry)),
+  };
 }
 
 describe("Claude Code tool capture", () => {
@@ -87,5 +95,34 @@ describe("Claude Code tool capture", () => {
     );
     expect(parseAssistantStopReason(lastAssistant?.metadata?.stopReason)).toBe("end_turn");
     expect(projected.at(-1)).toMatchObject({ type: "session_lifecycle", lifecycleType: "end" });
+  });
+
+  it("names a log rotation's inputs by role and carries the log's path into its checksum step", async () => {
+    // A real headless `claude -p` run: gzip -k, sha256sum into a .sha256 file, then ls.
+    const { rejected, observed } = await capture(
+      "1100efe6-6289-472f-8f65-8f2e3b9b7759",
+      "-workspace-logs",
+    );
+    expect(rejected).toEqual([]);
+    const names = observed.flatMap((event) =>
+      event.type === "tool_call" && event.toolName === "Bash"
+        ? [
+            (
+              readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
+                ?.candidates ?? []
+            ).flatMap((candidate) =>
+              candidate.proposed.kind === "input" ? [candidate.proposed.name] : [],
+            ),
+          ]
+        : [],
+    );
+    // The checksum step carries the rotated log's path inside `var/svc.log.2.gz`, as the same
+    // `file_path` input gzip ran with, so another log's rotation checksums that log's archive.
+    expect(names).toEqual([
+      ["directory"],
+      ["file_path"],
+      ["file_path", "archive_path", "text"],
+      ["directory_2", "archive_path", "text"],
+    ]);
   });
 });

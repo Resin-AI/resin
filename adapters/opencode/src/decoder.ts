@@ -8,6 +8,7 @@ import type {
   IntermediateSessionEvent,
   RawHarnessRecord,
 } from "@resin/harness-contracts";
+import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { OPENCODE_HARNESS_ID, type OpencodeRecordPayload } from "./source.js";
 import type { OpencodeMessageInfo, OpencodePart } from "./store.js";
 
@@ -321,6 +322,11 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
     const input = toMetadata(state.input);
     const callId = str(part.callID) ?? part.id;
     const timestamp = iso(obj(state.time)?.start, fallbackTime);
+    const connection = this.resolveConnection(tool);
+    // OpenCode names every MCP tool `<server>_<tool>`, so an unconnected `bash` with a command is its
+    // built-in shell tool; only this decoder proves that to the recorder, with a local-only marker.
+    const nativeShell =
+      tool === "bash" && connection === undefined && typeof input.command === "string";
     const events: IntermediateSessionEvent[] = [
       {
         type: "tool_call",
@@ -330,10 +336,14 @@ export class OpencodeRecordDecoder implements HarnessRecordDecoder {
         toolCallId: callId,
         callId,
         toolName: tool,
-        connection: this.resolveConnection(tool),
+        connection,
         input,
         parameters: input,
-        metadata: { messageId: message.id, partId: part.id },
+        metadata: {
+          messageId: message.id,
+          partId: part.id,
+          ...(nativeShell ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "opencode-bash" } : {}),
+        },
       },
     ];
     const childSession = str(obj(state.metadata)?.sessionId);

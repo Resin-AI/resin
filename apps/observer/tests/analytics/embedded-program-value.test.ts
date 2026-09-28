@@ -195,7 +195,7 @@ describe("a value embedded in a recorded program", () => {
     ).toEqual([]);
   });
 
-  it("offers a program's values as optional inputs named by flag or shape, never its structure", () => {
+  it("offers a program's values as optional inputs named by flag or role, never its structure", () => {
     const shell = (callId: string, stepId: string, command: string) => ({
       callId,
       stepId,
@@ -230,11 +230,11 @@ describe("a value embedded in a recorded program", () => {
     );
     // Assignments and a credential flag's value are configuration, never parameters.
     expect(offered).toEqual([
-      ["step0", 3, "path", true],
+      ["step0", 3, "file_name", true],
       ["step0", 5, "month", true],
       ["step0", 9, "text", true],
       // The same value in a later call is the same input.
-      ["step1", 2, "path", true],
+      ["step1", 2, "file_name", true],
     ]);
   });
 
@@ -299,13 +299,16 @@ describe("a value embedded in a recorded program", () => {
       call(2, { command: "cat /app/b.txt" }),
       result(2, { stdout: "b" }),
     ]);
-    // Across the session the second path is `path_2`; recorded alone, it is the tool's `path`.
-    expect(carrierOf(events[2]!)?.candidates?.[0]?.proposed).toMatchObject({ name: "path_2" });
+    // Across the session the second document is `document_path_2`; recorded alone, it is the
+    // tool's `document_path`.
+    expect(carrierOf(events[2]!)?.candidates?.[0]?.proposed).toMatchObject({
+      name: "document_path_2",
+    });
     const workflow = recordCallsFromEvents("second-read", events.slice(2), {
       supportingEvents: events,
     })!.workflow;
     expect(workflow.candidates?.map((candidate) => candidate.proposed)).toEqual([
-      { kind: "input", name: "path", type: "string", recordedDefault: true },
+      { kind: "input", name: "document_path", type: "string", recordedDefault: true },
     ]);
   });
 
@@ -377,15 +380,15 @@ describe("a value embedded in a recorded program", () => {
     );
     expect(embedded).toEqual([
       [2, "text"],
-      [3, "path_5"],
-      [4, "text_2"],
-      [5, "path_6"],
+      [3, "text_2"],
+      [4, "text_3"],
+      [5, "text_4"],
     ]);
     expect(spans).toEqual([
       [2, "text"],
-      [2, "path_5"],
-      [3, "text_2"],
-      [3, "path_6"],
+      [2, "text_2"],
+      [3, "text_3"],
+      [3, "text_4"],
     ]);
   });
 
