@@ -1,5 +1,5 @@
 /** Local-only workflow values. Exact V2 originals never become uploaded event fields. */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,11 +21,18 @@ export interface PrivateValueStore {
   ): void;
   origin?(key: string): PrivateValueOrigin | undefined;
   representation?(key: string): PrivateValueRepresentation | undefined;
+  /**
+   * Device-local HMAC key that tags redaction placeholders. Stable for this store so one secret
+   * keeps one placeholder across sessions; never uploaded.
+   */
+  redactionKey?(): Uint8Array;
 }
 
 const STORE_FILE = "private-values.json";
 const STORE_DIR = "private-values";
 const MAX_ENTRIES = 4096;
+const REDACTION_KEY_FILE = "redaction-key";
+const REDACTION_KEY_BYTES = 32;
 const PLACEHOLDER_PATTERN = /\[REDACTED_[A-Z_]+:[^\]]+\]/g;
 const PLACEHOLDER_TEST = /\[REDACTED_[A-Z_]+:[^\]]+\]/;
 
@@ -116,6 +123,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
   /** Stat signature of the legacy file last read or written by this instance. */
   private loadedSignature: string | undefined;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
+  private deviceRedactionKey: Buffer | undefined;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
@@ -126,6 +134,39 @@ export class FilePrivateValueStore implements PrivateValueStore {
       path.join(os.homedir(), ".resin", "data"),
     );
     return FilePrivateValueStore.shared;
+  }
+
+  /**
+   * Owner-only random key, created once per device beside the private values it protects. A
+   * concurrent creator loses to the first published key, so every process tags alike.
+   */
+  redactionKey(): Uint8Array {
+    if (this.deviceRedactionKey !== undefined) return this.deviceRedactionKey;
+    const target = path.join(path.dirname(this.file), REDACTION_KEY_FILE);
+    let key: Buffer;
+    try {
+      key = fs.readFileSync(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(temporary, randomBytes(REDACTION_KEY_BYTES), { flag: "wx", mode: 0o600 });
+        try {
+          fs.linkSync(temporary, target);
+        } catch (linkError) {
+          if ((linkError as NodeJS.ErrnoException).code !== "EEXIST") throw linkError;
+        }
+      } finally {
+        fs.rmSync(temporary, { force: true });
+      }
+      key = fs.readFileSync(target);
+    }
+    if (key.length !== REDACTION_KEY_BYTES) {
+      throw new Error(`Invalid local redaction key at '${target}'`);
+    }
+    this.deviceRedactionKey = key;
+    return key;
   }
 
   private immutablePath(key: string): string {
@@ -320,6 +361,10 @@ export class FilePrivateValueStore implements PrivateValueStore {
 /** Same identity/value rules for tests and non-persisting local consumers. */
 export class InMemoryPrivateValueStore implements PrivateValueStore {
   private readonly entries = new Map<string, PrivateEntry>();
+  private readonly deviceRedactionKey = randomBytes(REDACTION_KEY_BYTES);
+  redactionKey(): Uint8Array {
+    return this.deviceRedactionKey;
+  }
   get(key: string): unknown | undefined {
     return structuredClone(this.entries.get(key)?.value);
   }

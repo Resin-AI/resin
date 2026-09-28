@@ -443,6 +443,12 @@ export const SENSITIVE_PATTERN_REGEXES: readonly RegExp[] = Object.freeze([
   /\bAKIA[0-9A-Z]{16}\b/,
   /\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/,
   /\bpassword\s*[:=]\s*["']?[^\s"']{6,}/i,
+  // Unredacted slots the ContentScanner's structural rules fill with placeholders. A value
+  // starting with `[` is a placeholder; `\\` covers JSON-escaped quotes in serialized bodies.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@"'`\\]*:[^\s@"'`/\\[][^\s@"'`/\\]*@/i,
+  /\b(?:Proxy-)?Authorization\s*:\s*(?:Basic|Bearer|Token|Digest|Negotiate|NTLM|ApiKey|Key)\s+[^\s"'`,;\\[][^\s"'`,;\\]{2,}/i,
+  /(?<![A-Za-z0-9_-])(?:(?:[A-Za-z0-9]+-)+[A-Za-z0-9]*(?:key|token|secret|auth|password)[A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[A-Za-z0-9]*(?:key|token|secret|auth|password)[A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*:\s*(?:(?:Basic|Bearer|Token)\s+)?[^\s"'`,;\\[][^\s"'`,;\\]{2,}/i,
+  /\b(?:curl|wget|https?|httpie|xh)\b[^\n|;&]*?\s(?:-u\s*|--user(?:\s+|=)|-a\s+|--auth(?:\s+|=))["']?[^\s"':]*:[^\s"'`\\[]/,
 ]);
 
 /**
