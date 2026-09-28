@@ -48,7 +48,7 @@ describe("lock", () => {
 
       const content = JSON.parse(await fs.promises.readFile(lockPath, "utf-8"));
       expect(content.pid).toBe(process.pid);
-      expect(content.socketPath).toBe("/tmp/resin-test.sock");
+      expect(content.socketPath).toBe(path.resolve("/tmp/resin-test.sock"));
 
       await lock.release();
       expect(lock.isLocked).toBe(false);
@@ -66,7 +66,7 @@ describe("lock", () => {
       const res2 = await lock2.acquire();
       expect(res2.status).toBe("already_running");
       expect(res2.pid).toBe(process.pid);
-      expect(res2.lockData?.socketPath).toBe("/tmp/sock1");
+      expect(res2.lockData?.socketPath).toBe(path.resolve("/tmp/sock1"));
 
       await lock1.release();
       expect(fs.existsSync(lockPath)).toBe(false);

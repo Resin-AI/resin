@@ -85,20 +85,30 @@ async function findCopilotExecutable(
 export async function readCopilotVersion(executablePath: string): Promise<string | null> {
   let dir = path.dirname(await fs.realpath(executablePath).catch(() => executablePath));
   for (let depth = 0; depth < 6; depth++) {
-    try {
-      const pkg = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8")) as {
-        name?: unknown;
-        version?: unknown;
-      };
-      if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
-        return pkg.version;
-      }
-    } catch {
-      // Not the package root.
-    }
+    const version = await readCopilotPackageVersion(dir);
+    if (version !== null) return version;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+  // Windows npm keeps its command shims (`copilot.cmd`, `.ps1` and an extensionless script) in the
+  // global prefix beside `node_modules/@github/copilot`; no symlink leads from shim to package.
+  return await readCopilotPackageVersion(
+    path.join(path.dirname(executablePath), "node_modules", COPILOT_PACKAGE_NAME),
+  );
+}
+
+async function readCopilotPackageVersion(dir: string): Promise<string | null> {
+  try {
+    const pkg = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8")) as {
+      name?: unknown;
+      version?: unknown;
+    };
+    if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
+      return pkg.version;
+    }
+  } catch {
+    // Not the package root.
   }
   return null;
 }

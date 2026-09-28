@@ -16,6 +16,7 @@ import {
   bindProgramToken,
   hashCanonical,
   programTokenPath,
+  recordedProgramLanguage,
 } from "@resin/contracts";
 
 /** The template a recorded source resolves through, so a binding can be placed inside it. */
@@ -145,9 +146,12 @@ export function applyConfirmedWorkflowBinding(
     const address = programTokenPath(candidate.path);
     const program = step.callable.program;
     if (address === undefined || program?.argument !== candidate.argument) return undefined;
+    // A program read in no grammar (cmd.exe, an unproven shell dialect) is never bound.
+    const language = recordedProgramLanguage(program);
+    if (language === undefined) return undefined;
     replaced = bindProgramToken(
       source,
-      program.kind,
+      language,
       address.token,
       leaf,
       address.embedded,

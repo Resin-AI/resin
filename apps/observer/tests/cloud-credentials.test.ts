@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { AuthClaims } from "@resin/protocol";
+import { checkOwnerOnly } from "@resin/windows-security";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudCredentialStore, isAllowedOrigin } from "../src/cloud-credentials.js";
 import { CloudObservationClient, CloudRuntimeModule } from "../src/cloud-runtime.js";
@@ -165,6 +166,8 @@ describe("CloudCredentialStore", () => {
     const stat = await fs.stat(tokenFilePath);
     if (process.platform !== "win32") {
       expect(stat.mode & 0o777).toBe(0o600);
+    } else {
+      expect(checkOwnerOnly(tokenFilePath)).toMatchObject({ ok: true, problems: [] });
     }
 
     // Atomic update
@@ -537,6 +540,8 @@ describe("CloudCredentialStore", () => {
     if (process.platform !== "win32") {
       const lockStat = await fs.stat(lockPath);
       expect(lockStat.mode & 0o777).toBe(0o600);
+    } else {
+      expect(checkOwnerOnly(lockPath)).toMatchObject({ ok: true, problems: [] });
     }
     const lockPayload = JSON.parse(await fs.readFile(lockPath, "utf8")) as {
       pid?: number;

@@ -55,6 +55,23 @@ function findOpencodeExecutable(
  * The binary is never run: probing must stay cheap and side-effect free.
  */
 export function readOpencodeVersion(executablePath: string): string | null {
+  return readOwningPackageVersion(executablePath) ?? readShimPackageVersion(executablePath);
+}
+
+/**
+ * Windows npm keeps its command shims (`opencode.cmd`, `.ps1` and an extensionless script) in the
+ * global prefix beside `node_modules/opencode-ai`; no symlink leads from the shim to the package.
+ */
+function readShimPackageVersion(executablePath: string): string | null {
+  const pkg = readJsonObject(
+    path.join(path.dirname(executablePath), "node_modules", OPENCODE_PACKAGE_NAME, "package.json"),
+  );
+  return pkg?.name === OPENCODE_PACKAGE_NAME && typeof pkg.version === "string"
+    ? parseOpencodeVersion(pkg.version)
+    : null;
+}
+
+function readOwningPackageVersion(executablePath: string): string | null {
   let dir: string;
   try {
     dir = path.dirname(fs.realpathSync(executablePath));

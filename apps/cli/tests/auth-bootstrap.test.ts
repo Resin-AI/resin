@@ -62,12 +62,9 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
           deviceId: "dev_mock_test",
           installationId: "inst_dev_mock_test",
           hostname: os.hostname() || "localhost",
-          platform:
-            process.platform === "darwin"
-              ? "darwin"
-              : process.platform === "linux"
-                ? "linux"
-                : "other",
+          platform: ["darwin", "linux", "win32"].includes(process.platform)
+            ? process.platform
+            : "other",
           arch: process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64" : "other",
           clientVersion: "1.0.0",
           scopes: [

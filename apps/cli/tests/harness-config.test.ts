@@ -1,3 +1,4 @@
+import path from "node:path";
 import { type HarnessInstallation, InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { SUPPORTED_HARNESS_IDS } from "../src/harness-registry.js";
@@ -5,6 +6,15 @@ import {
   HarnessConfigOrchestrator,
   type HarnessProbeOptions,
 } from "../src/installer/harness-config.js";
+
+// Drive-qualified on Windows so adapter-resolved target paths match the requested ones.
+const home = path.resolve("/home/developer");
+const workspace = path.join(home, "projects", "my-project");
+// Windows registers the installer's Node entry launched through node.exe (no shebang shims).
+const expectedLaunch =
+  process.platform === "win32"
+    ? { command: process.execPath, args: [path.join(home, ".resin", "bin", "resin.mjs"), "mcp"] }
+    : { command: `${home}/.resin/bin/resin`, args: ["mcp"] };
 
 async function everyHarnessPresent({
   harnessId,
@@ -29,10 +39,6 @@ describe("HarnessConfigOrchestrator", () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
 
-    const home = "/home/developer";
-    const resinCommand = `${home}/.resin/bin/resin`;
-    const workspace = "/home/developer/projects/my-project";
-
     const result = await orchestrator.configureHarnesses({
       customHome: home,
       workspacePath: workspace,
@@ -49,34 +55,31 @@ describe("HarnessConfigOrchestrator", () => {
     const claudeContent = await bridge.readFile(`${home}/.claude.json`);
     expect(claudeContent).not.toBeNull();
     const claudeJson = JSON.parse(claudeContent ?? "{}");
-    expect(claudeJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+    expect(claudeJson.mcpServers.resin).toEqual(expectedLaunch);
 
     // Verify Codex config was written
     const codexContent = await bridge.readFile(`${home}/.codex/config.toml`);
     expect(codexContent).not.toBeNull();
-    expect(codexContent).toContain(`command = "${resinCommand}"`);
-    expect(codexContent).toContain('args = ["mcp"]');
+    expect(codexContent).toContain(`command = ${JSON.stringify(expectedLaunch.command)}`);
+    expect(codexContent).toContain(`args = ${JSON.stringify(expectedLaunch.args)}`);
 
     // Verify OMP config was written
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+    expect(ompJson.mcpServers.resin).toEqual(expectedLaunch);
 
     // Verify Muse Code settings were written with the schema version muse requires
     const museContent = await bridge.readFile(`${home}/.config/muse/settings.json`);
     expect(JSON.parse(museContent ?? "{}")).toEqual({
       schema_version: 1,
-      mcp_servers: { resin: { command: resinCommand, args: ["mcp"] } },
+      mcp_servers: { resin: expectedLaunch },
     });
   });
 
   it("is idempotent when re-run on already configured harnesses", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
-
-    const home = "/home/developer";
-    const workspace = "/home/developer/projects/my-project";
 
     // First run: apply configurations
     const firstRun = await orchestrator.configureHarnesses({
@@ -105,9 +108,6 @@ describe("HarnessConfigOrchestrator", () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
 
-    const home = "/home/developer";
-    const workspace = "/home/developer/projects/my-project";
-
     const result = await orchestrator.configureHarnesses({
       customHome: home,
       workspacePath: workspace,
@@ -129,9 +129,6 @@ describe("HarnessConfigOrchestrator", () => {
   it("rolls back all applied configurations on failure", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const orchestrator = new HarnessConfigOrchestrator();
-
-    const home = "/home/developer";
-    const workspace = "/home/developer/projects/my-project";
 
     // Pre-populate original content
     await bridge.writeFile(`${home}/.claude.json`, '{"original": true}');

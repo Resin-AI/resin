@@ -46,6 +46,10 @@ import { ClaudeSessionEventSource } from "./source.js";
 export interface ClaudeHarnessAdapterOptions {
   fsBridge?: ConfigFsBridge;
   execFn?: ExecFunction;
+  /** User home Claude expands `~` against; defaults to `%USERPROFILE%` on Windows, `$HOME` elsewhere. */
+  homeDir?: string;
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -59,20 +63,34 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
 
   private readonly fsBridge: ConfigFsBridge;
   private readonly execFn?: ExecFunction;
+  private readonly host: Pick<ClaudeHarnessAdapterOptions, "homeDir" | "env" | "platform">;
 
   constructor(options?: ClaudeHarnessAdapterOptions) {
     this.fsBridge = options?.fsBridge ?? defaultFsBridge;
     this.execFn = options?.execFn;
+    this.host = { homeDir: options?.homeDir, env: options?.env, platform: options?.platform };
   }
 
   async initialize(): Promise<void> {}
 
   async probeInstallation(options?: ProbeInstallationOptions): Promise<HarnessInstallation | null> {
-    return await probeClaudeInstallation(options, this.fsBridge, this.execFn);
+    return await probeClaudeInstallation(
+      {
+        ...(this.host.homeDir === undefined ? {} : { homeDir: this.host.homeDir }),
+        ...(this.host.env === undefined ? {} : { env: this.host.env }),
+        ...(this.host.platform === undefined ? {} : { platform: this.host.platform }),
+        ...options,
+      },
+      this.fsBridge,
+      this.execFn,
+    );
   }
 
   async listWorkspaces(): Promise<HarnessWorkspace[]> {
-    return await detectClaudeWorkspaces(undefined, this.fsBridge);
+    return await detectClaudeWorkspaces(this.host.homeDir, this.fsBridge, {
+      env: this.host.env,
+      platform: this.host.platform,
+    });
   }
 
   async detectWorkspaces(): Promise<HarnessWorkspace[]> {

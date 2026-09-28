@@ -14,6 +14,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { checkOwnerOnly } from "@resin/windows-security";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_UPDATE_POLICY,
@@ -699,7 +700,12 @@ describe("cross-process update lock", () => {
     // SAFETY: Update lock metadata format verified in test.
     const persisted = JSON.parse(await readFile(lockPath, "utf8")) as UpdateLockMetadata;
 
-    expect(fileStats.mode & 0o777).toBe(0o600);
+    if (process.platform === "win32") {
+      // NTFS has no mode bits; the metadata must instead be private through its DACL.
+      expect(checkOwnerOnly(lockPath)).toMatchObject({ ok: true, ownedByCurrentUser: true });
+    } else {
+      expect(fileStats.mode & 0o777).toBe(0o600);
+    }
     expect(persisted).toMatchObject({
       version: UPDATE_LOCK_METADATA_VERSION,
       pid: process.pid,
@@ -716,7 +722,14 @@ describe("cross-process update lock", () => {
     const targetPath = path.join(path.dirname(lockPath), "foreign-file");
     await mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
     await writeFile(targetPath, "do not delete", { mode: 0o600 });
-    await symlink(targetPath, lockPath);
+    if (process.platform === "win32") {
+      // Unprivileged Windows users cannot create file symlinks; a junction is the same kind of link.
+      const foreignDirectory = path.join(path.dirname(lockPath), "foreign-directory");
+      await mkdir(foreignDirectory);
+      await symlink(foreignDirectory, lockPath, "junction");
+    } else {
+      await symlink(targetPath, lockPath);
+    }
 
     await expect(acquireUpdateLock({ lockPath, timeoutMs: 0 })).rejects.toBeInstanceOf(
       UnsafeUpdateLockError,
@@ -835,28 +848,40 @@ describe("cross-process update lock", () => {
     const targetDirectory = path.join(root, "foreign-locks");
     await mkdir(targetDirectory, { mode: 0o755 });
     await chmod(targetDirectory, 0o755);
-    await symlink(targetDirectory, path.dirname(lockPath));
+    const targetMode = (await stat(targetDirectory)).mode;
+    await symlink(
+      targetDirectory,
+      path.dirname(lockPath),
+      process.platform === "win32" ? "junction" : "dir",
+    );
 
     await expect(acquireUpdateLock({ lockPath, timeoutMs: 0 })).rejects.toBeInstanceOf(
       UnsafeUpdateLockError,
     );
-    expect((await stat(targetDirectory)).mode & 0o777).toBe(0o755);
+    expect((await stat(targetDirectory)).mode).toBe(targetMode);
     await expect(access(path.join(targetDirectory, "update.lock"))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
 
-  it("fails closed when an ancestor is writable by other users", async () => {
-    const lockPath = await createTemporaryLockPath();
-    const root = path.dirname(path.dirname(lockPath));
-    await chmod(root, 0o777);
+  // POSIX-only: Windows ancestors have no mode bits; the lock directory gets a private DACL instead.
+  it.skipIf(process.platform === "win32")(
+    "fails closed when an ancestor is writable by other users",
+    async () => {
+      const lockPath = await createTemporaryLockPath();
+      const root = path.dirname(path.dirname(lockPath));
+      await chmod(root, 0o777);
 
-    await expect(acquireUpdateLock({ lockPath, timeoutMs: 0 })).rejects.toBeInstanceOf(
-      UnsafeUpdateLockError,
-    );
-  });
+      await expect(acquireUpdateLock({ lockPath, timeoutMs: 0 })).rejects.toBeInstanceOf(
+        UnsafeUpdateLockError,
+      );
+    },
+  );
 
-  it.each(["linux", "darwin"] as const)(
+  // The linux variant anchors through /proc/self/fd, which only exists on a Linux host.
+  it.each(
+    process.platform === "win32" ? (["darwin", "win32"] as const) : (["linux", "darwin"] as const),
+  )(
     "never mutates a replacement lock directory after its inode changes on %s",
     async (platform) => {
       const lockPath = await createTemporaryLockPath();

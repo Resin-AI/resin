@@ -142,11 +142,11 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
   });
 
   describe("2. Qualification Coverage (Platforms, Harnesses, Cloud Staging & Security)", () => {
-    it("includes all 5 required platform qualification lanes", () => {
+    it("includes all 7 required platform qualification lanes", () => {
       const evidence = generateReleaseEvidence({ rootDir, testOnly: true });
       const platforms = evidence.qualification.platforms;
 
-      expect(platforms.totalLanes).toBe(5);
+      expect(platforms.totalLanes).toBe(7);
       expect(platforms.passedLanes).toBe(0);
 
       const laneIds = platforms.lanes.map((l) => l.id);

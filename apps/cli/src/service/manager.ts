@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -24,6 +24,14 @@ import {
   RecoveryStateTracker,
   sanitizeCrashDiagnostic,
 } from "./recovery-state.js";
+import {
+  WINDOWS_TASK_NAME_ENV,
+  WindowsTaskBackend,
+  type WindowsTaskBackendOptions,
+  buildServiceHostArguments,
+  buildWindowsTaskXml,
+  serviceStopRequestPath,
+} from "./windows-task.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +56,7 @@ export const defaultServiceCommandRunner: ServiceCommandRunner = {
       const { stdout, stderr } = await execFileAsync(cmd, args, {
         encoding: "utf8",
         timeout: 10000,
+        windowsHide: true,
       });
       return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
     } catch (err: unknown) {
@@ -94,6 +103,21 @@ export interface ServiceSupervisorOptions {
    * service layer does not depend on the update engine.
    */
   autoUpdateFactory?: (options: { resinHome: string }) => { stop(): void } | undefined;
+  /**
+   * Watches for an out-of-band stop request. Windows has no SIGTERM to deliver
+   * to the task's processes, so `resin service stop` writes a request file that
+   * this watcher reports. Defaults to polling `<resinHome>/run/service-stop.request`
+   * on win32 and to no watcher elsewhere.
+   */
+  stopRequestWatcher?: (onRequest: () => void) => { close(): void };
+  /**
+   * Asks the running daemon to drain and exit (e.g. over IPC) before the
+   * supervisor kills it. Resolves true when the request was accepted.
+   */
+  requestChildShutdown?: () => Promise<boolean>;
+  /** How long a daemon that accepted a shutdown request may take to exit. */
+  childShutdownGraceMs?: number;
+  platform?: NodeJS.Platform;
 }
 
 export interface ServiceSupervisorResult {
@@ -149,6 +173,22 @@ export async function runServiceSupervisor(
   }
   process.once("SIGINT", requestShutdown);
   process.once("SIGTERM", requestShutdown);
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    // Ctrl+Break in a console, the only other stop signal Windows delivers.
+    process.once("SIGBREAK", requestShutdown);
+  }
+  let stopRequestWatch: { close(): void } | undefined;
+  try {
+    const watcherFactory =
+      options.stopRequestWatcher ??
+      (platform === "win32" ? createStopRequestFileWatcher(resinHome) : undefined);
+    stopRequestWatch = watcherFactory?.(requestShutdown);
+  } catch (error: unknown) {
+    report(
+      `stop-request watcher unavailable: ${sanitizeCrashDiagnostic(error instanceof Error ? error.message : String(error))}`,
+    );
+  }
 
   let harnessHealthScheduler: HarnessHealthScheduler | undefined;
   if (!process.env.VITEST || options.harnessHealthSchedulerFactory) {
@@ -186,6 +226,10 @@ export async function runServiceSupervisor(
         stabilityWindowMs,
         stabilityWait,
         shutdownSignal: shutdownController.signal,
+        platform,
+        requestChildShutdown: options.requestChildShutdown,
+        childShutdownGraceMs: options.childShutdownGraceMs ?? 15_000,
+        graceWait: options.stabilityWait ?? waitForSupervisorDelay,
       });
       if (shutdownController.signal.aborted) {
         return {
@@ -258,7 +302,13 @@ export async function runServiceSupervisor(
   } finally {
     process.removeListener("SIGINT", requestShutdown);
     process.removeListener("SIGTERM", requestShutdown);
+    process.removeListener("SIGBREAK", requestShutdown);
     requestedSignal?.removeEventListener("abort", requestShutdown);
+    try {
+      stopRequestWatch?.close();
+    } catch {
+      // Watcher cleanup is best-effort during supervisor shutdown.
+    }
     try {
       harnessHealthScheduler?.stop();
     } catch {
@@ -281,6 +331,67 @@ interface RunSupervisedChildOptions {
   stabilityWindowMs: number;
   stabilityWait: (delayMs: number, signal: AbortSignal) => Promise<void>;
   shutdownSignal: AbortSignal;
+  platform: NodeJS.Platform;
+  requestChildShutdown?: () => Promise<boolean>;
+  childShutdownGraceMs: number;
+  graceWait: (delayMs: number, signal: AbortSignal) => Promise<void>;
+}
+
+const STOP_REQUEST_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * Polls for the stop-request file written by the Windows service manager. A
+ * request left over from before this supervisor started is discarded.
+ */
+function createStopRequestFileWatcher(
+  resinHome: string,
+): (onRequest: () => void) => { close(): void } {
+  return (onRequest) => {
+    const requestPath = serviceStopRequestPath(resinHome);
+    try {
+      fsSync.rmSync(requestPath, { force: true });
+    } catch {
+      // A stale request that cannot be removed is reported below as a real one.
+    }
+    const timer = setInterval(() => {
+      if (fsSync.existsSync(requestPath)) {
+        clearInterval(timer);
+        try {
+          fsSync.rmSync(requestPath, { force: true });
+        } catch {
+          // The manager also clears it once the task has stopped.
+        }
+        onRequest();
+      }
+    }, STOP_REQUEST_POLL_INTERVAL_MS);
+    timer.unref();
+    return { close: () => clearInterval(timer) };
+  };
+}
+
+/** Kills a child and, on Windows, every process it started. */
+function killChildTree(child: ChildProcess, platform: NodeJS.Platform): void {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  if (platform === "win32" && child.pid !== undefined) {
+    const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+    const taskkill = spawn(
+      path.win32.join(systemRoot, "System32", "taskkill.exe"),
+      ["/PID", String(child.pid), "/T", "/F"],
+      { stdio: "ignore", windowsHide: true },
+    );
+    taskkill.once("error", () => {
+      child.kill();
+    });
+    taskkill.once("exit", (code) => {
+      if (code !== 0) {
+        child.kill();
+      }
+    });
+    return;
+  }
+  child.kill("SIGTERM");
 }
 
 async function runSupervisedChild(
@@ -289,6 +400,7 @@ async function runSupervisedChild(
   const child = spawn(options.command, options.args, {
     env: options.environment,
     stdio: ["ignore", "inherit", "pipe"],
+    windowsHide: true,
   });
   let capturedStderr = "";
   let pendingStderr = "";
@@ -310,10 +422,31 @@ async function runSupervisedChild(
     }
   });
 
+  const graceController = new AbortController();
   const stopChild = (): void => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
     }
+    // POSIX delivers SIGTERM so the daemon drains itself. Windows has no such
+    // signal: ask the daemon to drain (IPC) and kill the tree after the grace period.
+    if (options.platform !== "win32" || options.requestChildShutdown === undefined) {
+      killChildTree(child, options.platform);
+      return;
+    }
+    void options
+      .requestChildShutdown()
+      .catch(() => false)
+      .then(async (accepted) => {
+        if (accepted) {
+          await options.graceWait(options.childShutdownGraceMs, graceController.signal);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!graceController.signal.aborted) {
+          killChildTree(child, options.platform);
+        }
+      });
   };
   if (options.shutdownSignal.aborted) {
     stopChild();
@@ -383,6 +516,7 @@ async function runSupervisedChild(
     return await childExited;
   } finally {
     stabilityController.abort();
+    graceController.abort();
     options.shutdownSignal.removeEventListener("abort", stopChild);
   }
 }
@@ -445,8 +579,8 @@ export function isStaleSupervisorUnitContent(
 
   // 1. Obsolete versioned supervisor paths are always stale
   if (
-    /\/versions\/v[^\/\s"']+\/apps\/cli\/dist\/index\.js/.test(onDiskContent) ||
-    /\/versions\/v[^\/\s"']+\/bin\/resin/.test(onDiskContent)
+    /[\\/]versions[\\/]v[^\\/\s"'&]+[\\/]apps[\\/]cli[\\/]dist[\\/]index\.js/.test(onDiskContent) ||
+    /[\\/]versions[\\/]v[^\\/\s"'&]+[\\/]bin[\\/]resin/.test(onDiskContent)
   ) {
     return true;
   }
@@ -475,7 +609,15 @@ export function isStaleSupervisorUnitContent(
     );
   }
 
-  // 4. WSL fallback script: compare command invocation line
+  // 4. Windows task XML: compare the action's command and arguments
+  const onDiskAction = onDiskContent.match(/<Exec>([\s\S]*?)<\/Exec>/);
+  const expectedAction = expectedContent.match(/<Exec>([\s\S]*?)<\/Exec>/);
+  if (onDiskAction?.[1] !== undefined && expectedAction?.[1] !== undefined) {
+    const normalizeAction = (str: string) => str.replace(/\s+/g, " ").trim();
+    return normalizeAction(onDiskAction[1]) !== normalizeAction(expectedAction[1]);
+  }
+
+  // 5. WSL fallback script: compare command invocation line
   const onDiskNohupMatch = onDiskContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   const expectedNohupMatch = expectedContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   if (onDiskNohupMatch && expectedNohupMatch) {
@@ -486,16 +628,37 @@ export function isStaleSupervisorUnitContent(
   return onDiskContent.trim() !== expectedContent.trim();
 }
 
+/**
+ * The daemon command the supervisor runs. Windows never goes through a shell:
+ * `.cmd`/`.bat` launchers are refused, `.exe` runs directly, and anything else
+ * (the `.mjs` launcher or a JS entry) runs under Node.
+ */
+function daemonChildCommand(daemonPath: string, nodePath: string, windows: boolean): string[] {
+  if (!windows) {
+    return daemonPath.endsWith(".js")
+      ? [nodePath, daemonPath, "--foreground"]
+      : [daemonPath, "--foreground"];
+  }
+  const extension = path.win32.extname(daemonPath).toLowerCase();
+  if (extension === ".cmd" || extension === ".bat") {
+    throw new Error(
+      `The Windows service cannot run the daemon through a batch launcher (${daemonPath}); use the .mjs launcher.`,
+    );
+  }
+  return extension === ".exe"
+    ? [daemonPath, "--foreground"]
+    : [nodePath, daemonPath, "--foreground"];
+}
+
 function createSupervisorProgramArguments(
   daemonPath: string,
   resinHome: string,
   nodePath: string,
   supervisorEntryPath?: string,
+  windows = false,
 ): string[] {
   const resolvedSupervisorEntry = resolveSupervisorEntryPath(resinHome, supervisorEntryPath);
-  const childCommand = daemonPath.endsWith(".js")
-    ? [nodePath, daemonPath, "--foreground"]
-    : [daemonPath, "--foreground"];
+  const childCommand = daemonChildCommand(daemonPath, nodePath, windows);
   return [
     nodePath,
     resolvedSupervisorEntry,
@@ -575,7 +738,7 @@ export interface ServiceStatusInfo {
 }
 
 export interface UserServiceManagerOptions {
-  platform?: "linux" | "darwin" | "wsl" | "systemd" | "launchd";
+  platform?: "linux" | "darwin" | "wsl" | "systemd" | "launchd" | "windows" | "windows-task";
   homeDir?: string;
   resinHome?: string;
   daemonPath?: string;
@@ -584,11 +747,13 @@ export interface UserServiceManagerOptions {
   fsBridge?: ConfigFsBridge;
   runner?: ServiceCommandRunner;
   env?: Record<string, string>;
+  /** Native Windows scheduled-task settings and test seams. */
+  windowsTask?: WindowsTaskBackendOptions;
 }
 
 export interface UserServiceManager {
   readonly name: string;
-  readonly platform: "systemd" | "launchd" | "wsl" | "external";
+  readonly platform: "systemd" | "launchd" | "wsl" | "windows-task" | "external";
   install(options?: ServiceInstallOptions): Promise<ServiceInstallResult>;
   uninstall(): Promise<ServiceUninstallResult>;
   start(): Promise<void>;
@@ -1511,6 +1676,257 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
   }
 }
 
+// -----------------------------------------------------------------------------
+// Windows Scheduled Task User Service Manager (native Windows)
+// -----------------------------------------------------------------------------
+
+export class WindowsTaskUserServiceManager implements UserServiceManager {
+  readonly name = "windows-task";
+  readonly platform = "windows-task" as const;
+
+  protected readonly homeDir: string;
+  protected readonly resinHome: string;
+  protected readonly defaultDaemonPath: string;
+  protected readonly nodePath: string;
+  protected readonly supervisorEntryPath?: string;
+  protected readonly fsBridge: ConfigFsBridge;
+  protected readonly runner: ServiceCommandRunner;
+  protected readonly defaultEnv: Record<string, string>;
+  readonly backend: WindowsTaskBackend;
+
+  constructor(options: UserServiceManagerOptions = {}) {
+    this.homeDir = options.homeDir ?? os.homedir();
+    this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
+    this.defaultDaemonPath =
+      options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon.mjs");
+    this.nodePath = options.nodePath ?? process.execPath;
+    this.supervisorEntryPath = options.supervisorEntryPath;
+    this.fsBridge = options.fsBridge ?? defaultFsBridge;
+    this.runner = options.runner ?? defaultServiceCommandRunner;
+    this.defaultEnv = options.env ?? {};
+    this.backend = new WindowsTaskBackend(
+      {
+        homeDir: this.homeDir,
+        resinHome: this.resinHome,
+        runner: this.runner,
+        fsBridge: this.fsBridge,
+      },
+      options.windowsTask,
+    );
+  }
+
+  get serviceName(): string {
+    return this.backend.taskName;
+  }
+
+  /**
+   * A custom home needs an injected runner or an explicitly named task, so tests
+   * never register or remove the default task by accident. Every task operation
+   * also refuses a task whose action belongs to another Resin home.
+   */
+  protected ensureLoginHomeForCommands(): void {
+    if (
+      this.runner === defaultServiceCommandRunner &&
+      !this.backend.explicitTaskName &&
+      path.resolve(this.homeDir) !== path.resolve(os.homedir())
+    ) {
+      throw new Error(
+        `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner or an explicit ${WINDOWS_TASK_NAME_ENV}.`,
+      );
+    }
+  }
+
+  getUnitPath(): string {
+    return this.backend.xmlPath;
+  }
+
+  getUnitDefinition(options: ServiceInstallOptions = {}): string {
+    const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
+    const resinHome = options.resinHome ?? this.resinHome;
+    const nodePath = options.nodePath ?? this.nodePath;
+    const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
+    return buildWindowsTaskXml({
+      userSid: this.backend.userSid(),
+      hostPath: this.backend.hostPath,
+      workingDirectory: resinHome,
+      hostArguments: buildServiceHostArguments({
+        resinHome,
+        nodePath,
+        env: { ...this.defaultEnv, ...(options.env ?? {}) },
+        supervisorArguments: createSupervisorProgramArguments(
+          daemonPath,
+          resinHome,
+          nodePath,
+          supervisorEntryPath,
+          true,
+        ),
+      }),
+    });
+  }
+
+  async isInstalled(): Promise<boolean> {
+    if (!(await this.fsBridge.exists(this.getUnitPath()))) {
+      return false;
+    }
+    this.ensureLoginHomeForCommands();
+    return (await this.backend.query()).installed;
+  }
+
+  private notInstalledStatus(): ServiceStatusInfo {
+    return {
+      installed: false,
+      active: false,
+      enabled: false,
+      serviceName: this.serviceName,
+      unitPath: this.getUnitPath(),
+      state: "not_installed",
+    };
+  }
+
+  async install(options: ServiceInstallOptions = {}): Promise<ServiceInstallResult> {
+    const unitPath = this.getUnitPath();
+    let unitContent = "";
+    try {
+      this.ensureLoginHomeForCommands();
+      unitContent = this.getUnitDefinition(options);
+      await this.backend.writeDefinition(unitContent);
+      await this.backend.register();
+      let started = false;
+      if (options.autoStart ?? true) {
+        await this.backend.run();
+        started = true;
+      }
+      return {
+        success: true,
+        unitPath,
+        unitContent,
+        serviceName: this.serviceName,
+        enabled: true,
+        started,
+      };
+    } catch (err: unknown) {
+      return {
+        success: false,
+        unitPath,
+        unitContent,
+        serviceName: this.serviceName,
+        enabled: false,
+        started: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async uninstall(): Promise<ServiceUninstallResult> {
+    const unitPath = this.getUnitPath();
+    let stopped = false;
+    let disabled = false;
+    let removed = false;
+    const errors: string[] = [];
+    try {
+      this.ensureLoginHomeForCommands();
+    } catch (err: unknown) {
+      return {
+        success: false,
+        unitPath,
+        stopped,
+        disabled,
+        removed,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    try {
+      await this.backend.stop();
+      stopped = true;
+    } catch (err: unknown) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await this.backend.delete();
+      disabled = true;
+    } catch (err: unknown) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+    if (disabled) {
+      const leftovers = await this.backend.removeFiles();
+      removed = leftovers.length === 0;
+      if (leftovers.length > 0) {
+        errors.push(`Could not remove (file in use?): ${leftovers.join(", ")}`);
+      }
+      await this.backend.clearStopRequest();
+    }
+    const result: ServiceUninstallResult = {
+      success: errors.length === 0,
+      unitPath,
+      stopped,
+      disabled,
+      removed,
+    };
+    if (errors.length > 0) {
+      result.error = errors.join("; ");
+    }
+    return result;
+  }
+
+  async start(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    await this.backend.run();
+  }
+
+  async stop(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    await this.backend.stop();
+  }
+
+  async restart(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    await this.backend.stop();
+    await this.backend.run();
+  }
+
+  /** Re-registers the task from the XML on disk (used after a rollback restores it). */
+  async reload(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    if (await this.fsBridge.exists(this.getUnitPath())) {
+      await this.backend.register();
+    }
+  }
+
+  async enable(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    await this.backend.setEnabled(true);
+  }
+
+  async disable(): Promise<void> {
+    this.ensureLoginHomeForCommands();
+    await this.backend.setEnabled(false);
+  }
+
+  async status(): Promise<ServiceStatusInfo> {
+    if (!(await this.fsBridge.exists(this.getUnitPath()))) {
+      return this.notInstalledStatus();
+    }
+    this.ensureLoginHomeForCommands();
+    const task = await this.backend.query();
+    if (!task.installed) {
+      return this.notInstalledStatus();
+    }
+    const info: ServiceStatusInfo = {
+      installed: true,
+      active: task.running,
+      enabled: task.enabled,
+      serviceName: this.serviceName,
+      unitPath: this.getUnitPath(),
+      state: task.state,
+      rawStatus: JSON.stringify(task),
+    };
+    if (task.pid !== undefined) {
+      info.pid = task.pid;
+    }
+    return info;
+  }
+}
+
 class ExternalUserServiceManager implements UserServiceManager {
   readonly name = "external";
   readonly platform = "external" as const;
@@ -1589,6 +2005,9 @@ export function createUserServiceManager(
     return new ExternalUserServiceManager();
   }
   if (options.platform) {
+    if (options.platform === "windows" || options.platform === "windows-task") {
+      return new WindowsTaskUserServiceManager(options);
+    }
     if (options.platform === "wsl") {
       return new WslUserServiceManager(options);
     }
@@ -1603,6 +2022,9 @@ export function createUserServiceManager(
     env: process.env,
   });
 
+  if (detected.os === "windows") {
+    return new WindowsTaskUserServiceManager(options);
+  }
   if (detected.isWsl) {
     return new WslUserServiceManager(options);
   }

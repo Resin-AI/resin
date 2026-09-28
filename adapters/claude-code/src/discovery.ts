@@ -1,14 +1,16 @@
-import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { nowIso } from "@resin/contracts/common";
 import type { ProbeInstallationOptions } from "@resin/harness-contracts";
 import {
   type ConfigFsBridge,
   InMemoryConfigFsBridge,
   defaultFsBridge,
+  findHostExecutable,
+  readHostEnv,
+  readHostPathEnv,
+  resolveHarnessUserHome,
+  runHarnessCommand,
 } from "@resin/harness-contracts";
 import type {
   HarnessInstallation,
@@ -16,8 +18,6 @@ import type {
   InstallationStatus,
 } from "@resin/harness-contracts";
 import { z } from "zod";
-
-const execFileAsync = promisify(execFile);
 
 export type ExecFunction = (
   file: string,
@@ -44,16 +44,13 @@ export function isSupportedClaudeVersion(versionStr: string, minMajor = 0, minMi
  * Detect host platform details including WSL.
  */
 export function detectPlatform(
-  platform = process.platform,
-): "darwin" | "linux" | "wsl" | "win32" | "other" {
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): ClaudeHostPlatform {
   if (platform === "darwin") return "darwin";
   if (platform === "win32") return "win32";
   if (platform === "linux") {
-    if (
-      process.env.WSL_DISTRO_NAME ||
-      process.env.WSLENV ||
-      (process.env.IS_WSL && process.env.IS_WSL !== "0")
-    ) {
+    if (env.WSL_DISTRO_NAME || env.WSLENV || (env.IS_WSL && env.IS_WSL !== "0")) {
       return "wsl";
     }
     return "linux";
@@ -61,14 +58,25 @@ export function detectPlatform(
   return "other";
 }
 
+export type ClaudeHostPlatform = "darwin" | "linux" | "wsl" | "win32" | "other";
+
+function configuredClaudeConfigDir(env: NodeJS.ProcessEnv, platform: ClaudeHostPlatform) {
+  return readHostPathEnv(env, "CLAUDE_CONFIG_DIR", platform === "win32" ? "win32" : "linux");
+}
+
 /**
- * Resolve candidate Claude configuration directories based on platform.
+ * Resolve candidate Claude configuration directories based on platform. `$CLAUDE_CONFIG_DIR`
+ * comes first: Claude Code keeps settings and session history (`projects/`) under it when set.
+ * Native Windows uses `%USERPROFILE%\.claude` (`homeDir` is the profile folder there).
  */
 export function resolveClaudeHomeCandidates(
-  platform = detectPlatform(),
-  homeDir = os.homedir(),
+  platform: ClaudeHostPlatform = detectPlatform(),
+  homeDir = resolveHarnessUserHome(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const candidates: string[] = [];
+  const configured = configuredClaudeConfigDir(env, platform);
+  if (configured) candidates.push(configured);
 
   switch (platform) {
     case "darwin":
@@ -76,37 +84,43 @@ export function resolveClaudeHomeCandidates(
       candidates.push(path.join(homeDir, ".claude"));
       candidates.push(path.join(homeDir, ".config", "claude"));
       break;
+    case "win32":
+      candidates.push(path.join(homeDir, ".claude"));
+      break;
     case "wsl":
       candidates.push(path.join(homeDir, ".claude"));
       candidates.push(path.join(homeDir, ".config", "claude"));
       // Also probe standard WSL Windows user profile path if available
-      if (process.env.USERPROFILE) {
-        candidates.push(path.join(process.env.USERPROFILE, ".claude"));
+      if (env.USERPROFILE) {
+        candidates.push(path.join(env.USERPROFILE, ".claude"));
       }
       break;
     default:
       candidates.push(path.join(homeDir, ".claude"));
-      if (process.env.XDG_CONFIG_HOME) {
-        candidates.push(path.join(process.env.XDG_CONFIG_HOME, "claude"));
+      if (env.XDG_CONFIG_HOME) {
+        candidates.push(path.join(env.XDG_CONFIG_HOME, "claude"));
       }
       candidates.push(path.join(homeDir, ".config", "claude"));
       break;
   }
 
-  return candidates;
+  return [...new Set(candidates)];
 }
 
 /**
  * Resolve candidate Claude global config file paths.
  */
 export function resolveClaudeConfigFileCandidates(
-  homeDir = os.homedir(),
-  platform = detectPlatform(),
+  homeDir = resolveHarnessUserHome(),
+  platform: ClaudeHostPlatform = detectPlatform(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const homes = resolveClaudeHomeCandidates(platform, homeDir);
+  const homes = resolveClaudeHomeCandidates(platform, homeDir, env);
   const candidates: string[] = [];
 
-  // Direct ~/.claude.json file
+  // Claude's global state file: `$CLAUDE_CONFIG_DIR/.claude.json` when set, else `~/.claude.json`.
+  const configured = configuredClaudeConfigDir(env, platform);
+  if (configured) candidates.push(path.join(configured, ".claude.json"));
   candidates.push(path.join(homeDir, ".claude.json"));
 
   for (const home of homes) {
@@ -119,11 +133,12 @@ export function resolveClaudeConfigFileCandidates(
 }
 
 /**
- * Resolve candidate Claude executable paths.
+ * Resolve candidate Claude executable paths (POSIX). A bare `claude` entry means "run it from
+ * `PATH`". Native Windows uses {@link resolveClaudeWindowsExecutableSearch} instead.
  */
 export function resolveClaudeExecutableCandidates(
-  homeDir = os.homedir(),
-  platform = detectPlatform(),
+  homeDir = resolveHarnessUserHome(),
+  platform: ClaudeHostPlatform = detectPlatform(),
 ): string[] {
   const candidates: string[] = [];
 
@@ -143,6 +158,31 @@ export function resolveClaudeExecutableCandidates(
 }
 
 /**
+ * Where Claude Code's launcher lives on native Windows, searched before `PATH`:
+ * - native installer: `%USERPROFILE%\.local\bin\claude.exe`
+ * - WinGet (`Anthropic.ClaudeCode`): `%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe`
+ * - npm global: `%APPDATA%\npm\claude.cmd`
+ * `%LOCALAPPDATA%\Microsoft\WindowsApps` is excluded: older Claude Desktop builds register a
+ * `claude.exe` app alias there that would open the desktop app instead of the CLI.
+ */
+export function resolveClaudeWindowsExecutableSearch(
+  homeDir: string,
+  env: NodeJS.ProcessEnv,
+): { preferredDirs: string[]; excludeDirs: string[] } {
+  const localAppData =
+    readHostEnv(env, "LOCALAPPDATA", "win32") ?? path.join(homeDir, "AppData", "Local");
+  const appData = readHostEnv(env, "APPDATA", "win32") ?? path.join(homeDir, "AppData", "Roaming");
+  return {
+    preferredDirs: [
+      path.join(homeDir, ".local", "bin"),
+      path.join(localAppData, "Microsoft", "WinGet", "Links"),
+      path.join(appData, "npm"),
+    ],
+    excludeDirs: [path.join(localAppData, "Microsoft", "WindowsApps")],
+  };
+}
+
+/**
  * Options for probing Claude Code installation.
  */
 export interface ClaudeProbeInstallationOptions extends ProbeInstallationOptions {
@@ -150,6 +190,10 @@ export interface ClaudeProbeInstallationOptions extends ProbeInstallationOptions
   customConfigPath?: string;
   configPath?: string;
   checkPermissions?: boolean;
+  /** User home Claude expands `~` against; defaults to {@link resolveHarnessUserHome}. */
+  homeDir?: string;
+  /** Host platform (tests inject `win32`); defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -160,8 +204,10 @@ export async function probeClaudeInstallation(
   fsBridge: ConfigFsBridge = defaultFsBridge,
   execFn?: ExecFunction,
 ): Promise<HarnessInstallation> {
-  const platform = detectPlatform();
-  const homeDir = os.homedir();
+  const env = options?.env ?? process.env;
+  const hostPlatform = options?.platform ?? process.platform;
+  const platform = detectPlatform(hostPlatform, env);
+  const homeDir = options?.homeDir ?? resolveHarnessUserHome({ platform: hostPlatform, env });
   const detectedAt = nowIso();
 
   // 1. Resolve Executable Path
@@ -170,13 +216,21 @@ export async function probeClaudeInstallation(
   let status: InstallationStatus = "unknown";
   let isInstalled = false;
 
-  const runner =
-    execFn ||
-    (async (file: string, args: string[]) => {
-      return await execFileAsync(file, args, { timeout: 5000 });
-    });
+  const runner: ExecFunction =
+    execFn ??
+    (async (file: string, args: string[]) =>
+      await runHarnessCommand(file, args, { platform: hostPlatform, env }));
 
-  if (!executablePath) {
+  if (!executablePath && platform === "win32") {
+    const search = resolveClaudeWindowsExecutableSearch(homeDir, env);
+    executablePath =
+      (await findHostExecutable(["claude"], {
+        platform: "win32",
+        env,
+        ...search,
+        isFile: (candidate) => fsBridge.exists(candidate),
+      })) ?? undefined;
+  } else if (!executablePath) {
     const candidates = resolveClaudeExecutableCandidates(homeDir, platform);
     for (const candidate of candidates) {
       if (candidate === "claude") {
@@ -202,7 +256,7 @@ export async function probeClaudeInstallation(
   let configPath = options?.customConfigPath ?? options?.configPath;
   let homePath: string | undefined;
 
-  const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir);
+  const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir, env);
   for (const candidate of homeCandidates) {
     if (await fsBridge.exists(candidate)) {
       homePath = candidate;
@@ -214,7 +268,7 @@ export async function probeClaudeInstallation(
   }
 
   if (!configPath) {
-    const configCandidates = resolveClaudeConfigFileCandidates(homeDir, platform);
+    const configCandidates = resolveClaudeConfigFileCandidates(homeDir, platform, env);
     for (const candidate of configCandidates) {
       if (await fsBridge.exists(candidate)) {
         configPath = candidate;
@@ -406,19 +460,31 @@ async function resolveClaudeProjectRoot(
   return roots.size === 1 ? (roots.values().next().value ?? null) : null;
 }
 
+/** Host facts for workspace discovery; each defaults to the running process. */
+export interface ClaudeDiscoveryHost {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  cwd?: string;
+}
+
 /**
- * Detect workspaces / projects managed by Claude Code.
+ * Detect workspaces / projects managed by Claude Code: every `projects/<encoded cwd>` directory
+ * under each Claude config home (`$CLAUDE_CONFIG_DIR`, then `~/.claude`). On Windows the encoded
+ * cwd is a drive-letter (`C--Users-dev-app`) or UNC (`--wsl-localhost-Ubuntu-home-dev`) path.
  */
 export async function detectClaudeWorkspaces(
   customHome?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
+  host: ClaudeDiscoveryHost = {},
 ): Promise<HarnessWorkspace[]> {
-  const homeDir = customHome || os.homedir();
+  const env = host.env ?? process.env;
+  const hostPlatform = host.platform ?? process.platform;
+  const homeDir = customHome || resolveHarnessUserHome({ platform: hostPlatform, env });
   const workspaces: HarnessWorkspace[] = [];
   const seenRootPaths = new Set<string>();
 
   // Add current working directory workspace if .claude or claude.json exists
-  const cwd = process.cwd();
+  const cwd = host.cwd ?? process.cwd();
   const cwdClaudeJson = path.join(cwd, ".claude.json");
   const cwdClaudeDir = path.join(cwd, ".claude");
 
@@ -440,7 +506,11 @@ export async function detectClaudeWorkspaces(
     });
   }
 
-  const homeCandidates = resolveClaudeHomeCandidates(detectPlatform(), homeDir);
+  const homeCandidates = resolveClaudeHomeCandidates(
+    detectPlatform(hostPlatform, env),
+    homeDir,
+    env,
+  );
   const projectsDirs: string[] = [];
   const dump: Record<string, string> | null =
     "dump" in fsBridge && fsBridge.dump instanceof Function

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { type RawHarnessRecord, RawHarnessRecordSchema } from "@resin/harness-contracts";
+import { ensurePrivateDirectorySync, restrictPrivateFileSync } from "../private-fs.js";
 
 /**
  * Classification reasons for routing a raw record to the Dead Letter Queue.
@@ -490,6 +491,7 @@ export class BoundedRecordQueue extends EventEmitter {
 
       this.pendingFileIdentity = `${stat.dev}:${stat.ino}`;
       fs.chmodSync(pendingPath, 0o600);
+      restrictPrivateFileSync(pendingPath);
       if (restored.length > 0) {
         this.queue = restored;
         this.durablePendingActive = true;
@@ -524,7 +526,7 @@ export class BoundedRecordQueue extends EventEmitter {
     const temporaryPath = `${pendingPath}.${process.pid}.${randomUUID()}.tmp`;
     let descriptor: number | null = null;
     try {
-      fs.mkdirSync(parentDirectory, { recursive: true, mode: 0o700 });
+      ensurePrivateDirectorySync(parentDirectory);
       fs.chmodSync(parentDirectory, 0o700);
 
       if (fs.existsSync(pendingPath)) {

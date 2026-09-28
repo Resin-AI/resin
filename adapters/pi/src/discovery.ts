@@ -237,25 +237,39 @@ const PI_PACKAGE_NAMES: ReadonlySet<string> = new Set([
 export async function readPiVersion(executablePath: string): Promise<string | undefined> {
   let dir = path.dirname(await fsp.realpath(executablePath).catch(() => executablePath));
   for (let depth = 0; depth < 6; depth++) {
-    try {
-      const pkg: unknown = JSON.parse(await fsp.readFile(path.join(dir, "package.json"), "utf8"));
-      if (
-        pkg &&
-        typeof pkg === "object" &&
-        "name" in pkg &&
-        typeof pkg.name === "string" &&
-        PI_PACKAGE_NAMES.has(pkg.name) &&
-        "version" in pkg &&
-        typeof pkg.version === "string"
-      ) {
-        return pkg.version;
-      }
-    } catch {
-      // not the package root
-    }
+    const version = await readPiPackageVersion(dir);
+    if (version !== undefined) return version;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+  // Windows npm keeps its command shims (`pi.cmd`, `.ps1` and an extensionless script) in the
+  // global prefix beside `node_modules/<package>`; no symlink leads from the shim to the package.
+  for (const name of PI_PACKAGE_NAMES) {
+    const version = await readPiPackageVersion(
+      path.join(path.dirname(executablePath), "node_modules", name),
+    );
+    if (version !== undefined) return version;
+  }
+  return undefined;
+}
+
+async function readPiPackageVersion(dir: string): Promise<string | undefined> {
+  try {
+    const pkg: unknown = JSON.parse(await fsp.readFile(path.join(dir, "package.json"), "utf8"));
+    if (
+      pkg &&
+      typeof pkg === "object" &&
+      "name" in pkg &&
+      typeof pkg.name === "string" &&
+      PI_PACKAGE_NAMES.has(pkg.name) &&
+      "version" in pkg &&
+      typeof pkg.version === "string"
+    ) {
+      return pkg.version;
+    }
+  } catch {
+    // not the package root
   }
   return undefined;
 }

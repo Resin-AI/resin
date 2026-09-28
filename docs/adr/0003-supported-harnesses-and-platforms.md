@@ -1,9 +1,10 @@
 # ADR 0003: Supported AI Harnesses and Operating System Platforms
 
-- **Status**: accepted
+- **Status**: superseded
 - **Date**: 2026-08-17
 - **Deciders**: Resin Core Architecture Team
 - **Consulted**: Developer Tooling, CI/CD Team, Platform Engineering
+- **Superseded by**: [ADR 0014](0014-native-windows-support.md)
 
 ## Context and Problem Statement
 

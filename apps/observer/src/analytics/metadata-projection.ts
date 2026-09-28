@@ -47,8 +47,10 @@ import {
 } from "../normalization/local-workflow-payload.js";
 import {
   RESIN_WORKFLOW_CALL_METADATA_KEY,
+  RESIN_WORKFLOW_DIALECT_METADATA_KEY,
   RESIN_WORKFLOW_RESULT_METADATA_KEY,
   readWorkflowCallCarrier,
+  readWorkflowDialectUpgrade,
   readWorkflowResultCarrier,
 } from "./workflow-carrier.js";
 const DEFAULT_HOME_DIR = homedir();
@@ -836,6 +838,16 @@ export function projectEventToMetadataOnly(
   );
   if (workflowResult !== undefined) {
     metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = workflowResult;
+  }
+  // A dialect a later record proved for a call is re-read through the same carrier vocabulary as
+  // the call's own carrier (its scrubbed program view, template and suggestions) and copied by value.
+  const dialectUpgrade = readWorkflowDialectUpgrade(
+    event.metadata?.[RESIN_WORKFLOW_DIALECT_METADATA_KEY],
+  );
+  if (dialectUpgrade !== undefined) {
+    metadata[RESIN_WORKFLOW_DIALECT_METADATA_KEY] = JSON.parse(
+      JSON.stringify(dialectUpgrade),
+    ) as Record<string, unknown>;
   }
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec

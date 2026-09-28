@@ -62,7 +62,8 @@ export function discoverPackages(rootDir) {
     const entries = fs.readdirSync(groupDir, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const pkgDir = path.join(group, entry.name);
+        // Manifest-relative, `/`-separated on every host, as resin-boundary.json lists paths.
+        const pkgDir = `${group}/${entry.name}`;
         const fullDir = path.join(groupDir, entry.name);
         const pkgJsonPath = path.join(fullDir, "package.json");
 

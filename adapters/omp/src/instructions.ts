@@ -3,6 +3,7 @@ import {
   type ManagedBlockMarkers,
   applyManagedBlock,
   defaultFsBridge,
+  readHostPathEnv,
 } from "@resin/harness-contracts";
 import { ompMcpToolName } from "./device-surface.js";
 import { resolveOmpHome } from "./discovery.js";
@@ -36,11 +37,11 @@ export function resolveOmpGuidancePath(home: string, env: NodeJS.ProcessEnv): st
 
 /** Resolves OMP's config home: \`$OMP_HOME\`, else \`$RESIN_OMP_HOME\`, else \`<home>/.omp\`. */
 export function resolveOmpConfigHome(home: string, env: NodeJS.ProcessEnv): string {
-  const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find(
-    (candidate): candidate is string =>
-      typeof candidate === "string" && candidate.trim().length > 0,
+  return (
+    readHostPathEnv(env, "OMP_HOME") ??
+    readHostPathEnv(env, "RESIN_OMP_HOME") ??
+    path.join(home, ".omp")
   );
-  return configuredHome ? path.resolve(configuredHome) : path.join(home, ".omp");
 }
 
 const OMP_CATALOG_MARKERS: ManagedBlockMarkers = {

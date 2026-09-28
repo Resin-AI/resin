@@ -46,6 +46,7 @@
     "@resin/observer": "workspace:*",
     "@resin/protocol": "workspace:*",
     "@resin/runtime": "workspace:*",
+    "@resin/windows-security": "workspace:*",
     "zod": "^3.25.76"
   },
   "devDependencies": {

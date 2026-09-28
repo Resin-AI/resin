@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { ensurePrivateDirectorySync } from "@resin/observer";
 
 /** The ledger's file name under the Resin state directory, shared by the daemon and every gateway. */
 export const WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME = "workflow-validation-asks.jsonl";
@@ -64,7 +65,7 @@ export class FileValidationAskLedger {
    * be re-sent.
    */
   admit(ask: ValidationAskAdmission): boolean {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(path.dirname(this.filePath));
     const lock = this.lock();
     if (lock === undefined) return false;
     try {

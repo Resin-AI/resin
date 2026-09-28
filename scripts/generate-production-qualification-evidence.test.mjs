@@ -18,6 +18,8 @@ const PLATFORM_STATUSES = {
   "darwin-x64": "ARTIFACT_VALIDATED",
   "darwin-arm64": "ARTIFACT_VALIDATED",
   wsl: "ARTIFACT_VALIDATED",
+  "windows-x64": "QUALIFIED",
+  "windows-arm64": "QUALIFIED",
 };
 const tempRoots = [];
 
@@ -45,26 +47,52 @@ function createFixture(options = {}) {
 
   for (const [lane, status] of Object.entries(PLATFORM_STATUSES)) {
     if (lane === options.omitLane) continue;
-    writeJson(
-      path.join(
-        rootDir,
-        "dist",
-        "upstream-qualification",
-        "platform",
-        `artifact-${lane}`,
-        `${lane}.json`,
-      ),
-      {
-        lane,
-        passed: true,
-        status,
-        execution: { native: status === "QUALIFIED" },
-        release: {
-          commitSha: COMMIT_SHA,
-          assetSha256: lane.padEnd(64, "0").slice(0, 64),
-        },
-      },
+    const laneDir = path.join(
+      rootDir,
+      "dist",
+      "upstream-qualification",
+      "platform",
+      `artifact-${lane}`,
     );
+    const windows = lane.startsWith("windows-");
+    const arch = lane.endsWith("arm64") ? "arm64" : "x64";
+    writeJson(path.join(laneDir, `${lane}.json`), {
+      lane,
+      passed: true,
+      status: options.windowsStatus && windows ? options.windowsStatus : status,
+      execution: { native: status === "QUALIFIED" },
+      release: {
+        commitSha: COMMIT_SHA,
+        assetSha256: lane.padEnd(64, "0").slice(0, 64),
+        platformMetadata: { arch },
+      },
+      checks: windows
+        ? {
+            artifactLayout: {
+              nativePrebuilds: {
+                "resin_windows_security.node": { sha256: "a".repeat(64), peArch: arch },
+                "resin-service-host.exe": { sha256: "b".repeat(64), peArch: arch },
+              },
+            },
+            ...(options.omitWindowsService
+              ? {}
+              : {
+                  windowsService: {
+                    backend: "windows-task",
+                    statusHealthy: true,
+                    crashRestart: true,
+                    stopStart: true,
+                  },
+                }),
+          }
+        : {},
+    });
+    if (windows && !options.omitIsolation) {
+      writeJson(path.join(laneDir, `${lane}-second-user-isolation.json`), {
+        expect: "denied",
+        ok: options.isolationBreached !== true,
+      });
+    }
   }
 
   const systemCommitSha = options.systemCommitSha || COMMIT_SHA;
@@ -103,9 +131,9 @@ describe("public production qualification evidence", () => {
 
     expect(evidence.commitSha).toBe(COMMIT_SHA);
     expect(evidence.qualification.platforms).toMatchObject({
-      totalLanes: 5,
-      passedLanes: 5,
-      qualifiedLanes: 2,
+      totalLanes: 7,
+      passedLanes: 7,
+      qualifiedLanes: 4,
       artifactValidatedLanes: 3,
       runId: RUN_IDS.platformRunId,
       status: "PASSED",
@@ -131,6 +159,44 @@ describe("public production qualification evidence", () => {
   it("rejects incomplete platform evidence", () => {
     const rootDir = createFixture({ omitLane: "wsl" });
     expect(() => generate(rootDir)).toThrow("Missing qualification evidence for platform 'wsl'");
+  });
+
+  it("records the native Windows service, isolation and prebuild evidence", () => {
+    const evidence = generate(createFixture());
+    const windows = evidence.qualification.platforms.lanes.find(({ id }) => id === "windows-arm64");
+    expect(windows).toMatchObject({
+      os: "win32",
+      arch: "arm64",
+      serviceManager: "windows-task",
+      status: "QUALIFIED",
+      native: true,
+      serviceLifecycle: "PASSED",
+      secondUserIsolation: "PASSED",
+      nativePrebuilds: {
+        "resin_windows_security.node": "a".repeat(64),
+        "resin-service-host.exe": "b".repeat(64),
+      },
+    });
+    expect(windows.isolationEvidenceSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(windows).not.toHaveProperty("nativeOnly");
+  });
+
+  it("blocks the release when a native Windows lane is missing or incomplete", () => {
+    expect(() => generate(createFixture({ omitLane: "windows-x64" }))).toThrow(
+      "Missing qualification evidence for platform 'windows-x64'",
+    );
+    expect(() => generate(createFixture({ windowsStatus: "ARTIFACT_VALIDATED" }))).toThrow(
+      "Platform 'windows-x64' must be qualified natively on Windows, found 'ARTIFACT_VALIDATED'",
+    );
+    expect(() => generate(createFixture({ omitWindowsService: true }))).toThrow(
+      "Platform 'windows-x64' evidence lacks the Scheduled Task service lifecycle",
+    );
+    expect(() => generate(createFixture({ omitIsolation: true }))).toThrow(
+      "Platform 'windows-x64' is missing second-user isolation evidence",
+    );
+    expect(() => generate(createFixture({ isolationBreached: true }))).toThrow(
+      "Platform 'windows-x64' second-user isolation probe did not prove access was denied",
+    );
   });
 
   it("rejects system evidence from a different commit", () => {

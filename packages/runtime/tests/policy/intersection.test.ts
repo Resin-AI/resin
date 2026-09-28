@@ -1,8 +1,10 @@
+import path from "node:path";
 import type { CapabilityEnvelope, CapabilityManifest } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { intersectCapabilities } from "../../src/policy/intersection.js";
 
-const testWorkspace = "/tmp/test-ws";
+// Fully qualified on every platform: a drive-less "/tmp/…" is not an absolute root on Windows.
+const testWorkspace = path.resolve("/tmp/test-ws");
 
 const baseEnvelope: CapabilityEnvelope = {
   envelopeId: "env_ws_001",

@@ -143,7 +143,12 @@ describe("a computed number written by a later command", () => {
     fs.rmSync(workspace, { recursive: true, force: true });
   });
 
-  it("is offered as an extract of the printed number and the promoted plan writes the new total", async () => {
+  it("is offered as an extract of the printed number and the promoted plan writes the new total", async ({
+    skip,
+  }) => {
+    // A Codex bash session from a POSIX host: its heredoc runs python3 under bash with the
+    // workspace's POSIX path inline, which a Windows path (backslashes are bash escapes) cannot be.
+    skip(process.platform === "win32", "a POSIX-host Codex bash session");
     const store = new InMemoryPrivateValueStore();
     const recorded = await record(store, {
       root: workspace,

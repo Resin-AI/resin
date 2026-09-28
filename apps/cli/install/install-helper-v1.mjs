@@ -429,8 +429,8 @@ var init_parseUtil = __esm({
     init_errors();
     init_en();
     makeIssue = (params) => {
-      const { data, path: path33, errorMaps, issueData } = params;
-      const fullPath = [...path33, ...issueData.path || []];
+      const { data, path: path39, errorMaps, issueData } = params;
+      const fullPath = [...path39, ...issueData.path || []];
       const fullIssue = {
         ...issueData,
         path: fullPath
@@ -738,11 +738,11 @@ var init_types = __esm({
     init_parseUtil();
     init_util();
     ParseInputLazyPath = class {
-      constructor(parent, value, path33, key) {
+      constructor(parent, value, path39, key) {
         this._cachedPath = [];
         this.parent = parent;
         this.data = value;
-        this._path = path33;
+        this._path = path39;
         this._key = key;
       }
       get path() {
@@ -4744,14 +4744,14 @@ ${block}
   }
   return { action: current === null ? "created" : "updated", content: next };
 }
-async function applyManagedBlock(fs12, filePath, markers, body, options = {}) {
-  const edit = editManagedBlock(await fs12.readFile(filePath), markers, body);
+async function applyManagedBlock(fs17, filePath, markers, body, options = {}) {
+  const edit = editManagedBlock(await fs17.readFile(filePath), markers, body);
   if (edit.action !== "unchanged" && !options.dryRun) {
     if (edit.content === null) {
-      await fs12.unlink(filePath);
+      await fs17.unlink(filePath);
     } else {
-      await fs12.mkdirp(path2.dirname(filePath));
-      await fs12.writeFile(filePath, edit.content);
+      await fs17.mkdirp(path2.dirname(filePath));
+      await fs17.writeFile(filePath, edit.content);
     }
   }
   return { path: filePath, action: edit.action };
@@ -4759,6 +4759,153 @@ async function applyManagedBlock(fs12, filePath, markers, body, options = {}) {
 var init_managed_block = __esm({
   "packages/harness-contracts/dist/managed-block.js"() {
     "use strict";
+  }
+});
+
+// packages/harness-contracts/dist/host.js
+import { execFile } from "node:child_process";
+import * as fs2 from "node:fs/promises";
+import * as os from "node:os";
+import * as path3 from "node:path";
+import { promisify } from "node:util";
+function readHostEnv(env, name, platform = process.platform) {
+  const exact = env[name];
+  if (exact !== void 0 || platform !== "win32")
+    return nonEmpty(exact);
+  const wanted = name.toUpperCase();
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() === wanted)
+      return nonEmpty(value);
+  }
+  return void 0;
+}
+function readHostPathEnv(env, name, platform = process.platform) {
+  const value = readHostEnv(env, name, platform)?.trim();
+  if (value === void 0)
+    return void 0;
+  if (platform === "win32" && process.platform === "win32" && /^\/(?!\/)/.test(value)) {
+    return void 0;
+  }
+  return path3.resolve(value);
+}
+function nonEmpty(value) {
+  return value !== void 0 && value.trim().length > 0 ? value : void 0;
+}
+function resolveHarnessUserHome(options = {}) {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const fallback = options.homedir ?? os.homedir;
+  if (platform === "win32") {
+    const profile = readHostEnv(env, "USERPROFILE", platform);
+    if (profile)
+      return profile;
+    const drive = readHostEnv(env, "HOMEDRIVE", platform);
+    const homePath = readHostEnv(env, "HOMEPATH", platform);
+    if (drive && homePath)
+      return `${drive}${homePath}`;
+    return fallback();
+  }
+  return readHostEnv(env, "HOME", platform) ?? fallback();
+}
+function windowsExecutableExtensions(env = process.env) {
+  const raw = readHostEnv(env, "PATHEXT", "win32");
+  const listed = (raw ?? "").split(";").map((extension) => extension.trim().toLowerCase()).filter((extension) => RUNNABLE_WINDOWS_EXTENSIONS.has(extension));
+  return listed.length > 0 ? [...new Set(listed)] : [...DEFAULT_PATHEXT];
+}
+function executableFileNames(name, host = {}) {
+  const platform = host.platform ?? process.platform;
+  if (platform !== "win32")
+    return [name];
+  const extension = path3.win32.extname(name).toLowerCase();
+  if (RUNNABLE_WINDOWS_EXTENSIONS.has(extension))
+    return [name];
+  return windowsExecutableExtensions(host.env ?? process.env).map((candidate) => `${name}${candidate}`);
+}
+function hostSearchPath(host = {}) {
+  const platform = host.platform ?? process.platform;
+  const raw = readHostEnv(host.env ?? process.env, "PATH", platform) ?? "";
+  const delimiter5 = platform === "win32" ? ";" : ":";
+  return raw.split(delimiter5).map((entry) => platform === "win32" ? entry.trim().replace(/^"(.*)"$/, "$1") : entry).filter((entry) => entry.length > 0);
+}
+function hostPathKey(value, platform = process.platform) {
+  if (platform !== "win32")
+    return path3.posix.normalize(value);
+  return path3.win32.normalize(value).replace(/[\\]+$/, "").toLowerCase();
+}
+async function isRegularFile(filePath) {
+  try {
+    return (await fs2.stat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+async function findHostExecutable(names, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const isFile = options.isFile ?? isRegularFile;
+  const excluded = new Set((options.excludeDirs ?? []).map((dir) => hostPathKey(dir, platform)));
+  const seen = /* @__PURE__ */ new Set();
+  const dirs = [
+    ...options.preferredDirs ?? [],
+    ...hostSearchPath(options),
+    ...options.fallbackDirs ?? []
+  ];
+  for (const dir of dirs) {
+    const key = hostPathKey(dir, platform);
+    if (excluded.has(key) || seen.has(key))
+      continue;
+    seen.add(key);
+    for (const name of names) {
+      for (const fileName of executableFileNames(name, options)) {
+        const candidate = path3.join(dir, fileName);
+        if (await isFile(candidate))
+          return candidate;
+      }
+    }
+  }
+  return null;
+}
+function isWindowsBatchFile(file) {
+  return /\.(?:cmd|bat)$/i.test(file);
+}
+function harnessCommandInvocation(file, args, host = {}) {
+  const platform = host.platform ?? process.platform;
+  if (platform !== "win32" || !isWindowsBatchFile(file)) {
+    return { file, args: [...args], windowsVerbatimArguments: false };
+  }
+  if (/["%^&|<>\r\n]/.test(file)) {
+    throw new Error(`Refusing to run a batch file whose path cmd.exe would reinterpret: ${file}`);
+  }
+  for (const arg of args) {
+    if (!SAFE_BATCH_ARGUMENT.test(arg)) {
+      throw new Error(`Refusing to pass a non-literal argument to a batch file: ${arg}`);
+    }
+  }
+  const env = host.env ?? process.env;
+  const comspec = readHostEnv(env, "ComSpec", platform) ?? "cmd.exe";
+  const commandLine = [`"${file}"`, ...args].join(" ");
+  return {
+    file: comspec,
+    args: ["/d", "/s", "/c", `"${commandLine}"`],
+    windowsVerbatimArguments: true
+  };
+}
+async function runHarnessCommand(file, args, options = {}) {
+  const invocation = harnessCommandInvocation(file, args, options);
+  return await execFileAsync(invocation.file, invocation.args, {
+    timeout: options.timeoutMs ?? 5e3,
+    encoding: "utf8",
+    windowsHide: true,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+  });
+}
+var execFileAsync, RUNNABLE_WINDOWS_EXTENSIONS, DEFAULT_PATHEXT, SAFE_BATCH_ARGUMENT;
+var init_host = __esm({
+  "packages/harness-contracts/dist/host.js"() {
+    "use strict";
+    execFileAsync = promisify(execFile);
+    RUNNABLE_WINDOWS_EXTENSIONS = /* @__PURE__ */ new Set([".com", ".exe", ".bat", ".cmd"]);
+    DEFAULT_PATHEXT = [".com", ".exe", ".bat", ".cmd"];
+    SAFE_BATCH_ARGUMENT = /^[A-Za-z0-9_.,:=+\\/-]+$/;
   }
 });
 
@@ -4776,11 +4923,390 @@ var init_dist = __esm({
     init_decoder();
     init_definition();
     init_managed_block();
+    init_host();
+  }
+});
+
+// packages/windows-security/dist/native.js
+import fs3 from "node:fs";
+import { createRequire } from "node:module";
+import path4 from "node:path";
+import { fileURLToPath } from "node:url";
+function packageRoot() {
+  return path4.resolve(path4.dirname(fileURLToPath(import.meta.url)), "..");
+}
+function prebuildDirectory() {
+  return prebuildDirectoryOverride ?? path4.join(packageRoot(), "prebuilds", `${process.platform}-${process.arch}`);
+}
+function useWindowsSecurityPrebuildDirectory(directory) {
+  const resolved = path4.resolve(directory);
+  if (cachedBinding !== void 0) {
+    if (resolved === prebuildDirectory())
+      return;
+    throw new Error(`@resin/windows-security already loaded its native helper from ${prebuildDirectory()}; set the prebuild directory before first use.`);
+  }
+  const addonPath = path4.join(resolved, NATIVE_ADDON_FILE);
+  if (!fs3.existsSync(addonPath)) {
+    throw new Error(`Resin's Windows security helper is missing: ${addonPath} does not exist.`);
+  }
+  prebuildDirectoryOverride = resolved;
+  cachedLoadError = void 0;
+}
+function loadBinding() {
+  if (cachedBinding)
+    return cachedBinding;
+  if (cachedLoadError)
+    throw cachedLoadError;
+  if (process.platform !== "win32") {
+    cachedLoadError = new Error(`@resin/windows-security native helper is only available on Windows (current platform: ${process.platform}).`);
+    throw cachedLoadError;
+  }
+  const addonPath = path4.join(prebuildDirectory(), NATIVE_ADDON_FILE);
+  if (!fs3.existsSync(addonPath)) {
+    cachedLoadError = new Error(`Resin's Windows security helper is missing: ${addonPath} does not exist. ${BUILD_HINT}`);
+    throw cachedLoadError;
+  }
+  try {
+    const require2 = createRequire(import.meta.url);
+    cachedBinding = require2(addonPath);
+    return cachedBinding;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    cachedLoadError = new Error(`Resin's Windows security helper at ${addonPath} failed to load: ${detail}. ${BUILD_HINT}`);
+    throw cachedLoadError;
+  }
+}
+function nativeBinding() {
+  return loadBinding();
+}
+var NATIVE_ADDON_FILE, BUILD_HINT, prebuildDirectoryOverride, cachedBinding, cachedLoadError;
+var init_native = __esm({
+  "packages/windows-security/dist/native.js"() {
+    "use strict";
+    NATIVE_ADDON_FILE = "resin_windows_security.node";
+    BUILD_HINT = "Build it with `node packages/windows-security/scripts/build-native.mjs` (needs Visual Studio Build Tools with the C++ workload) or reinstall the Resin release for this architecture.";
+  }
+});
+
+// packages/windows-security/dist/acl.js
+import fs4 from "node:fs";
+import path5 from "node:path";
+function errorCode(error) {
+  return error instanceof Error && "code" in error ? error.code : void 0;
+}
+function translateNativeError(error, target) {
+  if (!(error instanceof Error))
+    return error;
+  const code = errorCode(error);
+  if (code === WIN32_FILE_NOT_FOUND || code === WIN32_PATH_NOT_FOUND || code === "ENOENT") {
+    return Object.assign(new Error(`ENOENT: no such file or directory, '${target}'`), {
+      code: "ENOENT",
+      path: target,
+      cause: error
+    });
+  }
+  if (code === "EEXIST") {
+    return Object.assign(new Error(`EEXIST: file already exists, '${target}'`), {
+      code: "EEXIST",
+      path: target,
+      cause: error
+    });
+  }
+  if (code === "EFOREIGNOWNER") {
+    return Object.assign(new Error(`Refusing to make '${target}' private: it is owned by another principal (${error.message}).`), { code: "EFOREIGNOWNER", path: target, cause: error });
+  }
+  return error;
+}
+function currentUserSid() {
+  return nativeBinding().currentUserSid();
+}
+function readAcl(target) {
+  try {
+    return nativeBinding().readAcl(target);
+  } catch (error) {
+    throw translateNativeError(error, target);
+  }
+}
+function ownerOnlyProblems(acl, userSid, options = {}) {
+  const problems = [];
+  const me = userSid.toUpperCase();
+  if (acl.owner === null) {
+    problems.push("has no owner");
+  } else if (acl.owner.toUpperCase() !== me) {
+    problems.push(`is owned by ${acl.owner}, not the current user ${userSid}`);
+  }
+  if (!acl.daclPresent) {
+    problems.push("has a NULL DACL (everyone has full access)");
+    return problems;
+  }
+  if (options.requireProtected && !acl.protected) {
+    problems.push("does not have a protected DACL (ancestors can widen it through inheritance)");
+  }
+  for (const entry of acl.entries) {
+    if (entry.type === "deny")
+      continue;
+    if (entry.type === "other") {
+      problems.push(`has an unsupported ACE type granting access to ${entry.sid ?? "an unknown SID"}`);
+      continue;
+    }
+    if (entry.sid !== null && entry.sid.toUpperCase() === me)
+      continue;
+    const scope = entry.inheritOnly ? " (inheritable to new children)" : "";
+    problems.push(`grants access to ${entry.sid ?? "an unknown SID"}${scope}`);
+  }
+  return problems;
+}
+function isOwner(acl, sid) {
+  return acl.owner !== null && acl.owner.toUpperCase() === sid.toUpperCase();
+}
+function checkOwnerOnly(target, options = {}) {
+  if (process.platform !== "win32")
+    return { ok: true, problems: [], ownedByCurrentUser: true };
+  const sid = currentUserSid();
+  const acl = readAcl(target);
+  const problems = ownerOnlyProblems(acl, sid, options);
+  if (problems.length === 0 && !acl.protected)
+    problems.push(...inheritanceProblems(target, sid));
+  return { ok: problems.length === 0, problems, ownedByCurrentUser: isOwner(acl, sid) };
+}
+function inheritanceProblems(target, sid) {
+  let current = path5.resolve(target);
+  for (; ; ) {
+    const parent = path5.dirname(current);
+    if (parent === current) {
+      return ["inherits its DACL, but no ancestor has a protected owner-only DACL"];
+    }
+    current = parent;
+    const acl = readAcl(current);
+    const problems = ownerOnlyProblems(acl, sid);
+    if (problems.length > 0) {
+      return [`inherits its DACL from '${current}', which ${problems.join("; ")}`];
+    }
+    if (acl.protected)
+      return [];
+  }
+}
+function ensureOwnerOnly(target, options) {
+  if (process.platform !== "win32")
+    return;
+  try {
+    nativeBinding().setOwnerOnlyAcl(target, options.directory);
+  } catch (error) {
+    throw translateNativeError(error, target);
+  }
+  const acl = readAcl(target);
+  const problems = ownerOnlyProblems(acl, currentUserSid(), { requireProtected: true });
+  if (problems.length > 0) {
+    throw Object.assign(new Error(`Could not make '${target}' private: it ${problems.join("; ")}`), { code: "EACCES", path: target });
+  }
+}
+function createPrivateDirectory(target) {
+  if (process.platform !== "win32") {
+    fs4.mkdirSync(target, { mode: 448 });
+    return;
+  }
+  try {
+    nativeBinding().createPrivateDirectory(target);
+  } catch (error) {
+    throw translateNativeError(error, target);
+  }
+}
+function ensurePrivateDirectoryBoundary(directory) {
+  if (process.platform !== "win32") {
+    fs4.mkdirSync(directory, { recursive: true, mode: 448 });
+    return;
+  }
+  const resolved = path5.resolve(directory);
+  fs4.mkdirSync(path5.dirname(resolved), { recursive: true });
+  try {
+    createPrivateDirectory(resolved);
+    return;
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST")
+      throw error;
+  }
+  const stat8 = fs4.lstatSync(resolved);
+  if (!stat8.isDirectory() || stat8.isSymbolicLink()) {
+    throw Object.assign(new Error(`'${resolved}' is not a directory`), {
+      code: "ENOTDIR",
+      path: resolved
+    });
+  }
+  if (!checkOwnerOnly(resolved, { requireProtected: true }).ok) {
+    ensureOwnerOnly(resolved, { directory: true });
+  }
+}
+var WIN32_FILE_NOT_FOUND, WIN32_PATH_NOT_FOUND;
+var init_acl = __esm({
+  "packages/windows-security/dist/acl.js"() {
+    "use strict";
+    init_native();
+    WIN32_FILE_NOT_FOUND = "WIN32_2";
+    WIN32_PATH_NOT_FOUND = "WIN32_3";
+  }
+});
+
+// packages/windows-security/dist/pipe.js
+import { createHash as createHash2 } from "node:crypto";
+import path6 from "node:path";
+import { Duplex } from "node:stream";
+function isVerificationFailure(value) {
+  return value !== void 0 && VERIFICATION_FAILURES.has(value);
+}
+function isLocalPipeName(name) {
+  return name.toLowerCase().startsWith(WINDOWS_PIPE_PREFIX);
+}
+function canonicalLocalPipeName(value) {
+  const trimmed = value.trim();
+  if (!isLocalPipeName(trimmed) || trimmed.length === WINDOWS_PIPE_PREFIX.length)
+    return void 0;
+  return `${WINDOWS_PIPE_PREFIX}${trimmed.slice(WINDOWS_PIPE_PREFIX.length)}`;
+}
+function normalizeResinHome(resinHome) {
+  let normalized = path6.win32.resolve(resinHome);
+  while (normalized.length > 3 && /[\\/]$/.test(normalized)) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized.toLowerCase();
+}
+function windowsDaemonPipeName(resinHome, userSid) {
+  const sid = (userSid ?? currentUserSid()).toLowerCase();
+  const digest = createHash2("sha256").update(`${sid}\0${normalizeResinHome(resinHome)}`).digest("hex");
+  return `${WINDOWS_PIPE_PREFIX}resin-daemon-${digest.slice(0, 16)}`;
+}
+function connectError(name, reason, win32Error) {
+  let code = "EACCES";
+  let message = `Refusing ${name}: it is not served by the current user (${reason})`;
+  if (reason === "not-running") {
+    code = "ENOENT";
+    message = `No server is listening on ${name}`;
+  } else if (reason === "open-failed") {
+    code = "ECONNREFUSED";
+    message = `Could not open ${name} (win32 error ${win32Error})`;
+  }
+  return Object.assign(new Error(message), { code, reason, win32Error });
+}
+function connectVerifiedPipe(name, options = {}) {
+  const { promise, resolve: resolve6, reject } = Promise.withResolvers();
+  const canonical = canonicalLocalPipeName(name);
+  if (canonical === void 0) {
+    reject(connectError(name, "open-failed", 0));
+    return promise;
+  }
+  let binding;
+  try {
+    binding = nativeBinding();
+  } catch (error) {
+    reject(error);
+    return promise;
+  }
+  let socket;
+  const onEvent = (kind, _id, arg) => {
+    if (kind !== "connection")
+      socket?.deliver(kind, arg);
+  };
+  binding.pipeConnect(canonical, options.timeoutMs ?? 2e3, onEvent, (error, result) => {
+    if (error) {
+      reject(error);
+      return;
+    }
+    if (!result.ok) {
+      const reason = isVerificationFailure(result.reason) ? result.reason : "open-failed";
+      reject(connectError(canonical, reason, result.win32Error));
+      return;
+    }
+    socket = new VerifiedPipeSocket(result.handle, result.serverPid);
+    resolve6(socket);
+  });
+  return promise;
+}
+var WINDOWS_PIPE_PREFIX, VERIFICATION_FAILURES, NativePipeSocket, VerifiedPipeSocket;
+var init_pipe = __esm({
+  "packages/windows-security/dist/pipe.js"() {
+    "use strict";
+    init_acl();
+    init_native();
+    WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
+    VERIFICATION_FAILURES = /* @__PURE__ */ new Set([
+      "not-running",
+      "access-denied",
+      "open-failed",
+      "foreign-owner",
+      "foreign-server"
+    ]);
+    NativePipeSocket = class extends Duplex {
+      endpoint;
+      id;
+      released = false;
+      constructor(endpoint, id) {
+        super({ allowHalfOpen: false });
+        this.endpoint = endpoint;
+        this.id = id;
+      }
+      /** Called for native events of this connection. */
+      deliver(kind, arg) {
+        if (kind === "data" && Buffer.isBuffer(arg)) {
+          this.push(arg);
+        } else if (kind === "end") {
+          this.push(null);
+        } else if (kind === "error") {
+          this.destroy(new Error(typeof arg === "string" ? arg : "named pipe error"));
+        }
+      }
+      _read() {
+      }
+      _write(chunk, encoding, callback) {
+        if (this.released) {
+          callback(new Error("named pipe connection is closed"));
+          return;
+        }
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+        nativeBinding().pipeWrite(this.endpoint, this.id, data, (error) => {
+          callback(error === null ? null : new Error(error));
+        });
+      }
+      _destroy(error, callback) {
+        this.release(false);
+        callback(error);
+      }
+      release(graceful) {
+        if (this.released)
+          return;
+        this.released = true;
+        nativeBinding().pipeClose(this.endpoint, this.id, graceful);
+        this.afterRelease();
+      }
+      afterRelease() {
+      }
+    };
+    VerifiedPipeSocket = class extends NativePipeSocket {
+      serverPid;
+      constructor(endpoint, serverPid) {
+        super(endpoint, 1);
+        this.serverPid = serverPid;
+      }
+      _final(callback) {
+        callback();
+      }
+      afterRelease() {
+        nativeBinding().pipeServerClose(this.endpoint);
+      }
+    };
+  }
+});
+
+// packages/windows-security/dist/index.js
+var init_dist2 = __esm({
+  "packages/windows-security/dist/index.js"() {
+    "use strict";
+    init_native();
+    init_acl();
+    init_pipe();
   }
 });
 
 // adapters/claude-code/dist/config-planner.js
-function generatePlannedClaudeConfig(currentContent, gatewayUrl, serverKey = CANONICAL_RESIN_MCP_SERVER_KEY, command = CANONICAL_RESIN_MCP_COMMAND) {
+function generatePlannedClaudeConfig(currentContent, gatewayUrl, serverKey = CANONICAL_RESIN_MCP_SERVER_KEY, command = CANONICAL_RESIN_MCP_COMMAND, args = CANONICAL_RESIN_MCP_ARGS) {
   let doc = {};
   if (currentContent && currentContent.trim().length > 0) {
     try {
@@ -4795,16 +5321,16 @@ function generatePlannedClaudeConfig(currentContent, gatewayUrl, serverKey = CAN
   const existingServers = doc.mcpServers && doc.mcpServers instanceof Object && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
   const serverConfig = {
     command,
-    args: [...CANONICAL_RESIN_MCP_ARGS]
+    args: [...args]
   };
   doc.mcpServers = migrateJsonMcpServers(existingServers, serverConfig, gatewayUrl, serverKey);
   return `${JSON.stringify(doc, null, 2)}
 `;
 }
-async function planClaudeMcpConfig(workspace, gatewayUrl, fsBridge = defaultFsBridge, command = CANONICAL_RESIN_MCP_COMMAND) {
+async function planClaudeMcpConfig(workspace, gatewayUrl, fsBridge = defaultFsBridge, command = CANONICAL_RESIN_MCP_COMMAND, args = CANONICAL_RESIN_MCP_ARGS) {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
   const currentContent = await fsBridge.readFile(targetPath);
-  const plannedContent = generatePlannedClaudeConfig(currentContent, gatewayUrl, CANONICAL_RESIN_MCP_SERVER_KEY, command);
+  const plannedContent = generatePlannedClaudeConfig(currentContent, gatewayUrl, CANONICAL_RESIN_MCP_SERVER_KEY, command, args);
   return planConfigMutation({
     harnessId: "claude-code",
     targetPath,
@@ -4821,10 +5347,7 @@ var init_config_planner = __esm({
 });
 
 // adapters/claude-code/dist/discovery.js
-import { execFile } from "node:child_process";
-import * as os from "node:os";
-import * as path3 from "node:path";
-import { promisify } from "node:util";
+import * as path7 from "node:path";
 function isSupportedClaudeVersion(versionStr, minMajor = 0, minMinor = 1) {
   const match = versionStr.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
   if (!match)
@@ -4837,56 +5360,68 @@ function isSupportedClaudeVersion(versionStr, minMajor = 0, minMinor = 1) {
     return minor >= minMinor;
   return false;
 }
-function detectPlatform(platform = process.platform) {
+function detectPlatform(platform = process.platform, env = process.env) {
   if (platform === "darwin")
     return "darwin";
   if (platform === "win32")
     return "win32";
   if (platform === "linux") {
-    if (process.env.WSL_DISTRO_NAME || process.env.WSLENV || process.env.IS_WSL && process.env.IS_WSL !== "0") {
+    if (env.WSL_DISTRO_NAME || env.WSLENV || env.IS_WSL && env.IS_WSL !== "0") {
       return "wsl";
     }
     return "linux";
   }
   return "other";
 }
-function resolveClaudeHomeCandidates(platform = detectPlatform(), homeDir = os.homedir()) {
+function configuredClaudeConfigDir(env, platform) {
+  return readHostPathEnv(env, "CLAUDE_CONFIG_DIR", platform === "win32" ? "win32" : "linux");
+}
+function resolveClaudeHomeCandidates(platform = detectPlatform(), homeDir = resolveHarnessUserHome(), env = process.env) {
   const candidates = [];
+  const configured = configuredClaudeConfigDir(env, platform);
+  if (configured)
+    candidates.push(configured);
   switch (platform) {
     case "darwin":
-      candidates.push(path3.join(homeDir, "Library", "Application Support", "Claude"));
-      candidates.push(path3.join(homeDir, ".claude"));
-      candidates.push(path3.join(homeDir, ".config", "claude"));
+      candidates.push(path7.join(homeDir, "Library", "Application Support", "Claude"));
+      candidates.push(path7.join(homeDir, ".claude"));
+      candidates.push(path7.join(homeDir, ".config", "claude"));
+      break;
+    case "win32":
+      candidates.push(path7.join(homeDir, ".claude"));
       break;
     case "wsl":
-      candidates.push(path3.join(homeDir, ".claude"));
-      candidates.push(path3.join(homeDir, ".config", "claude"));
-      if (process.env.USERPROFILE) {
-        candidates.push(path3.join(process.env.USERPROFILE, ".claude"));
+      candidates.push(path7.join(homeDir, ".claude"));
+      candidates.push(path7.join(homeDir, ".config", "claude"));
+      if (env.USERPROFILE) {
+        candidates.push(path7.join(env.USERPROFILE, ".claude"));
       }
       break;
     default:
-      candidates.push(path3.join(homeDir, ".claude"));
-      if (process.env.XDG_CONFIG_HOME) {
-        candidates.push(path3.join(process.env.XDG_CONFIG_HOME, "claude"));
+      candidates.push(path7.join(homeDir, ".claude"));
+      if (env.XDG_CONFIG_HOME) {
+        candidates.push(path7.join(env.XDG_CONFIG_HOME, "claude"));
       }
-      candidates.push(path3.join(homeDir, ".config", "claude"));
+      candidates.push(path7.join(homeDir, ".config", "claude"));
       break;
   }
-  return candidates;
+  return [...new Set(candidates)];
 }
-function resolveClaudeConfigFileCandidates(homeDir = os.homedir(), platform = detectPlatform()) {
-  const homes = resolveClaudeHomeCandidates(platform, homeDir);
+function resolveClaudeConfigFileCandidates(homeDir = resolveHarnessUserHome(), platform = detectPlatform(), env = process.env) {
+  const homes = resolveClaudeHomeCandidates(platform, homeDir, env);
   const candidates = [];
-  candidates.push(path3.join(homeDir, ".claude.json"));
+  const configured = configuredClaudeConfigDir(env, platform);
+  if (configured)
+    candidates.push(path7.join(configured, ".claude.json"));
+  candidates.push(path7.join(homeDir, ".claude.json"));
   for (const home of homes) {
-    candidates.push(path3.join(home, "claude.json"));
-    candidates.push(path3.join(home, "mcp_settings.json"));
-    candidates.push(path3.join(home, "settings.json"));
+    candidates.push(path7.join(home, "claude.json"));
+    candidates.push(path7.join(home, "mcp_settings.json"));
+    candidates.push(path7.join(home, "settings.json"));
   }
   return candidates;
 }
-function resolveClaudeExecutableCandidates(homeDir = os.homedir(), platform = detectPlatform()) {
+function resolveClaudeExecutableCandidates(homeDir = resolveHarnessUserHome(), platform = detectPlatform()) {
   const candidates = [];
   if (platform === "darwin") {
     candidates.push("/usr/local/bin/claude");
@@ -4895,23 +5430,43 @@ function resolveClaudeExecutableCandidates(homeDir = os.homedir(), platform = de
     candidates.push("/usr/local/bin/claude");
     candidates.push("/usr/bin/claude");
   }
-  candidates.push(path3.join(homeDir, ".npm-global", "bin", "claude"));
-  candidates.push(path3.join(homeDir, ".local", "bin", "claude"));
+  candidates.push(path7.join(homeDir, ".npm-global", "bin", "claude"));
+  candidates.push(path7.join(homeDir, ".local", "bin", "claude"));
   candidates.push("claude");
   return candidates;
 }
+function resolveClaudeWindowsExecutableSearch(homeDir, env) {
+  const localAppData = readHostEnv(env, "LOCALAPPDATA", "win32") ?? path7.join(homeDir, "AppData", "Local");
+  const appData = readHostEnv(env, "APPDATA", "win32") ?? path7.join(homeDir, "AppData", "Roaming");
+  return {
+    preferredDirs: [
+      path7.join(homeDir, ".local", "bin"),
+      path7.join(localAppData, "Microsoft", "WinGet", "Links"),
+      path7.join(appData, "npm")
+    ],
+    excludeDirs: [path7.join(localAppData, "Microsoft", "WindowsApps")]
+  };
+}
 async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, execFn) {
-  const platform = detectPlatform();
-  const homeDir = os.homedir();
+  const env = options?.env ?? process.env;
+  const hostPlatform = options?.platform ?? process.platform;
+  const platform = detectPlatform(hostPlatform, env);
+  const homeDir = options?.homeDir ?? resolveHarnessUserHome({ platform: hostPlatform, env });
   const detectedAt = nowIso();
   let executablePath = options?.customExecutablePath ?? options?.executablePath;
   let rawVersionString = null;
   let status = "unknown";
   let isInstalled = false;
-  const runner = execFn || (async (file, args) => {
-    return await execFileAsync(file, args, { timeout: 5e3 });
-  });
-  if (!executablePath) {
+  const runner = execFn ?? (async (file, args) => await runHarnessCommand(file, args, { platform: hostPlatform, env }));
+  if (!executablePath && platform === "win32") {
+    const search = resolveClaudeWindowsExecutableSearch(homeDir, env);
+    executablePath = await findHostExecutable(["claude"], {
+      platform: "win32",
+      env,
+      ...search,
+      isFile: (candidate) => fsBridge.exists(candidate)
+    }) ?? void 0;
+  } else if (!executablePath) {
     const candidates = resolveClaudeExecutableCandidates(homeDir, platform);
     for (const candidate of candidates) {
       if (candidate === "claude") {
@@ -4933,7 +5488,7 @@ async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, exec
   }
   let configPath = options?.customConfigPath ?? options?.configPath;
   let homePath;
-  const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir);
+  const homeCandidates = resolveClaudeHomeCandidates(platform, homeDir, env);
   for (const candidate of homeCandidates) {
     if (await fsBridge.exists(candidate)) {
       homePath = candidate;
@@ -4944,7 +5499,7 @@ async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, exec
     homePath = homeCandidates[0];
   }
   if (!configPath) {
-    const configCandidates = resolveClaudeConfigFileCandidates(homeDir, platform);
+    const configCandidates = resolveClaudeConfigFileCandidates(homeDir, platform, env);
     for (const candidate of configCandidates) {
       if (await fsBridge.exists(candidate)) {
         configPath = candidate;
@@ -4952,7 +5507,7 @@ async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, exec
       }
     }
     if (!configPath) {
-      configPath = path3.join(homePath ?? homeDir, "claude.json");
+      configPath = path7.join(homePath ?? homeDir, "claude.json");
     }
   }
   if (executablePath && !rawVersionString) {
@@ -5018,14 +5573,13 @@ async function probeClaudeInstallation(options, fsBridge = defaultFsBridge, exec
     }
   };
 }
-var execFileAsync, CLAUDE_TESTED_VERSIONS, PROJECT_METADATA_BYTES, projectIndexSchema, transcriptMetadataSchema, subagentMetaSchema;
+var CLAUDE_TESTED_VERSIONS, PROJECT_METADATA_BYTES, projectIndexSchema, transcriptMetadataSchema, subagentMetaSchema;
 var init_discovery = __esm({
   "adapters/claude-code/dist/discovery.js"() {
     "use strict";
     init_common();
     init_dist();
     init_zod();
-    execFileAsync = promisify(execFile);
     CLAUDE_TESTED_VERSIONS = ["2.1.283"];
     PROJECT_METADATA_BYTES = 64 * 1024;
     projectIndexSchema = external_exports.object({
@@ -5046,22 +5600,22 @@ var init_discovery = __esm({
 });
 
 // adapters/claude-code/dist/install.js
-import * as path4 from "node:path";
+import * as path8 from "node:path";
 function resolveClaudeConfigDir(home, env) {
-  const configured = env.CLAUDE_CONFIG_DIR;
-  return configured && configured.trim().length > 0 ? path4.resolve(configured) : path4.join(home, ".claude");
+  return readHostPathEnv(env, "CLAUDE_CONFIG_DIR") ?? path8.join(home, ".claude");
 }
 function resolveClaudeMcpConfigPath(home, env) {
-  const configured = env.CLAUDE_CONFIG_DIR;
-  return configured && configured.trim().length > 0 ? path4.join(path4.resolve(configured), ".claude.json") : path4.join(home, ".claude.json");
+  const configured = readHostPathEnv(env, "CLAUDE_CONFIG_DIR");
+  return configured ? path8.join(configured, ".claude.json") : path8.join(home, ".claude.json");
 }
 function resolveClaudeGuidancePath(home, env) {
-  return path4.join(resolveClaudeConfigDir(home, env), "CLAUDE.md");
+  return path8.join(resolveClaudeConfigDir(home, env), "CLAUDE.md");
 }
 var CLAUDE_GUIDANCE_MARKERS, CLAUDE_RESIN_GUIDANCE, claudeCodeInstallHarness;
 var init_install = __esm({
   "adapters/claude-code/dist/install.js"() {
     "use strict";
+    init_dist();
     init_config_planner();
     init_discovery();
     CLAUDE_GUIDANCE_MARKERS = {
@@ -5085,20 +5639,20 @@ Resin learned tools from earlier work in your projects. They are MCP tools named
         "Only user-scope MCP registration (.claude.json) is managed; project .mcp.json files are left alone.",
         "Edit/Write steps are learned only when Claude recorded the resulting patch (toolUseResult.structuredPatch or created-file content)."
       ],
-      probeInstallation: ({ targetPath, fsBridge }) => probeClaudeInstallation({ customConfigPath: targetPath }, fsBridge),
+      probeInstallation: ({ targetPath, home, env, fsBridge }) => probeClaudeInstallation({ customConfigPath: targetPath, homeDir: home, env }, fsBridge),
       mcpConfig: {
         resolvePath: resolveClaudeMcpConfigPath,
         uninstallPaths: (home, env) => [
           resolveClaudeMcpConfigPath(home, env),
-          path4.join(home, ".claude.json"),
-          path4.join(home, ".claude", "claude.json"),
-          path4.join(home, ".claude", "config.json")
+          path8.join(home, ".claude.json"),
+          path8.join(home, ".claude", "claude.json"),
+          path8.join(home, ".claude", "config.json")
         ],
         format: "json",
         serverKey: "resin",
         jsonContainerKeys: ["mcpServers"],
         transports: ["stdio"],
-        planRegistration: ({ workspace, gatewayUrl, command, fsBridge }) => planClaudeMcpConfig(workspace, gatewayUrl, fsBridge, command)
+        planRegistration: ({ workspace, gatewayUrl, command, args, fsBridge }) => planClaudeMcpConfig(workspace, gatewayUrl, fsBridge, command, args)
       },
       guidance: {
         resolvePath: resolveClaudeGuidancePath,
@@ -5110,65 +5664,62 @@ Resin learned tools from earlier work in your projects. They are MCP tools named
 });
 
 // adapters/codex-cli/dist/discovery.js
-import { execFile as execFile2 } from "node:child_process";
-import * as fs2 from "node:fs/promises";
-import * as os2 from "node:os";
-import * as path5 from "node:path";
-import { promisify as promisify2 } from "node:util";
-function getCandidateBinaryNames(platform = process.platform) {
-  if (platform === "win32") {
-    return [
-      "codex.exe",
-      "codex.cmd",
-      "codex.bat",
-      "codex-cli.exe",
-      "codex-cli.cmd",
-      "codex-cli.bat",
-      "codex"
-    ];
-  }
-  return ["codex", "codex-cli"];
+import * as fs5 from "node:fs/promises";
+import * as path9 from "node:path";
+function getCandidateBinaryNames(platform = process.platform, env = process.env) {
+  return CODEX_COMMAND_NAMES.flatMap((name) => executableFileNames(name, { platform, env }));
+}
+function codexInstallDirs(env, platform) {
+  const userHome = resolveHarnessUserHome({ platform, env });
+  const fallbackDirs = [
+    path9.join(userHome, ".codex", "bin"),
+    path9.join(userHome, ".cargo", "bin"),
+    path9.join(userHome, ".local", "bin"),
+    path9.join(userHome, "bin")
+  ];
+  if (platform !== "win32")
+    return { preferredDirs: [], fallbackDirs };
+  const appData = readHostEnv(env, "APPDATA", platform) ?? path9.join(userHome, "AppData", "Roaming");
+  const localAppData = readHostEnv(env, "LOCALAPPDATA", platform) ?? path9.join(userHome, "AppData", "Local");
+  return {
+    preferredDirs: [],
+    fallbackDirs: [
+      ...fallbackDirs,
+      path9.join(appData, "npm"),
+      path9.join(localAppData, "Microsoft", "WinGet", "Links")
+    ]
+  };
 }
 async function fileExists(filePath) {
   try {
-    await fs2.access(filePath, fs2.constants.F_OK);
+    await fs5.access(filePath, fs5.constants.F_OK);
     return true;
   } catch {
     return false;
   }
 }
-async function defaultPathLookup(binName, env = process.env, platform = process.platform) {
-  const pathEnv = env.PATH || env.Path || "";
-  const delimiter5 = platform === "win32" ? ";" : ":";
-  const searchDirs = pathEnv.split(delimiter5).filter(Boolean);
-  const home = env.CODEX_HOME || env.HOME || env.USERPROFILE || os2.homedir();
-  if (home) {
-    searchDirs.push(path5.join(home, ".codex", "bin"), path5.join(home, ".cargo", "bin"), path5.join(home, ".local", "bin"), path5.join(home, "bin"));
-  }
-  for (const dir of searchDirs) {
-    const fullPath = path5.join(dir, binName);
-    if (await fileExists(fullPath)) {
-      return fullPath;
-    }
-  }
-  return null;
-}
 async function findCodexExecutable(options) {
   const explicitPath = options?.executablePath ?? options?.customExecutablePath;
   if (explicitPath) {
     if (await fileExists(explicitPath)) {
-      return path5.resolve(explicitPath);
+      return path9.resolve(explicitPath);
     }
     return null;
   }
   const platform = options?.platform ?? process.platform;
   const env = options?.env ?? process.env;
-  const lookup = options?.pathLookup ?? ((bin) => defaultPathLookup(bin, env, platform));
-  const candidateNames = getCandidateBinaryNames(platform);
-  for (const candidate of candidateNames) {
-    const resolved = await lookup(candidate);
+  if (!options?.pathLookup) {
+    const found = await findHostExecutable(CODEX_COMMAND_NAMES, {
+      platform,
+      env,
+      ...codexInstallDirs(env, platform)
+    });
+    return found ? path9.resolve(found) : null;
+  }
+  for (const candidate of getCandidateBinaryNames(platform, env)) {
+    const resolved = await options.pathLookup(candidate);
     if (resolved) {
-      return path5.resolve(resolved);
+      return path9.resolve(resolved);
     }
   }
   return null;
@@ -5193,19 +5744,20 @@ async function probeCodexVersion(executablePath, executor = defaultCommandExecut
 }
 async function resolveCodexPaths(options) {
   const env = options?.env ?? process.env;
-  const home = env.CODEX_HOME || options?.homeDir || (env.HOME || env.USERPROFILE ? path5.join(env.HOME || env.USERPROFILE, ".codex") : os2.homedir());
+  const platform = options?.platform ?? process.platform;
+  const home = readHostPathEnv(env, "CODEX_HOME", platform) ?? options?.homeDir ?? path9.join(options?.userHome ?? resolveHarnessUserHome({ platform, env }), ".codex");
   let configPath;
   let configFormat = "toml";
   if (options?.customConfigPath) {
-    configPath = path5.resolve(options.customConfigPath);
+    configPath = path9.resolve(options.customConfigPath);
     configFormat = configPath.endsWith(".json") ? "json" : "toml";
-  } else if (env.CODEX_CONFIG_PATH) {
-    configPath = path5.resolve(env.CODEX_CONFIG_PATH);
+  } else if (readHostPathEnv(env, "CODEX_CONFIG_PATH", platform)) {
+    configPath = readHostPathEnv(env, "CODEX_CONFIG_PATH", platform);
     configFormat = configPath.endsWith(".json") ? "json" : "toml";
   } else {
-    const tomlPath = path5.join(home, "config.toml");
-    const jsonPath = path5.join(home, "config.json");
-    const mcpJsonPath = path5.join(home, "mcp.json");
+    const tomlPath = path9.join(home, "config.toml");
+    const jsonPath = path9.join(home, "config.json");
+    const mcpJsonPath = path9.join(home, "mcp.json");
     if (await fileExists(tomlPath)) {
       configPath = tomlPath;
       configFormat = "toml";
@@ -5222,13 +5774,13 @@ async function resolveCodexPaths(options) {
   }
   let sessionRoot;
   if (options?.customSessionRoot) {
-    sessionRoot = path5.resolve(options.customSessionRoot);
-  } else if (env.CODEX_SESSIONS_DIR) {
-    sessionRoot = path5.resolve(env.CODEX_SESSIONS_DIR);
+    sessionRoot = path9.resolve(options.customSessionRoot);
+  } else if (readHostPathEnv(env, "CODEX_SESSIONS_DIR", platform)) {
+    sessionRoot = readHostPathEnv(env, "CODEX_SESSIONS_DIR", platform);
   } else {
-    const defaultSessions = path5.join(home, "sessions");
-    const rollouts = path5.join(home, "rollouts");
-    const history = path5.join(home, "history");
+    const defaultSessions = path9.join(home, "sessions");
+    const rollouts = path9.join(home, "rollouts");
+    const history = path9.join(home, "history");
     if (await fileExists(defaultSessions)) {
       sessionRoot = defaultSessions;
     } else if (await fileExists(rollouts)) {
@@ -5251,7 +5803,9 @@ async function probeCodexInstallation(options) {
   const testedVersions = options?.testedVersions ?? CODEX_TESTED_VERSIONS;
   const resolvedPaths = await resolveCodexPaths({
     customConfigPath: options?.customConfigPath,
-    env: options?.env
+    env: options?.env,
+    platform: options?.platform,
+    userHome: options?.userHome
   });
   const executablePath = await findCodexExecutable({
     executablePath: options?.executablePath,
@@ -5319,9 +5873,9 @@ async function probeCodexInstallation(options) {
   }
   if (options?.checkPermissions) {
     try {
-      const configDir = path5.dirname(resolvedPaths.configPath);
-      await fs2.mkdir(configDir, { recursive: true });
-      await fs2.access(configDir, fs2.constants.R_OK | fs2.constants.W_OK);
+      const configDir = path9.dirname(resolvedPaths.configPath);
+      await fs5.mkdir(configDir, { recursive: true });
+      await fs5.access(configDir, fs5.constants.R_OK | fs5.constants.W_OK);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       return {
@@ -5381,21 +5935,18 @@ async function probeCodexInstallation(options) {
     }
   };
 }
-var execFileAsync2, CODEX_HARNESS_ID, CODEX_DISPLAY_NAME, CODEX_TESTED_VERSIONS, defaultCommandExecutor, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
+var CODEX_HARNESS_ID, CODEX_DISPLAY_NAME, CODEX_TESTED_VERSIONS, CODEX_COMMAND_NAMES, defaultCommandExecutor, CODEX_HEADER_MAX_BYTES, CODEX_TAIL_BYTES, CODEX_READ_CHUNK_BYTES, CODEX_ACTIVE_GRACE_MS;
 var init_discovery2 = __esm({
   "adapters/codex-cli/dist/discovery.js"() {
     "use strict";
     init_dist();
-    execFileAsync2 = promisify2(execFile2);
     CODEX_HARNESS_ID = "codex-cli";
     CODEX_DISPLAY_NAME = "Codex CLI";
     CODEX_TESTED_VERSIONS = ["0.156.1", "0.157.1"];
+    CODEX_COMMAND_NAMES = ["codex", "codex-cli"];
     defaultCommandExecutor = async (file, args) => {
       try {
-        const { stdout, stderr } = await execFileAsync2(file, args, {
-          timeout: 5e3,
-          encoding: "utf8"
-        });
+        const { stdout, stderr } = await runHarnessCommand(file, args, { timeoutMs: 5e3 });
         return { stdout, stderr, exitCode: 0 };
       } catch (err) {
         const error = err;
@@ -6101,18 +6652,18 @@ var init_config_planner2 = __esm({
 });
 
 // adapters/codex-cli/dist/instructions.js
-import path6 from "node:path";
+import path10 from "node:path";
 function resolveCodexHome(customHome, env = {}) {
-  const codexHome = env.CODEX_HOME;
-  return codexHome && codexHome.trim().length > 0 ? path6.resolve(codexHome) : path6.join(customHome, ".codex");
+  return readHostPathEnv(env, "CODEX_HOME") ?? path10.join(customHome, ".codex");
 }
 function resolveCodexAgentsPath(customHome, env = {}) {
-  return path6.join(resolveCodexHome(customHome, env), "AGENTS.md");
+  return path10.join(resolveCodexHome(customHome, env), "AGENTS.md");
 }
 var CODEX_GUIDANCE_MARKERS, CODEX_RESIN_GUIDANCE;
 var init_instructions = __esm({
   "adapters/codex-cli/dist/instructions.js"() {
     "use strict";
+    init_dist();
     CODEX_GUIDANCE_MARKERS = {
       start: "<!-- resin:codex-guidance:start -->",
       end: "<!-- resin:codex-guidance:end -->"
@@ -6129,18 +6680,15 @@ Resin learned tools from earlier work in this workspace. They are MCP tools name
 });
 
 // adapters/codex-cli/dist/install.js
-import path7 from "node:path";
+import path11 from "node:path";
 function resolveCodexConfigPath(home, env) {
-  const configPath = env.CODEX_CONFIG_PATH;
-  if (configPath && configPath.trim().length > 0) {
-    return path7.resolve(configPath);
-  }
-  return path7.join(resolveCodexHome(home, env), "config.toml");
+  return readHostPathEnv(env, "CODEX_CONFIG_PATH") ?? path11.join(resolveCodexHome(home, env), "config.toml");
 }
 var codexInstallHarness;
 var init_install2 = __esm({
   "adapters/codex-cli/dist/install.js"() {
     "use strict";
+    init_dist();
     init_config_planner2();
     init_discovery2();
     init_instructions();
@@ -6155,14 +6703,18 @@ var init_install2 = __esm({
         "Multi-agent child threads are separate rollouts, bound to the parent's project through their own session_meta cwd.",
         "Compaction boundaries are captured, but Codex does not record the token count after compaction."
       ],
-      probeInstallation: ({ targetPath, home, env }) => probeCodexInstallation({ customConfigPath: targetPath, env: { ...env, HOME: home } }),
+      probeInstallation: ({ targetPath, home, env }) => probeCodexInstallation({
+        customConfigPath: targetPath,
+        env: { ...env, HOME: home },
+        userHome: home
+      }),
       mcpConfig: {
         resolvePath: resolveCodexConfigPath,
         uninstallPaths: (home, env) => [
           resolveCodexConfigPath(home, env),
-          path7.join(home, ".codex", "config.toml"),
-          path7.join(home, ".codex", "config.json"),
-          path7.join(home, ".codex", "mcp.json")
+          path11.join(home, ".codex", "config.toml"),
+          path11.join(home, ".codex", "config.json"),
+          path11.join(home, ".codex", "mcp.json")
         ],
         format: "codex-toml",
         serverKey: "resin",
@@ -6181,28 +6733,28 @@ var init_install2 = __esm({
 
 // adapters/copilot-cli/dist/discovery.js
 import { constants as fsConstants } from "node:fs";
-import * as fs3 from "node:fs/promises";
-import * as path8 from "node:path";
+import * as fs6 from "node:fs/promises";
+import * as path12 from "node:path";
 function resolveCopilotHome(home, env) {
   const override = env.COPILOT_HOME?.trim();
   if (override) {
-    return override === "~" || override.startsWith("~/") ? path8.join(home, override.slice(1)) : path8.resolve(override);
+    return override === "~" || override.startsWith("~/") ? path12.join(home, override.slice(1)) : path12.resolve(override);
   }
-  return path8.join(home, ".copilot");
+  return path12.join(home, ".copilot");
 }
 function resolveCopilotMcpConfigPath(home, env) {
-  return path8.join(resolveCopilotHome(home, env), COPILOT_MCP_CONFIG_FILENAME);
+  return path12.join(resolveCopilotHome(home, env), COPILOT_MCP_CONFIG_FILENAME);
 }
 function resolveCopilotInstructionsPath(home, env) {
-  return path8.join(resolveCopilotHome(home, env), COPILOT_INSTRUCTIONS_FILENAME);
+  return path12.join(resolveCopilotHome(home, env), COPILOT_INSTRUCTIONS_FILENAME);
 }
 async function findCopilotExecutable(executable, env) {
-  const candidates = executable && executable.includes(path8.sep) ? [executable] : (env.PATH ?? "").split(path8.delimiter).filter(Boolean).map((dir) => path8.join(dir, executable ?? "copilot"));
+  const candidates = executable && executable.includes(path12.sep) ? [executable] : (env.PATH ?? "").split(path12.delimiter).filter(Boolean).map((dir) => path12.join(dir, executable ?? "copilot"));
   for (const candidate of candidates) {
     try {
-      if (!(await fs3.stat(candidate)).isFile())
+      if (!(await fs6.stat(candidate)).isFile())
         continue;
-      await fs3.access(candidate, fsConstants.X_OK);
+      await fs6.access(candidate, fsConstants.X_OK);
       return candidate;
     } catch {
     }
@@ -6210,19 +6762,25 @@ async function findCopilotExecutable(executable, env) {
   return null;
 }
 async function readCopilotVersion(executablePath) {
-  let dir = path8.dirname(await fs3.realpath(executablePath).catch(() => executablePath));
+  let dir = path12.dirname(await fs6.realpath(executablePath).catch(() => executablePath));
   for (let depth = 0; depth < 6; depth++) {
-    try {
-      const pkg = JSON.parse(await fs3.readFile(path8.join(dir, "package.json"), "utf8"));
-      if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
-        return pkg.version;
-      }
-    } catch {
-    }
-    const parent = path8.dirname(dir);
+    const version = await readCopilotPackageVersion(dir);
+    if (version !== null)
+      return version;
+    const parent = path12.dirname(dir);
     if (parent === dir)
       break;
     dir = parent;
+  }
+  return await readCopilotPackageVersion(path12.join(path12.dirname(executablePath), "node_modules", COPILOT_PACKAGE_NAME));
+}
+async function readCopilotPackageVersion(dir) {
+  try {
+    const pkg = JSON.parse(await fs6.readFile(path12.join(dir, "package.json"), "utf8"));
+    if (pkg.name === COPILOT_PACKAGE_NAME && typeof pkg.version === "string") {
+      return pkg.version;
+    }
+  } catch {
   }
   return null;
 }
@@ -6239,7 +6797,7 @@ async function probeCopilotInstallation(options) {
     displayName: COPILOT_DISPLAY_NAME,
     version: version ?? UNKNOWN_HARNESS_VERSION,
     executablePath: executable ?? void 0,
-    configPath: path8.join(copilotHome, COPILOT_MCP_CONFIG_FILENAME),
+    configPath: path12.join(copilotHome, COPILOT_MCP_CONFIG_FILENAME),
     homePath: copilotHome,
     isInstalled: executable !== null,
     status: executable ? "ready" : "missing_executable",
@@ -6249,7 +6807,7 @@ async function probeCopilotInstallation(options) {
 }
 async function isDirectory(target) {
   try {
-    return (await fs3.stat(target)).isDirectory();
+    return (await fs6.stat(target)).isDirectory();
   } catch {
     return false;
   }
@@ -6313,6 +6871,7 @@ async function planCopilotMcpRegistration(options) {
   });
 }
 async function verifyCopilotMcpRegistration(options) {
+  const expectedArgs = options.args ?? CANONICAL_RESIN_MCP_ARGS;
   const content = await options.fsBridge.readFile(options.targetPath);
   if (content === null)
     return false;
@@ -6328,7 +6887,7 @@ async function verifyCopilotMcpRegistration(options) {
     return false;
   const type = entry.type;
   const tools = entry.tools;
-  return (type === void 0 || type === "local" || type === "stdio") && entry.url === void 0 && entry.command === options.command && Array.isArray(entry.args) && entry.args.length === CANONICAL_RESIN_MCP_ARGS.length && entry.args.every((arg, index) => arg === CANONICAL_RESIN_MCP_ARGS[index]) && // Copilot treats a missing `tools` as all tools; an explicit list must include "*".
+  return (type === void 0 || type === "local" || type === "stdio") && entry.url === void 0 && entry.command === options.command && Array.isArray(entry.args) && entry.args.length === expectedArgs.length && entry.args.every((arg, index) => arg === expectedArgs[index]) && // Copilot treats a missing `tools` as all tools; an explicit list must include "*".
   (tools === void 0 || Array.isArray(tools) && tools.includes("*"));
 }
 async function removeCopilotMcpRegistration(options) {
@@ -6410,7 +6969,7 @@ var init_install3 = __esm({
         jsonContainerKeys: ["mcpServers"],
         transports: ["stdio", "http", "sse"],
         planRegistration: ({ targetPath, command, args, gatewayUrl, fsBridge }) => planCopilotMcpRegistration({ targetPath, command, args, gatewayUrl, fsBridge }),
-        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyCopilotMcpRegistration({ targetPath, command, fsBridge }),
+        verifyRegistration: ({ targetPath, command, args, fsBridge }) => verifyCopilotMcpRegistration({ targetPath, command, args, fsBridge }),
         removeRegistration: ({ home, env, fsBridge, dryRun }) => removeCopilotMcpRegistration({
           targetPath: resolveCopilotMcpConfigPath(home, env),
           fsBridge,
@@ -6437,22 +6996,22 @@ var init_guards = __esm({
 });
 
 // adapters/cursor-cli/dist/paths.js
-import path9 from "node:path";
+import path13 from "node:path";
 function resolveCursorHome(home) {
-  return path9.join(path9.resolve(home), ".cursor");
+  return path13.join(path13.resolve(home), ".cursor");
 }
 function resolveCursorMcpConfigPath(home) {
-  return path9.join(resolveCursorHome(home), "mcp.json");
+  return path13.join(resolveCursorHome(home), "mcp.json");
 }
 function resolveCursorHooksPath(home) {
-  return path9.join(resolveCursorHome(home), "hooks.json");
+  return path13.join(resolveCursorHome(home), "hooks.json");
 }
 function resolveResinHome(home, env = {}) {
   const configured = env.RESIN_HOME?.trim();
-  return configured ? path9.resolve(configured) : path9.join(path9.resolve(home), ".resin");
+  return configured ? path13.resolve(configured) : path13.join(path13.resolve(home), ".resin");
 }
 function resolveCursorHookScriptPath(home, env = {}) {
-  return path9.join(resolveResinHome(home, env), "hooks", "cursor-capture.mjs");
+  return path13.join(resolveResinHome(home, env), "hooks", "cursor-capture.mjs");
 }
 function normalizeCursorVersion(raw) {
   const match = raw.trim().match(/(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
@@ -6522,17 +7081,17 @@ var init_hook_records = __esm({
 
 // adapters/cursor-cli/dist/discovery.js
 import * as fsp from "node:fs/promises";
-import os3 from "node:os";
-import path10 from "node:path";
+import os2 from "node:os";
+import path14 from "node:path";
 function resolveHome(options) {
-  return options.home ?? options.env?.HOME ?? os3.homedir();
+  return options.home ?? options.env?.HOME ?? os2.homedir();
 }
 async function findExecutable(options, home) {
   const env = options.env ?? process.env;
   const candidates = [
     options.executablePath,
-    ...(env.PATH ?? "").split(path10.delimiter).filter(Boolean).map((dir) => path10.join(dir, "cursor-agent")),
-    path10.join(home, ".local", "bin", "cursor-agent")
+    ...(env.PATH ?? "").split(path14.delimiter).filter(Boolean).map((dir) => path14.join(dir, "cursor-agent")),
+    path14.join(home, ".local", "bin", "cursor-agent")
   ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
   for (const candidate of candidates) {
     try {
@@ -6545,10 +7104,10 @@ async function findExecutable(options, home) {
 }
 async function readCursorRawVersion(executablePath) {
   const target = await fsp.realpath(executablePath).catch(() => executablePath);
-  const versionDir = path10.dirname(target);
-  if (path10.basename(path10.dirname(versionDir)) !== "versions")
+  const versionDir = path14.dirname(target);
+  if (path14.basename(path14.dirname(versionDir)) !== "versions")
     return null;
-  const raw = path10.basename(versionDir);
+  const raw = path14.basename(versionDir);
   return normalizeCursorVersion(raw) ? raw : null;
 }
 async function probeCursorInstallation(options = {}) {
@@ -6565,7 +7124,7 @@ async function probeCursorInstallation(options = {}) {
     version,
     executablePath,
     configPath,
-    homePath: path10.join(home, ".cursor"),
+    homePath: path14.join(home, ".cursor"),
     isInstalled: true,
     status: "ready",
     detectedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -6585,7 +7144,7 @@ var init_discovery4 = __esm({
 });
 
 // adapters/cursor-cli/dist/hooks.js
-import path11 from "node:path";
+import path15 from "node:path";
 function shellQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -6593,7 +7152,7 @@ function renderCursorHookCommand(scriptPath) {
   return `node ${shellQuote(scriptPath)}`;
 }
 function isResinHookEntry(entry) {
-  return isRecord(entry) && typeof entry.command === "string" && entry.command.includes(`/.resin/hooks/${SCRIPT_BASENAME}`);
+  return isRecord(entry) && typeof entry.command === "string" && RESIN_HOOK_SCRIPT_SUFFIX.test(entry.command);
 }
 function parseHooksDocument(content, filePath) {
   if (content === null || content.trim().length === 0)
@@ -6628,8 +7187,8 @@ function editCursorHooksDocument(doc, command, install) {
   }
   return { ...doc, version: doc.version ?? 1, hooks };
 }
-async function writeOwned(fs12, filePath, content, dryRun) {
-  const current = await fs12.readFile(filePath);
+async function writeOwned(fs17, filePath, content, dryRun) {
+  const current = await fs17.readFile(filePath);
   let action;
   if (content === null)
     action = current === null ? "unchanged" : "removed";
@@ -6639,10 +7198,10 @@ async function writeOwned(fs12, filePath, content, dryRun) {
     action = current === null ? "created" : "updated";
   if (!dryRun && action !== "unchanged") {
     if (content === null) {
-      await fs12.unlink(filePath);
+      await fs17.unlink(filePath);
     } else {
-      await fs12.mkdirp(path11.dirname(filePath));
-      await fs12.writeFile(filePath, content);
+      await fs17.mkdirp(path15.dirname(filePath));
+      await fs17.writeFile(filePath, content);
     }
   }
   return { path: filePath, action };
@@ -6690,7 +7249,7 @@ async function verifyCursorCaptureHooks(context) {
     return Array.isArray(entries) && entries.filter((entry) => isRecord(entry) && entry.command === command).length === 1;
   });
 }
-var CURSOR_CAPTURE_HOOK_EVENTS, CURSOR_HOOK_TIMEOUT_SECONDS, SCRIPT_BASENAME, CURSOR_HOOK_SCRIPT, cursorCaptureHooksExtension;
+var CURSOR_CAPTURE_HOOK_EVENTS, CURSOR_HOOK_TIMEOUT_SECONDS, CURSOR_HOOK_SCRIPT, RESIN_HOOK_SCRIPT_SUFFIX, cursorCaptureHooksExtension;
 var init_hooks = __esm({
   "adapters/cursor-cli/dist/hooks.js"() {
     "use strict";
@@ -6711,7 +7270,6 @@ var init_hooks = __esm({
       "stop"
     ];
     CURSOR_HOOK_TIMEOUT_SECONDS = 10;
-    SCRIPT_BASENAME = "cursor-capture.mjs";
     CURSOR_HOOK_SCRIPT = `#!/usr/bin/env node
 // Resin capture hook for Cursor CLI. Managed by Resin (\`resin init\` / \`resin uninstall\`); edits are overwritten.
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -6740,6 +7298,7 @@ try {
   // Capture is best effort; never fail the harness.
 }
 `;
+    RESIN_HOOK_SCRIPT_SUFFIX = /[\\/]\.resin[\\/]hooks[\\/]cursor-capture\.mjs/;
     cursorCaptureHooksExtension = {
       name: "Cursor capture hooks",
       install: installCursorCaptureHooks,
@@ -6750,7 +7309,7 @@ try {
 });
 
 // adapters/cursor-cli/dist/install.js
-import path12 from "node:path";
+import path16 from "node:path";
 var cursorGuidance, cursorInstallHarness;
 var init_install4 = __esm({
   "adapters/cursor-cli/dist/install.js"() {
@@ -6761,7 +7320,7 @@ var init_install4 = __esm({
     init_hooks();
     init_paths();
     cursorGuidance = {
-      resolvePath: (home) => path12.join(resolveCursorHome(home), "rules", "resin.mdc"),
+      resolvePath: (home) => path16.join(resolveCursorHome(home), "rules", "resin.mdc"),
       markers: {
         start: "---\ndescription: Resin learned tools\nalwaysApply: true\n---\n<!-- resin:cursor-guidance:start -->",
         end: "<!-- resin:cursor-guidance:end -->"
@@ -6812,16 +7371,16 @@ Resin learned tools from earlier work in your projects. They are MCP tools on th
 });
 
 // adapters/grok-build/dist/paths.js
-import * as path13 from "node:path";
+import * as path17 from "node:path";
 function resolveGrokHome(home, env = {}) {
   const override = env.GROK_HOME?.trim();
-  return override ? path13.resolve(override) : path13.join(home, ".grok");
+  return override ? path17.resolve(override) : path17.join(home, ".grok");
 }
 function resolveGrokConfigPath(home, env = {}) {
-  return path13.join(resolveGrokHome(home, env), "config.toml");
+  return path17.join(resolveGrokHome(home, env), "config.toml");
 }
 function resolveGrokAgentsPath(home, env = {}) {
-  return path13.join(resolveGrokHome(home, env), "AGENTS.md");
+  return path17.join(resolveGrokHome(home, env), "AGENTS.md");
 }
 var GROK_HARNESS_ID, GROK_DISPLAY_NAME;
 var init_paths2 = __esm({
@@ -6840,17 +7399,17 @@ function headerPath(line) {
   const match = HEADER_PATTERN.exec(line);
   return match?.[1] ? match[1].replace(/\s*\.\s*/g, ".").replace(/"/g, "") : null;
 }
-function isServerTable(path33, key) {
+function isServerTable(path39, key) {
   const table = `mcp_servers.${key}`;
-  return path33 === table || path33.startsWith(`${table}.`);
+  return path39 === table || path39.startsWith(`${table}.`);
 }
 function updateGrokTomlServer(content, key, entry) {
   const kept = [];
   let skipping = false;
   for (const line of content.split("\n")) {
-    const path33 = headerPath(line);
-    if (path33 !== null)
-      skipping = isServerTable(path33, key);
+    const path39 = headerPath(line);
+    if (path39 !== null)
+      skipping = isServerTable(path39, key);
     if (!skipping)
       kept.push(line);
   }
@@ -6895,21 +7454,21 @@ var init_config_planner5 = __esm({
 });
 
 // adapters/grok-build/dist/discovery.js
-import * as fs4 from "node:fs/promises";
-import * as path14 from "node:path";
+import * as fs7 from "node:fs/promises";
+import * as path18 from "node:path";
 async function isExecutable(filePath) {
   try {
-    await fs4.access(filePath, fs4.constants.X_OK);
-    return (await fs4.stat(filePath)).isFile();
+    await fs7.access(filePath, fs7.constants.X_OK);
+    return (await fs7.stat(filePath)).isFile();
   } catch {
     return false;
   }
 }
 async function findGrokExecutable(home, env) {
-  const candidates = [path14.join(resolveGrokHome(home, env), "bin", "grok")];
-  for (const dir of (env.PATH ?? "").split(path14.delimiter)) {
+  const candidates = [path18.join(resolveGrokHome(home, env), "bin", "grok")];
+  for (const dir of (env.PATH ?? "").split(path18.delimiter)) {
     if (dir)
-      candidates.push(path14.join(dir, "grok"));
+      candidates.push(path18.join(dir, "grok"));
   }
   for (const candidate of candidates) {
     if (await isExecutable(candidate))
@@ -6920,7 +7479,7 @@ async function findGrokExecutable(home, env) {
 async function probeGrokInstallation(options) {
   const executablePath = await findGrokExecutable(options.home, options.env);
   const grokHome = resolveGrokHome(options.home, options.env);
-  const homeExists = await fs4.stat(grokHome).then((stat7) => stat7.isDirectory()).catch(() => false);
+  const homeExists = await fs7.stat(grokHome).then((stat8) => stat8.isDirectory()).catch(() => false);
   if (!executablePath && !homeExists)
     return null;
   const version = executablePath ? await (options.readVersion ?? readGrokVersion)(executablePath) : null;
@@ -6945,8 +7504,8 @@ var init_discovery5 = __esm({
     init_paths2();
     GROK_TESTED_VERSIONS = Object.freeze(["1.0.13"]);
     readGrokVersion = async (executablePath) => {
-      const target = await fs4.realpath(executablePath).catch(() => executablePath);
-      return /^grok-v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/.exec(path14.basename(target))?.[1] ?? null;
+      const target = await fs7.realpath(executablePath).catch(() => executablePath);
+      return /^grok-v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$/.exec(path18.basename(target))?.[1] ?? null;
     };
   }
 });
@@ -7003,24 +7562,24 @@ Resin learned tools from earlier work in this workspace. Grok lists MCP tools th
 });
 
 // adapters/muse-code/dist/discovery.js
-import { execFile as execFile3 } from "node:child_process";
-import * as fs5 from "node:fs/promises";
-import * as os4 from "node:os";
-import * as path15 from "node:path";
-import { promisify as promisify3 } from "node:util";
+import { execFile as execFile2 } from "node:child_process";
+import * as fs8 from "node:fs/promises";
+import * as os3 from "node:os";
+import * as path19 from "node:path";
+import { promisify as promisify2 } from "node:util";
 function resolveMuseConfigDir(home, env = process.env) {
   const xdg2 = env.XDG_CONFIG_HOME?.trim();
-  return xdg2 ? path15.join(xdg2, "muse") : path15.join(home, ".config", "muse");
+  return xdg2 ? path19.join(xdg2, "muse") : path19.join(home, ".config", "muse");
 }
 function resolveMuseSettingsPath(home, env = process.env) {
-  return path15.join(resolveMuseConfigDir(home, env), "settings.json");
+  return path19.join(resolveMuseConfigDir(home, env), "settings.json");
 }
 function resolveMuseUserRulesPath(home, env = process.env) {
-  return path15.join(resolveMuseConfigDir(home, env), "AGENTS.md");
+  return path19.join(resolveMuseConfigDir(home, env), "AGENTS.md");
 }
 function resolveMuseSessionRoot(home, env = process.env) {
   const xdg2 = env.XDG_DATA_HOME?.trim();
-  return xdg2 ? path15.join(xdg2, "muse", "sessions") : path15.join(home, ".local", "share", "muse", "sessions");
+  return xdg2 ? path19.join(xdg2, "muse", "sessions") : path19.join(home, ".local", "share", "muse", "sessions");
 }
 function parseMuseVersion(text) {
   const match = /(\d+\.\d+\.\d+)/.exec(text);
@@ -7028,10 +7587,10 @@ function parseMuseVersion(text) {
 }
 async function isExecutableFile(filePath) {
   try {
-    const stat7 = await fs5.stat(filePath);
-    if (!stat7.isFile())
+    const stat8 = await fs8.stat(filePath);
+    if (!stat8.isFile())
       return false;
-    await fs5.access(filePath, fs5.constants.X_OK);
+    await fs8.access(filePath, fs8.constants.X_OK);
     return true;
   } catch {
     return false;
@@ -7039,11 +7598,11 @@ async function isExecutableFile(filePath) {
 }
 async function findMuseExecutable(env = process.env) {
   const names = process.platform === "win32" ? ["muse.exe", "muse.cmd", "muse"] : ["muse"];
-  for (const dir of (env.PATH ?? "").split(path15.delimiter)) {
+  for (const dir of (env.PATH ?? "").split(path19.delimiter)) {
     if (!dir)
       continue;
     for (const name of names) {
-      const candidate = path15.join(dir, name);
+      const candidate = path19.join(dir, name);
       if (await isExecutableFile(candidate))
         return candidate;
     }
@@ -7052,7 +7611,7 @@ async function findMuseExecutable(env = process.env) {
 }
 async function readMuseVersion(executable, env = process.env, executor = defaultVersionExecutor) {
   try {
-    const recorded = await fs5.readFile(path15.join(path15.dirname(executable), ".muse-version"), "utf8");
+    const recorded = await fs8.readFile(path19.join(path19.dirname(executable), ".muse-version"), "utf8");
     const version = parseMuseVersion(recorded);
     if (version)
       return version;
@@ -7066,10 +7625,10 @@ async function readMuseVersion(executable, env = process.env, executor = default
 }
 async function probeMuseInstallation(options = {}) {
   const env = options.env ?? process.env;
-  const home = options.home ?? os4.homedir();
+  const home = options.home ?? os3.homedir();
   const configDir = resolveMuseConfigDir(home, env);
   const executable = options.executablePath && await isExecutableFile(options.executablePath) ? options.executablePath : await findMuseExecutable(env);
-  const configExists = await fs5.stat(configDir).then((stat7) => stat7.isDirectory()).catch(() => false);
+  const configExists = await fs8.stat(configDir).then((stat8) => stat8.isDirectory()).catch(() => false);
   if (!executable && !configExists)
     return null;
   const version = executable ? await readMuseVersion(executable, env, options.executor) : UNKNOWN_HARNESS_VERSION;
@@ -7086,7 +7645,7 @@ async function probeMuseInstallation(options = {}) {
     metadata: { sessionRoot: resolveMuseSessionRoot(home, env) }
   };
 }
-var MUSE_HARNESS_ID, MUSE_DISPLAY_NAME, MUSE_TESTED_VERSIONS, ACTIVE_WINDOW_MS, HEAD_INSPECTION_BYTES, execFileAsync3, defaultVersionExecutor;
+var MUSE_HARNESS_ID, MUSE_DISPLAY_NAME, MUSE_TESTED_VERSIONS, ACTIVE_WINDOW_MS, HEAD_INSPECTION_BYTES, execFileAsync2, defaultVersionExecutor;
 var init_discovery6 = __esm({
   "adapters/muse-code/dist/discovery.js"() {
     "use strict";
@@ -7097,25 +7656,25 @@ var init_discovery6 = __esm({
     MUSE_TESTED_VERSIONS = ["1.4.0"];
     ACTIVE_WINDOW_MS = 5 * 60 * 1e3;
     HEAD_INSPECTION_BYTES = 256 * 1024;
-    execFileAsync3 = promisify3(execFile3);
+    execFileAsync2 = promisify2(execFile2);
     defaultVersionExecutor = async (executable, env) => {
-      const scratch = await fs5.mkdtemp(path15.join(os4.tmpdir(), "resin-muse-probe-"));
+      const scratch = await fs8.mkdtemp(path19.join(os3.tmpdir(), "resin-muse-probe-"));
       try {
-        const { stdout } = await execFileAsync3(executable, ["--version"], {
+        const { stdout } = await execFileAsync2(executable, ["--version"], {
           env: {
             ...env,
             MUSE_NO_AUTO_UPDATE: "1",
             HOME: scratch,
-            XDG_CONFIG_HOME: path15.join(scratch, "config"),
-            XDG_DATA_HOME: path15.join(scratch, "data"),
-            XDG_CACHE_HOME: path15.join(scratch, "cache"),
-            XDG_STATE_HOME: path15.join(scratch, "state")
+            XDG_CONFIG_HOME: path19.join(scratch, "config"),
+            XDG_DATA_HOME: path19.join(scratch, "data"),
+            XDG_CACHE_HOME: path19.join(scratch, "cache"),
+            XDG_STATE_HOME: path19.join(scratch, "state")
           },
           timeout: 5e3
         });
         return String(stdout);
       } finally {
-        await fs5.rm(scratch, { recursive: true, force: true });
+        await fs8.rm(scratch, { recursive: true, force: true });
       }
     };
   }
@@ -7246,40 +7805,39 @@ var init_session_exit = __esm({
 });
 
 // adapters/omp/dist/discovery.js
-import { execFile as execFile4 } from "node:child_process";
-import fs6 from "node:fs";
+import fs9 from "node:fs";
 import * as fsp2 from "node:fs/promises";
-import os5 from "node:os";
-import path16 from "node:path";
-import { promisify as promisify4 } from "node:util";
+import path20 from "node:path";
 function resolveOmpHome(options) {
   const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
   if (options?.customHome) {
-    return path16.resolve(options.customHome);
+    return path20.resolve(options.customHome);
   }
   if (options?.ompHome) {
-    return path16.resolve(options.ompHome);
+    return path20.resolve(options.ompHome);
   }
-  if (env.OMP_HOME) {
-    return path16.resolve(env.OMP_HOME);
+  const configured = readHostPathEnv(env, "OMP_HOME", platform) ?? readHostPathEnv(env, "RESIN_OMP_HOME", platform);
+  if (configured) {
+    return configured;
   }
-  if (env.RESIN_OMP_HOME) {
-    return path16.resolve(env.RESIN_OMP_HOME);
-  }
-  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os5.homedir();
-  return path16.resolve(userHome, ".omp");
+  return path20.resolve(resolveOmpUserHome(options), ".omp");
+}
+function resolveOmpUserHome(options) {
+  return options?.homeDir ?? resolveHarnessUserHome({ platform: options?.platform, env: options?.env ?? process.env });
 }
 async function findOmpExecutable(options) {
   const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
   if (options?.customExecutablePath) {
-    const customPath = path16.resolve(options.customExecutablePath);
+    const customPath = path20.resolve(options.customExecutablePath);
     try {
-      await fsp2.access(customPath, fs6.constants.X_OK);
+      await fsp2.access(customPath, fs9.constants.X_OK);
       return customPath;
     } catch {
       try {
-        const stat7 = await fsp2.stat(customPath);
-        if (stat7.isFile()) {
+        const stat8 = await fsp2.stat(customPath);
+        if (stat8.isFile()) {
           return customPath;
         }
       } catch {
@@ -7287,45 +7845,42 @@ async function findOmpExecutable(options) {
       }
     }
   }
-  if (env.OMP_BIN) {
-    const binPath = path16.resolve(env.OMP_BIN);
+  const ompBin = readHostEnv(env, "OMP_BIN", platform);
+  if (ompBin) {
+    const binPath = path20.resolve(ompBin);
     try {
-      const stat7 = await fsp2.stat(binPath);
-      if (stat7.isFile()) {
+      const stat8 = await fsp2.stat(binPath);
+      if (stat8.isFile()) {
         return binPath;
       }
     } catch {
     }
   }
-  const ompHome = resolveOmpHome({ env, homeDir: options?.homeDir });
-  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os5.homedir();
-  const isWindows = process.platform === "win32";
-  const binaryNames = isWindows ? ["omp.exe", "omp.cmd", "omp.bat", "omp"] : ["omp"];
-  const searchDirs = [];
-  if (options?.searchPaths && options.searchPaths.length > 0) {
-    searchDirs.push(...options.searchPaths);
+  const ompHome = resolveOmpHome({ env, homeDir: options?.homeDir, platform });
+  const userHome = resolveOmpUserHome({ env, homeDir: options?.homeDir, platform });
+  const fallbackDirs = [
+    path20.join(ompHome, "bin"),
+    path20.join(ompHome, "dist", "bin"),
+    path20.join(userHome, ".local", "bin"),
+    path20.join(userHome, ".bun", "bin"),
+    path20.join(userHome, ".cargo", "bin"),
+    path20.join(userHome, ".npm-global", "bin")
+  ];
+  if (platform === "win32") {
+    const localAppData = readHostEnv(env, "LOCALAPPDATA", platform) ?? path20.join(userHome, "AppData", "Local");
+    const appData = readHostEnv(env, "APPDATA", platform) ?? path20.join(userHome, "AppData", "Roaming");
+    const installDir = readHostEnv(env, "PI_INSTALL_DIR", platform);
+    fallbackDirs.push(...installDir ? [installDir] : [], path20.join(localAppData, "omp"), path20.join(appData, "npm"));
+  } else if (!options?.homeDir && !options?.searchPaths?.length) {
+    fallbackDirs.push("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin");
   }
-  if (env.PATH) {
-    const pathDirs = env.PATH.split(path16.delimiter).filter(Boolean);
-    searchDirs.push(...pathDirs);
-  }
-  searchDirs.push(path16.join(ompHome, "bin"), path16.join(ompHome, "dist", "bin"), path16.join(userHome, ".local", "bin"), path16.join(userHome, ".cargo", "bin"), path16.join(userHome, ".npm-global", "bin"));
-  if (!options?.homeDir && !options?.searchPaths?.length) {
-    searchDirs.push("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin");
-  }
-  for (const dir of searchDirs) {
-    for (const binName of binaryNames) {
-      const candidate = path16.join(dir, binName);
-      try {
-        const stat7 = await fsp2.stat(candidate);
-        if (stat7.isFile()) {
-          return path16.resolve(candidate);
-        }
-      } catch {
-      }
-    }
-  }
-  return null;
+  const found = await findHostExecutable(["omp"], {
+    platform,
+    env,
+    preferredDirs: options?.searchPaths ?? [],
+    fallbackDirs
+  });
+  return found ? path20.resolve(found) : null;
 }
 function parseOmpSemver(value) {
   const match = value.trim().match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
@@ -7334,18 +7889,16 @@ function parseOmpSemver(value) {
 async function detectOmpVersion(executablePath, options) {
   const timeoutMs = options?.timeoutMs ?? 3e3;
   try {
-    const { stdout } = await execFileAsync4(executablePath, ["--version"], {
-      timeout: timeoutMs
-    });
+    const { stdout } = await runHarnessCommand(executablePath, ["--version"], { timeoutMs });
     const detected = parseOmpSemver(stdout);
     if (detected) {
       return detected;
     }
   } catch {
   }
-  let currentDir = path16.dirname(executablePath);
+  let currentDir = path20.dirname(executablePath);
   for (let i = 0; i < 3; i++) {
-    const pkgJsonPath = path16.join(currentDir, "package.json");
+    const pkgJsonPath = path20.join(currentDir, "package.json");
     try {
       const content = await fsp2.readFile(pkgJsonPath, "utf8");
       const parsed = JSON.parse(content);
@@ -7356,7 +7909,7 @@ async function detectOmpVersion(executablePath, options) {
       }
     } catch {
     }
-    currentDir = path16.dirname(currentDir);
+    currentDir = path20.dirname(currentDir);
   }
   return null;
 }
@@ -7365,8 +7918,8 @@ async function probeOmpInstallation(options) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   let ompHomeExists = false;
   try {
-    const stat7 = await fsp2.stat(ompHome);
-    ompHomeExists = stat7.isDirectory();
+    const stat8 = await fsp2.stat(ompHome);
+    ompHomeExists = stat8.isDirectory();
   } catch {
     ompHomeExists = false;
   }
@@ -7377,7 +7930,7 @@ async function probeOmpInstallation(options) {
       displayName: "Oh My Pi",
       version: "0.0.0",
       executablePath: options.customExecutablePath,
-      configPath: path16.join(ompHome, "agent", "mcp.json"),
+      configPath: path20.join(ompHome, "agent", "mcp.json"),
       homePath: ompHome,
       isInstalled: false,
       status: "missing_executable",
@@ -7390,7 +7943,7 @@ async function probeOmpInstallation(options) {
   if (!execPath && !ompHomeExists && !options?.customConfigPath) {
     return null;
   }
-  const globalConfigPath = options?.customConfigPath ? path16.resolve(options.customConfigPath) : path16.join(ompHome, "agent", "mcp.json");
+  const globalConfigPath = options?.customConfigPath ? path20.resolve(options.customConfigPath) : path20.join(ompHome, "agent", "mcp.json");
   let status = "missing_executable";
   let version = "0.0.0";
   let isInstalled = false;
@@ -7406,7 +7959,7 @@ async function probeOmpInstallation(options) {
   }
   if (options?.checkPermissions && execPath) {
     try {
-      await fsp2.access(execPath, fs6.constants.R_OK | fs6.constants.X_OK);
+      await fsp2.access(execPath, fs9.constants.R_OK | fs9.constants.X_OK);
     } catch {
       status = "corrupt";
       isInstalled = false;
@@ -7432,13 +7985,13 @@ async function probeOmpInstallation(options) {
     }
   };
 }
-var execFileAsync4, ACTIVE_ONLY_TERMINAL_GRACE_MS, OMP_TESTED_VERSIONS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema, QUIET_DIRECTORY_MS, transcriptPathCollator;
+var ACTIVE_ONLY_TERMINAL_GRACE_MS, OMP_TESTED_VERSIONS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema, QUIET_DIRECTORY_MS, transcriptPathCollator;
 var init_discovery7 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
+    init_dist();
     init_zod();
     init_session_exit();
-    execFileAsync4 = promisify4(execFile4);
     ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 6e4;
     OMP_TESTED_VERSIONS = ["18.3.2"];
     OmpWorkspaceEntrySchema = external_exports.union([
@@ -7485,22 +8038,22 @@ var init_discovery7 = __esm({
 });
 
 // adapters/omp/dist/config-planner.js
-import path17 from "node:path";
+import path21 from "node:path";
 function resolveOmpConfigPath(workspace, options) {
   if (options?.customConfigPath) {
-    return path17.resolve(options.customConfigPath);
+    return path21.resolve(options.customConfigPath);
   }
   if (workspace?.mcpConfigPath) {
-    return path17.resolve(workspace.mcpConfigPath);
+    return path21.resolve(workspace.mcpConfigPath);
   }
   if (workspace?.rootPath) {
-    return path17.resolve(workspace.rootPath, ".omp", "agent", "mcp.json");
+    return path21.resolve(workspace.rootPath, ".omp", "agent", "mcp.json");
   }
   if (workspace?.configPath) {
-    return path17.resolve(workspace.configPath);
+    return path21.resolve(workspace.configPath);
   }
   const ompHome = resolveOmpHome({ customHome: options?.ompHome });
-  return path17.resolve(ompHome, "agent", "mcp.json");
+  return path21.resolve(ompHome, "agent", "mcp.json");
 }
 async function planOmpMcpConfig(options) {
   const fsBridge = options.fsBridge ?? new NodeConfigFsBridge();
@@ -7579,8 +8132,8 @@ var init_config_planner7 = __esm({
     "use strict";
     init_dist();
     init_discovery7();
-    DEFAULT_OMP_CONFIG_FILENAME = path17.join("agent", "mcp.json");
-    DEFAULT_OMP_MCP_CONFIG_PATH = path17.join("agent", "mcp.json");
+    DEFAULT_OMP_CONFIG_FILENAME = path21.join("agent", "mcp.json");
+    DEFAULT_OMP_MCP_CONFIG_PATH = path21.join("agent", "mcp.json");
     DEFAULT_GATEWAY_SERVER_NAME2 = CANONICAL_RESIN_MCP_SERVER_KEY;
   }
 });
@@ -7604,19 +8157,18 @@ var init_device_surface = __esm({
 });
 
 // adapters/omp/dist/instructions.js
-import path18 from "node:path";
+import path22 from "node:path";
 function resolveOmpGuidancePath(home, env) {
-  return path18.join(resolveOmpConfigHome(home, env), "agent", "AGENTS.md");
+  return path22.join(resolveOmpConfigHome(home, env), "agent", "AGENTS.md");
 }
 function resolveOmpConfigHome(home, env) {
-  const configuredHome = [env.OMP_HOME, env.RESIN_OMP_HOME].find((candidate) => typeof candidate === "string" && candidate.trim().length > 0);
-  return configuredHome ? path18.resolve(configuredHome) : path18.join(home, ".omp");
+  return readHostPathEnv(env, "OMP_HOME") ?? readHostPathEnv(env, "RESIN_OMP_HOME") ?? path22.join(home, ".omp");
 }
 function renderOmpInvocationSnippet(toolName, serverName) {
-  const path33 = `xd://${ompMcpToolName(serverName, toolName)}`;
+  const path39 = `xd://${ompMcpToolName(serverName, toolName)}`;
   return [
-    `- **Invoke**: write the JSON arguments to \`${path33}\` (e.g. \`write\` \`{"path": "${path33}", "content": "{}"}\` when the tool takes no inputs).`,
-    `- **Docs**: \`read\` \`${path33}\` returns the tool's documentation.`
+    `- **Invoke**: write the JSON arguments to \`${path39}\` (e.g. \`write\` \`{"path": "${path39}", "content": "{}"}\` when the tool takes no inputs).`,
+    `- **Docs**: \`read\` \`${path39}\` returns the tool's documentation.`
   ].join("\n");
 }
 function renderOmpCatalogInstructionsBody(options) {
@@ -7635,7 +8187,7 @@ function renderOmpCatalogInstructionsBody(options) {
   return lines.join("\n");
 }
 async function applyOmpCatalogInstructions(options) {
-  const targetPath = options.appendSystemPath ?? path18.join(resolveOmpHome({ customHome: options.ompHome }), DEFAULT_APPEND_SYSTEM_FILENAME);
+  const targetPath = options.appendSystemPath ?? path22.join(resolveOmpHome({ customHome: options.ompHome }), DEFAULT_APPEND_SYSTEM_FILENAME);
   const markdown = options.markdown?.trim();
   const body = markdown ? renderOmpCatalogInstructionsBody({
     markdown,
@@ -7651,7 +8203,7 @@ var init_instructions4 = __esm({
     init_dist();
     init_device_surface();
     init_discovery7();
-    DEFAULT_APPEND_SYSTEM_FILENAME = path18.join("agent", "APPEND_SYSTEM.md");
+    DEFAULT_APPEND_SYSTEM_FILENAME = path22.join("agent", "APPEND_SYSTEM.md");
     OMP_GUIDANCE_MARKERS = {
       start: "<!-- resin:omp-guidance:start -->",
       end: "<!-- resin:omp-guidance:end -->"
@@ -7671,7 +8223,7 @@ Resin learned tools from earlier work in this workspace. They are MCP tools moun
 });
 
 // adapters/omp/dist/install.js
-import path19 from "node:path";
+import path23 from "node:path";
 var ompInstallHarness;
 var init_install7 = __esm({
   "adapters/omp/dist/install.js"() {
@@ -7691,14 +8243,14 @@ var init_install7 = __esm({
       ],
       probeInstallation: ({ targetPath, home, env }) => probeOmpInstallation({ customConfigPath: targetPath, env, homeDir: home }),
       mcpConfig: {
-        resolvePath: (home, env) => path19.join(resolveOmpConfigHome(home, env), "agent", "mcp.json"),
+        resolvePath: (home, env) => path23.join(resolveOmpConfigHome(home, env), "agent", "mcp.json"),
         uninstallPaths: (home, env) => {
           const activeHome = resolveOmpConfigHome(home, env);
           return [
-            path19.join(activeHome, "agent", "mcp.json"),
-            path19.join(activeHome, "config.json"),
-            path19.join(home, ".omp", "agent", "mcp.json"),
-            path19.join(home, ".omp", "config.json")
+            path23.join(activeHome, "agent", "mcp.json"),
+            path23.join(activeHome, "config.json"),
+            path23.join(home, ".omp", "agent", "mcp.json"),
+            path23.join(home, ".omp", "config.json")
           ];
         },
         format: "json",
@@ -7727,34 +8279,34 @@ var init_install7 = __esm({
 });
 
 // adapters/opencode/dist/paths.js
-import * as os6 from "node:os";
-import * as path20 from "node:path";
+import * as os4 from "node:os";
+import * as path24 from "node:path";
 function xdg(home, env, key, fallback) {
   const value = env[key]?.trim();
-  return value && path20.isAbsolute(value) ? value : path20.join(home, fallback);
+  return value && path24.isAbsolute(value) ? value : path24.join(home, fallback);
 }
-function resolveOpencodeDataDir(home = os6.homedir(), env = process.env) {
-  return path20.join(xdg(home, env, "XDG_DATA_HOME", path20.join(".local", "share")), "opencode");
+function resolveOpencodeDataDir(home = os4.homedir(), env = process.env) {
+  return path24.join(xdg(home, env, "XDG_DATA_HOME", path24.join(".local", "share")), "opencode");
 }
-function resolveOpencodeConfigDir(home = os6.homedir(), env = process.env) {
-  return path20.join(xdg(home, env, "XDG_CONFIG_HOME", ".config"), "opencode");
+function resolveOpencodeConfigDir(home = os4.homedir(), env = process.env) {
+  return path24.join(xdg(home, env, "XDG_CONFIG_HOME", ".config"), "opencode");
 }
-function resolveOpencodeDbPath(home = os6.homedir(), env = process.env) {
+function resolveOpencodeDbPath(home = os4.homedir(), env = process.env) {
   const dataDir = resolveOpencodeDataDir(home, env);
   const override = env.OPENCODE_DB?.trim();
   if (override && override !== ":memory:") {
-    return path20.isAbsolute(override) ? override : path20.join(dataDir, override);
+    return path24.isAbsolute(override) ? override : path24.join(dataDir, override);
   }
-  return path20.join(dataDir, "opencode.db");
+  return path24.join(dataDir, "opencode.db");
 }
-function resolveOpencodeLegacyStorageDir(home = os6.homedir(), env = process.env) {
-  return path20.join(resolveOpencodeDataDir(home, env), "storage");
+function resolveOpencodeLegacyStorageDir(home = os4.homedir(), env = process.env) {
+  return path24.join(resolveOpencodeDataDir(home, env), "storage");
 }
-function resolveOpencodeMcpConfigPath(home = os6.homedir(), env = process.env) {
-  return path20.join(resolveOpencodeConfigDir(home, env), "opencode.json");
+function resolveOpencodeMcpConfigPath(home = os4.homedir(), env = process.env) {
+  return path24.join(resolveOpencodeConfigDir(home, env), "opencode.json");
 }
-function resolveOpencodeGuidancePath(home = os6.homedir(), env = process.env) {
-  return path20.join(resolveOpencodeConfigDir(home, env), "AGENTS.md");
+function resolveOpencodeGuidancePath(home = os4.homedir(), env = process.env) {
+  return path24.join(resolveOpencodeConfigDir(home, env), "AGENTS.md");
 }
 var OPENCODE_GLOBAL_CONFIG_FILES;
 var init_paths3 = __esm({
@@ -7765,7 +8317,7 @@ var init_paths3 = __esm({
 });
 
 // adapters/opencode/dist/config-planner.js
-import * as path21 from "node:path";
+import * as path25 from "node:path";
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -7845,15 +8397,16 @@ async function verifyOpencodeMcpConfig(options) {
   if (!isObject(entry) || entry.enabled === false || entry.type !== "local")
     return false;
   const argv = Array.isArray(entry.command) ? entry.command : [];
-  if (argv.length !== 1 + CANONICAL_RESIN_MCP_ARGS.length)
+  const expectedArgs = options.args ?? CANONICAL_RESIN_MCP_ARGS;
+  if (argv.length !== 1 + expectedArgs.length)
     return false;
-  if (!CANONICAL_RESIN_MCP_ARGS.every((arg, index) => argv[index + 1] === arg))
+  if (!expectedArgs.every((arg, index) => argv[index + 1] === arg))
     return false;
   return options.command === void 0 ? isResinOpencodeEntry(entry) : argv[0] === options.command;
 }
 function opencodeUninstallPaths(home, env) {
   const dir = resolveOpencodeConfigDir(home, env);
-  return OPENCODE_GLOBAL_CONFIG_FILES.map((name) => path21.join(dir, name));
+  return OPENCODE_GLOBAL_CONFIG_FILES.map((name) => path25.join(dir, name));
 }
 async function removeOpencodeMcpConfig(options) {
   const fsBridge = options.fsBridge ?? defaultFsBridge;
@@ -7906,38 +8459,45 @@ var init_config_planner8 = __esm({
 });
 
 // adapters/opencode/dist/discovery.js
-import * as fs7 from "node:fs";
-import * as path22 from "node:path";
+import * as fs10 from "node:fs";
+import * as path26 from "node:path";
 function parseOpencodeVersion(output) {
   return output.match(/\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/)?.[1] ?? null;
 }
 function isExecutableFile2(file) {
   try {
-    if (!fs7.statSync(file).isFile())
+    if (!fs10.statSync(file).isFile())
       return false;
-    fs7.accessSync(file, fs7.constants.X_OK);
+    fs10.accessSync(file, fs10.constants.X_OK);
     return true;
   } catch {
     return false;
   }
 }
 function findOpencodeExecutable(executable, env) {
-  const candidates = executable && executable.includes(path22.sep) ? [executable] : (env.PATH ?? "").split(path22.delimiter).filter(Boolean).map((dir) => path22.join(dir, executable ?? "opencode"));
+  const candidates = executable && executable.includes(path26.sep) ? [executable] : (env.PATH ?? "").split(path26.delimiter).filter(Boolean).map((dir) => path26.join(dir, executable ?? "opencode"));
   return candidates.find(isExecutableFile2) ?? null;
 }
 function readOpencodeVersion(executablePath) {
+  return readOwningPackageVersion(executablePath) ?? readShimPackageVersion(executablePath);
+}
+function readShimPackageVersion(executablePath) {
+  const pkg = readJsonObject(path26.join(path26.dirname(executablePath), "node_modules", OPENCODE_PACKAGE_NAME, "package.json"));
+  return pkg?.name === OPENCODE_PACKAGE_NAME && typeof pkg.version === "string" ? parseOpencodeVersion(pkg.version) : null;
+}
+function readOwningPackageVersion(executablePath) {
   let dir;
   try {
-    dir = path22.dirname(fs7.realpathSync(executablePath));
+    dir = path26.dirname(fs10.realpathSync(executablePath));
   } catch {
-    dir = path22.dirname(executablePath);
+    dir = path26.dirname(executablePath);
   }
   for (let depth = 0; depth < 6; depth++) {
-    const pkg = readJsonObject(path22.join(dir, "package.json"));
+    const pkg = readJsonObject(path26.join(dir, "package.json"));
     if (pkg?.name === OPENCODE_PACKAGE_NAME && typeof pkg.version === "string") {
       return parseOpencodeVersion(pkg.version);
     }
-    const parent = path22.dirname(dir);
+    const parent = path26.dirname(dir);
     if (parent === dir)
       break;
     dir = parent;
@@ -7951,7 +8511,7 @@ async function probeOpencodeInstallation(options) {
   const dbPath = resolveOpencodeDbPath(options.home, options.env);
   const legacyDir = resolveOpencodeLegacyStorageDir(options.home, options.env);
   const configDir = resolveOpencodeConfigDir(options.home, options.env);
-  const hasState = fs7.existsSync(dbPath) || fs7.existsSync(legacyDir) || fs7.existsSync(configDir);
+  const hasState = fs10.existsSync(dbPath) || fs10.existsSync(legacyDir) || fs10.existsSync(configDir);
   if (!executableFound && !hasState)
     return null;
   const resolvedVersion = version ?? UNKNOWN_HARNESS_VERSION;
@@ -7961,20 +8521,20 @@ async function probeOpencodeInstallation(options) {
     version: resolvedVersion,
     executablePath: executable ?? void 0,
     configPath: options.configPath ?? resolveOpencodeMcpConfigPath(options.home, options.env),
-    homePath: path22.dirname(dbPath),
+    homePath: path26.dirname(dbPath),
     isInstalled: executableFound,
     status: executableFound ? "ready" : "missing_executable",
     detectedAt: nowIso(),
     metadata: {
       dbPath,
-      store: fs7.existsSync(dbPath) ? "sqlite" : fs7.existsSync(legacyDir) ? "legacy-json" : "none",
+      store: fs10.existsSync(dbPath) ? "sqlite" : fs10.existsSync(legacyDir) ? "legacy-json" : "none",
       versionClassification: classifyHarnessVersion(resolvedVersion, OPENCODE_TESTED_VERSIONS)
     }
   };
 }
 function readJsonObject(file) {
   try {
-    const value = JSON.parse(fs7.readFileSync(file, "utf8"));
+    const value = JSON.parse(fs10.readFileSync(file, "utf8"));
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch {
     return null;
@@ -8040,7 +8600,7 @@ var init_install8 = __esm({
         jsonContainerKeys: ["mcp"],
         transports: ["stdio", "http"],
         planRegistration: ({ targetPath, command, args, fsBridge }) => planOpencodeMcpConfig({ targetPath, command, args, fsBridge }),
-        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyOpencodeMcpConfig({ targetPath, command, fsBridge }),
+        verifyRegistration: ({ targetPath, command, args, fsBridge }) => verifyOpencodeMcpConfig({ targetPath, command, args, fsBridge }),
         removeRegistration: ({ home, env, fsBridge, dryRun }) => removeOpencodeMcpConfig({ home, env, fsBridge, dryRun })
       },
       guidance: {
@@ -8290,24 +8850,24 @@ var init_extension = __esm({
 });
 
 // adapters/pi/dist/paths.js
-import path23 from "node:path";
+import path27 from "node:path";
 function expandHome(value, home) {
   if (value === "~")
     return home;
   if (value.startsWith("~/"))
-    return path23.join(home, value.slice(2));
+    return path27.join(home, value.slice(2));
   return value;
 }
-function nonEmpty(value) {
+function nonEmpty2(value) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : void 0;
 }
 function resolvePiAgentDir(home, env) {
-  const configured = nonEmpty(env[PI_AGENT_DIR_ENV]);
-  return configured ? path23.resolve(expandHome(configured, home)) : path23.join(home, ".pi", "agent");
+  const configured = nonEmpty2(env[PI_AGENT_DIR_ENV]);
+  return configured ? path27.resolve(expandHome(configured, home)) : path27.join(home, ".pi", "agent");
 }
 function resolvePiExtensionPath(home, env) {
-  return path23.join(resolvePiAgentDir(home, env), "extensions", PI_RESIN_EXTENSION_FILE_NAME);
+  return path27.join(resolvePiAgentDir(home, env), "extensions", PI_RESIN_EXTENSION_FILE_NAME);
 }
 var PI_HARNESS_ID, PI_DISPLAY_NAME, PI_AGENT_DIR_ENV;
 var init_paths4 = __esm({
@@ -8322,12 +8882,12 @@ var init_paths4 = __esm({
 
 // adapters/pi/dist/discovery.js
 import * as fsp3 from "node:fs/promises";
-import path24 from "node:path";
+import path28 from "node:path";
 async function findOnPath(name, env) {
-  for (const dir of (env.PATH ?? "").split(path24.delimiter)) {
+  for (const dir of (env.PATH ?? "").split(path28.delimiter)) {
     if (!dir)
       continue;
-    const candidate = path24.join(dir, name);
+    const candidate = path28.join(dir, name);
     try {
       await fsp3.access(candidate, 1);
       return candidate;
@@ -8337,19 +8897,30 @@ async function findOnPath(name, env) {
   return void 0;
 }
 async function readPiVersion(executablePath) {
-  let dir = path24.dirname(await fsp3.realpath(executablePath).catch(() => executablePath));
+  let dir = path28.dirname(await fsp3.realpath(executablePath).catch(() => executablePath));
   for (let depth = 0; depth < 6; depth++) {
-    try {
-      const pkg = JSON.parse(await fsp3.readFile(path24.join(dir, "package.json"), "utf8"));
-      if (pkg && typeof pkg === "object" && "name" in pkg && typeof pkg.name === "string" && PI_PACKAGE_NAMES.has(pkg.name) && "version" in pkg && typeof pkg.version === "string") {
-        return pkg.version;
-      }
-    } catch {
-    }
-    const parent = path24.dirname(dir);
+    const version = await readPiPackageVersion(dir);
+    if (version !== void 0)
+      return version;
+    const parent = path28.dirname(dir);
     if (parent === dir)
       break;
     dir = parent;
+  }
+  for (const name of PI_PACKAGE_NAMES) {
+    const version = await readPiPackageVersion(path28.join(path28.dirname(executablePath), "node_modules", name));
+    if (version !== void 0)
+      return version;
+  }
+  return void 0;
+}
+async function readPiPackageVersion(dir) {
+  try {
+    const pkg = JSON.parse(await fsp3.readFile(path28.join(dir, "package.json"), "utf8"));
+    if (pkg && typeof pkg === "object" && "name" in pkg && typeof pkg.name === "string" && PI_PACKAGE_NAMES.has(pkg.name) && "version" in pkg && typeof pkg.version === "string") {
+      return pkg.version;
+    }
+  } catch {
   }
   return void 0;
 }
@@ -8389,7 +8960,7 @@ var init_discovery9 = __esm({
 
 // adapters/pi/dist/registration.js
 import { existsSync as existsSync2 } from "node:fs";
-import path25 from "node:path";
+import path29 from "node:path";
 async function planPiRegistration(options) {
   const currentContent = await options.fsBridge.readFile(options.targetPath);
   if (currentContent !== null && !currentContent.startsWith(PI_RESIN_EXTENSION_MARKER)) {
@@ -8415,7 +8986,7 @@ async function verifyPiRegistration(options) {
   return content !== null && content === renderPiResinExtension({
     name: PI_RESIN_SERVER_NAME,
     command: options.command,
-    args: ["mcp"]
+    args: [...options.args ?? ["mcp"]]
   });
 }
 async function removePiRegistration(options) {
@@ -8434,8 +9005,8 @@ async function removePiRegistration(options) {
 }
 function resolvePiGuidancePath(home, env) {
   const agentDir = resolvePiAgentDir(home, env);
-  const existing = PI_CONTEXT_FILE_NAMES.map((name) => path25.join(agentDir, name)).find((file) => existsSync2(file));
-  return existing ?? path25.join(agentDir, "AGENTS.md");
+  const existing = PI_CONTEXT_FILE_NAMES.map((name) => path29.join(agentDir, name)).find((file) => existsSync2(file));
+  return existing ?? path29.join(agentDir, "AGENTS.md");
 }
 var PI_RESIN_SERVER_NAME, PI_GUIDANCE_MARKERS, PI_RESIN_GUIDANCE, PI_CONTEXT_FILE_NAMES;
 var init_registration = __esm({
@@ -8467,7 +9038,7 @@ Resin learned tools from earlier work in this workspace. They are tools named \`
 });
 
 // adapters/pi/dist/install.js
-import path26 from "node:path";
+import path30 from "node:path";
 var piInstallHarness;
 var init_install9 = __esm({
   "adapters/pi/dist/install.js"() {
@@ -8493,14 +9064,14 @@ var init_install9 = __esm({
         resolvePath: resolvePiExtensionPath,
         uninstallPaths: (home, env) => [
           resolvePiExtensionPath(home, env),
-          path26.join(home, ".pi", "agent", "extensions", PI_RESIN_EXTENSION_FILE_NAME)
+          path30.join(home, ".pi", "agent", "extensions", PI_RESIN_EXTENSION_FILE_NAME)
         ],
         format: "owned-file",
         serverKey: "resin",
         jsonContainerKeys: [],
         transports: ["stdio"],
         planRegistration: ({ targetPath, command, args, fsBridge }) => planPiRegistration({ targetPath, command, args, fsBridge }),
-        verifyRegistration: ({ targetPath, command, fsBridge }) => verifyPiRegistration({ targetPath, command, fsBridge }),
+        verifyRegistration: ({ targetPath, command, args, fsBridge }) => verifyPiRegistration({ targetPath, command, args, fsBridge }),
         removeRegistration: ({ home, env, fsBridge, dryRun }) => removePiRegistration({
           paths: piInstallHarness.mcpConfig.uninstallPaths(home, env),
           fsBridge,
@@ -8617,7 +9188,7 @@ var init_stringify = __esm({
 });
 
 // node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js
-var init_dist2 = __esm({
+var init_dist3 = __esm({
   "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js"() {
     init_parse();
     init_stringify();
@@ -8631,7 +9202,7 @@ var init_harness_config = __esm({
   "apps/cli/src/installer/harness-config.ts"() {
     "use strict";
     init_dist();
-    init_dist2();
+    init_dist3();
     init_harness_registry();
   }
 });
@@ -8639,8 +9210,8 @@ var init_harness_config = __esm({
 // apps/cli/src/installer/harness-reconciler.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants as fsConstants2 } from "node:fs";
-import fs8 from "node:fs/promises";
-import path27 from "node:path";
+import fs11 from "node:fs/promises";
+import path31 from "node:path";
 function isAlreadyExistsError(cause) {
   return Boolean(cause) && cause instanceof Object && "code" in cause && cause.code === "EEXIST";
 }
@@ -8655,6 +9226,7 @@ var init_harness_reconciler = __esm({
   "apps/cli/src/installer/harness-reconciler.ts"() {
     "use strict";
     init_dist();
+    init_dist2();
     init_zod();
     init_harness_registry();
     init_harness_config();
@@ -8707,7 +9279,7 @@ var init_harness_reconciler = __esm({
       activeLocks = /* @__PURE__ */ new Map();
       async readFile(filePath) {
         try {
-          return await fs8.readFile(filePath, "utf8");
+          return await fs11.readFile(filePath, "utf8");
         } catch (error) {
           if (isMissingFileError(error)) {
             return null;
@@ -8717,23 +9289,23 @@ var init_harness_reconciler = __esm({
       }
       async writeFile(filePath, content) {
         const targetPath = await this.resolveAtomicWriteTarget(filePath);
-        const directoryPath = path27.dirname(targetPath);
-        await fs8.mkdir(directoryPath, { recursive: true, mode: 448 });
+        const directoryPath = path31.dirname(targetPath);
+        await fs11.mkdir(directoryPath, { recursive: true, mode: 448 });
         let targetMode = 384;
         try {
-          targetMode = (await fs8.stat(targetPath)).mode & 511;
+          targetMode = (await fs11.stat(targetPath)).mode & 511;
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
           }
         }
-        const temporaryPath = path27.join(
+        const temporaryPath = path31.join(
           directoryPath,
-          `.${path27.basename(targetPath)}.resin-${randomUUID2()}.tmp`
+          `.${path31.basename(targetPath)}.resin-${randomUUID2()}.tmp`
         );
         let replaced = false;
         try {
-          const handle = await fs8.open(temporaryPath, "wx", targetMode);
+          const handle = await fs11.open(temporaryPath, "wx", targetMode);
           try {
             await handle.writeFile(content, "utf8");
             await handle.sync();
@@ -8741,20 +9313,20 @@ var init_harness_reconciler = __esm({
           } finally {
             await handle.close();
           }
-          await fs8.rename(temporaryPath, targetPath);
+          await fs11.rename(temporaryPath, targetPath);
           replaced = true;
         } finally {
           if (!replaced) {
-            await fs8.unlink(temporaryPath).catch(() => void 0);
+            await fs11.unlink(temporaryPath).catch(() => void 0);
           }
         }
       }
       async writeFileExclusive(filePath, content) {
-        await fs8.mkdir(path27.dirname(filePath), { recursive: true, mode: 448 });
+        await fs11.mkdir(path31.dirname(filePath), { recursive: true, mode: 448 });
         let handle;
         let created = false;
         try {
-          handle = await fs8.open(filePath, "wx", 384);
+          handle = await fs11.open(filePath, "wx", 384);
           created = true;
           await handle.writeFile(content, "utf8");
           await handle.sync();
@@ -8765,7 +9337,7 @@ var init_harness_reconciler = __esm({
             return false;
           }
           if (created) {
-            await fs8.unlink(filePath).catch(() => void 0);
+            await fs11.unlink(filePath).catch(() => void 0);
           }
           throw error;
         } finally {
@@ -8774,10 +9346,10 @@ var init_harness_reconciler = __esm({
       }
       async compareAndSwapFile(filePath, expectedContent, content) {
         const target = await this.resolveTransactionTarget(filePath);
-        const activeLock = this.activeLocks.get(path27.resolve(filePath));
+        const activeLock = this.activeLocks.get(path31.resolve(filePath));
         if (expectedContent === null) {
           try {
-            await fs8.lstat(target.effectivePath);
+            await fs11.lstat(target.effectivePath);
             return false;
           } catch (error) {
             if (!isMissingFileError(error)) {
@@ -8828,11 +9400,11 @@ var init_harness_reconciler = __esm({
           await this.verifyHardLinkSupport(transaction);
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
-          const finalVersion = await fs8.lstat(target.effectivePath, { bigint: true });
+          const finalVersion = await fs11.lstat(target.effectivePath, { bigint: true });
           if (!finalVersion.isFile() || finalVersion.dev !== original.device || finalVersion.ino !== original.inode) {
             throw new Error(`Configuration identity changed immediately before writing ${filePath}`);
           }
-          await fs8.rename(target.effectivePath, transaction.capturedPath);
+          await fs11.rename(target.effectivePath, transaction.capturedPath);
           captured = true;
           const capturedSnapshot = await this.readStableFile(transaction.capturedPath);
           if (capturedSnapshot.device !== original.device || capturedSnapshot.inode !== original.inode || capturedSnapshot.content !== expectedContent) {
@@ -8876,7 +9448,7 @@ var init_harness_reconciler = __esm({
       }
       async unlinkIfUnchanged(filePath, expectedContent) {
         const target = await this.resolveTransactionTarget(filePath);
-        const activeLock = this.activeLocks.get(path27.resolve(filePath));
+        const activeLock = this.activeLocks.get(path31.resolve(filePath));
         let original;
         try {
           original = await this.readStableFile(target.effectivePath);
@@ -8895,11 +9467,11 @@ var init_harness_reconciler = __esm({
           await this.verifyHardLinkSupport(transaction);
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
-          const finalVersion = await fs8.lstat(target.effectivePath, { bigint: true });
+          const finalVersion = await fs11.lstat(target.effectivePath, { bigint: true });
           if (!finalVersion.isFile() || finalVersion.dev !== original.device || finalVersion.ino !== original.inode) {
             throw new Error(`Configuration identity changed immediately before removing ${filePath}`);
           }
-          await fs8.rename(target.effectivePath, transaction.capturedPath);
+          await fs11.rename(target.effectivePath, transaction.capturedPath);
           captured = true;
           const capturedSnapshot = await this.readStableFile(transaction.capturedPath);
           if (capturedSnapshot.device !== original.device || capturedSnapshot.inode !== original.inode || capturedSnapshot.content !== expectedContent) {
@@ -8908,7 +9480,7 @@ var init_harness_reconciler = __esm({
           await this.assertActiveLock(activeLock);
           await this.assertTransactionTargetUnchanged(target);
           try {
-            await fs8.lstat(target.effectivePath);
+            await fs11.lstat(target.effectivePath);
             throw new Error(
               `A concurrent writer recreated ${filePath} at Resin's final removal boundary`
             );
@@ -8933,13 +9505,13 @@ var init_harness_reconciler = __esm({
         }
       }
       async withFileLock(filePath, action) {
-        const requestedPath = path27.resolve(filePath);
+        const requestedPath = path31.resolve(filePath);
         const canonicalTarget = await this.resolveLockTarget(filePath);
-        const lockPath = path27.join(
-          path27.dirname(canonicalTarget),
-          `.${path27.basename(canonicalTarget)}.resin-reconcile.lock`
+        const lockPath = path31.join(
+          path31.dirname(canonicalTarget),
+          `.${path31.basename(canonicalTarget)}.resin-reconcile.lock`
         );
-        await fs8.mkdir(path27.dirname(lockPath), { recursive: true, mode: 448 });
+        await fs11.mkdir(path31.dirname(lockPath), { recursive: true, mode: 448 });
         const deadline = process.hrtime.bigint() + BigInt(RECONCILIATION_LOCK_WAIT_MS) * 1000000n;
         await this.waitForLockDirectory(lockPath, canonicalTarget, deadline);
         const claim = await this.createLockClaim(lockPath, canonicalTarget);
@@ -8947,7 +9519,7 @@ var init_harness_reconciler = __esm({
           requestedPath,
           canonicalTarget,
           lockPath,
-          claimPath: path27.join(lockPath, `${claim.token}${LOCK_CLAIM_SUFFIX}`),
+          claimPath: path31.join(lockPath, `${claim.token}${LOCK_CLAIM_SUFFIX}`),
           claim,
           refreshTail: Promise.resolve(),
           releaseStarted: false
@@ -8975,7 +9547,7 @@ var init_harness_reconciler = __esm({
           await activeLock.refreshTail;
           try {
             await this.removeOwnedClaim(activeLock);
-            await fs8.rmdir(lockPath).catch((error) => {
+            await fs11.rmdir(lockPath).catch((error) => {
               const code = "code" in error ? error.code : void 0;
               if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
                 throw error;
@@ -9001,7 +9573,7 @@ var init_harness_reconciler = __esm({
       }
       async exists(filePath) {
         try {
-          await fs8.access(filePath);
+          await fs11.access(filePath);
           return true;
         } catch (error) {
           if (isMissingFileError(error)) {
@@ -9011,21 +9583,21 @@ var init_harness_reconciler = __esm({
         }
       }
       async mkdirp(directoryPath) {
-        await fs8.mkdir(directoryPath, { recursive: true, mode: 448 });
+        await fs11.mkdir(directoryPath, { recursive: true, mode: 448 });
       }
       async copyFile(sourcePath, destinationPath) {
-        await fs8.mkdir(path27.dirname(destinationPath), { recursive: true, mode: 448 });
+        await fs11.mkdir(path31.dirname(destinationPath), { recursive: true, mode: 448 });
         try {
-          await fs8.copyFile(sourcePath, destinationPath);
-          await fs8.chmod(destinationPath, 384);
+          await fs11.copyFile(sourcePath, destinationPath);
+          await fs11.chmod(destinationPath, 384);
         } catch (error) {
-          await fs8.unlink(destinationPath).catch(() => void 0);
+          await fs11.unlink(destinationPath).catch(() => void 0);
           throw error;
         }
       }
       async unlink(filePath) {
         try {
-          await fs8.unlink(filePath);
+          await fs11.unlink(filePath);
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
@@ -9034,8 +9606,8 @@ var init_harness_reconciler = __esm({
       }
       async listFiles(directoryPath) {
         try {
-          const entries = await fs8.readdir(directoryPath);
-          return entries.map((entry) => path27.join(directoryPath, entry));
+          const entries = await fs11.readdir(directoryPath);
+          return entries.map((entry) => path31.join(directoryPath, entry));
         } catch (error) {
           if (isMissingFileError(error)) {
             return [];
@@ -9046,7 +9618,7 @@ var init_harness_reconciler = __esm({
       async removeDirectoryWithoutFiles(directoryPath) {
         let entries;
         try {
-          entries = await fs8.readdir(directoryPath, { withFileTypes: true });
+          entries = await fs11.readdir(directoryPath, { withFileTypes: true });
         } catch (error) {
           if (isMissingFileError(error)) {
             return false;
@@ -9055,13 +9627,13 @@ var init_harness_reconciler = __esm({
         }
         let empty = true;
         for (const entry of entries) {
-          empty = entry.isDirectory() && !entry.isSymbolicLink() && await this.removeDirectoryWithoutFiles(path27.join(directoryPath, entry.name)) && empty;
+          empty = entry.isDirectory() && !entry.isSymbolicLink() && await this.removeDirectoryWithoutFiles(path31.join(directoryPath, entry.name)) && empty;
         }
         if (!empty) {
           return false;
         }
         try {
-          await fs8.rmdir(directoryPath);
+          await fs11.rmdir(directoryPath);
           return true;
         } catch (error) {
           const code = error.code;
@@ -9072,23 +9644,23 @@ var init_harness_reconciler = __esm({
         }
       }
       async linkTransactionFile(sourcePath, destinationPath) {
-        await fs8.link(sourcePath, destinationPath);
+        await fs11.link(sourcePath, destinationPath);
       }
       async prepareTransaction(targetPath, plannedContent, mode) {
-        const parentPath = path27.dirname(targetPath);
-        await fs8.mkdir(parentPath, { recursive: true, mode: 448 });
-        const directoryPath = path27.join(
+        const parentPath = path31.dirname(targetPath);
+        await fs11.mkdir(parentPath, { recursive: true, mode: 448 });
+        const directoryPath = path31.join(
           parentPath,
-          `.${path27.basename(targetPath)}.resin-transaction-${randomUUID2()}`
+          `.${path31.basename(targetPath)}.resin-transaction-${randomUUID2()}`
         );
-        await fs8.mkdir(directoryPath, { mode: 448 });
+        await fs11.mkdir(directoryPath, { mode: 448 });
         const transaction = {
           directoryPath,
-          plannedPath: path27.join(directoryPath, "planned"),
-          capturedPath: path27.join(directoryPath, "captured"),
-          probePath: path27.join(directoryPath, "link-probe")
+          plannedPath: path31.join(directoryPath, "planned"),
+          capturedPath: path31.join(directoryPath, "captured"),
+          probePath: path31.join(directoryPath, "link-probe")
         };
-        const handle = await fs8.open(transaction.plannedPath, "wx", mode);
+        const handle = await fs11.open(transaction.plannedPath, "wx", mode);
         try {
           await handle.writeFile(plannedContent, "utf8");
           await handle.sync();
@@ -9101,7 +9673,7 @@ var init_harness_reconciler = __esm({
       async verifyHardLinkSupport(transaction) {
         try {
           await this.linkTransactionFile(transaction.plannedPath, transaction.probePath);
-          await fs8.unlink(transaction.probePath);
+          await fs11.unlink(transaction.probePath);
         } catch (error) {
           throw new Error(`Atomic filesystem compare-and-swap is unavailable: ${describeError(error)}`);
         }
@@ -9112,13 +9684,13 @@ var init_harness_reconciler = __esm({
           transaction.plannedPath,
           transaction.capturedPath
         ]) {
-          await fs8.unlink(ownedPath).catch((error) => {
+          await fs11.unlink(ownedPath).catch((error) => {
             if (!isMissingFileError(error)) {
               throw error;
             }
           });
         }
-        await fs8.rmdir(transaction.directoryPath);
+        await fs11.rmdir(transaction.directoryPath);
       }
       async restoreCapturedIfTargetMissing(transaction, targetPath) {
         try {
@@ -9135,7 +9707,7 @@ var init_harness_reconciler = __esm({
         );
       }
       async readStableFile(filePath) {
-        const handle = await fs8.open(filePath, fsConstants2.O_RDONLY | (fsConstants2.O_NOFOLLOW ?? 0));
+        const handle = await fs11.open(filePath, fsConstants2.O_RDONLY | (fsConstants2.O_NOFOLLOW ?? 0));
         try {
           const before = await handle.stat({ bigint: true });
           if (!before.isFile()) {
@@ -9161,15 +9733,15 @@ var init_harness_reconciler = __esm({
         }
       }
       async resolveTransactionTarget(filePath) {
-        const requestedPath = path27.resolve(filePath);
+        const requestedPath = path31.resolve(filePath);
         try {
-          const entry = await fs8.lstat(requestedPath, { bigint: true });
+          const entry = await fs11.lstat(requestedPath, { bigint: true });
           if (!entry.isSymbolicLink()) {
             return { requestedPath, effectivePath: requestedPath };
           }
           let effectivePath;
           try {
-            effectivePath = await fs8.realpath(requestedPath);
+            effectivePath = await fs11.realpath(requestedPath);
           } catch (error) {
             if (isMissingFileError(error)) {
               throw new Error(`Refusing to reconcile broken symbolic link ${filePath}`);
@@ -9182,7 +9754,7 @@ var init_harness_reconciler = __esm({
             symbolicLink: {
               device: entry.dev,
               inode: entry.ino,
-              linkTarget: await fs8.readlink(requestedPath)
+              linkTarget: await fs11.readlink(requestedPath)
             }
           };
         } catch (error) {
@@ -9196,22 +9768,23 @@ var init_harness_reconciler = __esm({
         if (target.symbolicLink === void 0) {
           return;
         }
-        const entry = await fs8.lstat(target.requestedPath, { bigint: true });
-        if (!entry.isSymbolicLink() || entry.dev !== target.symbolicLink.device || entry.ino !== target.symbolicLink.inode || await fs8.readlink(target.requestedPath) !== target.symbolicLink.linkTarget) {
+        const entry = await fs11.lstat(target.requestedPath, { bigint: true });
+        if (!entry.isSymbolicLink() || entry.dev !== target.symbolicLink.device || entry.ino !== target.symbolicLink.inode || await fs11.readlink(target.requestedPath) !== target.symbolicLink.linkTarget) {
           throw new Error(`Symbolic link changed while reconciling ${target.requestedPath}`);
         }
       }
       async waitForLockDirectory(lockPath, canonicalTarget, deadline) {
         while (true) {
           try {
-            await fs8.mkdir(lockPath, { mode: 448 });
+            await fs11.mkdir(lockPath, { mode: 448 });
+            ensureOwnerOnly(lockPath, { directory: true });
             return;
           } catch (error) {
             if (!isAlreadyExistsError(error)) {
               throw error;
             }
           }
-          const entry = await fs8.lstat(lockPath);
+          const entry = await fs11.lstat(lockPath);
           if (entry.isSymbolicLink()) {
             throw new Error(`Refusing symbolic-link reconciliation lock ${lockPath}`);
           }
@@ -9243,7 +9816,7 @@ var init_harness_reconciler = __esm({
       }
       async fenceLegacyLock(lockPath, expected) {
         const retiredPath = `${lockPath}.stale-${randomUUID2()}`;
-        await fs8.rename(lockPath, retiredPath);
+        await fs11.rename(lockPath, retiredPath);
         const captured = await this.readStableFile(retiredPath);
         if (captured.device !== expected.device || captured.inode !== expected.inode) {
           await this.linkTransactionFile(retiredPath, lockPath).catch(() => void 0);
@@ -9251,7 +9824,7 @@ var init_harness_reconciler = __esm({
             `Reconciliation lock changed while fencing it; preserved replacement at ${retiredPath}`
           );
         }
-        await fs8.unlink(retiredPath);
+        await fs11.unlink(retiredPath);
       }
       async createLockClaim(lockPath, canonicalTarget) {
         const token = randomUUID2();
@@ -9268,16 +9841,16 @@ var init_harness_reconciler = __esm({
           leaseExpiresAt: Date.now() + RECONCILIATION_LOCK_LEASE_MS,
           leaseExpiresMonotonicNs: (createdMonotonicNs + BigInt(RECONCILIATION_LOCK_LEASE_MS) * 1000000n).toString()
         };
-        const claimPath = path27.join(lockPath, `${token}${LOCK_CLAIM_SUFFIX}`);
+        const claimPath = path31.join(lockPath, `${token}${LOCK_CLAIM_SUFFIX}`);
         await this.publishClaimFile(claimPath, claim);
         return claim;
       }
       async publishClaimFile(claimPath, claim) {
-        const temporaryPath = path27.join(
-          path27.dirname(claimPath),
-          `.${path27.basename(claimPath)}.${randomUUID2()}.tmp`
+        const temporaryPath = path31.join(
+          path31.dirname(claimPath),
+          `.${path31.basename(claimPath)}.${randomUUID2()}.tmp`
         );
-        const handle = await fs8.open(temporaryPath, "wx", 384);
+        const handle = await fs11.open(temporaryPath, "wx", 384);
         try {
           await handle.writeFile(JSON.stringify(claim), "utf8");
           await handle.sync();
@@ -9288,7 +9861,7 @@ var init_harness_reconciler = __esm({
         try {
           await this.linkTransactionFile(temporaryPath, claimPath);
         } finally {
-          await fs8.unlink(temporaryPath).catch(() => void 0);
+          await fs11.unlink(temporaryPath).catch(() => void 0);
         }
       }
       async waitUntilClaimIsElected(activeLock, deadline) {
@@ -9306,18 +9879,18 @@ var init_harness_reconciler = __esm({
         }
       }
       async scanLockClaims(lockPath, canonicalTarget) {
-        const directory = await fs8.lstat(lockPath);
+        const directory = await fs11.lstat(lockPath);
         if (!directory.isDirectory() || directory.isSymbolicLink()) {
           throw new Error(`Reconciliation lock directory was replaced: ${lockPath}`);
         }
         this.assertPrivateLockEntry(lockPath, directory.mode, directory.uid);
         const activeClaims = [];
         let blocked = false;
-        for (const entryName of await fs8.readdir(lockPath)) {
+        for (const entryName of await fs11.readdir(lockPath)) {
           if (!entryName.endsWith(LOCK_CLAIM_SUFFIX)) {
             continue;
           }
-          const claimPath = path27.join(lockPath, entryName);
+          const claimPath = path31.join(lockPath, entryName);
           let snapshot;
           try {
             snapshot = await this.readStableFile(claimPath);
@@ -9362,7 +9935,7 @@ var init_harness_reconciler = __esm({
       async retireStaleClaim(claimPath, expected, expectedToken) {
         const retiredPath = `${claimPath}.retired-${randomUUID2()}`;
         try {
-          await fs8.rename(claimPath, retiredPath);
+          await fs11.rename(claimPath, retiredPath);
         } catch (error) {
           if (isMissingFileError(error)) {
             return;
@@ -9382,7 +9955,7 @@ var init_harness_reconciler = __esm({
             `Reconciliation lock claim changed while fencing it; preserved at ${retiredPath}`
           );
         }
-        await fs8.unlink(retiredPath);
+        await fs11.unlink(retiredPath);
       }
       async isLockClaimActive(claim) {
         if (!this.isProcessAlive(claim.pid)) {
@@ -9406,12 +9979,12 @@ var init_harness_reconciler = __esm({
       }
       async readProcessStartIdentity(pid) {
         try {
-          const stat7 = await fs8.readFile(`/proc/${pid}/stat`, "utf8");
-          const closingParenthesis = stat7.lastIndexOf(")");
+          const stat8 = await fs11.readFile(`/proc/${pid}/stat`, "utf8");
+          const closingParenthesis = stat8.lastIndexOf(")");
           if (closingParenthesis < 0) {
             return null;
           }
-          const fields = stat7.slice(closingParenthesis + 2).trim().split(/\s+/);
+          const fields = stat8.slice(closingParenthesis + 2).trim().split(/\s+/);
           const startTime = fields[19];
           return startTime === void 0 ? null : `proc:${startTime}`;
         } catch {
@@ -9451,7 +10024,7 @@ var init_harness_reconciler = __esm({
           leaseExpiresMonotonicNs: (now + BigInt(RECONCILIATION_LOCK_LEASE_MS) * 1000000n).toString()
         };
         const temporaryPath = `${activeLock.claimPath}.refresh-${randomUUID2()}`;
-        const handle = await fs8.open(temporaryPath, "wx", 384);
+        const handle = await fs11.open(temporaryPath, "wx", 384);
         try {
           await handle.writeFile(JSON.stringify(refreshed), "utf8");
           await handle.sync();
@@ -9460,10 +10033,10 @@ var init_harness_reconciler = __esm({
           await handle.close();
         }
         if (activeLock.releaseStarted) {
-          await fs8.unlink(temporaryPath);
+          await fs11.unlink(temporaryPath);
           return;
         }
-        await fs8.rename(temporaryPath, activeLock.claimPath);
+        await fs11.rename(temporaryPath, activeLock.claimPath);
         activeLock.claim = refreshed;
       }
       async assertActiveLock(activeLock) {
@@ -9496,6 +10069,15 @@ var init_harness_reconciler = __esm({
         await this.retireStaleClaim(activeLock.claimPath, snapshot, activeLock.claim.token);
       }
       assertPrivateLockEntry(entryPath, mode, uid) {
+        if (process.platform === "win32") {
+          const acl = checkOwnerOnly(entryPath);
+          if (!acl.ok) {
+            throw new Error(
+              `Refusing reconciliation lock with unsafe permissions: ${entryPath} (${acl.problems.join("; ")})`
+            );
+          }
+          return;
+        }
         if ((mode & 63) !== 0) {
           throw new Error(`Refusing reconciliation lock with unsafe permissions: ${entryPath}`);
         }
@@ -9511,12 +10093,12 @@ var init_harness_reconciler = __esm({
       }
       async resolveAtomicWriteTarget(filePath) {
         try {
-          const entry = await fs8.lstat(filePath);
+          const entry = await fs11.lstat(filePath);
           if (!entry.isSymbolicLink()) {
             return filePath;
           }
           try {
-            return await fs8.realpath(filePath);
+            return await fs11.realpath(filePath);
           } catch (error) {
             if (isMissingFileError(error)) {
               throw new Error(`Refusing to replace broken symbolic link ${filePath}`);
@@ -9532,13 +10114,13 @@ var init_harness_reconciler = __esm({
       }
       async resolveLockTarget(filePath) {
         try {
-          return await fs8.realpath(filePath);
+          return await fs11.realpath(filePath);
         } catch (error) {
           if (!isMissingFileError(error)) {
             throw error;
           }
           try {
-            const entry = await fs8.lstat(filePath);
+            const entry = await fs11.lstat(filePath);
             if (entry.isSymbolicLink()) {
               throw new Error(`Refusing to reconcile broken symbolic link ${filePath}`);
             }
@@ -9547,8 +10129,8 @@ var init_harness_reconciler = __esm({
               throw lstatError;
             }
           }
-          const canonicalDirectory = await fs8.realpath(path27.dirname(filePath)).catch(() => path27.resolve(path27.dirname(filePath)));
-          return path27.join(canonicalDirectory, path27.basename(filePath));
+          const canonicalDirectory = await fs11.realpath(path31.dirname(filePath)).catch(() => path31.resolve(path31.dirname(filePath)));
+          return path31.join(canonicalDirectory, path31.basename(filePath));
         }
       }
     };
@@ -9558,23 +10140,26 @@ var init_harness_reconciler = __esm({
 
 // apps/cli/src/installer/bootstrap-entry.ts
 init_dist();
-import child_process from "node:child_process";
-import fs11 from "node:fs";
-import os11 from "node:os";
-import path32 from "node:path";
-import process6 from "node:process";
-import { fileURLToPath as fileURLToPath2, pathToFileURL } from "node:url";
+init_dist2();
+import child_process2 from "node:child_process";
+import fs16 from "node:fs";
+import os9 from "node:os";
+import path38 from "node:path";
+import process8 from "node:process";
+import { fileURLToPath as fileURLToPath3, pathToFileURL as pathToFileURL2 } from "node:url";
 
 // apps/cli/src/platform/platform.ts
 init_harness_registry();
-import os7 from "node:os";
+import os5 from "node:os";
 import process2 from "node:process";
 var REQUIRED_QUALIFICATION_LANES = [
   "linux-x64",
   "linux-arm64",
   "darwin-x64",
   "darwin-arm64",
-  "wsl"
+  "wsl",
+  "windows-x64",
+  "windows-arm64"
 ];
 var ALL_QUALIFICATION_LANES = [
   "linux-x64",
@@ -9582,7 +10167,9 @@ var ALL_QUALIFICATION_LANES = [
   "darwin-x64",
   "darwin-arm64",
   "wsl-systemd",
-  "wsl-fallback"
+  "wsl-fallback",
+  "windows-x64",
+  "windows-arm64"
 ];
 var V1_SUPPORT_MATRIX = Object.freeze({
   schemaVersion: "2.0.0",
@@ -9680,6 +10267,30 @@ var V1_SUPPORT_MATRIX = Object.freeze({
       tarball: "resin-v1.0.0-wsl.tar.gz",
       qualified: true,
       minimumOsVersion: "WSL2 (Ubuntu 22.04+)"
+    }),
+    Object.freeze({
+      id: "windows-x64",
+      os: "win32",
+      arch: "x64",
+      isWsl: false,
+      displayName: "Windows x64 (native, PowerShell)",
+      tier: 1,
+      serviceManager: "windows-task",
+      tarball: "resin-v1.0.0-windows-x64.tar.gz",
+      qualified: true,
+      minimumOsVersion: "Windows 10 (1809+) / Windows 11"
+    }),
+    Object.freeze({
+      id: "windows-arm64",
+      os: "win32",
+      arch: "arm64",
+      isWsl: false,
+      displayName: "Windows ARM64 (native, PowerShell)",
+      tier: 1,
+      serviceManager: "windows-task",
+      tarball: "resin-v1.0.0-windows-arm64.tar.gz",
+      qualified: true,
+      minimumOsVersion: "Windows 11 (ARM64)"
     })
   ]),
   qualificationLanes: REQUIRED_QUALIFICATION_LANES,
@@ -9703,7 +10314,11 @@ var V1_SUPPORT_MATRIX = Object.freeze({
     shells: Object.freeze({
       supported: Object.freeze(["bash", "zsh", "sh"]),
       posixCompliant: true,
-      profileFiles: Object.freeze([".bashrc", ".zshrc", ".profile"])
+      profileFiles: Object.freeze([".bashrc", ".zshrc", ".profile"]),
+      windows: Object.freeze({
+        learnable: Object.freeze(["powershell", "pwsh"]),
+        capturedNotLearnable: Object.freeze(["cmd"])
+      })
     }),
     packageManagers: Object.freeze({
       pnpm: Object.freeze({
@@ -9724,12 +10339,6 @@ var V1_SUPPORT_MATRIX = Object.freeze({
     })
   }),
   limitations: Object.freeze({
-    nativeWindows: Object.freeze({
-      supported: false,
-      impliedByWsl2: false,
-      reason: "Native Windows (win32) is unsupported. Resin must run inside WSL2 (Windows Subsystem for Linux): `wsl --install`.",
-      rejectionMessage: "Native Windows is not supported. Please run within Windows Subsystem for Linux (WSL2): `wsl --install`."
-    }),
     wsl1: Object.freeze({
       supported: false,
       reason: "WSL1 is unsupported due to missing Linux socket and filesystem semantics; WSL2 is required."
@@ -9751,8 +10360,9 @@ var UnsupportedPlatformError = class extends Error {
   nodeVersion;
   isWsl;
   constructor(platform, details) {
-    const message = platform === "win32" ? V1_SUPPORT_MATRIX.limitations.nativeWindows.rejectionMessage : `Unsupported platform: ${String(platform)}. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), or WSL2.`;
-    super(message);
+    super(
+      `Unsupported platform: ${String(platform)}. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), Windows 10/11 (x64/arm64), or WSL2.`
+    );
     this.name = "UnsupportedPlatformError";
     this.platform = platform;
     this.arch = details?.arch ?? process2.arch;
@@ -9764,7 +10374,7 @@ function isWslEnvironment(env = process2.env, release) {
   if (env.WSL_DISTRO_NAME || env.IS_WSL || env.WSLENV || env.WSL_INTEROP) {
     return true;
   }
-  const kernelRelease = (release ?? (process2.platform === "linux" ? os7.release() : "")).toLowerCase();
+  const kernelRelease = (release ?? (process2.platform === "linux" ? os5.release() : "")).toLowerCase();
   if (kernelRelease.includes("microsoft") || kernelRelease.includes("wsl")) {
     return true;
   }
@@ -9783,6 +10393,9 @@ function isAppleSilicon(platform = process2.platform, arch = process2.arch, env 
   return false;
 }
 function getQualificationLane(info) {
+  if (info.os === "windows") {
+    return info.arch === "arm64" ? "windows-arm64" : "windows-x64";
+  }
   if (info.isWsl) {
     return info.hasSystemd ? "wsl-systemd" : "wsl-fallback";
   }
@@ -9794,12 +10407,15 @@ function getQualificationLane(info) {
   }
   return "linux-x64";
 }
+function isSupportedNodePlatform(platform) {
+  return platform === "linux" || platform === "darwin" || platform === "win32";
+}
 function detectPlatform2(options = {}) {
   const targetPlatform = options.platform ?? process2.platform;
   const arch = options.arch ?? process2.arch;
   const env = options.env ?? process2.env;
   const nodeVersion = options.nodeVersion ?? process2.version;
-  const isWsl = isWslEnvironment(env, options.release);
+  const isWsl = targetPlatform !== "win32" && isWslEnvironment(env, options.release);
   const appleSilicon = isAppleSilicon(targetPlatform, arch, env);
   let wslDistro;
   let wslVersion;
@@ -9814,6 +10430,8 @@ function detectPlatform2(options = {}) {
     osType = "wsl";
   } else if (targetPlatform === "darwin") {
     osType = "darwin";
+  } else if (targetPlatform === "win32") {
+    osType = "windows";
   } else if (targetPlatform === "linux") {
     osType = "linux";
   }
@@ -9824,16 +10442,11 @@ function detectPlatform2(options = {}) {
     distro = env.ID ?? env.DISTRIB_ID ?? "linux-generic";
   } else if (targetPlatform === "darwin") {
     distro = "macOS";
+  } else if (targetPlatform === "win32") {
+    distro = "Windows";
   }
-  const isSupported = targetPlatform === "linux" || targetPlatform === "darwin";
-  let rejectionReason;
-  if (!isSupported) {
-    if (targetPlatform === "win32") {
-      rejectionReason = V1_SUPPORT_MATRIX.limitations.nativeWindows.rejectionMessage;
-    } else {
-      rejectionReason = `Operating system '${targetPlatform}' is not supported. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), or WSL2.`;
-    }
-  }
+  const isSupported = isSupportedNodePlatform(targetPlatform);
+  const rejectionReason = isSupported ? void 0 : `Operating system '${targetPlatform}' is not supported. Resin requires Linux (x64/arm64), macOS (Apple Silicon/Intel), Windows 10/11 (x64/arm64), or WSL2.`;
   const info = {
     os: osType,
     isSupported,
@@ -9881,14 +10494,14 @@ var PRODUCTION_RELEASE_TRUST_RECORD = Object.freeze({
 });
 
 // apps/cli/src/service/manager.ts
-import { execFile as execFile5, spawn } from "node:child_process";
-import fsSync from "node:fs";
-import os8 from "node:os";
-import path28 from "node:path";
-import process3 from "node:process";
+import { execFile as execFile3, spawn } from "node:child_process";
+import fsSync2 from "node:fs";
+import os6 from "node:os";
+import path33 from "node:path";
+import process4 from "node:process";
 init_dist();
-import { fileURLToPath } from "node:url";
-import { promisify as promisify5 } from "node:util";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { promisify as promisify3 } from "node:util";
 
 // apps/cli/src/installer/harness-health.ts
 init_dist();
@@ -9969,6 +10582,606 @@ var EMPTY_CONFIG_CACHE = Object.fromEntries(
   SUPPORTED_HARNESS_IDS.map((harnessId) => [harnessId, ABSENT_CONFIG_FILE])
 );
 
+// apps/cli/src/platform/paths.ts
+init_dist2();
+
+// apps/cli/src/service/windows-task.ts
+init_dist();
+init_zod();
+import { execFileSync } from "node:child_process";
+import fsSync from "node:fs";
+import fs12 from "node:fs/promises";
+import { createRequire as createRequire2 } from "node:module";
+import path32 from "node:path";
+import process3 from "node:process";
+import { setTimeout as waitForTimeout } from "node:timers/promises";
+var WINDOWS_TASK_DEFAULT_NAME = "\\Resin\\ResinDaemon";
+var WINDOWS_TASK_NAME_ENV = "RESIN_WINDOWS_TASK_NAME";
+var WINDOWS_SERVICE_HOST_FILE = "resin-service-host.exe";
+var WINDOWS_TASK_XML_FILE = "windows-task.xml";
+var WINDOWS_HOST_RESTART_DELAY_SECONDS = 60;
+var WINDOWS_HOST_RESTART_LIMIT = 999;
+var SERVICE_STOP_REQUEST_FILE = "service-stop.request";
+function serviceStopRequestPath(resinHome) {
+  return path32.join(resinHome, "run", SERVICE_STOP_REQUEST_FILE);
+}
+var TASK_NAME_PATTERN = /^\\(?:[A-Za-z0-9 ._-]+\\)*[A-Za-z0-9._-][A-Za-z0-9 ._-]*$/;
+var SID_PATTERN = /^S-1-\d+(?:-\d+)+$/;
+function resolveWindowsTaskName(env = process3.env) {
+  const requested = env[WINDOWS_TASK_NAME_ENV]?.trim();
+  const taskName = requested && requested.length > 0 ? requested : WINDOWS_TASK_DEFAULT_NAME;
+  assertValidTaskName(taskName);
+  return taskName;
+}
+function assertValidTaskName(taskName) {
+  if (!TASK_NAME_PATTERN.test(taskName)) {
+    throw new Error(
+      `Invalid Windows scheduled task name ${JSON.stringify(taskName)}; expected a path such as ${WINDOWS_TASK_DEFAULT_NAME}`
+    );
+  }
+}
+function splitWindowsTaskName(taskName) {
+  assertValidTaskName(taskName);
+  const index = taskName.lastIndexOf("\\");
+  return { folder: index === 0 ? "\\" : taskName.slice(0, index), name: taskName.slice(index + 1) };
+}
+function quoteWindowsArgument(argument) {
+  if (argument.length > 0 && !/[\s"]/.test(argument)) {
+    return argument;
+  }
+  let quoted = '"';
+  let backslashes = 0;
+  for (const character of argument) {
+    if (character === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (character === '"') {
+      quoted += `${"\\".repeat(backslashes * 2 + 1)}"`;
+    } else {
+      quoted += `${"\\".repeat(backslashes)}${character}`;
+    }
+    backslashes = 0;
+  }
+  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+}
+function formatWindowsCommandLine(argv) {
+  return argv.map(quoteWindowsArgument).join(" ");
+}
+function escapeTaskXml(value) {
+  let escaped = "";
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 32 && codePoint !== 9 || codePoint >= 55296 && codePoint <= 57343 || codePoint === 65534 || codePoint === 65535) {
+      throw new Error("Scheduled task values cannot contain control characters");
+    }
+    switch (character) {
+      case "&":
+        escaped += "&amp;";
+        break;
+      case "<":
+        escaped += "&lt;";
+        break;
+      case ">":
+        escaped += "&gt;";
+        break;
+      case '"':
+        escaped += "&quot;";
+        break;
+      case "'":
+        escaped += "&apos;";
+        break;
+      default:
+        escaped += codePoint > 126 ? `&#x${codePoint.toString(16).toUpperCase()};` : character;
+    }
+  }
+  return escaped;
+}
+function buildWindowsTaskXml(definition) {
+  if (!SID_PATTERN.test(definition.userSid)) {
+    throw new Error(`Invalid Windows user SID: ${definition.userSid}`);
+  }
+  const sid = escapeTaskXml(definition.userSid);
+  return `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Resin</Author>
+    <Description>Resin background daemon for this user. Managed by resin; remove with resin uninstall.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${sid}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${sid}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${escapeTaskXml(definition.hostPath)}</Command>
+      <Arguments>${escapeTaskXml(formatWindowsCommandLine(definition.hostArguments))}</Arguments>
+      <WorkingDirectory>${escapeTaskXml(definition.workingDirectory)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+function buildServiceHostArguments(input) {
+  const logDir = path32.win32.join(input.resinHome, "logs");
+  const environment = {
+    ...input.env,
+    RESIN_HOME: input.resinHome,
+    NODE_ENV: "production"
+  };
+  const args = [
+    "--stdout",
+    path32.win32.join(logDir, "daemon.stdout.log"),
+    "--stderr",
+    path32.win32.join(logDir, "daemon.stderr.log"),
+    "--cwd",
+    input.resinHome,
+    "--restart-delay-seconds",
+    String(WINDOWS_HOST_RESTART_DELAY_SECONDS),
+    "--restart-limit",
+    String(WINDOWS_HOST_RESTART_LIMIT),
+    "--path-prepend",
+    path32.win32.dirname(input.nodePath)
+  ];
+  for (const [name, value] of Object.entries(environment)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid service environment variable name: ${name}`);
+    }
+    if (name.toUpperCase() === "PATH") continue;
+    args.push("--env", `${name}=${value}`);
+  }
+  args.push("--", ...input.supervisorArguments);
+  return args;
+}
+var TaskStatusSchema = external_exports.union([
+  external_exports.object({ installed: external_exports.literal(false) }),
+  external_exports.object({
+    installed: external_exports.literal(true),
+    state: external_exports.number().int().min(0).max(4),
+    enabled: external_exports.boolean(),
+    lastTaskResult: external_exports.number().int().nullable().optional(),
+    pid: external_exports.number().int().nullable().optional(),
+    command: external_exports.string().nullable().optional()
+  })
+]);
+var TASK_STATES = {
+  0: "unknown",
+  1: "disabled",
+  2: "queued",
+  3: "ready",
+  4: "running"
+};
+function parseWindowsTaskStatus(stdout) {
+  const trimmed = stdout.trim().replace(/^\uFEFF/, "");
+  const lastLine = trimmed.split(/\r?\n/).filter((line) => line.trim().length > 0).at(-1) ?? "";
+  let parsed;
+  try {
+    parsed = TaskStatusSchema.parse(JSON.parse(lastLine));
+  } catch {
+    throw new Error("Unrecognized scheduled task status output");
+  }
+  if (!parsed.installed) {
+    return { installed: false, state: "not_installed", running: false, enabled: false };
+  }
+  const state = TASK_STATES[parsed.state] ?? "unknown";
+  const status = { installed: true, state, running: state === "running", enabled: parsed.enabled };
+  if (typeof parsed.command === "string" && parsed.command.length > 0) {
+    status.command = parsed.command;
+  }
+  if (parsed.lastTaskResult !== null && parsed.lastTaskResult !== void 0) {
+    status.lastTaskResult = parsed.lastTaskResult;
+  }
+  if (parsed.pid !== null && parsed.pid !== void 0 && parsed.pid > 0) {
+    status.pid = parsed.pid;
+  }
+  return status;
+}
+function powershellString(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+var MISSING_TASK_HRESULTS = "-2147024894,-2147024893";
+function windowsTaskStatusScript(taskName) {
+  const { folder, name } = splitWindowsTaskName(taskName);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$service = New-Object -ComObject Schedule.Service",
+    "$service.Connect()",
+    "try {",
+    `  $task = $service.GetFolder(${powershellString(folder)}).GetTask(${powershellString(name)})`,
+    "} catch {",
+    `  if (@(${MISSING_TASK_HRESULTS}) -contains $_.Exception.HResult) { '{"installed":false}'; exit 0 }`,
+    "  throw",
+    "}",
+    "$enginePid = $null",
+    "foreach ($instance in @($task.GetInstances(0))) { $enginePid = [int]$instance.EnginePID; break }",
+    "$command = $null",
+    "foreach ($action in @($task.Definition.Actions)) { if ([int]$action.Type -eq 0) { $command = [string]$action.Path; break } }",
+    "$status = [ordered]@{ installed = $true; state = [int]$task.State; enabled = [bool]$task.Enabled; lastTaskResult = [int64]$task.LastTaskResult; pid = $enginePid; command = $command }",
+    "New-Object PSObject -Property $status | ConvertTo-Json -Compress"
+  ].join("\n");
+}
+function windowsTaskFolderCleanupScript(taskName) {
+  const { folder } = splitWindowsTaskName(taskName);
+  if (folder === "\\") {
+    return "exit 0";
+  }
+  const parent = folder.slice(0, folder.lastIndexOf("\\")) || "\\";
+  const leaf = folder.slice(folder.lastIndexOf("\\") + 1);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$service = New-Object -ComObject Schedule.Service",
+    "$service.Connect()",
+    "try {",
+    `  $folder = $service.GetFolder(${powershellString(folder)})`,
+    "} catch {",
+    `  if (@(${MISSING_TASK_HRESULTS}) -contains $_.Exception.HResult) { exit 0 }`,
+    "  throw",
+    "}",
+    "if ($folder.GetTasks(1).Count -gt 0 -or $folder.GetFolders(0).Count -gt 0) { exit 0 }",
+    `$service.GetFolder(${powershellString(parent)}).DeleteFolder(${powershellString(leaf)}, 0)`
+  ].join("\n");
+}
+function encodePowerShellCommand(script) {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+function windowsSystemExecutable(name, env = process3.env) {
+  return path32.win32.join(env.SystemRoot ?? env.windir ?? "C:\\Windows", "System32", name);
+}
+function windowsPowerShellExecutable(env = process3.env) {
+  return path32.win32.join(
+    env.SystemRoot ?? env.windir ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+}
+function powerShellArguments(script) {
+  return [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-EncodedCommand",
+    encodePowerShellCommand(script)
+  ];
+}
+function parseWhoamiSid(stdout) {
+  const match = stdout.match(/"(S-1-\d+(?:-\d+)+)"/);
+  if (!match?.[1]) {
+    throw new Error("Could not determine the current Windows user SID");
+  }
+  return match[1];
+}
+function currentUserSidFromWhoami(env = process3.env) {
+  const stdout = execFileSync(
+    windowsSystemExecutable("whoami.exe", env),
+    ["/user", "/fo", "csv", "/nh"],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 1e4
+    }
+  );
+  return parseWhoamiSid(stdout);
+}
+function resolveServiceHostSourcePath(resinHome, arch = process3.arch, exists = fsSync.existsSync) {
+  const relative2 = path32.join("prebuilds", `win32-${arch}`, WINDOWS_SERVICE_HOST_FILE);
+  const candidates = [
+    path32.join(resinHome, "current", "node_modules", "@resin", "windows-security", relative2)
+  ];
+  try {
+    const packageJson = createRequire2(import.meta.url).resolve(
+      "@resin/windows-security/package.json"
+    );
+    candidates.push(path32.join(path32.dirname(packageJson), relative2));
+  } catch {
+  }
+  const found = candidates.find((candidate) => exists(candidate));
+  if (!found) {
+    throw new Error(
+      `Resin service host (${WINDOWS_SERVICE_HOST_FILE}) not found; looked in: ${candidates.join(", ")}. Build it with \`node packages/windows-security/scripts/build-native.mjs\`.`
+    );
+  }
+  return found;
+}
+function isFileLockError(error) {
+  return error instanceof Error && "code" in error && (error.code === "EBUSY" || error.code === "EPERM" || error.code === "EACCES");
+}
+async function sameFileContent(left, right) {
+  try {
+    const [a, b] = await Promise.all([fs12.readFile(left), fs12.readFile(right)]);
+    return a.equals(b);
+  } catch {
+    return false;
+  }
+}
+var nodeWindowsServiceHostFiles = {
+  async installHost(source, target) {
+    if (await sameFileContent(source, target)) return;
+    await fs12.mkdir(path32.dirname(target), { recursive: true });
+    try {
+      await fs12.copyFile(source, target);
+    } catch (error) {
+      if (!isFileLockError(error)) throw error;
+      await fs12.rename(target, `${target}.${Date.now()}.old`);
+      await fs12.copyFile(source, target);
+    }
+  },
+  async removeHost(target) {
+    const failures = [];
+    const directory = path32.dirname(target);
+    const base = path32.basename(target);
+    let names = [];
+    try {
+      names = await fs12.readdir(directory);
+    } catch {
+      return failures;
+    }
+    for (const name of names) {
+      if (name !== base && !(name.startsWith(`${base}.`) && name.endsWith(".old"))) continue;
+      const candidate = path32.join(directory, name);
+      try {
+        await fs12.rm(candidate, { force: true });
+      } catch {
+        failures.push(candidate);
+      }
+    }
+    return failures;
+  }
+};
+var WindowsTaskBackend = class {
+  taskName;
+  /** The task name was chosen explicitly (option or RESIN_WINDOWS_TASK_NAME), not defaulted. */
+  explicitTaskName;
+  resinHome;
+  homeDir;
+  runner;
+  fsBridge;
+  options;
+  systemEnv;
+  cachedSid;
+  constructor(context, options = {}) {
+    this.systemEnv = options.systemEnv ?? process3.env;
+    this.taskName = options.taskName ?? resolveWindowsTaskName(this.systemEnv);
+    this.explicitTaskName = options.taskName !== void 0 || (this.systemEnv[WINDOWS_TASK_NAME_ENV]?.trim().length ?? 0) > 0;
+    assertValidTaskName(this.taskName);
+    this.resinHome = context.resinHome;
+    this.homeDir = context.homeDir;
+    this.runner = context.runner;
+    this.fsBridge = context.fsBridge ?? defaultFsBridge;
+    this.options = options;
+  }
+  get servicesDir() {
+    return path32.join(this.resinHome, "services");
+  }
+  get xmlPath() {
+    return path32.join(this.servicesDir, WINDOWS_TASK_XML_FILE);
+  }
+  get hostPath() {
+    return path32.join(this.servicesDir, WINDOWS_SERVICE_HOST_FILE);
+  }
+  userSid() {
+    if (this.cachedSid === void 0) {
+      const configured = this.options.userSid;
+      this.cachedSid = typeof configured === "string" ? configured : configured instanceof Function ? configured() : currentUserSidFromWhoami(this.systemEnv);
+    }
+    return this.cachedSid;
+  }
+  serviceHostSource() {
+    const configured = this.options.serviceHostSourcePath;
+    if (typeof configured === "string") return configured;
+    if (configured instanceof Function) return configured();
+    return resolveServiceHostSourcePath(this.resinHome);
+  }
+  schtasks(args) {
+    return this.runner.run(windowsSystemExecutable("schtasks.exe", this.systemEnv), args);
+  }
+  powershell(script) {
+    return this.runner.run(
+      windowsPowerShellExecutable(this.systemEnv),
+      powerShellArguments(script)
+    );
+  }
+  async wait(delayMs) {
+    if (this.options.wait) {
+      await this.options.wait(delayMs);
+      return;
+    }
+    await waitForTimeout(delayMs);
+  }
+  /** Copies the host executable into the Resin home and writes the task XML. */
+  async writeDefinition(xml) {
+    await this.fsBridge.mkdirp(this.servicesDir);
+    await this.fsBridge.mkdirp(path32.join(this.resinHome, "logs"));
+    await (this.options.hostFiles ?? nodeWindowsServiceHostFiles).installHost(
+      this.serviceHostSource(),
+      this.hostPath
+    );
+    await this.fsBridge.writeFile(this.xmlPath, xml);
+  }
+  /** Registers (or replaces) the task from the XML on disk. */
+  async register() {
+    this.assertOwned(await this.query());
+    const result = await this.schtasks([
+      "/Create",
+      "/TN",
+      this.taskName,
+      "/XML",
+      this.xmlPath,
+      "/F"
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to register scheduled task ${this.taskName}: ${result.stderr || result.stdout || `exit code ${result.exitCode}`}`
+      );
+    }
+  }
+  /**
+   * Refuses to touch a task registered for another Resin home (its action runs a
+   * different host copy), e.g. the real service when working on a test home.
+   */
+  assertOwned(status) {
+    if (!status.installed || status.command === void 0) return;
+    const normalize3 = (value) => path32.win32.normalize(value).toLowerCase();
+    if (normalize3(status.command) !== normalize3(this.hostPath)) {
+      throw new Error(
+        `Scheduled task ${this.taskName} belongs to another Resin home (it runs ${status.command}, not ${this.hostPath}); set ${WINDOWS_TASK_NAME_ENV} to use a different task.`
+      );
+    }
+  }
+  async query() {
+    const result = await this.powershell(windowsTaskStatusScript(this.taskName));
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to query scheduled task ${this.taskName}: ${result.stderr || result.stdout || `exit code ${result.exitCode}`}`
+      );
+    }
+    return parseWindowsTaskStatus(result.stdout);
+  }
+  async run() {
+    this.assertOwned(await this.query());
+    await this.clearStopRequest();
+    const result = await this.schtasks(["/Run", "/TN", this.taskName]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to start scheduled task ${this.taskName}: ${result.stderr || result.stdout || `exit code ${result.exitCode}`}`
+      );
+    }
+  }
+  async setEnabled(enabled) {
+    const result = await this.schtasks([
+      "/Change",
+      "/TN",
+      this.taskName,
+      enabled ? "/ENABLE" : "/DISABLE"
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to ${enabled ? "enable" : "disable"} scheduled task ${this.taskName}: ${result.stderr || result.stdout || `exit code ${result.exitCode}`}`
+      );
+    }
+  }
+  async waitUntilStopped(timeoutMs) {
+    const interval = this.options.pollIntervalMs ?? 250;
+    for (let elapsed = 0; ; elapsed += interval) {
+      const status = await this.query();
+      if (!status.running) return true;
+      if (elapsed >= timeoutMs) return false;
+      await this.wait(interval);
+    }
+  }
+  /**
+   * Stops the task: writes the stop request the supervisor watches (it asks the
+   * daemon to drain over IPC, then the supervisor and host exit cleanly), and
+   * ends the task if it is still running after the grace period. Ending it
+   * closes the host's job, which kills the whole tree.
+   */
+  async stop() {
+    const initial = await this.query();
+    this.assertOwned(initial);
+    if (!initial.installed || !initial.running) {
+      await this.clearStopRequest();
+      return { graceful: true, wasRunning: false };
+    }
+    const requestPath = serviceStopRequestPath(this.resinHome);
+    let requested = false;
+    try {
+      await this.fsBridge.mkdirp(path32.dirname(requestPath));
+      await this.fsBridge.writeFile(requestPath, `${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+      requested = true;
+    } catch {
+    }
+    if (requested && await this.waitUntilStopped(this.options.stopTimeoutMs ?? 2e4)) {
+      await this.clearStopRequest();
+      return { graceful: true, wasRunning: true };
+    }
+    const end = await this.schtasks(["/End", "/TN", this.taskName]);
+    if (end.exitCode !== 0) {
+      throw new Error(
+        `Failed to end scheduled task ${this.taskName}: ${end.stderr || end.stdout || `exit code ${end.exitCode}`}`
+      );
+    }
+    if (!await this.waitUntilStopped(5e3)) {
+      throw new Error(`Scheduled task ${this.taskName} is still running after /End`);
+    }
+    await this.clearStopRequest();
+    return { graceful: false, wasRunning: true };
+  }
+  /** A stale request would stop the next supervisor as soon as it starts. */
+  async clearStopRequest() {
+    await this.fsBridge.unlink(serviceStopRequestPath(this.resinHome)).catch(() => void 0);
+  }
+  /** Deletes the task (and its folder when empty). Returns false when it did not exist. */
+  async delete() {
+    const status = await this.query();
+    if (!status.installed) return false;
+    this.assertOwned(status);
+    const result = await this.schtasks(["/Delete", "/TN", this.taskName, "/F"]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to delete scheduled task ${this.taskName}: ${result.stderr || result.stdout || `exit code ${result.exitCode}`}`
+      );
+    }
+    await this.powershell(windowsTaskFolderCleanupScript(this.taskName)).catch(() => void 0);
+    return true;
+  }
+  /** Removes the persisted XML and host copy; returns paths that could not be removed. */
+  async removeFiles() {
+    const failures = [];
+    try {
+      await this.fsBridge.unlink(this.xmlPath);
+    } catch {
+      failures.push(this.xmlPath);
+    }
+    let remaining = [];
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      remaining = await (this.options.hostFiles ?? nodeWindowsServiceHostFiles).removeHost(
+        this.hostPath
+      );
+      if (remaining.length === 0) break;
+      await this.wait(500);
+    }
+    return [...failures, ...remaining];
+  }
+};
+
+// packages/crypto/dist/vault.js
+init_dist2();
+
 // apps/cli/src/service/recovery-state.ts
 init_zod();
 var RECOVERY_STATE_VERSION = 1;
@@ -10003,15 +11216,16 @@ var PersistedRecoveryStateSchema = external_exports.object({
 var MAX_PERSISTED_CRASH_TIMESTAMPS = MAX_CRASHES_IN_WINDOW + 1;
 
 // apps/cli/src/service/manager.ts
-var execFileAsync5 = promisify5(execFile5);
+var execFileAsync3 = promisify3(execFile3);
 var SERVICE_SUPERVISOR_COMMAND = "__service-supervisor";
-var SERVICE_SUPERVISOR_ENTRY_PATH = fileURLToPath(new URL("../index.js", import.meta.url));
+var SERVICE_SUPERVISOR_ENTRY_PATH = fileURLToPath2(new URL("../index.js", import.meta.url));
 var defaultServiceCommandRunner = {
   async run(cmd, args) {
     try {
-      const { stdout, stderr } = await execFileAsync5(cmd, args, {
+      const { stdout, stderr } = await execFileAsync3(cmd, args, {
         encoding: "utf8",
-        timeout: 1e4
+        timeout: 1e4,
+        windowsHide: true
       });
       return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode: 0 };
     } catch (err) {
@@ -10042,25 +11256,37 @@ function resolveSupervisorEntryPath(resinHome, explicitPath) {
   if (explicitPath && explicitPath.trim().length > 0) {
     return explicitPath;
   }
-  const currentEntry = path28.join(resinHome, "current", "apps", "cli", "dist", "index.js");
-  const currentLink = path28.join(resinHome, "current");
-  const versionsDir = path28.join(resinHome, "versions");
-  const normalizedDefault = path28.resolve(SERVICE_SUPERVISOR_ENTRY_PATH);
-  const normalizedVersions = path28.resolve(versionsDir);
-  if (normalizedDefault.startsWith(normalizedVersions + path28.sep) || normalizedDefault.includes(`${path28.sep}versions${path28.sep}`)) {
+  const currentEntry = path33.join(resinHome, "current", "apps", "cli", "dist", "index.js");
+  const currentLink = path33.join(resinHome, "current");
+  const versionsDir = path33.join(resinHome, "versions");
+  const normalizedDefault = path33.resolve(SERVICE_SUPERVISOR_ENTRY_PATH);
+  const normalizedVersions = path33.resolve(versionsDir);
+  if (normalizedDefault.startsWith(normalizedVersions + path33.sep) || normalizedDefault.includes(`${path33.sep}versions${path33.sep}`)) {
     return currentEntry;
   }
   try {
-    if (fsSync.existsSync(currentEntry) || fsSync.existsSync(currentLink) || fsSync.existsSync(versionsDir)) {
+    if (fsSync2.existsSync(currentEntry) || fsSync2.existsSync(currentLink) || fsSync2.existsSync(versionsDir)) {
       return currentEntry;
     }
   } catch {
   }
   return SERVICE_SUPERVISOR_ENTRY_PATH;
 }
-function createSupervisorProgramArguments(daemonPath, resinHome, nodePath, supervisorEntryPath) {
+function daemonChildCommand(daemonPath, nodePath, windows) {
+  if (!windows) {
+    return daemonPath.endsWith(".js") ? [nodePath, daemonPath, "--foreground"] : [daemonPath, "--foreground"];
+  }
+  const extension = path33.win32.extname(daemonPath).toLowerCase();
+  if (extension === ".cmd" || extension === ".bat") {
+    throw new Error(
+      `The Windows service cannot run the daemon through a batch launcher (${daemonPath}); use the .mjs launcher.`
+    );
+  }
+  return extension === ".exe" ? [daemonPath, "--foreground"] : [nodePath, daemonPath, "--foreground"];
+}
+function createSupervisorProgramArguments(daemonPath, resinHome, nodePath, supervisorEntryPath, windows = false) {
   const resolvedSupervisorEntry = resolveSupervisorEntryPath(resinHome, supervisorEntryPath);
-  const childCommand = daemonPath.endsWith(".js") ? [nodePath, daemonPath, "--foreground"] : [daemonPath, "--foreground"];
+  const childCommand = daemonChildCommand(daemonPath, nodePath, windows);
   return [
     nodePath,
     resolvedSupervisorEntry,
@@ -10088,9 +11314,9 @@ function formatShellEnvironment(name, value) {
   return `export ${name}=${quoteShellArgument(value)}`;
 }
 function serviceSearchPath(nodePath) {
-  const inheritedPath = process3.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  return Array.from(/* @__PURE__ */ new Set([path28.dirname(nodePath), ...inheritedPath.split(path28.delimiter)])).join(
-    path28.delimiter
+  const inheritedPath = process4.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  return Array.from(/* @__PURE__ */ new Set([path33.dirname(nodePath), ...inheritedPath.split(path33.delimiter)])).join(
+    path33.delimiter
   );
 }
 var SystemdUserServiceManager = class {
@@ -10106,24 +11332,24 @@ var SystemdUserServiceManager = class {
   runner;
   defaultEnv;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os8.homedir();
-    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
-    this.nodePath = options.nodePath ?? process3.execPath;
+    this.homeDir = options.homeDir ?? os6.homedir();
+    this.resinHome = options.resinHome ?? path33.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path33.join(this.resinHome, "bin", "resin-daemon");
+    this.nodePath = options.nodePath ?? process4.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
   }
   ensureLoginHomeForCommands() {
-    if (this.runner === defaultServiceCommandRunner && path28.resolve(this.homeDir) !== path28.resolve(os8.homedir())) {
+    if (this.runner === defaultServiceCommandRunner && path33.resolve(this.homeDir) !== path33.resolve(os6.homedir())) {
       throw new Error(
         `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`
       );
     }
   }
   getUnitPath() {
-    return path28.join(this.homeDir, ".config", "systemd", "user", this.serviceName);
+    return path33.join(this.homeDir, ".config", "systemd", "user", this.serviceName);
   }
   getUnitDefinition(options = {}) {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
@@ -10176,7 +11402,7 @@ WantedBy=default.target
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
-      await this.fsBridge.mkdirp(path28.dirname(unitPath));
+      await this.fsBridge.mkdirp(path33.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
       await this.runner.run("systemctl", ["--user", "daemon-reload"]);
       const enableResult = await this.runner.run("systemctl", [
@@ -10358,29 +11584,29 @@ var LaunchdUserServiceManager = class {
   runner;
   defaultEnv;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os8.homedir();
-    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
-    this.nodePath = options.nodePath ?? process3.execPath;
+    this.homeDir = options.homeDir ?? os6.homedir();
+    this.resinHome = options.resinHome ?? path33.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path33.join(this.resinHome, "bin", "resin-daemon");
+    this.nodePath = options.nodePath ?? process4.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
     this.defaultEnv = options.env ?? {};
   }
   ensureLoginHomeForCommands() {
-    if (this.runner === defaultServiceCommandRunner && path28.resolve(this.homeDir) !== path28.resolve(os8.homedir())) {
+    if (this.runner === defaultServiceCommandRunner && path33.resolve(this.homeDir) !== path33.resolve(os6.homedir())) {
       throw new Error(
         `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner.`
       );
     }
   }
   getUnitPath() {
-    return path28.join(this.homeDir, "Library", "LaunchAgents", `${this.serviceName}.plist`);
+    return path33.join(this.homeDir, "Library", "LaunchAgents", `${this.serviceName}.plist`);
   }
   getUnitDefinition(options = {}) {
     const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
     const resinHome = options.resinHome ?? this.resinHome;
-    const logDir = path28.join(resinHome, "logs");
+    const logDir = path33.join(resinHome, "logs");
     const nodePath = options.nodePath ?? this.nodePath;
     const envVars = {
       PATH: serviceSearchPath(nodePath),
@@ -10423,9 +11649,9 @@ ${argsXml}
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>${this.escapeXml(path28.join(logDir, "daemon.stdout.log"))}</string>
+    <string>${this.escapeXml(path33.join(logDir, "daemon.stdout.log"))}</string>
     <key>StandardErrorPath</key>
-    <string>${this.escapeXml(path28.join(logDir, "daemon.stderr.log"))}</string>
+    <string>${this.escapeXml(path33.join(logDir, "daemon.stderr.log"))}</string>
     <key>EnvironmentVariables</key>
     <dict>
 ${envXml}
@@ -10446,7 +11672,7 @@ ${envXml}
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
-      await this.fsBridge.mkdirp(path28.dirname(unitPath));
+      await this.fsBridge.mkdirp(path33.dirname(unitPath));
       await this.fsBridge.writeFile(unitPath, unitContent);
       let started = false;
       if (autoStart) {
@@ -10597,10 +11823,10 @@ var WslUserServiceManager = class {
   defaultEnv;
   systemdAvailableCache;
   constructor(options = {}) {
-    this.homeDir = options.homeDir ?? os8.homedir();
-    this.resinHome = options.resinHome ?? path28.join(this.homeDir, ".resin");
-    this.defaultDaemonPath = options.daemonPath ?? path28.join(this.resinHome, "bin", "resin-daemon");
-    this.nodePath = options.nodePath ?? process3.execPath;
+    this.homeDir = options.homeDir ?? os6.homedir();
+    this.resinHome = options.resinHome ?? path33.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path33.join(this.resinHome, "bin", "resin-daemon");
+    this.nodePath = options.nodePath ?? process4.execPath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -10621,13 +11847,13 @@ var WslUserServiceManager = class {
     }
   }
   getUnitPath() {
-    return this.systemdAvailableCache === true ? this.systemdDelegate.getUnitPath() : path28.join(this.resinHome, "services", "wsl-service.json");
+    return this.systemdAvailableCache === true ? this.systemdDelegate.getUnitPath() : path33.join(this.resinHome, "services", "wsl-service.json");
   }
   getFallbackScriptPath() {
-    return path28.join(this.resinHome, "bin", "resin-service.sh");
+    return path33.join(this.resinHome, "bin", "resin-service.sh");
   }
   getPidPath() {
-    return path28.join(this.resinHome, "run", "daemon.pid");
+    return path33.join(this.resinHome, "run", "daemon.pid");
   }
   getUnitDefinition(options = {}) {
     if (this.systemdAvailableCache === true) {
@@ -10637,8 +11863,8 @@ var WslUserServiceManager = class {
     const resinHome = options.resinHome ?? this.resinHome;
     const nodePath = options.nodePath ?? this.nodePath;
     const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
-    const logDir = path28.join(resinHome, "logs");
-    const runDir = path28.join(resinHome, "run");
+    const logDir = path33.join(resinHome, "logs");
+    const runDir = path33.join(resinHome, "run");
     const envLines = Object.entries({
       ...this.defaultEnv,
       ...options.env ?? {}
@@ -10655,8 +11881,8 @@ export RESIN_HOME=${quoteShellArgument(resinHome)}
 export NODE_ENV=production
 ${envLines.join("\n")}
 mkdir -p ${quoteShellArgument(logDir)} ${quoteShellArgument(runDir)}
-nohup ${execCmd} >> ${quoteShellArgument(path28.join(logDir, "daemon.stdout.log"))} 2>> ${quoteShellArgument(path28.join(logDir, "daemon.stderr.log"))} &
-echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
+nohup ${execCmd} >> ${quoteShellArgument(path33.join(logDir, "daemon.stdout.log"))} 2>> ${quoteShellArgument(path33.join(logDir, "daemon.stderr.log"))} &
+echo $! > ${quoteShellArgument(path33.join(runDir, "daemon.pid"))}
 `;
   }
   async isInstalled() {
@@ -10675,8 +11901,8 @@ echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
     const scriptContent = this.getUnitDefinition(options);
     const unitPath = this.getUnitPath();
     try {
-      await this.fsBridge.mkdirp(path28.dirname(scriptPath));
-      await this.fsBridge.mkdirp(path28.dirname(unitPath));
+      await this.fsBridge.mkdirp(path33.dirname(scriptPath));
+      await this.fsBridge.mkdirp(path33.dirname(unitPath));
       await this.fsBridge.writeFile(scriptPath, scriptContent);
       await this.fsBridge.writeFile(
         unitPath,
@@ -10780,7 +12006,7 @@ echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
     const pid = Number.parseInt(content.trim(), 10);
     if (!Number.isNaN(pid) && pid > 0) {
       try {
-        process3.kill(pid, "SIGTERM");
+        process4.kill(pid, "SIGTERM");
       } catch {
       }
     }
@@ -10838,7 +12064,7 @@ echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
       pid = Number.parseInt(content.trim(), 10);
       if (!Number.isNaN(pid) && pid > 0) {
         try {
-          process3.kill(pid, 0);
+          process4.kill(pid, 0);
           active = true;
         } catch {
           active = false;
@@ -10855,6 +12081,230 @@ echo $! > ${quoteShellArgument(path28.join(runDir, "daemon.pid"))}
       state: active ? "active" : "inactive",
       rawStatus: active ? `Process running with PID ${pid}` : "Process not running"
     };
+  }
+};
+var WindowsTaskUserServiceManager = class {
+  name = "windows-task";
+  platform = "windows-task";
+  homeDir;
+  resinHome;
+  defaultDaemonPath;
+  nodePath;
+  supervisorEntryPath;
+  fsBridge;
+  runner;
+  defaultEnv;
+  backend;
+  constructor(options = {}) {
+    this.homeDir = options.homeDir ?? os6.homedir();
+    this.resinHome = options.resinHome ?? path33.join(this.homeDir, ".resin");
+    this.defaultDaemonPath = options.daemonPath ?? path33.join(this.resinHome, "bin", "resin-daemon.mjs");
+    this.nodePath = options.nodePath ?? process4.execPath;
+    this.supervisorEntryPath = options.supervisorEntryPath;
+    this.fsBridge = options.fsBridge ?? defaultFsBridge;
+    this.runner = options.runner ?? defaultServiceCommandRunner;
+    this.defaultEnv = options.env ?? {};
+    this.backend = new WindowsTaskBackend(
+      {
+        homeDir: this.homeDir,
+        resinHome: this.resinHome,
+        runner: this.runner,
+        fsBridge: this.fsBridge
+      },
+      options.windowsTask
+    );
+  }
+  get serviceName() {
+    return this.backend.taskName;
+  }
+  /**
+   * A custom home needs an injected runner or an explicitly named task, so tests
+   * never register or remove the default task by accident. Every task operation
+   * also refuses a task whose action belongs to another Resin home.
+   */
+  ensureLoginHomeForCommands() {
+    if (this.runner === defaultServiceCommandRunner && !this.backend.explicitTaskName && path33.resolve(this.homeDir) !== path33.resolve(os6.homedir())) {
+      throw new Error(
+        `Cannot issue login-session supervisor commands for custom home directory (${this.homeDir}) without an injected runner or an explicit ${WINDOWS_TASK_NAME_ENV}.`
+      );
+    }
+  }
+  getUnitPath() {
+    return this.backend.xmlPath;
+  }
+  getUnitDefinition(options = {}) {
+    const daemonPath = options.daemonPath ?? this.defaultDaemonPath;
+    const resinHome = options.resinHome ?? this.resinHome;
+    const nodePath = options.nodePath ?? this.nodePath;
+    const supervisorEntryPath = options.supervisorEntryPath ?? this.supervisorEntryPath;
+    return buildWindowsTaskXml({
+      userSid: this.backend.userSid(),
+      hostPath: this.backend.hostPath,
+      workingDirectory: resinHome,
+      hostArguments: buildServiceHostArguments({
+        resinHome,
+        nodePath,
+        env: { ...this.defaultEnv, ...options.env ?? {} },
+        supervisorArguments: createSupervisorProgramArguments(
+          daemonPath,
+          resinHome,
+          nodePath,
+          supervisorEntryPath,
+          true
+        )
+      })
+    });
+  }
+  async isInstalled() {
+    if (!await this.fsBridge.exists(this.getUnitPath())) {
+      return false;
+    }
+    this.ensureLoginHomeForCommands();
+    return (await this.backend.query()).installed;
+  }
+  notInstalledStatus() {
+    return {
+      installed: false,
+      active: false,
+      enabled: false,
+      serviceName: this.serviceName,
+      unitPath: this.getUnitPath(),
+      state: "not_installed"
+    };
+  }
+  async install(options = {}) {
+    const unitPath = this.getUnitPath();
+    let unitContent = "";
+    try {
+      this.ensureLoginHomeForCommands();
+      unitContent = this.getUnitDefinition(options);
+      await this.backend.writeDefinition(unitContent);
+      await this.backend.register();
+      let started = false;
+      if (options.autoStart ?? true) {
+        await this.backend.run();
+        started = true;
+      }
+      return {
+        success: true,
+        unitPath,
+        unitContent,
+        serviceName: this.serviceName,
+        enabled: true,
+        started
+      };
+    } catch (err) {
+      return {
+        success: false,
+        unitPath,
+        unitContent,
+        serviceName: this.serviceName,
+        enabled: false,
+        started: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  async uninstall() {
+    const unitPath = this.getUnitPath();
+    let stopped = false;
+    let disabled = false;
+    let removed = false;
+    const errors = [];
+    try {
+      this.ensureLoginHomeForCommands();
+    } catch (err) {
+      return {
+        success: false,
+        unitPath,
+        stopped,
+        disabled,
+        removed,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+    try {
+      await this.backend.stop();
+      stopped = true;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await this.backend.delete();
+      disabled = true;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+    if (disabled) {
+      const leftovers = await this.backend.removeFiles();
+      removed = leftovers.length === 0;
+      if (leftovers.length > 0) {
+        errors.push(`Could not remove (file in use?): ${leftovers.join(", ")}`);
+      }
+      await this.backend.clearStopRequest();
+    }
+    const result = {
+      success: errors.length === 0,
+      unitPath,
+      stopped,
+      disabled,
+      removed
+    };
+    if (errors.length > 0) {
+      result.error = errors.join("; ");
+    }
+    return result;
+  }
+  async start() {
+    this.ensureLoginHomeForCommands();
+    await this.backend.run();
+  }
+  async stop() {
+    this.ensureLoginHomeForCommands();
+    await this.backend.stop();
+  }
+  async restart() {
+    this.ensureLoginHomeForCommands();
+    await this.backend.stop();
+    await this.backend.run();
+  }
+  /** Re-registers the task from the XML on disk (used after a rollback restores it). */
+  async reload() {
+    this.ensureLoginHomeForCommands();
+    if (await this.fsBridge.exists(this.getUnitPath())) {
+      await this.backend.register();
+    }
+  }
+  async enable() {
+    this.ensureLoginHomeForCommands();
+    await this.backend.setEnabled(true);
+  }
+  async disable() {
+    this.ensureLoginHomeForCommands();
+    await this.backend.setEnabled(false);
+  }
+  async status() {
+    if (!await this.fsBridge.exists(this.getUnitPath())) {
+      return this.notInstalledStatus();
+    }
+    this.ensureLoginHomeForCommands();
+    const task = await this.backend.query();
+    if (!task.installed) {
+      return this.notInstalledStatus();
+    }
+    const info = {
+      installed: true,
+      active: task.running,
+      enabled: task.enabled,
+      serviceName: this.serviceName,
+      unitPath: this.getUnitPath(),
+      state: task.state,
+      rawStatus: JSON.stringify(task)
+    };
+    if (task.pid !== void 0) {
+      info.pid = task.pid;
+    }
+    return info;
   }
 };
 var ExternalUserServiceManager = class {
@@ -10911,10 +12361,13 @@ var ExternalUserServiceManager = class {
   }
 };
 function createUserServiceManager(options = {}) {
-  if (process3.env.RESIN_NO_SERVICE === "1" || options.env?.RESIN_NO_SERVICE === "1") {
+  if (process4.env.RESIN_NO_SERVICE === "1" || options.env?.RESIN_NO_SERVICE === "1") {
     return new ExternalUserServiceManager();
   }
   if (options.platform) {
+    if (options.platform === "windows" || options.platform === "windows-task") {
+      return new WindowsTaskUserServiceManager(options);
+    }
     if (options.platform === "wsl") {
       return new WslUserServiceManager(options);
     }
@@ -10924,9 +12377,12 @@ function createUserServiceManager(options = {}) {
     return new SystemdUserServiceManager(options);
   }
   const detected = detectPlatform2({
-    platform: process3.platform,
-    env: process3.env
+    platform: process4.platform,
+    env: process4.env
   });
+  if (detected.os === "windows") {
+    return new WindowsTaskUserServiceManager(options);
+  }
   if (detected.isWsl) {
     return new WslUserServiceManager(options);
   }
@@ -10939,13 +12395,19 @@ function createUserServiceManager(options = {}) {
 // apps/cli/src/service/verification.ts
 init_zod();
 init_dist();
-import os10 from "node:os";
-import path30 from "node:path";
-import process4 from "node:process";
+import os8 from "node:os";
+import path35 from "node:path";
+import process5 from "node:process";
 
 // apps/observer/dist/paths.js
-import os9 from "node:os";
-import path29 from "node:path";
+init_dist2();
+import os7 from "node:os";
+import path34 from "node:path";
+
+// apps/observer/dist/private-fs.js
+init_dist2();
+
+// apps/observer/dist/paths.js
 function normalizeCandidate(value) {
   if (typeof value !== "string") {
     return void 0;
@@ -10956,25 +12418,27 @@ function normalizeCandidate(value) {
 function resolvePaths(options = {}) {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
-  const userHome = normalizeCandidate(options.home) ?? normalizeCandidate(env.HOME) ?? normalizeCandidate(env.USERPROFILE) ?? os9.homedir();
+  const userHome = normalizeCandidate(options.home) ?? normalizeCandidate(env.HOME) ?? normalizeCandidate(env.USERPROFILE) ?? os7.homedir();
   const explicitHome = normalizeCandidate(options.resinHome) ?? normalizeCandidate(env.RESIN_HOME);
-  const baseHomeDir = path29.resolve(explicitHome ?? path29.join(userHome, ".resin"));
-  const baseConfigDir = path29.join(baseHomeDir, "config");
-  const baseDataDir = path29.join(baseHomeDir, "data");
-  const baseStateDir = path29.join(baseHomeDir, "state");
-  const baseLogDir = path29.join(baseHomeDir, "logs");
-  const defaultSocketPath = platform === "win32" ? "\\\\.\\pipe\\resin-daemon" : path29.join(baseStateDir, "daemon.sock");
-  const configDir = path29.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
-  const dataDir = path29.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
-  const stateDir = path29.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
-  const logDir = path29.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
-  let socketPath = options.socketPath ?? env.RESIN_SOCKET_PATH ?? defaultSocketPath;
-  if (platform !== "win32" || !socketPath.startsWith("\\\\.\\pipe\\")) {
-    socketPath = path29.resolve(socketPath);
+  const baseHomeDir = path34.resolve(explicitHome ?? path34.join(userHome, ".resin"));
+  const baseConfigDir = path34.join(baseHomeDir, "config");
+  const baseDataDir = path34.join(baseHomeDir, "data");
+  const baseStateDir = path34.join(baseHomeDir, "state");
+  const baseLogDir = path34.join(baseHomeDir, "logs");
+  const override = options.socketPath ?? env.RESIN_SOCKET_PATH;
+  let socketPath;
+  if (platform === "win32") {
+    socketPath = override !== void 0 ? canonicalLocalPipeName(override) ?? path34.resolve(override) : windowsDaemonPipeName(baseHomeDir, windowsUserSidFor(options.windowsUserSid));
+  } else {
+    socketPath = path34.resolve(override ?? path34.join(baseStateDir, "daemon.sock"));
   }
-  const lockFilePath = path29.resolve(options.lockFilePath ?? env.RESIN_LOCK_FILE ?? path29.join(stateDir, "daemon.lock"));
-  const pidFilePath = path29.resolve(options.pidFilePath ?? env.RESIN_PID_FILE ?? path29.join(stateDir, "daemon.pid"));
-  const configFile = path29.resolve(options.configFile ?? env.RESIN_CONFIG_FILE ?? path29.join(configDir, "config.json"));
+  const configDir = path34.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
+  const dataDir = path34.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
+  const stateDir = path34.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
+  const logDir = path34.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
+  const lockFilePath = path34.resolve(options.lockFilePath ?? env.RESIN_LOCK_FILE ?? path34.join(stateDir, "daemon.lock"));
+  const pidFilePath = path34.resolve(options.pidFilePath ?? env.RESIN_PID_FILE ?? path34.join(stateDir, "daemon.pid"));
+  const configFile = path34.resolve(options.configFile ?? env.RESIN_CONFIG_FILE ?? path34.join(configDir, "config.json"));
   return {
     homeDir: baseHomeDir,
     configDir,
@@ -10986,6 +12450,14 @@ function resolvePaths(options = {}) {
     pidFilePath,
     configFile
   };
+}
+function windowsUserSidFor(explicit) {
+  if (explicit !== void 0)
+    return explicit;
+  if (process.platform !== "win32") {
+    throw new Error("Resolving the Windows daemon pipe name needs the user's SID; pass windowsUserSid when simulating win32.");
+  }
+  return currentUserSid();
 }
 
 // apps/observer/dist/config.js
@@ -13369,7 +14841,6 @@ var StoredCloudCredentialsSchema = external_exports.object({
 
 // apps/observer/dist/ipc/client.js
 import crypto2 from "node:crypto";
-import net from "node:net";
 
 // apps/observer/dist/ipc/framing.js
 var MAX_FRAME_SIZE = 16 * 1024 * 1024;
@@ -13424,6 +14895,10 @@ var FrameDecoder = class {
   }
 };
 
+// apps/observer/dist/ipc/pipe-trust.js
+init_dist2();
+import net from "node:net";
+
 // apps/observer/dist/ipc/protocol.js
 var IPC_ERROR_CODES = {
   UNAUTHORIZED: "UNAUTHORIZED",
@@ -13432,8 +14907,44 @@ var IPC_ERROR_CODES = {
   INTERNAL_ERROR: "INTERNAL_ERROR",
   SHUTDOWN_IN_PROGRESS: "SHUTDOWN_IN_PROGRESS",
   TIMEOUT: "TIMEOUT",
-  CONNECTION_CLOSED: "CONNECTION_CLOSED"
+  CONNECTION_CLOSED: "CONNECTION_CLOSED",
+  /** Windows: the daemon pipe is not owned and served by the current user. */
+  UNTRUSTED_SERVER: "UNTRUSTED_SERVER"
 };
+
+// apps/observer/dist/ipc/pipe-trust.js
+function undialableDaemonTarget(socketPath) {
+  if (process.platform !== "win32" || isLocalPipeName(socketPath))
+    return void 0;
+  return Object.assign(new Error(`Refusing to dial '${socketPath}': on Windows the Resin daemon is only reachable through a local named pipe (\\\\.\\pipe\\...).`), { code: IPC_ERROR_CODES.UNTRUSTED_SERVER });
+}
+function connectNet(socketPath) {
+  const { promise, resolve: resolve6, reject } = Promise.withResolvers();
+  const socket = net.createConnection(socketPath);
+  const onError = (error) => reject(error);
+  socket.once("error", onError);
+  socket.once("connect", () => {
+    socket.off("error", onError);
+    resolve6(socket);
+  });
+  return promise;
+}
+async function openDaemonConnection(socketPath, options = {}) {
+  if (process.platform !== "win32")
+    return connectNet(socketPath);
+  const undialable = undialableDaemonTarget(socketPath);
+  if (undialable)
+    throw undialable;
+  try {
+    return await connectVerifiedPipe(socketPath, { timeoutMs: options.timeoutMs });
+  } catch (error) {
+    const reason = error instanceof Error && "reason" in error ? error.reason : void 0;
+    if (reason === "access-denied" || reason === "foreign-owner" || reason === "foreign-server") {
+      throw Object.assign(new Error(`Refusing to talk to daemon pipe ${socketPath}: it is not served by the current user (${reason}). Another process may be squatting the name.`), { code: IPC_ERROR_CODES.UNTRUSTED_SERVER, reason, cause: error });
+    }
+    throw error;
+  }
+}
 
 // apps/observer/dist/ipc/client.js
 var IpcClient = class {
@@ -13466,17 +14977,17 @@ var IpcClient = class {
     if (!targetSocket) {
       throw new Error("No socketPath or transport provided to IpcClient");
     }
-    await new Promise((resolve6, reject) => {
-      const socket = net.createConnection(targetSocket, () => {
-        this.socket = socket;
-        this.isConnected = true;
-        this.setupSocketListeners(socket);
-        resolve6();
-      });
-      socket.once("error", (err) => {
-        reject(new Error(`Failed to connect to daemon socket at ${this.socketPath}: ${err.message}`));
-      });
-    });
+    let socket;
+    try {
+      socket = await openDaemonConnection(targetSocket);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof Error && "code" in err ? err.code : void 0;
+      throw Object.assign(new Error(`Failed to connect to daemon socket at ${this.socketPath}: ${message}`), code === void 0 ? {} : { code }, { cause: err });
+    }
+    this.socket = socket;
+    this.isConnected = true;
+    this.setupSocketListeners(socket);
   }
   setupSocketListeners(socket) {
     socket.on("data", (data) => {
@@ -13674,7 +15185,7 @@ var STARTUP_CRASH_LOOP_THRESHOLD = 2;
 var STARTUP_PROBE_INTERVAL_MS = 1e3;
 function defaultIsProcessAlive(pid) {
   try {
-    process4.kill(pid, 0);
+    process5.kill(pid, 0);
     return true;
   } catch (error) {
     return error.code === "EPERM";
@@ -13683,7 +15194,7 @@ function defaultIsProcessAlive(pid) {
 function createDaemonStartupProbe(options) {
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
-  const crashLogPath = path30.join(options.resinHome, "logs", "crash-recovery.log");
+  const crashLogPath = path35.join(options.resinHome, "logs", "crash-recovery.log");
   return async () => {
     const status = await options.serviceStatus();
     if (!status.active) {
@@ -13725,8 +15236,8 @@ function createDaemonStartupProbe(options) {
   };
 }
 var verifyDaemonReadiness = async (options) => {
-  const homeDir = options.homeDir ?? os10.homedir();
-  const resinHome = options.resinHome ?? path30.join(homeDir, ".resin");
+  const homeDir = options.homeDir ?? os8.homedir();
+  const resinHome = options.resinHome ?? path35.join(homeDir, ".resin");
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const daemonPaths = resolvePaths({ home: homeDir, resinHome });
   const socketPath = daemonPaths.socketPath;
@@ -13861,14 +15372,311 @@ var verifyDaemonReadiness = async (options) => {
 
 // apps/cli/src/installer/asset-downloader.ts
 init_dist();
-import crypto3 from "node:crypto";
-import fs9 from "node:fs";
+import crypto4 from "node:crypto";
+import fs14 from "node:fs";
 import fsPromises from "node:fs/promises";
-import path31 from "node:path";
-import process5 from "node:process";
+import path37 from "node:path";
+import process7 from "node:process";
+import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
+
+// apps/cli/src/installer/windows-install.ts
+import child_process from "node:child_process";
+import crypto3 from "node:crypto";
+import fs13 from "node:fs";
+import path36 from "node:path";
+import process6 from "node:process";
+var WINDOWS_LAUNCHER_NAMES = Object.freeze(["resin", "resin-daemon", "resin-gateway"]);
+var LAUNCHER_NAME_PATTERN = /^resin(?:-[a-z0-9]+)*$/;
+var RELEASE_DIRECTORY_PATTERN = /^v[0-9A-Za-z.+-]+$/;
+var WINDOWS_LAUNCHER_FILE_PATTERN = /^resin(?:-[a-z0-9]+)*\.(?:cmd|mjs)$/;
+function assertLauncherName(name) {
+  if (!LAUNCHER_NAME_PATTERN.test(name)) {
+    throw new Error(`Refusing to publish a Windows launcher for unexpected entry '${name}'.`);
+  }
+}
+function releaseDirectoryName(version) {
+  const directory = version.startsWith("v") ? version : `v${version}`;
+  if (!RELEASE_DIRECTORY_PATTERN.test(directory) || directory.includes("..")) {
+    throw new Error(`Refusing to publish Windows launchers for invalid release '${version}'.`);
+  }
+  return directory;
+}
+function windowsGlobalCmdLauncher(version, name) {
+  assertLauncherName(name);
+  const release = releaseDirectoryName(version);
+  return `@node "%~dp0..\\versions\\${release}\\bin\\${name}" %* & call exit /b %%errorlevel%%\r
+`;
+}
+function windowsGlobalModuleLauncher(version, name) {
+  assertLauncherName(name);
+  return `import "../versions/${releaseDirectoryName(version)}/bin/${name}";
+`;
+}
+function windowsLauncherFileNames(names = WINDOWS_LAUNCHER_NAMES) {
+  return names.flatMap((name) => [`${name}.cmd`, `${name}.mjs`]);
+}
+function windowsLauncherPaths(resinHome) {
+  const binDir = path36.join(resinHome, "bin");
+  return windowsLauncherFileNames().map((fileName) => path36.join(binDir, fileName));
+}
+function windowsLauncherNamesForRelease(releaseDir) {
+  const names = /* @__PURE__ */ new Set(["resin", "resin-daemon"]);
+  const binDir = path36.join(releaseDir, "bin");
+  if (fs13.existsSync(binDir)) {
+    for (const entry of fs13.readdirSync(binDir, { withFileTypes: true })) {
+      if (!entry.isFile() || entry.name.includes(".") || entry.name === "resin-mcp") continue;
+      if (LAUNCHER_NAME_PATTERN.test(entry.name) && !/-(?:linux|darwin|win32)-/.test(entry.name)) {
+        names.add(entry.name);
+      }
+    }
+  }
+  return [...names].filter((name) => fs13.existsSync(path36.join(binDir, name)));
+}
+function tempSibling(target, label) {
+  return path36.join(
+    path36.dirname(target),
+    `.${path36.basename(target)}.${label}-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+  );
+}
+function writeFileAtomic(target, content) {
+  const temp = tempSibling(target, "tmp");
+  try {
+    fs13.writeFileSync(temp, content, { flag: "wx" });
+    fs13.renameSync(temp, target);
+  } catch (error) {
+    fs13.rmSync(temp, { force: true });
+    throw error;
+  }
+}
+function readFileIfExists(filePath) {
+  try {
+    return fs13.lstatSync(filePath).isFile() ? fs13.readFileSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function publishWindowsLaunchers(options) {
+  const binDir = path36.join(options.resinHome, "bin");
+  const stats = fs13.lstatSync(binDir, { throwIfNoEntry: false });
+  if (stats && (stats.isSymbolicLink() || !stats.isDirectory())) {
+    throw new Error(`Security violation: Resin bin path must be a real directory: '${binDir}'.`);
+  }
+  const createdBinDir = !stats;
+  if (createdBinDir) fs13.mkdirSync(binDir, { recursive: true });
+  const desired = /* @__PURE__ */ new Map();
+  for (const name of options.names) {
+    desired.set(`${name}.cmd`, windowsGlobalCmdLauncher(options.version, name));
+    desired.set(`${name}.mjs`, windowsGlobalModuleLauncher(options.version, name));
+  }
+  const stale = fs13.readdirSync(binDir).filter((fileName) => WINDOWS_LAUNCHER_FILE_PATTERN.test(fileName) && !desired.has(fileName));
+  const prior = /* @__PURE__ */ new Map();
+  const published = [];
+  const rollback = () => {
+    for (const [fileName, content] of prior) {
+      const target = path36.join(binDir, fileName);
+      try {
+        if (content === null) fs13.rmSync(target, { force: true });
+        else writeFileAtomic(target, content);
+      } catch {
+      }
+    }
+    if (createdBinDir) {
+      try {
+        fs13.rmdirSync(binDir);
+      } catch {
+      }
+    }
+  };
+  try {
+    for (const [fileName, content] of desired) {
+      const target = path36.join(binDir, fileName);
+      prior.set(fileName, readFileIfExists(target));
+      writeFileAtomic(target, content);
+      published.push(target);
+    }
+    for (const fileName of stale) {
+      const target = path36.join(binDir, fileName);
+      prior.set(fileName, readFileIfExists(target));
+      fs13.rmSync(target, { force: true });
+    }
+  } catch (error) {
+    rollback();
+    throw error;
+  }
+  return { published, rollback };
+}
+function snapshotWindowsPointer(pointerPath) {
+  const stats = fs13.lstatSync(pointerPath, { throwIfNoEntry: false });
+  if (!stats) return { kind: "absent" };
+  if (stats.isSymbolicLink()) return { kind: "link", target: fs13.readlinkSync(pointerPath) };
+  if (stats.isFile()) return { kind: "file", content: fs13.readFileSync(pointerPath) };
+  return { kind: "other" };
+}
+function removeWindowsPointer(pointerPath) {
+  const stats = fs13.lstatSync(pointerPath, { throwIfNoEntry: false });
+  if (!stats) return;
+  if (stats.isSymbolicLink() || stats.isFile()) {
+    fs13.unlinkSync(pointerPath);
+    return;
+  }
+  throw new Error(
+    `Refusing to replace '${pointerPath}': it is a real directory, not a Resin junction.`
+  );
+}
+function setWindowsReleasePointer(options) {
+  const pointerPath = path36.join(options.resinHome, options.name);
+  writeFileAtomic(path36.join(options.resinHome, `${options.name}-version`), options.version);
+  const temp = tempSibling(pointerPath, "tmp");
+  try {
+    fs13.symlinkSync(options.targetDir, temp, "junction");
+  } catch {
+    removeWindowsPointer(pointerPath);
+    return { junction: false };
+  }
+  try {
+    try {
+      fs13.renameSync(temp, pointerPath);
+    } catch {
+      removeWindowsPointer(pointerPath);
+      fs13.renameSync(temp, pointerPath);
+    }
+    return { junction: true };
+  } catch (error) {
+    try {
+      removeWindowsPointer(temp);
+    } catch {
+    }
+    throw error;
+  }
+}
+function restoreWindowsPointer(pointerPath, snapshot) {
+  if (snapshot.kind === "other") return;
+  removeWindowsPointer(pointerPath);
+  if (snapshot.kind === "link") {
+    fs13.symlinkSync(snapshot.target, pointerPath, "junction");
+  } else if (snapshot.kind === "file") {
+    writeFileAtomic(pointerPath, snapshot.content);
+  }
+}
+function resolveLauncherInvocation(cliPath, args, platform = process6.platform, nodePath = process6.execPath) {
+  if (platform === "win32" && !/\.(?:exe|com)$/i.test(cliPath)) {
+    return { command: nodePath, args: [cliPath, ...args] };
+  }
+  return { command: cliPath, args: [...args] };
+}
+var WINDOWS_USER_PATH_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$entry = $env:RESIN_PATH_ENTRY
+$mode = $env:RESIN_PATH_MODE
+$subKey = $env:RESIN_PATH_REGISTRY_KEY
+if ([string]::IsNullOrWhiteSpace($subKey)) { $subKey = 'Environment' }
+function Normalize-ResinPathEntry([string]$value) {
+  $expanded = [Environment]::ExpandEnvironmentVariables($value.Trim().Trim('"'))
+  if ($expanded.Length -gt 3) { $expanded = $expanded.TrimEnd('\') }
+  return $expanded.ToLowerInvariant()
+}
+$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKey)
+try {
+  $names = $key.GetValueNames()
+  $hasPath = $names -contains 'Path'
+  $raw = ''
+  $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+  if ($hasPath) {
+    $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $kind = $key.GetValueKind('Path')
+  }
+  $target = Normalize-ResinPathEntry $entry
+  $parts = @($raw -split ';' | Where-Object { $_.Trim().Length -gt 0 })
+  $kept = @($parts | Where-Object { (Normalize-ResinPathEntry $_) -ne $target })
+  $present = $kept.Count -ne $parts.Count
+  $changed = $false
+  if ($mode -eq 'add' -and -not $present) {
+    $kept += $entry
+    $key.SetValue('Path', ($kept -join ';'), $kind)
+    $changed = $true
+    $present = $true
+  } elseif ($mode -eq 'remove' -and $present) {
+    if ($kept.Count -eq 0) { $key.DeleteValue('Path', $false) } else { $key.SetValue('Path', ($kept -join ';'), $kind) }
+    $changed = $true
+    $present = $false
+  }
+} finally {
+  $key.Close()
+}
+if ($changed -and $subKey -eq 'Environment') {
+  [Environment]::SetEnvironmentVariable('RESIN_PATH_REFRESH', $null, [EnvironmentVariableTarget]::User)
+}
+Write-Output ('{"changed":' + $changed.ToString().ToLowerInvariant() + ',"present":' + $present.ToString().ToLowerInvariant() + '}')
+`;
+var defaultWindowsPathRunner = (script, env) => {
+  const { promise, resolve: resolve6 } = Promise.withResolvers();
+  const systemRoot = process6.env.SystemRoot ?? "C:\\Windows";
+  const powershell = path36.join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  child_process.execFile(
+    powershell,
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+    { env: { ...process6.env, ...env }, windowsHide: true, timeout: 6e4 },
+    (error, stdout, stderr) => {
+      const exitCode = error === null ? 0 : typeof error.code === "number" ? error.code : 1;
+      resolve6({ exitCode, stdout: String(stdout), stderr: String(stderr || error?.message || "") });
+    }
+  );
+  return promise;
+};
+async function updateWindowsUserPath(mode, options) {
+  const binDir = path36.join(path36.resolve(options.resinHome), "bin");
+  if ((options.platform ?? process6.platform) !== "win32") {
+    return { attempted: false, changed: false, present: false, binDir, reason: "not-windows" };
+  }
+  const runner = options.runner ?? defaultWindowsPathRunner;
+  try {
+    const result = await runner(WINDOWS_USER_PATH_SCRIPT, {
+      RESIN_PATH_ENTRY: binDir,
+      RESIN_PATH_MODE: mode,
+      RESIN_PATH_REGISTRY_KEY: options.registryKey ?? "Environment"
+    });
+    const line = result.stdout.split(/\r?\n/).map((candidate) => candidate.trim()).reverse().find((candidate) => candidate.startsWith("{"));
+    if (result.exitCode !== 0 || !line) {
+      return {
+        attempted: true,
+        changed: false,
+        present: mode === "remove",
+        binDir,
+        error: (result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()
+      };
+    }
+    const parsed = JSON.parse(line);
+    const changed = parsed instanceof Object && "changed" in parsed && parsed.changed === true;
+    const present = parsed instanceof Object && "present" in parsed && parsed.present === true;
+    return { attempted: true, changed, present, binDir };
+  } catch (error) {
+    return {
+      attempted: true,
+      changed: false,
+      present: mode === "remove",
+      binDir,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+function addWindowsUserPath(options) {
+  return updateWindowsUserPath("add", options);
+}
+function removeWindowsUserPath(options) {
+  return updateWindowsUserPath("remove", options);
+}
+
+// apps/cli/src/installer/asset-downloader.ts
 function sha256Hex(buf) {
-  return crypto3.createHash("sha256").update(buf).digest("hex");
+  return crypto4.createHash("sha256").update(buf).digest("hex");
 }
 var RELEASE_DIRECTORY_MODE = 493;
 var RELEASE_FILE_MODE = 420;
@@ -13891,10 +15699,10 @@ function normalizeReleaseVersion(version) {
   return cleanVersion;
 }
 function assertDirectChildPath(parentDir, candidatePath, description) {
-  const parentRoot = path31.resolve(parentDir);
-  const candidateRoot = path31.resolve(candidatePath);
-  const relativePath = path31.relative(parentRoot, candidateRoot);
-  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(relativePath) || path31.dirname(candidateRoot) !== parentRoot) {
+  const parentRoot = path37.resolve(parentDir);
+  const candidateRoot = path37.resolve(candidatePath);
+  const relativePath = path37.relative(parentRoot, candidateRoot);
+  if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path37.sep}`) || path37.isAbsolute(relativePath) || path37.dirname(candidateRoot) !== parentRoot) {
     throw new Error(
       `Security violation: ${description} must be a direct child of '${parentRoot}': '${candidatePath}'.`
     );
@@ -13902,16 +15710,16 @@ function assertDirectChildPath(parentDir, candidatePath, description) {
   return candidateRoot;
 }
 function resolveVersionChildPath(versionsDir, childName, description) {
-  if (childName.length === 0 || childName === "." || childName === ".." || path31.basename(childName) !== childName || childName.includes("/") || childName.includes("\\") || childName.includes("\0")) {
+  if (childName.length === 0 || childName === "." || childName === ".." || path37.basename(childName) !== childName || childName.includes("/") || childName.includes("\\") || childName.includes("\0")) {
     throw new Error(
       `Security violation: ${description} must use one safe direct-child segment: '${childName}'.`
     );
   }
-  return assertDirectChildPath(versionsDir, path31.resolve(versionsDir, childName), description);
+  return assertDirectChildPath(versionsDir, path37.resolve(versionsDir, childName), description);
 }
-function lstatIfExists(filePath, fsSync2) {
+function lstatIfExists(filePath, fsSync3) {
   try {
-    return fsSync2.lstatSync(filePath);
+    return fsSync3.lstatSync(filePath);
   } catch (error) {
     if (error instanceof Error && "code" in error && Boolean(error) && error instanceof Object && "code" in error && error.code === "ENOENT") {
       return null;
@@ -14108,28 +15916,28 @@ function parseTarEntries(tarData) {
   return entries;
 }
 function resolveContainedArchivePath(root, relativePath) {
-  const candidatePath = path31.resolve(root, ...relativePath.split("/"));
-  const nativeRelativePath = path31.relative(root, candidatePath);
-  if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(nativeRelativePath)) {
+  const candidatePath = path37.resolve(root, ...relativePath.split("/"));
+  const nativeRelativePath = path37.relative(root, candidatePath);
+  if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path37.sep}`) || path37.isAbsolute(nativeRelativePath)) {
     throw new Error(
       `Security violation: archive member resolves outside the extraction root: '${relativePath}'.`
     );
   }
   return candidatePath;
 }
-function setSafeDirectoryMode(directoryPath, desiredMode, fsSync2) {
-  const stats = fsSync2.lstatSync(directoryPath);
+function setSafeDirectoryMode(directoryPath, desiredMode, fsSync3) {
+  const stats = fsSync3.lstatSync(directoryPath);
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
     throw new Error(
       `Security violation: archive extraction encountered a linked or non-directory component: '${directoryPath}'.`
     );
   }
-  if (process5.platform !== "win32" && (stats.mode & RELEASE_MODE_MASK) !== desiredMode) {
-    fsSync2.chmodSync(directoryPath, desiredMode);
+  if (process7.platform !== "win32" && (stats.mode & RELEASE_MODE_MASK) !== desiredMode) {
+    fsSync3.chmodSync(directoryPath, desiredMode);
   }
 }
-function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes, fsSync2) {
-  const rootStats = fsSync2.lstatSync(root);
+function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes, fsSync3) {
+  const rootStats = fsSync3.lstatSync(root);
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error(
       `Security violation: archive extraction root is no longer a real directory: '${root}'.`
@@ -14141,75 +15949,75 @@ function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes
   let portablePath = "";
   for (const segment of relativeDirectory.split("/")) {
     portablePath = portablePath ? `${portablePath}/${segment}` : segment;
-    currentPath = path31.join(currentPath, segment);
-    let stats = lstatIfExists(currentPath, fsSync2);
+    currentPath = path37.join(currentPath, segment);
+    let stats = lstatIfExists(currentPath, fsSync3);
     if (!stats) {
-      const desiredMode2 = process5.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+      const desiredMode2 = process7.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
       try {
-        fsSync2.mkdirSync(currentPath, { recursive: false, mode: desiredMode2 });
+        fsSync3.mkdirSync(currentPath, { recursive: false, mode: desiredMode2 });
       } catch (error) {
         if (!(error instanceof Error && "code" in error && Boolean(error) && error instanceof Object && "code" in error && error.code === "EEXIST")) {
           throw error;
         }
       }
-      stats = fsSync2.lstatSync(currentPath);
+      stats = fsSync3.lstatSync(currentPath);
     }
     if (stats.isSymbolicLink() || !stats.isDirectory()) {
       throw new Error(
         `Security violation: archive extraction encountered a linked or non-directory component: '${portablePath}'.`
       );
     }
-    const desiredMode = process5.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
-    setSafeDirectoryMode(currentPath, desiredMode, fsSync2);
+    const desiredMode = process7.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+    setSafeDirectoryMode(currentPath, desiredMode, fsSync3);
   }
   return currentPath;
 }
-function writeExclusiveRegularFile(targetPath, fileData, mode, fsSync2) {
-  const noFollowFlag = fsSync2.constants.O_NOFOLLOW ?? 0;
-  const descriptor = fsSync2.openSync(
+function writeExclusiveRegularFile(targetPath, fileData, mode, fsSync3) {
+  const noFollowFlag = fsSync3.constants.O_NOFOLLOW ?? 0;
+  const descriptor = fsSync3.openSync(
     targetPath,
-    fsSync2.constants.O_CREAT | fsSync2.constants.O_EXCL | fsSync2.constants.O_WRONLY | noFollowFlag,
+    fsSync3.constants.O_CREAT | fsSync3.constants.O_EXCL | fsSync3.constants.O_WRONLY | noFollowFlag,
     mode
   );
   try {
-    if (!fsSync2.fstatSync(descriptor).isFile()) {
+    if (!fsSync3.fstatSync(descriptor).isFile()) {
       throw new Error(
         `Security violation: archive extraction did not create a regular file: '${targetPath}'.`
       );
     }
-    fsSync2.writeFileSync(descriptor, fileData);
-    if (process5.platform !== "win32") {
-      fsSync2.fchmodSync(descriptor, mode);
-      if ((fsSync2.fstatSync(descriptor).mode & RELEASE_MODE_MASK) !== mode) {
+    fsSync3.writeFileSync(descriptor, fileData);
+    if (process7.platform !== "win32") {
+      fsSync3.fchmodSync(descriptor, mode);
+      if ((fsSync3.fstatSync(descriptor).mode & RELEASE_MODE_MASK) !== mode) {
         throw new Error(
           `Integrity violation: archive extraction could not apply mode 0o${mode.toString(8)} to '${targetPath}'.`
         );
       }
     }
   } finally {
-    fsSync2.closeSync(descriptor);
+    fsSync3.closeSync(descriptor);
   }
 }
-function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
+function extractTarArchive(tarData, destinationDir, fsSync3 = fs14) {
   const entries = parseTarEntries(tarData);
-  const root = path31.resolve(destinationDir);
-  let rootStats = lstatIfExists(root, fsSync2);
+  const root = path37.resolve(destinationDir);
+  let rootStats = lstatIfExists(root, fsSync3);
   if (!rootStats) {
-    const parentStats = fsSync2.lstatSync(path31.dirname(root));
+    const parentStats = fsSync3.lstatSync(path37.dirname(root));
     if (parentStats.isSymbolicLink() || !parentStats.isDirectory()) {
       throw new Error(
-        `Security violation: archive extraction parent must be a real directory: '${path31.dirname(root)}'.`
+        `Security violation: archive extraction parent must be a real directory: '${path37.dirname(root)}'.`
       );
     }
-    fsSync2.mkdirSync(root, { recursive: false, mode: 448 });
-    rootStats = fsSync2.lstatSync(root);
+    fsSync3.mkdirSync(root, { recursive: false, mode: 448 });
+    rootStats = fsSync3.lstatSync(root);
   }
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error(
       `Security violation: archive extraction root must be a real directory: '${destinationDir}'.`
     );
   }
-  const existingTree = scanDirectoryTree(root, fsSync2);
+  const existingTree = scanDirectoryTree(root, fsSync3);
   if (existingTree.symlinks.length > 0) {
     throw new Error(
       `Security violation: archive extraction root contains a pre-existing link at '${existingTree.symlinks[0].relativePath}'.`
@@ -14232,10 +16040,10 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
   for (const entry of entries) {
     const targetPath = resolveContainedArchivePath(root, entry.relativePath);
     if (entry.isDirectory) {
-      const directoryMode = process5.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+      const directoryMode = process7.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
       explicitDirectoryModes.set(entry.relativePath, directoryMode);
-      ensureSafeDirectoryPath(root, entry.relativePath, explicitDirectoryModes, fsSync2);
-      setSafeDirectoryMode(targetPath, directoryMode, fsSync2);
+      ensureSafeDirectoryPath(root, entry.relativePath, explicitDirectoryModes, fsSync3);
+      setSafeDirectoryMode(targetPath, directoryMode, fsSync3);
       extractedDirs.push(targetPath);
       continue;
     }
@@ -14245,25 +16053,25 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
       root,
       parentRelativePath,
       explicitDirectoryModes,
-      fsSync2
+      fsSync3
     );
-    if (path31.dirname(targetPath) !== parentPath) {
+    if (path37.dirname(targetPath) !== parentPath) {
       throw new Error(
         `Security violation: archive file parent escaped the extraction root: '${entry.relativePath}'.`
       );
     }
-    const fileMode = process5.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_FILE_MODE : entry.archiveMarksExecutable ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
+    const fileMode = process7.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_FILE_MODE : entry.archiveMarksExecutable ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
     const fileData = tarData.subarray(entry.dataOffset, entry.dataOffset + entry.fileSize);
-    writeExclusiveRegularFile(targetPath, fileData, fileMode, fsSync2);
+    writeExclusiveRegularFile(targetPath, fileData, fileMode, fsSync3);
     extractedFiles.push(targetPath);
     if (entry.archiveMarksExecutable) executableFiles.push(targetPath);
   }
-  setSafeDirectoryMode(root, RELEASE_DIRECTORY_MODE, fsSync2);
+  setSafeDirectoryMode(root, RELEASE_DIRECTORY_MODE, fsSync3);
   return { extractedFiles, extractedDirs, executableFiles };
 }
-function extractTarGzBuffer(tarGzBuffer, destinationDir, fsSync2 = fs9) {
+function extractTarGzBuffer(tarGzBuffer, destinationDir, fsSync3 = fs14) {
   const decompressedTar = zlib.gunzipSync(tarGzBuffer);
-  return extractTarArchive(decompressedTar, destinationDir, fsSync2);
+  return extractTarArchive(decompressedTar, destinationDir, fsSync3);
 }
 async function downloadAndVerifyAsset(options) {
   const { asset, downloadDir } = options;
@@ -14273,8 +16081,8 @@ async function downloadAndVerifyAsset(options) {
   await fsBridge.mkdirp(downloadDir);
   await fsPromises.chmod(downloadDir, 493).catch(() => {
   });
-  const destinationPath = path31.join(downloadDir, asset.filename);
-  const tempPath = path31.join(downloadDir, `${asset.filename}.download.tmp`);
+  const destinationPath = path37.join(downloadDir, asset.filename);
+  const tempPath = path37.join(downloadDir, `${asset.filename}.download.tmp`);
   let fileBuffer;
   if (options.sourceBuffer) {
     fileBuffer = options.sourceBuffer;
@@ -14343,7 +16151,7 @@ function extractSingleFileZip(zipBuffer, expectedBasename) {
     const commentLength = zipBuffer.readUInt16LE(central + 32);
     const localOffset = zipBuffer.readUInt32LE(central + 42);
     const fileName = zipBuffer.subarray(central + 46, central + 46 + nameLength).toString("utf8").replace(/\\/g, "/");
-    const basename5 = path31.posix.basename(fileName);
+    const basename5 = path37.posix.basename(fileName);
     if (basename5 === expectedBasename) {
       if (zipBuffer.readUInt32LE(localOffset) !== 67324752) {
         throw new Error("Deno runtime ZIP contains an invalid local file header.");
@@ -14362,23 +16170,23 @@ function extractSingleFileZip(zipBuffer, expectedBasename) {
   }
   throw new Error(`Executable '${expectedBasename}' was not found in runtime archive.`);
 }
-function scanDirectoryTree(baseDir, fsSync2 = fs9) {
-  const root = path31.resolve(baseDir);
+function scanDirectoryTree(baseDir, fsSync3 = fs14) {
+  const root = path37.resolve(baseDir);
   const entries = [];
   const symlinks = [];
   const nonRegularNonDirs = [];
   function traverse(currentDir) {
-    if (!fsSync2.existsSync(currentDir)) return;
-    const directoryEntries = fsSync2.readdirSync(currentDir, { withFileTypes: true });
+    if (!fsSync3.existsSync(currentDir)) return;
+    const directoryEntries = fsSync3.readdirSync(currentDir, { withFileTypes: true });
     for (const directoryEntry of directoryEntries) {
-      const fullPath = path31.join(currentDir, directoryEntry.name);
-      const nativeRelativePath = path31.relative(root, fullPath);
-      if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(nativeRelativePath)) {
+      const fullPath = path37.join(currentDir, directoryEntry.name);
+      const nativeRelativePath = path37.relative(root, fullPath);
+      if (nativeRelativePath === "" || nativeRelativePath === ".." || nativeRelativePath.startsWith(`..${path37.sep}`) || path37.isAbsolute(nativeRelativePath)) {
         throw new Error(
           `Security violation: scanned release entry escaped its root: '${fullPath}'.`
         );
       }
-      const relativePath = nativeRelativePath.split(path31.sep).join("/");
+      const relativePath = nativeRelativePath.split(path37.sep).join("/");
       if (relativePath.includes("\\") || relativePath.split("/").some((segment) => segment === "..")) {
         throw new Error(
           `Security violation: scanned release entry contains a non-portable path: '${nativeRelativePath}'.`
@@ -14386,7 +16194,7 @@ function scanDirectoryTree(baseDir, fsSync2 = fs9) {
       }
       let stats;
       try {
-        stats = fsSync2.lstatSync(fullPath);
+        stats = fsSync3.lstatSync(fullPath);
       } catch {
         continue;
       }
@@ -14405,16 +16213,16 @@ function scanDirectoryTree(baseDir, fsSync2 = fs9) {
   return { entries, symlinks, nonRegularNonDirs };
 }
 function normalizeReleaseTreeModes(baseDir, executablePaths) {
-  const root = path31.resolve(baseDir);
+  const root = path37.resolve(baseDir);
   const executableRelativePaths = /* @__PURE__ */ new Set();
   for (const executablePath of executablePaths) {
-    const relativePath = path31.relative(root, path31.resolve(executablePath));
-    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path31.sep}`) || path31.isAbsolute(relativePath)) {
+    const relativePath = path37.relative(root, path37.resolve(executablePath));
+    if (relativePath === "" || relativePath === ".." || relativePath.startsWith(`..${path37.sep}`) || path37.isAbsolute(relativePath)) {
       throw new Error(
         `Security violation: executable permission policy points outside the release tree: '${executablePath}'.`
       );
     }
-    const portableRelativePath = relativePath.split(path31.sep).join("/");
+    const portableRelativePath = relativePath.split(path37.sep).join("/");
     if (portableRelativePath.includes("\\")) {
       throw new Error(
         `Security violation: executable permission policy contains a non-portable path: '${executablePath}'.`
@@ -14422,7 +16230,7 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
     }
     executableRelativePaths.add(portableRelativePath);
   }
-  const rootStats = fs9.lstatSync(root);
+  const rootStats = fs14.lstatSync(root);
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error(
       `Security violation: release staging root must be a real directory: '${baseDir}'.`
@@ -14439,12 +16247,12 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
       `Security violation: non-regular file detected in release staging tree at '${scan.nonRegularNonDirs[0].relativePath}'.`
     );
   }
-  if (process5.platform === "win32") return executableRelativePaths;
+  if (process7.platform === "win32") return executableRelativePaths;
   if ((rootStats.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
-    fs9.chmodSync(root, RELEASE_DIRECTORY_MODE);
+    fs14.chmodSync(root, RELEASE_DIRECTORY_MODE);
   }
   for (const entry of scan.entries) {
-    const stats = fs9.lstatSync(entry.fullPath);
+    const stats = fs14.lstatSync(entry.fullPath);
     if (stats.isSymbolicLink() || !stats.isDirectory() && !stats.isFile()) {
       throw new Error(
         `Security violation: release entry changed type during mode normalization at '${entry.relativePath}'.`
@@ -14452,19 +16260,19 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
     }
     const expectedMode = stats.isDirectory() ? RELEASE_DIRECTORY_MODE : executableRelativePaths.has(entry.relativePath) ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
     if ((stats.mode & RELEASE_MODE_MASK) !== expectedMode) {
-      fs9.chmodSync(entry.fullPath, expectedMode);
+      fs14.chmodSync(entry.fullPath, expectedMode);
     }
   }
   return executableRelativePaths;
 }
 function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expectedTarSha256, expectedExecutableFiles, expectedProvenance, expectedDenoRuntime) {
-  const targetRootStat = fs9.lstatSync(targetDir);
+  const targetRootStat = fs14.lstatSync(targetDir);
   if (targetRootStat.isSymbolicLink() || !targetRootStat.isDirectory()) {
     throw new Error(
       `Security violation: installed version root must be a real directory: '${targetDir}'.`
     );
   }
-  if (process5.platform !== "win32" && (targetRootStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
+  if (process7.platform !== "win32" && (targetRootStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
     throw new Error(
       `Integrity violation: directory permission mode drift at '.': expected 0o${RELEASE_DIRECTORY_MODE.toString(8)}, got 0o${(targetRootStat.mode & RELEASE_MODE_MASK).toString(8)}.`
     );
@@ -14514,15 +16322,15 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
     }
     const targetPath = targetEntry.fullPath;
     const stagingPath = stagingEntry.fullPath;
-    const targetStat = fs9.lstatSync(targetPath);
-    const stagingStat = fs9.lstatSync(stagingPath);
+    const targetStat = fs14.lstatSync(targetPath);
+    const stagingStat = fs14.lstatSync(stagingPath);
     if (stagingStat.isDirectory()) {
       if (!targetStat.isDirectory()) {
         throw new Error(
           `Integrity violation: expected directory at '${relPath}', but found non-directory in installed version tree.`
         );
       }
-      if (process5.platform !== "win32" && (targetStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
+      if (process7.platform !== "win32" && (targetStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
         throw new Error(
           `Integrity violation: directory permission mode drift at '${relPath}': expected 0o${RELEASE_DIRECTORY_MODE.toString(8)}, got 0o${(targetStat.mode & RELEASE_MODE_MASK).toString(8)}.`
         );
@@ -14534,7 +16342,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
         `Integrity violation: expected regular file at '${relPath}', but found non-regular file in installed version tree.`
       );
     }
-    if (process5.platform !== "win32") {
+    if (process7.platform !== "win32") {
       const targetMode = targetStat.mode & RELEASE_MODE_MASK;
       const expectedMode = expectedExecutableFiles.has(relPath) ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
       if (targetMode !== expectedMode) {
@@ -14546,7 +16354,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
     if (relPath === "version.json") {
       let parsedTarget;
       try {
-        parsedTarget = JSON.parse(fs9.readFileSync(targetPath, "utf8"));
+        parsedTarget = JSON.parse(fs14.readFileSync(targetPath, "utf8"));
       } catch (parseErr) {
         throw new Error(
           `Integrity violation: installed version.json metadata is corrupted or invalid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`
@@ -14595,8 +16403,8 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
         `Integrity violation: file size mismatch at '${relPath}': expected ${stagingStat.size} bytes, got ${targetStat.size} bytes.`
       );
     }
-    const targetBytes = fs9.readFileSync(targetPath);
-    const stagingBytes = fs9.readFileSync(stagingPath);
+    const targetBytes = fs14.readFileSync(targetPath);
+    const stagingBytes = fs14.readFileSync(stagingPath);
     if (Buffer.compare(targetBytes, stagingBytes) !== 0) {
       throw new Error(
         `Integrity violation: byte-for-byte content mismatch at '${relPath}'. Installed file does not match verified release payload.`
@@ -14610,7 +16418,7 @@ async function installReleaseVersion(options) {
   const log = options.logger ?? (() => {
   });
   const cleanVersion = normalizeReleaseVersion(version);
-  const versionsDir = path31.resolve(resinHome, "versions");
+  const versionsDir = path37.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanVersion}`,
@@ -14623,12 +16431,12 @@ async function installReleaseVersion(options) {
       `Security violation: release versions path must be a real directory: '${versionsDir}'.`
     );
   }
-  if (process5.platform !== "win32") {
+  if (process7.platform !== "win32") {
     await fsPromises.chmod(versionsDir, RELEASE_DIRECTORY_MODE);
   }
   const stagingDir = resolveVersionChildPath(
     versionsDir,
-    `.staging-v${cleanVersion}-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`,
+    `.staging-v${cleanVersion}-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`,
     "release staging directory"
   );
   let tarGzBuffer;
@@ -14643,26 +16451,26 @@ async function installReleaseVersion(options) {
     log(`Extracting release archive for version v${cleanVersion} into staging directory...`);
     await fsPromises.mkdir(stagingDir, { recursive: false, mode: 448 });
     stagingCreated = true;
-    if (process5.platform !== "win32") {
+    if (process7.platform !== "win32") {
       await fsPromises.chmod(stagingDir, 448);
     }
     let { extractedFiles, executableFiles } = extractTarGzBuffer(tarGzBuffer, stagingDir);
     const stagingEntries = await fsPromises.readdir(stagingDir, { withFileTypes: true });
     if (stagingEntries.length === 1 && stagingEntries[0].name === "resin" && stagingEntries[0].isDirectory()) {
-      const packagedRoot = path31.join(stagingDir, "resin");
+      const packagedRoot = path37.join(stagingDir, "resin");
       for (const entry of await fsPromises.readdir(packagedRoot)) {
-        await fsPromises.rename(path31.join(packagedRoot, entry), path31.join(stagingDir, entry));
+        await fsPromises.rename(path37.join(packagedRoot, entry), path37.join(stagingDir, entry));
       }
       await fsPromises.rmdir(packagedRoot);
       extractedFiles = extractedFiles.map(
-        (filePath) => path31.join(stagingDir, path31.relative(packagedRoot, filePath))
+        (filePath) => path37.join(stagingDir, path37.relative(packagedRoot, filePath))
       );
       executableFiles = executableFiles.map(
-        (filePath) => path31.join(stagingDir, path31.relative(packagedRoot, filePath))
+        (filePath) => path37.join(stagingDir, path37.relative(packagedRoot, filePath))
       );
     }
     const trustedExecutablePaths = new Set(
-      executableFiles.map((filePath) => path31.resolve(filePath))
+      executableFiles.map((filePath) => path37.resolve(filePath))
     );
     if (options.denoRuntime) {
       const runtimeBuffer = Buffer.isBuffer(options.denoRuntime.archivePathOrBuffer) ? options.denoRuntime.archivePathOrBuffer : await fsPromises.readFile(options.denoRuntime.archivePathOrBuffer);
@@ -14672,29 +16480,29 @@ async function installReleaseVersion(options) {
           `Deno runtime digest mismatch: expected ${options.denoRuntime.sha256}, got ${runtimeDigest}`
         );
       }
-      const denoDir = path31.join(stagingDir, "deno");
+      const denoDir = path37.join(stagingDir, "deno");
       await fsBridge.mkdirp(denoDir);
       await fsPromises.chmod(denoDir, 493).catch(() => {
       });
-      const denoExecutableName = process5.platform === "win32" ? "deno.exe" : "deno";
+      const denoExecutableName = process7.platform === "win32" ? "deno.exe" : "deno";
       const denoExecutable = extractSingleFileZip(runtimeBuffer, denoExecutableName);
-      const denoTarget = path31.join(denoDir, denoExecutableName);
+      const denoTarget = path37.join(denoDir, denoExecutableName);
       await fsPromises.writeFile(denoTarget, denoExecutable, {
         mode: 493
       });
       await fsPromises.chmod(denoTarget, 493);
       extractedFiles.push(denoTarget);
-      trustedExecutablePaths.add(path31.resolve(denoTarget));
+      trustedExecutablePaths.add(path37.resolve(denoTarget));
     }
-    const stagingBin = path31.join(stagingDir, "bin");
+    const stagingBin = path37.join(stagingDir, "bin");
     await fsBridge.mkdirp(stagingBin);
     await fsPromises.chmod(stagingBin, 493).catch(() => {
     });
-    const expectedCli = path31.join(stagingDir, "bin", "resin");
-    const expectedDaemon = path31.join(stagingDir, "bin", "resin-daemon");
-    trustedExecutablePaths.add(path31.resolve(expectedCli));
-    trustedExecutablePaths.add(path31.resolve(expectedDaemon));
-    if (!fs9.existsSync(expectedCli)) {
+    const expectedCli = path37.join(stagingDir, "bin", "resin");
+    const expectedDaemon = path37.join(stagingDir, "bin", "resin-daemon");
+    trustedExecutablePaths.add(path37.resolve(expectedCli));
+    trustedExecutablePaths.add(path37.resolve(expectedDaemon));
+    if (!fs14.existsSync(expectedCli)) {
       await fsPromises.writeFile(
         expectedCli,
         `#!/usr/bin/env node
@@ -14720,7 +16528,7 @@ if (main instanceof Function) {
       await fsPromises.chmod(expectedCli, 493);
       extractedFiles.push(expectedCli);
     }
-    if (!fs9.existsSync(expectedDaemon)) {
+    if (!fs14.existsSync(expectedDaemon)) {
       await fsPromises.writeFile(
         expectedDaemon,
         `#!/usr/bin/env node
@@ -14734,7 +16542,7 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       extractedFiles.push(expectedDaemon);
       await fsPromises.chmod(expectedDaemon, 493);
     }
-    const versionMetadataPath = path31.join(stagingDir, "version.json");
+    const versionMetadataPath = path37.join(stagingDir, "version.json");
     const versionInfo = {
       version: cleanVersion,
       installedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -14748,9 +16556,9 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
     });
     extractedFiles.push(versionMetadataPath);
     await fsPromises.chmod(versionMetadataPath, 420);
-    trustedExecutablePaths.delete(path31.resolve(versionMetadataPath));
+    trustedExecutablePaths.delete(path37.resolve(versionMetadataPath));
     const expectedExecutableFiles = normalizeReleaseTreeModes(stagingDir, trustedExecutablePaths);
-    const targetStats = lstatIfExists(targetVersionDir, fs9);
+    const targetStats = lstatIfExists(targetVersionDir, fs14);
     const targetExists = targetStats !== null;
     if (targetStats && (targetStats.isSymbolicLink() || !targetStats.isDirectory())) {
       throw new Error(
@@ -14777,7 +16585,7 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       const scanResult = scanDirectoryTree(targetVersionDir);
       const installedFilePaths = scanResult.entries.map((entry) => entry.fullPath).filter((installedPath) => {
         try {
-          return fs9.lstatSync(installedPath).isFile();
+          return fs14.lstatSync(installedPath).isFile();
         } catch {
           return false;
         }
@@ -14787,14 +16595,14 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
         versionDir: targetVersionDir,
         installedFiles: installedFilePaths,
         entryPoints: {
-          daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
-          cli: path31.join(targetVersionDir, "bin", "resin"),
-          deno: fs9.existsSync(
-            path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno")
-          ) ? path31.join(
+          daemon: path37.join(targetVersionDir, "bin", "resin-daemon"),
+          cli: path37.join(targetVersionDir, "bin", "resin"),
+          deno: fs14.existsSync(
+            path37.join(targetVersionDir, "deno", process7.platform === "win32" ? "deno.exe" : "deno")
+          ) ? path37.join(
             targetVersionDir,
             "deno",
-            process5.platform === "win32" ? "deno.exe" : "deno"
+            process7.platform === "win32" ? "deno.exe" : "deno"
           ) : void 0
         }
       };
@@ -14802,7 +16610,7 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
     if (targetExists) {
       const backupDir = resolveVersionChildPath(
         versionsDir,
-        `.backup-v${cleanVersion}-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`,
+        `.backup-v${cleanVersion}-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`,
         "release backup directory"
       );
       await fsPromises.rename(targetVersionDir, backupDir);
@@ -14826,11 +16634,11 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
       versionDir: targetVersionDir,
       installedFiles: extractedFiles.map((f) => f.replace(stagingDir, targetVersionDir)),
       entryPoints: {
-        daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
-        cli: path31.join(targetVersionDir, "bin", "resin"),
-        deno: fs9.existsSync(
-          path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno")
-        ) ? path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno") : void 0
+        daemon: path37.join(targetVersionDir, "bin", "resin-daemon"),
+        cli: path37.join(targetVersionDir, "bin", "resin"),
+        deno: fs14.existsSync(
+          path37.join(targetVersionDir, "deno", process7.platform === "win32" ? "deno.exe" : "deno")
+        ) ? path37.join(targetVersionDir, "deno", process7.platform === "win32" ? "deno.exe" : "deno") : void 0
       }
     };
   } catch (error) {
@@ -14847,67 +16655,77 @@ async function switchActiveVersion(options) {
   const log = options.logger ?? (() => {
   });
   const cleanTarget = normalizeReleaseVersion(targetVersion);
-  const versionsDir = path31.resolve(resinHome, "versions");
+  const versionsDir = path37.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanTarget}`,
     "active release version directory"
   );
-  const versionsStats = lstatIfExists(versionsDir, fs9);
+  const versionsStats = lstatIfExists(versionsDir, fs14);
   if (!versionsStats || versionsStats.isSymbolicLink() || !versionsStats.isDirectory()) {
     throw new Error(
       `Security violation: release versions path must be a real directory: '${versionsDir}'.`
     );
   }
-  if (!await fsBridge.exists(targetVersionDir) || !fs9.existsSync(targetVersionDir)) {
+  if (!await fsBridge.exists(targetVersionDir) || !fs14.existsSync(targetVersionDir)) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: directory does not exist at ${targetVersionDir}`
     );
   }
-  const targetStats = fs9.lstatSync(targetVersionDir);
+  const targetStats = fs14.lstatSync(targetVersionDir);
   if (targetStats.isSymbolicLink() || !targetStats.isDirectory()) {
     throw new Error(
       `Security violation: active release target must be a real direct-child directory: '${targetVersionDir}'.`
     );
   }
-  const targetVersionJson = path31.join(targetVersionDir, "version.json");
-  if (!fs9.existsSync(targetVersionJson)) {
+  const targetVersionJson = path37.join(targetVersionDir, "version.json");
+  if (!fs14.existsSync(targetVersionJson)) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: missing version.json metadata at ${targetVersionJson}`
     );
   }
-  const metaStat = fs9.lstatSync(targetVersionJson);
+  const metaStat = fs14.lstatSync(targetVersionJson);
   if (metaStat.isSymbolicLink() || !metaStat.isFile()) {
     throw new Error(
       `Cannot switch to version v${cleanTarget}: version.json in target directory must be a regular file`
     );
   }
-  const currentPointer = path31.join(resinHome, "current");
-  const previousPointer = path31.join(resinHome, "previous");
-  const versionStatePath = path31.join(resinHome, "version-state.json");
-  const globalBinDir = path31.join(resinHome, "bin");
+  if ((options.platform ?? process7.platform) === "win32") {
+    return switchActiveVersionWindows({
+      resinHome,
+      versionsDir,
+      cleanTarget,
+      targetVersionDir,
+      targetVersionJson,
+      log
+    });
+  }
+  const currentPointer = path37.join(resinHome, "current");
+  const previousPointer = path37.join(resinHome, "previous");
+  const versionStatePath = path37.join(resinHome, "version-state.json");
+  const globalBinDir = path37.join(resinHome, "bin");
   const priorActiveVersionRaw = getActiveVersion(resinHome);
   const priorActiveVersion = priorActiveVersionRaw === null ? null : normalizeReleaseVersion(priorActiveVersionRaw);
-  const hadCurrentSymlink = fs9.existsSync(currentPointer) && fs9.lstatSync(currentPointer).isSymbolicLink();
-  const priorCurrentTarget = hadCurrentSymlink ? fs9.readlinkSync(currentPointer) : null;
-  const hadCurrentVersionFile = fs9.existsSync(path31.join(resinHome, "current-version"));
-  const priorCurrentVersionContent = hadCurrentVersionFile ? fs9.readFileSync(path31.join(resinHome, "current-version"), "utf8") : null;
-  const hadPreviousSymlink = fs9.existsSync(previousPointer) && fs9.lstatSync(previousPointer).isSymbolicLink();
-  const priorPreviousTarget = hadPreviousSymlink ? fs9.readlinkSync(previousPointer) : null;
-  const hadPreviousVersionFile = fs9.existsSync(path31.join(resinHome, "previous-version"));
-  const priorPreviousVersionContent = hadPreviousVersionFile ? fs9.readFileSync(path31.join(resinHome, "previous-version"), "utf8") : null;
-  const hadVersionState = fs9.existsSync(versionStatePath);
+  const hadCurrentSymlink = fs14.existsSync(currentPointer) && fs14.lstatSync(currentPointer).isSymbolicLink();
+  const priorCurrentTarget = hadCurrentSymlink ? fs14.readlinkSync(currentPointer) : null;
+  const hadCurrentVersionFile = fs14.existsSync(path37.join(resinHome, "current-version"));
+  const priorCurrentVersionContent = hadCurrentVersionFile ? fs14.readFileSync(path37.join(resinHome, "current-version"), "utf8") : null;
+  const hadPreviousSymlink = fs14.existsSync(previousPointer) && fs14.lstatSync(previousPointer).isSymbolicLink();
+  const priorPreviousTarget = hadPreviousSymlink ? fs14.readlinkSync(previousPointer) : null;
+  const hadPreviousVersionFile = fs14.existsSync(path37.join(resinHome, "previous-version"));
+  const priorPreviousVersionContent = hadPreviousVersionFile ? fs14.readFileSync(path37.join(resinHome, "previous-version"), "utf8") : null;
+  const hadVersionState = fs14.existsSync(versionStatePath);
   let priorVersionStateRaw = null;
   if (hadVersionState) {
     try {
-      priorVersionStateRaw = fs9.readFileSync(versionStatePath, "utf8");
+      priorVersionStateRaw = fs14.readFileSync(versionStatePath, "utf8");
     } catch {
     }
   }
-  const hadGlobalBinDir = fs9.existsSync(globalBinDir);
-  const stagingBinDir = path31.join(
+  const hadGlobalBinDir = fs14.existsSync(globalBinDir);
+  const stagingBinDir = path37.join(
     resinHome,
-    `.bin.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+    `.bin.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
   );
   let backupBinDir = null;
   try {
@@ -14917,56 +16735,56 @@ async function switchActiveVersion(options) {
         `v${priorActiveVersion}`,
         "previous release version directory"
       );
-      if (fs9.existsSync(prevTargetDir)) {
-        const tmpPrevSymlink = path31.join(
+      if (fs14.existsSync(prevTargetDir)) {
+        const tmpPrevSymlink = path37.join(
           resinHome,
-          `.previous.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+          `.previous.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
         );
         try {
-          if (fs9.existsSync(tmpPrevSymlink)) fs9.unlinkSync(tmpPrevSymlink);
-          fs9.symlinkSync(prevTargetDir, tmpPrevSymlink, "dir");
-          if (fs9.existsSync(previousPointer) && fs9.lstatSync(previousPointer).isDirectory()) {
-            fs9.rmSync(previousPointer, { recursive: true, force: true });
+          if (fs14.existsSync(tmpPrevSymlink)) fs14.unlinkSync(tmpPrevSymlink);
+          fs14.symlinkSync(prevTargetDir, tmpPrevSymlink, "dir");
+          if (fs14.existsSync(previousPointer) && fs14.lstatSync(previousPointer).isDirectory()) {
+            fs14.rmSync(previousPointer, { recursive: true, force: true });
           }
-          fs9.renameSync(tmpPrevSymlink, previousPointer);
+          fs14.renameSync(tmpPrevSymlink, previousPointer);
         } catch {
-          const tmpPrevFile = path31.join(
+          const tmpPrevFile = path37.join(
             resinHome,
-            `.previous-version.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+            `.previous-version.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
           );
-          fs9.writeFileSync(tmpPrevFile, priorActiveVersion, "utf8");
-          fs9.chmodSync(tmpPrevFile, 420);
-          fs9.renameSync(tmpPrevFile, path31.join(resinHome, "previous-version"));
+          fs14.writeFileSync(tmpPrevFile, priorActiveVersion, "utf8");
+          fs14.chmodSync(tmpPrevFile, 420);
+          fs14.renameSync(tmpPrevFile, path37.join(resinHome, "previous-version"));
         }
       }
     }
-    const tmpSymlink = path31.join(
+    const tmpSymlink = path37.join(
       resinHome,
-      `.current.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+      `.current.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
     );
     try {
-      if (fs9.existsSync(tmpSymlink)) fs9.unlinkSync(tmpSymlink);
-      fs9.symlinkSync(targetVersionDir, tmpSymlink, "dir");
-      if (fs9.existsSync(currentPointer) && fs9.lstatSync(currentPointer).isDirectory()) {
-        fs9.rmSync(currentPointer, { recursive: true, force: true });
+      if (fs14.existsSync(tmpSymlink)) fs14.unlinkSync(tmpSymlink);
+      fs14.symlinkSync(targetVersionDir, tmpSymlink, "dir");
+      if (fs14.existsSync(currentPointer) && fs14.lstatSync(currentPointer).isDirectory()) {
+        fs14.rmSync(currentPointer, { recursive: true, force: true });
       }
-      fs9.renameSync(tmpSymlink, currentPointer);
+      fs14.renameSync(tmpSymlink, currentPointer);
     } catch {
-      const tmpCurrFile = path31.join(
+      const tmpCurrFile = path37.join(
         resinHome,
-        `.current-version.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+        `.current-version.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
       );
-      fs9.writeFileSync(tmpCurrFile, cleanTarget, "utf8");
-      fs9.chmodSync(tmpCurrFile, 420);
-      fs9.renameSync(tmpCurrFile, path31.join(resinHome, "current-version"));
+      fs14.writeFileSync(tmpCurrFile, cleanTarget, "utf8");
+      fs14.chmodSync(tmpCurrFile, 420);
+      fs14.renameSync(tmpCurrFile, path37.join(resinHome, "current-version"));
     }
     await fsBridge.mkdirp(stagingBinDir);
     await fsPromises.chmod(stagingBinDir, 493).catch(() => {
     });
-    const targetBinDir = path31.join(targetVersionDir, "bin");
+    const targetBinDir = path37.join(targetVersionDir, "bin");
     const binNames = /* @__PURE__ */ new Set(["resin", "resin-daemon"]);
-    if (fs9.existsSync(targetBinDir)) {
-      const files = fs9.readdirSync(targetBinDir);
+    if (fs14.existsSync(targetBinDir)) {
+      const files = fs14.readdirSync(targetBinDir);
       for (const f of files) {
         if (f !== "resin-mcp") {
           binNames.add(f);
@@ -14974,41 +16792,41 @@ async function switchActiveVersion(options) {
       }
     }
     for (const binName of binNames) {
-      const binTarget = path31.join(targetVersionDir, "bin", binName);
-      const stagedBinPath = path31.join(stagingBinDir, binName);
-      if (fs9.existsSync(binTarget)) {
+      const binTarget = path37.join(targetVersionDir, "bin", binName);
+      const stagedBinPath = path37.join(stagingBinDir, binName);
+      if (fs14.existsSync(binTarget)) {
         try {
-          fs9.symlinkSync(binTarget, stagedBinPath);
+          fs14.symlinkSync(binTarget, stagedBinPath);
         } catch {
-          fs9.writeFileSync(
+          fs14.writeFileSync(
             stagedBinPath,
             `#!/usr/bin/env node
-import "${path31.resolve(binTarget)}";
+import ${JSON.stringify(pathToFileURL(path37.resolve(binTarget)).href)};
 `,
             { mode: 493 }
           );
-          fs9.chmodSync(stagedBinPath, 493);
+          fs14.chmodSync(stagedBinPath, 493);
         }
       }
     }
     if (hadGlobalBinDir) {
-      backupBinDir = path31.join(
+      backupBinDir = path37.join(
         resinHome,
-        `.bin.backup-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+        `.bin.backup-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
       );
       await fsPromises.rename(globalBinDir, backupBinDir);
     }
     try {
       await fsPromises.rename(stagingBinDir, globalBinDir);
     } catch (binRenameErr) {
-      if (backupBinDir && fs9.existsSync(backupBinDir)) {
+      if (backupBinDir && fs14.existsSync(backupBinDir)) {
         await fsPromises.rename(backupBinDir, globalBinDir).catch(() => {
         });
         backupBinDir = null;
       }
       throw binRenameErr;
     }
-    const installedList = fs9.existsSync(versionsDir) ? fs9.readdirSync(versionsDir).filter((d) => d.startsWith("v") && !d.startsWith(".")).map((d) => d.replace(/^v/, "")) : [cleanTarget];
+    const installedList = fs14.existsSync(versionsDir) ? fs14.readdirSync(versionsDir).filter((d) => d.startsWith("v") && !d.startsWith(".")).map((d) => d.replace(/^v/, "")) : [cleanTarget];
     let existingProvenance = {};
     if (priorVersionStateRaw) {
       try {
@@ -15021,7 +16839,7 @@ import "${path31.resolve(binTarget)}";
     }
     try {
       const versionMetadata = JSON.parse(
-        fs9.readFileSync(targetVersionJson, "utf8")
+        fs14.readFileSync(targetVersionJson, "utf8")
       );
       if (versionMetadata.provenance) existingProvenance[cleanTarget] = versionMetadata.provenance;
     } catch {
@@ -15033,9 +16851,9 @@ import "${path31.resolve(binTarget)}";
       installedVersions: installedList,
       provenanceByVersion: existingProvenance
     };
-    const tmpStatePath = path31.join(
+    const tmpStatePath = path37.join(
       resinHome,
-      `.version-state.json.tmp-${Date.now()}-${crypto3.randomBytes(6).toString("hex")}`
+      `.version-state.json.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
     );
     await fsPromises.writeFile(tmpStatePath, JSON.stringify(newState, null, 2), "utf8");
     await fsPromises.chmod(tmpStatePath, 420);
@@ -15046,7 +16864,7 @@ import "${path31.resolve(binTarget)}";
         `Atomic activation failed post-commit check: expected active version v${cleanTarget}, but resolved ${verifiedActive ? `v${verifiedActive}` : "none"}`
       );
     }
-    if (backupBinDir && fs9.existsSync(backupBinDir)) {
+    if (backupBinDir && fs14.existsSync(backupBinDir)) {
       await fsPromises.rm(backupBinDir, { recursive: true, force: true }).catch(() => {
       });
       backupBinDir = null;
@@ -15061,41 +16879,41 @@ import "${path31.resolve(binTarget)}";
       rollbackRetained: Boolean(priorActiveVersion && priorActiveVersion !== cleanTarget)
     };
   } catch (error) {
-    if (fs9.existsSync(stagingBinDir)) {
+    if (fs14.existsSync(stagingBinDir)) {
       await fsPromises.rm(stagingBinDir, { recursive: true, force: true }).catch(() => {
       });
     }
     if (priorActiveVersion !== null) {
-      if (backupBinDir && fs9.existsSync(backupBinDir)) {
-        if (fs9.existsSync(globalBinDir)) {
-          fs9.rmSync(globalBinDir, { recursive: true, force: true });
+      if (backupBinDir && fs14.existsSync(backupBinDir)) {
+        if (fs14.existsSync(globalBinDir)) {
+          fs14.rmSync(globalBinDir, { recursive: true, force: true });
         }
         await fsPromises.rename(backupBinDir, globalBinDir).catch(() => {
         });
         backupBinDir = null;
-      } else if (!hadGlobalBinDir && fs9.existsSync(globalBinDir)) {
-        fs9.rmSync(globalBinDir, { recursive: true, force: true });
+      } else if (!hadGlobalBinDir && fs14.existsSync(globalBinDir)) {
+        fs14.rmSync(globalBinDir, { recursive: true, force: true });
       }
       if (hadCurrentSymlink && priorCurrentTarget) {
         try {
-          const tmpRestoreSymlink = path31.join(
+          const tmpRestoreSymlink = path37.join(
             resinHome,
-            `.current.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
+            `.current.tmp-restore-${Date.now()}-${crypto4.randomBytes(4).toString("hex")}`
           );
-          if (fs9.existsSync(tmpRestoreSymlink)) fs9.unlinkSync(tmpRestoreSymlink);
-          fs9.symlinkSync(priorCurrentTarget, tmpRestoreSymlink, "dir");
-          fs9.renameSync(tmpRestoreSymlink, currentPointer);
+          if (fs14.existsSync(tmpRestoreSymlink)) fs14.unlinkSync(tmpRestoreSymlink);
+          fs14.symlinkSync(priorCurrentTarget, tmpRestoreSymlink, "dir");
+          fs14.renameSync(tmpRestoreSymlink, currentPointer);
         } catch {
-          fs9.writeFileSync(path31.join(resinHome, "current-version"), priorActiveVersion, "utf8");
+          fs14.writeFileSync(path37.join(resinHome, "current-version"), priorActiveVersion, "utf8");
         }
       } else if (hadCurrentVersionFile && priorCurrentVersionContent) {
-        fs9.writeFileSync(
-          path31.join(resinHome, "current-version"),
+        fs14.writeFileSync(
+          path37.join(resinHome, "current-version"),
           priorCurrentVersionContent,
           "utf8"
         );
-        if (fs9.existsSync(currentPointer)) {
-          fs9.rmSync(currentPointer, { recursive: true, force: true });
+        if (fs14.existsSync(currentPointer)) {
+          fs14.rmSync(currentPointer, { recursive: true, force: true });
         }
       } else {
         const prevTargetDir = resolveVersionChildPath(
@@ -15103,49 +16921,49 @@ import "${path31.resolve(binTarget)}";
           `v${priorActiveVersion}`,
           "restored previous release version directory"
         );
-        if (fs9.existsSync(prevTargetDir)) {
+        if (fs14.existsSync(prevTargetDir)) {
           try {
-            const tmpRestoreSymlink = path31.join(
+            const tmpRestoreSymlink = path37.join(
               resinHome,
-              `.current.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
+              `.current.tmp-restore-${Date.now()}-${crypto4.randomBytes(4).toString("hex")}`
             );
-            if (fs9.existsSync(tmpRestoreSymlink)) fs9.unlinkSync(tmpRestoreSymlink);
-            fs9.symlinkSync(prevTargetDir, tmpRestoreSymlink, "dir");
-            fs9.renameSync(tmpRestoreSymlink, currentPointer);
+            if (fs14.existsSync(tmpRestoreSymlink)) fs14.unlinkSync(tmpRestoreSymlink);
+            fs14.symlinkSync(prevTargetDir, tmpRestoreSymlink, "dir");
+            fs14.renameSync(tmpRestoreSymlink, currentPointer);
           } catch {
-            fs9.writeFileSync(path31.join(resinHome, "current-version"), priorActiveVersion, "utf8");
+            fs14.writeFileSync(path37.join(resinHome, "current-version"), priorActiveVersion, "utf8");
           }
         }
       }
       if (hadPreviousSymlink && priorPreviousTarget) {
         try {
-          const tmpRestorePrev = path31.join(
+          const tmpRestorePrev = path37.join(
             resinHome,
-            `.previous.tmp-restore-${Date.now()}-${crypto3.randomBytes(4).toString("hex")}`
+            `.previous.tmp-restore-${Date.now()}-${crypto4.randomBytes(4).toString("hex")}`
           );
-          if (fs9.existsSync(tmpRestorePrev)) fs9.unlinkSync(tmpRestorePrev);
-          fs9.symlinkSync(priorPreviousTarget, tmpRestorePrev, "dir");
-          fs9.renameSync(tmpRestorePrev, previousPointer);
+          if (fs14.existsSync(tmpRestorePrev)) fs14.unlinkSync(tmpRestorePrev);
+          fs14.symlinkSync(priorPreviousTarget, tmpRestorePrev, "dir");
+          fs14.renameSync(tmpRestorePrev, previousPointer);
         } catch {
         }
-      } else if (!hadPreviousSymlink && fs9.existsSync(previousPointer)) {
-        fs9.rmSync(previousPointer, { recursive: true, force: true });
+      } else if (!hadPreviousSymlink && fs14.existsSync(previousPointer)) {
+        fs14.rmSync(previousPointer, { recursive: true, force: true });
       }
       if (hadPreviousVersionFile && priorPreviousVersionContent) {
-        fs9.writeFileSync(
-          path31.join(resinHome, "previous-version"),
+        fs14.writeFileSync(
+          path37.join(resinHome, "previous-version"),
           priorPreviousVersionContent,
           "utf8"
         );
-        fs9.chmodSync(path31.join(resinHome, "previous-version"), 420);
-      } else if (!hadPreviousVersionFile && fs9.existsSync(path31.join(resinHome, "previous-version"))) {
-        fs9.rmSync(path31.join(resinHome, "previous-version"), { force: true });
+        fs14.chmodSync(path37.join(resinHome, "previous-version"), 420);
+      } else if (!hadPreviousVersionFile && fs14.existsSync(path37.join(resinHome, "previous-version"))) {
+        fs14.rmSync(path37.join(resinHome, "previous-version"), { force: true });
       }
       if (hadVersionState && priorVersionStateRaw) {
-        fs9.writeFileSync(versionStatePath, priorVersionStateRaw, "utf8");
-        fs9.chmodSync(versionStatePath, 420);
-      } else if (!hadVersionState && fs9.existsSync(versionStatePath)) {
-        fs9.rmSync(versionStatePath, { force: true });
+        fs14.writeFileSync(versionStatePath, priorVersionStateRaw, "utf8");
+        fs14.chmodSync(versionStatePath, 420);
+      } else if (!hadVersionState && fs14.existsSync(versionStatePath)) {
+        fs14.rmSync(versionStatePath, { force: true });
       }
       const restoredActive = getActiveVersion(resinHome);
       if (restoredActive !== priorActiveVersion) {
@@ -15154,33 +16972,157 @@ import "${path31.resolve(binTarget)}";
         );
       }
     } else {
-      if (backupBinDir && fs9.existsSync(backupBinDir)) {
-        fs9.rmSync(backupBinDir, { recursive: true, force: true });
+      if (backupBinDir && fs14.existsSync(backupBinDir)) {
+        fs14.rmSync(backupBinDir, { recursive: true, force: true });
         backupBinDir = null;
       }
-      if (fs9.existsSync(globalBinDir)) {
-        fs9.rmSync(globalBinDir, { recursive: true, force: true });
+      if (fs14.existsSync(globalBinDir)) {
+        fs14.rmSync(globalBinDir, { recursive: true, force: true });
       }
-      if (fs9.existsSync(currentPointer)) {
-        fs9.rmSync(currentPointer, { recursive: true, force: true });
+      if (fs14.existsSync(currentPointer)) {
+        fs14.rmSync(currentPointer, { recursive: true, force: true });
       }
-      if (fs9.existsSync(path31.join(resinHome, "current-version"))) {
-        fs9.rmSync(path31.join(resinHome, "current-version"), { force: true });
+      if (fs14.existsSync(path37.join(resinHome, "current-version"))) {
+        fs14.rmSync(path37.join(resinHome, "current-version"), { force: true });
       }
-      if (fs9.existsSync(previousPointer)) {
-        fs9.rmSync(previousPointer, { recursive: true, force: true });
+      if (fs14.existsSync(previousPointer)) {
+        fs14.rmSync(previousPointer, { recursive: true, force: true });
       }
-      if (fs9.existsSync(path31.join(resinHome, "previous-version"))) {
-        fs9.rmSync(path31.join(resinHome, "previous-version"), { force: true });
+      if (fs14.existsSync(path37.join(resinHome, "previous-version"))) {
+        fs14.rmSync(path37.join(resinHome, "previous-version"), { force: true });
       }
-      if (fs9.existsSync(versionStatePath)) {
-        fs9.rmSync(versionStatePath, { force: true });
+      if (fs14.existsSync(versionStatePath)) {
+        fs14.rmSync(versionStatePath, { force: true });
       }
       const restoredActive = getActiveVersion(resinHome);
       if (restoredActive !== null) {
-        fs9.rmSync(currentPointer, { recursive: true, force: true });
-        fs9.rmSync(path31.join(resinHome, "current-version"), { force: true });
+        fs14.rmSync(currentPointer, { recursive: true, force: true });
+        fs14.rmSync(path37.join(resinHome, "current-version"), { force: true });
       }
+    }
+    throw error;
+  }
+}
+async function switchActiveVersionWindows(context) {
+  const { resinHome, versionsDir, cleanTarget, targetVersionDir, targetVersionJson, log } = context;
+  const versionStatePath = path37.join(resinHome, "version-state.json");
+  const snapshotPaths = [
+    path37.join(resinHome, "current"),
+    path37.join(resinHome, "current-version"),
+    path37.join(resinHome, "previous"),
+    path37.join(resinHome, "previous-version"),
+    versionStatePath
+  ];
+  const priorActiveVersionRaw = getActiveVersion(resinHome);
+  const priorActiveVersion = priorActiveVersionRaw === null ? null : normalizeReleaseVersion(priorActiveVersionRaw);
+  const snapshots = new Map(
+    snapshotPaths.map((snapshotPath) => [snapshotPath, snapshotWindowsPointer(snapshotPath)])
+  );
+  const priorVersionStateSnapshot = snapshots.get(versionStatePath);
+  const priorVersionStateRaw = priorVersionStateSnapshot?.kind === "file" ? priorVersionStateSnapshot.content.toString("utf8") : null;
+  let launchers = null;
+  try {
+    if (priorActiveVersion && priorActiveVersion !== cleanTarget) {
+      const prevTargetDir = resolveVersionChildPath(
+        versionsDir,
+        `v${priorActiveVersion}`,
+        "previous release version directory"
+      );
+      if (fs14.existsSync(prevTargetDir)) {
+        setWindowsReleasePointer({
+          resinHome,
+          name: "previous",
+          targetDir: prevTargetDir,
+          version: priorActiveVersion
+        });
+      }
+    }
+    const current = setWindowsReleasePointer({
+      resinHome,
+      name: "current",
+      targetDir: targetVersionDir,
+      version: cleanTarget
+    });
+    if (!current.junction) {
+      log(
+        `Directory junctions are unavailable in ${resinHome}; recorded the active version in current-version only.`
+      );
+    }
+    launchers = publishWindowsLaunchers({
+      resinHome,
+      version: cleanTarget,
+      names: windowsLauncherNamesForRelease(targetVersionDir)
+    });
+    const installedList = fs14.readdirSync(versionsDir).filter((d) => d.startsWith("v") && !d.startsWith(".")).map((d) => d.replace(/^v/, ""));
+    let provenanceByVersion = {};
+    if (priorVersionStateRaw) {
+      try {
+        const state = JSON.parse(priorVersionStateRaw);
+        if (state.provenanceByVersion) provenanceByVersion = { ...state.provenanceByVersion };
+      } catch {
+      }
+    }
+    try {
+      const versionMetadata = JSON.parse(
+        fs14.readFileSync(targetVersionJson, "utf8")
+      );
+      if (versionMetadata.provenance) provenanceByVersion[cleanTarget] = versionMetadata.provenance;
+    } catch {
+    }
+    const newState = {
+      activeVersion: cleanTarget,
+      previousVersion: priorActiveVersion,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      installedVersions: installedList,
+      provenanceByVersion
+    };
+    const tmpStatePath = path37.join(
+      resinHome,
+      `.version-state.json.tmp-${Date.now()}-${crypto4.randomBytes(6).toString("hex")}`
+    );
+    await fsPromises.writeFile(tmpStatePath, JSON.stringify(newState, null, 2), "utf8");
+    await fsPromises.rename(tmpStatePath, versionStatePath);
+    const verifiedActive = getActiveVersion(resinHome);
+    if (verifiedActive !== cleanTarget) {
+      throw new Error(
+        `Atomic activation failed post-commit check: expected active version v${cleanTarget}, but resolved ${verifiedActive ? `v${verifiedActive}` : "none"}`
+      );
+    }
+    log(
+      `Successfully switched active version to v${cleanTarget} (previous: ${priorActiveVersion ? `v${priorActiveVersion}` : "none"}).`
+    );
+    return {
+      activeVersion: cleanTarget,
+      previousVersion: priorActiveVersion,
+      activePath: targetVersionDir,
+      rollbackRetained: Boolean(priorActiveVersion && priorActiveVersion !== cleanTarget)
+    };
+  } catch (error) {
+    launchers?.rollback();
+    for (const [snapshotPath, snapshot] of snapshots) {
+      try {
+        restoreWindowsPointer(snapshotPath, snapshot);
+      } catch (restoreError) {
+        log(
+          `Warning: could not restore '${snapshotPath}': ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+        );
+      }
+    }
+    for (const entry of fs14.readdirSync(resinHome)) {
+      if (/^\.(?:current|previous)(?:-version)?\.tmp-|^\.version-state\.json\.tmp-/.test(entry)) {
+        try {
+          const leftover = path37.join(resinHome, entry);
+          if (fs14.lstatSync(leftover).isSymbolicLink()) fs14.unlinkSync(leftover);
+          else fs14.rmSync(leftover, { force: true });
+        } catch {
+        }
+      }
+    }
+    const restoredActive = getActiveVersion(resinHome);
+    if (restoredActive !== priorActiveVersion) {
+      log(
+        `Warning: Post-rollback active version mismatch: expected ${priorActiveVersion ? `v${priorActiveVersion}` : "none"}, got ${restoredActive ? `v${restoredActive}` : "none"}`
+      );
     }
     throw error;
   }
@@ -15189,14 +17131,14 @@ async function rollbackActiveVersion(options) {
   const { resinHome } = options;
   const log = options.logger ?? (() => {
   });
-  const versionStatePath = path31.join(resinHome, "version-state.json");
-  const previousPointer = path31.join(resinHome, "previous");
+  const versionStatePath = path37.join(resinHome, "version-state.json");
+  const previousPointer = path37.join(resinHome, "previous");
   let targetRollbackVersion = options.targetVersion;
-  if (!targetRollbackVersion && fs9.existsSync(previousPointer)) {
+  if (!targetRollbackVersion && fs14.existsSync(previousPointer)) {
     try {
-      const stats = fs9.lstatSync(previousPointer);
+      const stats = fs14.lstatSync(previousPointer);
       if (stats.isSymbolicLink()) {
-        const linkTarget = fs9.readlinkSync(previousPointer);
+        const linkTarget = fs14.readlinkSync(previousPointer);
         const match = linkTarget.match(/v([0-9a-zA-Z.-]+)$/);
         if (match && match[1]) {
           targetRollbackVersion = match[1];
@@ -15205,15 +17147,15 @@ async function rollbackActiveVersion(options) {
     } catch {
     }
   }
-  if (!targetRollbackVersion && fs9.existsSync(path31.join(resinHome, "previous-version"))) {
+  if (!targetRollbackVersion && fs14.existsSync(path37.join(resinHome, "previous-version"))) {
     try {
-      targetRollbackVersion = fs9.readFileSync(path31.join(resinHome, "previous-version"), "utf8").trim();
+      targetRollbackVersion = fs14.readFileSync(path37.join(resinHome, "previous-version"), "utf8").trim();
     } catch {
     }
   }
-  if (!targetRollbackVersion && fs9.existsSync(versionStatePath)) {
+  if (!targetRollbackVersion && fs14.existsSync(versionStatePath)) {
     try {
-      const state = JSON.parse(fs9.readFileSync(versionStatePath, "utf8"));
+      const state = JSON.parse(fs14.readFileSync(versionStatePath, "utf8"));
       targetRollbackVersion = state.previousVersion || void 0;
     } catch {
     }
@@ -15222,13 +17164,13 @@ async function rollbackActiveVersion(options) {
     throw new Error("Cannot rollback: no previous known good version found in resin home state.");
   }
   const cleanTarget = normalizeReleaseVersion(targetRollbackVersion);
-  const versionsDir = path31.resolve(resinHome, "versions");
+  const versionsDir = path37.resolve(resinHome, "versions");
   const targetVersionDir = resolveVersionChildPath(
     versionsDir,
     `v${cleanTarget}`,
     "rollback release version directory"
   );
-  if (!fs9.existsSync(targetVersionDir)) {
+  if (!fs14.existsSync(targetVersionDir)) {
     throw new Error(
       `Cannot rollback to v${cleanTarget}: target version directory does not exist at ${targetVersionDir}`
     );
@@ -15237,7 +17179,8 @@ async function rollbackActiveVersion(options) {
     resinHome,
     targetVersion: cleanTarget,
     fsBridge: options.fsBridge,
-    logger: options.logger
+    logger: options.logger,
+    platform: options.platform
   });
   log(`Rollback completed: active version restored to v${cleanTarget}.`);
   return {
@@ -15247,30 +17190,30 @@ async function rollbackActiveVersion(options) {
   };
 }
 function getActiveVersion(resinHome) {
-  const currentPointer = path31.join(resinHome, "current");
-  if (fs9.existsSync(currentPointer)) {
+  const currentPointer = path37.join(resinHome, "current");
+  if (fs14.existsSync(currentPointer)) {
     try {
-      const stats = fs9.lstatSync(currentPointer);
+      const stats = fs14.lstatSync(currentPointer);
       if (stats.isSymbolicLink()) {
-        const target = fs9.readlinkSync(currentPointer);
+        const target = fs14.readlinkSync(currentPointer);
         const match = target.match(/v([0-9a-zA-Z.-]+)$/);
         if (match && match[1]) return match[1];
       }
     } catch {
     }
   }
-  const currentVersionFile = path31.join(resinHome, "current-version");
-  if (fs9.existsSync(currentVersionFile)) {
+  const currentVersionFile = path37.join(resinHome, "current-version");
+  if (fs14.existsSync(currentVersionFile)) {
     try {
-      const val = fs9.readFileSync(currentVersionFile, "utf8").trim().replace(/^v/, "");
+      const val = fs14.readFileSync(currentVersionFile, "utf8").trim().replace(/^v/, "");
       if (val) return val;
     } catch {
     }
   }
-  const versionStatePath = path31.join(resinHome, "version-state.json");
-  if (fs9.existsSync(versionStatePath)) {
+  const versionStatePath = path37.join(resinHome, "version-state.json");
+  if (fs14.existsSync(versionStatePath)) {
     try {
-      const state = JSON.parse(fs9.readFileSync(versionStatePath, "utf8"));
+      const state = JSON.parse(fs14.readFileSync(versionStatePath, "utf8"));
       return state.activeVersion || null;
     } catch {
     }
@@ -15279,7 +17222,7 @@ function getActiveVersion(resinHome) {
 }
 
 // apps/cli/src/installer/channel-verifier.ts
-import crypto4 from "node:crypto";
+import crypto5 from "node:crypto";
 var REVOKED_RELEASE_KEY_IDS = Object.freeze(["resin-release-v1"]);
 var ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 function canonicalJson(val) {
@@ -15295,12 +17238,12 @@ function canonicalJson(val) {
   return `{${pairs.join(",")}}`;
 }
 function createPublicKeyFromInput(key) {
-  if (key instanceof crypto4.KeyObject) {
+  if (key instanceof crypto5.KeyObject) {
     return key;
   }
   const trimmed = key.trim();
   if (trimmed.startsWith("-----BEGIN PUBLIC KEY-----")) {
-    return crypto4.createPublicKey(trimmed);
+    return crypto5.createPublicKey(trimmed);
   }
   const rawKeyBuffer = Buffer.from(trimmed, "hex");
   if (rawKeyBuffer.length !== 32) {
@@ -15309,7 +17252,7 @@ function createPublicKeyFromInput(key) {
     );
   }
   const spkiDer = Buffer.concat([ED25519_SPKI_DER_PREFIX, rawKeyBuffer]);
-  return crypto4.createPublicKey({
+  return crypto5.createPublicKey({
     key: spkiDer,
     format: "der",
     type: "spki"
@@ -15321,7 +17264,7 @@ function verifyEd25519Signature(payload, signatureHex, publicKey) {
     const canonicalString = canonicalJson(payload);
     const dataBuffer = Buffer.from(canonicalString, "utf8");
     const signatureBuffer = Buffer.from(signatureHex, "hex");
-    return crypto4.verify(null, dataBuffer, keyObject, signatureBuffer);
+    return crypto5.verify(null, dataBuffer, keyObject, signatureBuffer);
   } catch {
     return false;
   }
@@ -15619,7 +17562,7 @@ function verifyManifest(manifestData, options = {}) {
   }
   if (options.expectedDigest) {
     const digestInput = options.rawManifestBytes ?? canonicalJson(manifest);
-    const actualDigest = crypto4.createHash("sha256").update(digestInput).digest("hex");
+    const actualDigest = crypto5.createHash("sha256").update(digestInput).digest("hex");
     if (actualDigest !== options.expectedDigest) {
       errors.push(
         `Release manifest digest mismatch: expected ${options.expectedDigest}, got ${actualDigest}.`
@@ -15726,7 +17669,8 @@ function selectPlatformAsset(manifest, platform) {
   }
   const isWsl = Boolean(platform.isWsl) || platform.os === "wsl";
   const arch = platform.arch === "x86_64" ? "x64" : platform.arch === "aarch64" ? "arm64" : platform.arch;
-  const osName = isWsl ? "wsl" : platform.os;
+  const isWindows = !isWsl && (platform.os === "win32" || platform.os === "windows");
+  const osName = isWsl ? "wsl" : isWindows ? "windows" : platform.os;
   if (isWsl && arch !== "x64" && arch !== "arm64") {
     throw new Error(
       `Unsupported WSL architecture '${platform.arch}'. Only x64 and arm64 are supported.`
@@ -15753,8 +17697,9 @@ function selectPlatformAsset(manifest, platform) {
     }
   }
   if (!asset && !isWsl) {
+    const assetPlatform = isWindows ? "win32" : osName;
     asset = Object.values(manifest.assets).find(
-      (a) => a.arch === arch && a.platform === osName && !a.isWsl
+      (a) => a.arch === arch && a.platform === assetPlatform && !a.isWsl
     );
   }
   if (!asset) {
@@ -15767,9 +17712,9 @@ function selectPlatformAsset(manifest, platform) {
 }
 
 // apps/cli/src/installer/release-client.ts
-import crypto5 from "node:crypto";
+import crypto6 from "node:crypto";
 import dns from "node:dns/promises";
-import fs10 from "node:fs/promises";
+import fs15 from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import net2 from "node:net";
@@ -15807,13 +17752,27 @@ var PINNED_DENO_RUNTIMES = Object.freeze({
     sha256: "b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615",
     sizeBytes: 38511993,
     sourceUrl: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip"
+  }),
+  // Source: https://github.com/denoland/deno/releases/tag/v2.9.5 — digests equal the release's
+  // `deno-*-pc-windows-msvc.zip.sha256sum` files and GitHub's recorded asset digests.
+  "windows-x64": Object.freeze({
+    filename: "deno-x86_64-pc-windows-msvc.zip",
+    sha256: "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
+    sizeBytes: 42691248,
+    sourceUrl: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip"
+  }),
+  "windows-arm64": Object.freeze({
+    filename: "deno-aarch64-pc-windows-msvc.zip",
+    sha256: "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
+    sizeBytes: 40905829,
+    sourceUrl: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip"
   })
 });
 function normalizeSha2562(value) {
   return value.replace(/^sha256:/i, "").trim().toLowerCase();
 }
 function sha256Hex2(value) {
-  return crypto5.createHash("sha256").update(value).digest("hex");
+  return crypto6.createHash("sha256").update(value).digest("hex");
 }
 function assertSha256(value, label) {
   const normalized = normalizeSha2562(value);
@@ -16514,7 +18473,7 @@ function parseBundledReleaseTrust(parsed) {
     }
     let keyObject;
     try {
-      keyObject = crypto5.createPublicKey(record.publicKeyPem.trim());
+      keyObject = crypto6.createPublicKey(record.publicKeyPem.trim());
     } catch (error) {
       throw new Error(
         `Trusted release key '${keyId}' has invalid publicKeyPem: ${error instanceof Error ? error.message : String(error)}`
@@ -16528,7 +18487,7 @@ function parseBundledReleaseTrust(parsed) {
     const der = keyObject.export({ type: "spki", format: "der" });
     const rawPublicKey = der.subarray(-32);
     const derivedHex = rawPublicKey.toString("hex").toLowerCase();
-    const derivedFingerprint = crypto5.createHash("sha256").update(der).digest("hex").toLowerCase();
+    const derivedFingerprint = crypto6.createHash("sha256").update(der).digest("hex").toLowerCase();
     if (String(record.publicKeyHex) !== record.publicKeyHex) {
       throw new Error(`Trusted release key '${keyId}' is missing 'publicKeyHex'.`);
     }
@@ -16634,7 +18593,7 @@ async function loadBundledTrustedReleaseKeys(customTrustData) {
   const bundledTrustPath = new URL("../release-trust.json", import.meta.url);
   let rawBytes;
   try {
-    rawBytes = await fs10.readFile(bundledTrustPath);
+    rawBytes = await fs15.readFile(bundledTrustPath);
   } catch (error) {
     throw new Error(
       `Failed to load bundled release trust file at ${bundledTrustPath.pathname}: ${error instanceof Error ? error.message : String(error)}`
@@ -16646,6 +18605,7 @@ async function loadBundledTrustedReleaseKeys(customTrustData) {
 function platformKey(platform) {
   const arch = platform.arch === "x86_64" ? "x64" : platform.arch === "aarch64" ? "arm64" : platform.arch;
   if (platform.isWsl || platform.os === "wsl") return `wsl-${arch}`;
+  if (platform.os === "win32" || platform.os === "windows") return `windows-${arch}`;
   return `${platform.os}-${arch}`;
 }
 function resolveReleaseRefUrl(rawRef, baseUrlString) {
@@ -16864,9 +18824,10 @@ async function defaultHealthCheckRunner(cliPath, args = ["version"], options = {
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_HEALTH_CHECK_MAX_OUTPUT_BYTES;
   let child;
   try {
-    child = child_process.spawn(cliPath, args, {
+    const invocation = resolveLauncherInvocation(cliPath, args);
+    child = child_process2.spawn(invocation.command, invocation.args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process6.env, ...options.env || {} }
+      env: { ...process8.env, ...options.env || {} }
     });
   } catch (err) {
     return {
@@ -16969,9 +18930,9 @@ Health check timed out after ${timeoutMs}ms` : `Health check timed out after ${t
 }
 async function isAlreadyInitialized(resinHome, fsBridge = defaultFsBridge) {
   const candidatePaths = [
-    path32.join(resinHome, "state", "device-token.json"),
-    path32.join(resinHome, "state", "install-journal.json"),
-    path32.join(resinHome, "journal.json")
+    path38.join(resinHome, "state", "device-token.json"),
+    path38.join(resinHome, "state", "install-journal.json"),
+    path38.join(resinHome, "journal.json")
   ];
   for (const candidate of candidatePaths) {
     try {
@@ -16990,7 +18951,7 @@ async function detectOnboardingSkipReason(options) {
   if (options.autoOnboard === false) {
     return "Explicitly disabled via autoOnboard option";
   }
-  const env = options.env ?? process6.env;
+  const env = options.env ?? process8.env;
   if (env.RESIN_NO_ONBOARD === "1" || env.RESIN_NO_ONBOARD === "true") {
     return "Disabled via RESIN_NO_ONBOARD environment variable";
   }
@@ -17018,7 +18979,7 @@ async function detectOnboardingSkipReason(options) {
     return "Non-interactive environment detected";
   }
   const allowRoot = env.RESIN_ALLOW_ROOT === "1" || env.RESIN_ALLOW_ROOT === "true";
-  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : process6.getuid instanceof Function ? process6.getuid() === 0 : false);
+  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : process8.getuid instanceof Function ? process8.getuid() === 0 : false);
   if (isRoot && !allowRoot) {
     return "Running in root/sudo context (avoiding root-owned browser launch or user config)";
   }
@@ -17027,13 +18988,14 @@ async function detectOnboardingSkipReason(options) {
 async function defaultOnboardingRunner(cliPath, args = ["init", "--auto-approve"], options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ONBOARDING_TIMEOUT_MS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_ONBOARDING_MAX_OUTPUT_BYTES;
-  const interactive = options.interactive ?? Boolean(process6.stdin?.isTTY && process6.stdout?.isTTY);
+  const interactive = options.interactive ?? Boolean(process8.stdin?.isTTY && process8.stdout?.isTTY);
   const stdio = options.stdio ?? (interactive ? "inherit" : ["ignore", "pipe", "pipe"]);
   let child;
   try {
-    child = child_process.spawn(cliPath, args, {
+    const invocation = resolveLauncherInvocation(cliPath, args);
+    child = child_process2.spawn(invocation.command, invocation.args, {
       stdio,
-      env: { ...process6.env, ...options.env || {} }
+      env: { ...process8.env, ...options.env || {} }
     });
   } catch (err) {
     return {
@@ -17214,12 +19176,13 @@ async function rollbackBootstrapActivation(options) {
   }
   try {
     for (const candidate of [
-      path32.join(resinHome, "current"),
-      path32.join(resinHome, "current-version"),
-      path32.join(resinHome, "version-state.json"),
-      path32.join(resinHome, "bin", "resin"),
-      path32.join(resinHome, "bin", "resin-daemon"),
-      path32.join(resinHome, "bin", "resin-mcp")
+      path38.join(resinHome, "current"),
+      path38.join(resinHome, "current-version"),
+      path38.join(resinHome, "version-state.json"),
+      path38.join(resinHome, "bin", "resin"),
+      path38.join(resinHome, "bin", "resin-daemon"),
+      path38.join(resinHome, "bin", "resin-mcp"),
+      ...windowsLauncherPaths(resinHome)
     ]) {
       if (await fsBridge.exists(candidate)) {
         await fsBridge.unlink(candidate);
@@ -17257,26 +19220,26 @@ function resolveCandidateProfiles(shellName) {
   };
 }
 function resinShellPathLine(homeDir, resinHome) {
-  const binDir = path32.join(resinHome, "bin");
-  if (resinHome === path32.join(homeDir, ".resin")) {
+  const binDir = path38.join(resinHome, "bin");
+  if (resinHome === path38.join(homeDir, ".resin")) {
     return 'export PATH="$HOME/.resin/bin:$PATH"';
   }
-  if (resinHome.startsWith(homeDir + path32.sep)) {
-    const rel = path32.relative(homeDir, binDir).split(path32.sep).join("/");
+  if (resinHome.startsWith(homeDir + path38.sep)) {
+    const rel = path38.relative(homeDir, binDir).split(path38.sep).join("/");
     return `export PATH="$HOME/${rel}:$PATH"`;
   }
   return `export PATH="${binDir}:$PATH"`;
 }
 async function removeShellPath(options) {
   const fsBridge = options.fsBridge ?? defaultFsBridge;
-  const homeDir = path32.resolve(options.homeDir);
-  const pathLine = resinShellPathLine(homeDir, path32.resolve(options.resinHome));
+  const homeDir = path38.resolve(options.homeDir);
+  const pathLine = resinShellPathLine(homeDir, path38.resolve(options.resinHome));
   const profiles = new Set(
     ["zsh", "bash", ""].flatMap((shell) => resolveCandidateProfiles(shell).candidates)
   );
   const cleaned = [];
   for (const profile of profiles) {
-    const profilePath = path32.join(homeDir, profile);
+    const profilePath = path38.join(homeDir, profile);
     if (!await fsBridge.exists(profilePath)) continue;
     const content = await fsBridge.readFile(profilePath);
     if (content === null) continue;
@@ -17289,13 +19252,13 @@ async function removeShellPath(options) {
   return cleaned;
 }
 async function configureShellPath(options) {
-  const env = options.env ?? process6.env;
+  const env = options.env ?? process8.env;
   const fsBridge = options.fsBridge ?? defaultFsBridge;
-  const isPosix = options.isPosix ?? process6.platform !== "win32";
-  const resinHome = path32.resolve(options.resinHome);
-  const binDir = path32.join(resinHome, "bin");
-  const homeDir = path32.resolve(
-    options.homeDir ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir()
+  const isPosix = options.isPosix ?? process8.platform !== "win32";
+  const resinHome = path38.resolve(options.resinHome);
+  const binDir = path38.join(resinHome, "bin");
+  const homeDir = path38.resolve(
+    options.homeDir ?? (options.resinHome ? path38.basename(options.resinHome) === ".resin" ? path38.dirname(options.resinHome) : options.resinHome : void 0) ?? posixHome(env) ?? os9.homedir()
   );
   if (!isPosix) {
     return {
@@ -17307,11 +19270,11 @@ async function configureShellPath(options) {
     };
   }
   const shellRaw = options.shell ?? env.SHELL ?? "";
-  const shellName = path32.basename(shellRaw).toLowerCase();
+  const shellName = path38.basename(shellRaw).toLowerCase();
   const { candidates, defaultProfile } = resolveCandidateProfiles(shellName);
   const pathLine = resinShellPathLine(homeDir, resinHome);
   for (const candidate of candidates) {
-    const fullCandidatePath = path32.join(homeDir, candidate);
+    const fullCandidatePath = path38.join(homeDir, candidate);
     try {
       if (await fsBridge.exists(fullCandidatePath)) {
         const content = await fsBridge.readFile(fullCandidatePath);
@@ -17335,7 +19298,7 @@ async function configureShellPath(options) {
   }
   let targetFile;
   for (const candidate of candidates) {
-    const fullCandidatePath = path32.join(homeDir, candidate);
+    const fullCandidatePath = path38.join(homeDir, candidate);
     try {
       if (await fsBridge.exists(fullCandidatePath)) {
         targetFile = candidate;
@@ -17347,7 +19310,7 @@ async function configureShellPath(options) {
   if (!targetFile) {
     targetFile = defaultProfile;
   }
-  const targetFullPath = path32.join(homeDir, targetFile);
+  const targetFullPath = path38.join(homeDir, targetFile);
   const profileName = `~/${targetFile}`;
   const reloadCommand = `source ${profileName}`;
   try {
@@ -17402,9 +19365,34 @@ async function configureShellPath(options) {
     };
   }
 }
+function secureWindowsResinHome(resinHome, versionDir) {
+  const prebuildDir = path38.join(
+    versionDir,
+    "node_modules",
+    "@resin",
+    "windows-security",
+    "prebuilds",
+    `win32-${process8.arch}`
+  );
+  try {
+    useWindowsSecurityPrebuildDirectory(prebuildDir);
+  } catch {
+  }
+  try {
+    ensurePrivateDirectoryBoundary(resinHome);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? String(error.code) : void 0;
+    throw new Error(
+      `Cannot make ${resinHome} private to the current user${code ? ` (${code})` : ""}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+function posixHome(env) {
+  return process8.platform === "win32" ? void 0 : env.HOME;
+}
 async function bootstrapInstall(options = {}) {
-  const env = options.env ?? process6.env;
-  const log = options.logger ?? ((msg) => process6.stderr.write(`${msg}
+  const env = options.env ?? process8.env;
+  const log = options.logger ?? ((msg) => process8.stderr.write(`${msg}
 `));
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const isVerbose = Boolean(
@@ -17423,15 +19411,15 @@ async function bootstrapInstall(options = {}) {
     const p = options.platform;
     const normalizedArch = p.arch === "x86_64" ? "x64" : p.arch === "aarch64" ? "arm64" : p.arch;
     const isWslRequested = Boolean(p.isWsl) || p.os === "wsl";
-    const targetPlatform = p.os === "wsl" ? "linux" : p.os === "darwin" || p.os === "linux" || p.os === "win32" ? p.os : "linux";
+    const targetPlatform = p.os === "wsl" ? "linux" : p.os === "windows" ? "win32" : p.os === "darwin" || p.os === "linux" || p.os === "win32" ? p.os : "linux";
     platformInfo = detectPlatform2({
       platform: targetPlatform,
       arch: normalizedArch,
       env: options.env ? {
-        ...process6.env,
+        ...process8.env,
         ...options.env,
         RESIN_IS_WSL: isWslRequested ? "1" : options.env.RESIN_IS_WSL
-      } : process6.env
+      } : process8.env
     });
   } else {
     platformInfo = detectPlatform2();
@@ -17443,18 +19431,18 @@ async function bootstrapInstall(options = {}) {
       isWsl: platformInfo.isWsl
     });
   }
-  const homeDir = options.customHome ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir();
-  const resinHome = options.resinHome ?? env.RESIN_HOME ?? path32.join(homeDir, ".resin");
-  const downloadsDir = path32.join(resinHome, "downloads");
+  const homeDir = options.customHome ?? (options.resinHome ? path38.basename(options.resinHome) === ".resin" ? path38.dirname(options.resinHome) : options.resinHome : void 0) ?? posixHome(env) ?? os9.homedir();
+  const resinHome = options.resinHome ?? env.RESIN_HOME ?? path38.join(homeDir, ".resin");
+  const downloadsDir = path38.join(resinHome, "downloads");
   const previousActiveVersion = getActiveVersion(resinHome);
-  const isActualLoginHome = path32.resolve(homeDir) === path32.resolve(os11.homedir()) && path32.resolve(resinHome) === path32.resolve(path32.join(os11.homedir(), ".resin"));
+  const isActualLoginHome = path38.resolve(homeDir) === path38.resolve(os9.homedir()) && path38.resolve(resinHome) === path38.resolve(path38.join(os9.homedir(), ".resin"));
   const hasInjectedServiceSupervisor = Boolean(
     options.userServiceManager || options.serviceRunner || options.serviceCommandRunner
   );
   const serviceRunner = options.serviceRunner ?? options.serviceCommandRunner;
   const serviceManager = options.userServiceManager ?? createUserServiceManager({
     homeDir,
-    platform: platformInfo.os === "darwin" ? "launchd" : platformInfo.os === "wsl" ? "wsl" : "systemd",
+    platform: platformInfo.os === "darwin" ? "launchd" : platformInfo.os === "wsl" ? "wsl" : platformInfo.os === "windows" ? "windows-task" : "systemd",
     resinHome,
     fsBridge,
     runner: serviceRunner
@@ -17565,7 +19553,7 @@ async function bootstrapInstall(options = {}) {
         maxSizeBytes: release.denoAsset.sizeBytes ?? 64 * 1024 * 1024
       });
     }
-    const denoFilename = release.denoAsset.filename || path32.basename(new URL(release.denoAsset.url).pathname);
+    const denoFilename = release.denoAsset.filename || path38.basename(new URL(release.denoAsset.url).pathname);
     const denoAssetObj = {
       filename: denoFilename,
       platform: platformInfo.os,
@@ -17600,6 +19588,9 @@ async function bootstrapInstall(options = {}) {
     fsBridge,
     logger: isVerbose ? log : void 0
   });
+  if (process8.platform === "win32") {
+    secureWindowsResinHome(resinHome, installResult.versionDir);
+  }
   logVerbose(`==> Activating version v${release.version}...`);
   const switchResult = await switchActiveVersion({
     resinHome,
@@ -17608,7 +19599,11 @@ async function bootstrapInstall(options = {}) {
     logger: isVerbose ? log : void 0
   });
   logVerbose("==> Running health check on active version via public bin path...");
-  const publicBinPath = path32.join(resinHome, "bin", "resin");
+  const publicBinPath = path38.join(
+    resinHome,
+    "bin",
+    process8.platform === "win32" ? "resin.mjs" : "resin"
+  );
   const checkPath = await fsBridge.exists(publicBinPath) ? publicBinPath : installResult.entryPoints.cli;
   const healthRunner = options.healthCheckRunner ?? defaultHealthCheckRunner;
   let healthCheck;
@@ -17647,7 +19642,27 @@ async function bootstrapInstall(options = {}) {
   log(`\u2714 Verified Resin v${release.version} for ${platformInfo.platform}`);
   log(`\u2714 Installed Resin v${release.version} (${checkPath})`);
   let pathConfig;
-  if (!options.skipPathSetup) {
+  if (!options.skipPathSetup && process8.platform === "win32") {
+    const windowsPath = await addWindowsUserPath({
+      resinHome,
+      runner: options.windowsPathRunner
+    });
+    pathConfig = {
+      attempted: windowsPath.attempted,
+      updated: windowsPath.changed,
+      alreadyConfigured: windowsPath.present && !windowsPath.changed,
+      binDir: windowsPath.binDir,
+      profileName: "user PATH (HKCU\\Environment)",
+      error: windowsPath.error
+    };
+    if (windowsPath.changed) {
+      log(`\u2714 Added ${windowsPath.binDir} to your user PATH (new terminals pick it up)`);
+    } else if (windowsPath.error) {
+      log(`\u26A0 Could not add ${windowsPath.binDir} to your user PATH: ${windowsPath.error}`);
+    } else if (isVerbose) {
+      log("\u2139 PATH is already configured (user PATH)");
+    }
+  } else if (!options.skipPathSetup) {
     pathConfig = await configureShellPath({
       resinHome,
       homeDir: options.customHome,
@@ -17657,10 +19672,10 @@ async function bootstrapInstall(options = {}) {
       logger: log
     });
     if (pathConfig.updated) {
-      const displayHome = path32.resolve(
-        options.customHome ?? (options.resinHome ? path32.basename(options.resinHome) === ".resin" ? path32.dirname(options.resinHome) : options.resinHome : void 0) ?? env.HOME ?? os11.homedir()
+      const displayHome = path38.resolve(
+        options.customHome ?? (options.resinHome ? path38.basename(options.resinHome) === ".resin" ? path38.dirname(options.resinHome) : options.resinHome : void 0) ?? posixHome(env) ?? os9.homedir()
       );
-      const displayBin = resinHome === path32.join(displayHome, ".resin") ? "~/.resin/bin" : path32.join(resinHome, "bin");
+      const displayBin = resinHome === path38.join(displayHome, ".resin") ? "~/.resin/bin" : path38.join(resinHome, "bin");
       log(`\u2714 Added ${displayBin} to PATH in ${pathConfig.profileName}`);
     } else if (pathConfig.alreadyConfigured && isVerbose) {
       log(`\u2139 PATH is already configured (${pathConfig.profileName || "active environment"})`);
@@ -17682,7 +19697,7 @@ async function bootstrapInstall(options = {}) {
       }
       if (priorUnitContent === null || priorUnitContent.trim() !== targetUnitContent.trim()) {
         logVerbose("==> Updating existing service unit definition for new release...");
-        await fsBridge.mkdirp(path32.dirname(targetUnitPath));
+        await fsBridge.mkdirp(path38.dirname(targetUnitPath));
         await fsBridge.writeFile(targetUnitPath, targetUnitContent);
         unitRewritten = true;
       }
@@ -17816,6 +19831,9 @@ async function bootstrapInstall(options = {}) {
         fsBridge,
         logger: log
       });
+      if (process8.platform === "win32" && pathConfig?.updated && rollback.restoredVersion === null && !rollback.error) {
+        await removeWindowsUserPath({ resinHome, runner: options.windowsPathRunner });
+      }
       const rollbackDetail = rollback.error ? ` Rollback error: ${rollback.error}.` : "";
       throw new Error(
         `Automatic onboarding failed: ${detail}. Active version restored to ${rollback.restoredVersion ?? "none"}.${rollbackDetail} Rerun the same installer to resume; no separate Resin command is required.`
@@ -17852,17 +19870,35 @@ To get started, reload your shell or run:
   };
 }
 function isMainModule(metaUrl = import.meta.url, argv1) {
-  const targetPath = argv1 ?? (process6?.argv ? process6.argv[1] : void 0);
+  const targetPath = argv1 ?? (process8?.argv ? process8.argv[1] : void 0);
   if (!targetPath) return false;
   try {
-    const resolvedPath = path32.resolve(targetPath);
-    if (metaUrl === pathToFileURL(resolvedPath).href) return true;
-    return fs11.realpathSync(fileURLToPath2(metaUrl)) === fs11.realpathSync(resolvedPath);
+    const resolvedPath = path38.resolve(targetPath);
+    if (metaUrl === pathToFileURL2(resolvedPath).href) return true;
+    return fs16.realpathSync(fileURLToPath3(metaUrl)) === fs16.realpathSync(resolvedPath);
   } catch {
     return false;
   }
 }
-async function runCli(argv = process6.argv.slice(2)) {
+function readTrustedKeysFile(filePath) {
+  const parsed = JSON.parse(fs16.readFileSync(filePath, "utf8"));
+  const toRecord = (value) => ({
+    keyId: value instanceof Object && "keyId" in value ? value.keyId : void 0,
+    publicKeyHex: value instanceof Object && "publicKeyHex" in value ? value.publicKeyHex : void 0
+  });
+  let keys;
+  if (Array.isArray(parsed)) {
+    keys = parsed;
+  } else if (parsed instanceof Object && "signingKey" in parsed) {
+    keys = [parsed.signingKey];
+  } else if (parsed instanceof Object && "trustedKeys" in parsed && Array.isArray(parsed.trustedKeys)) {
+    keys = parsed.trustedKeys;
+  } else {
+    throw new Error(`Trusted keys file '${filePath}' has no signingKey or trustedKeys.`);
+  }
+  return JSON.stringify(keys.map(toRecord));
+}
+async function runCli(argv = process8.argv.slice(2)) {
   let channel;
   let channelUrl;
   let resinHome;
@@ -17873,6 +19909,7 @@ async function runCli(argv = process6.argv.slice(2)) {
   let isInteractive;
   let verbose = false;
   let skipPathSetup = false;
+  let trustedKeysFile;
   let json = false;
   let help = false;
   for (let i = 0; i < argv.length; i++) {
@@ -17926,12 +19963,21 @@ async function runCli(argv = process6.argv.slice(2)) {
       isInteractive = false;
     } else if (arg === "--allow-insecure-loopback") {
       allowInsecureLoopback = true;
+    } else if (arg === "--trusted-keys-file") {
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("-")) {
+        throw new Error("Missing value for argument: --trusted-keys-file");
+      }
+      trustedKeysFile = argv[++i];
+    } else if (arg.startsWith("--trusted-keys-file=")) {
+      const val = arg.slice("--trusted-keys-file=".length);
+      if (!val) throw new Error("Missing value for argument: --trusted-keys-file");
+      trustedKeysFile = val;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
   if (help) {
-    process6.stderr.write(`Resin Standalone Bootstrap Installer
+    process8.stderr.write(`Resin Standalone Bootstrap Installer
 Usage:
   node install-helper-v1.mjs [options]
 
@@ -17947,12 +19993,20 @@ Options:
   --local-only               Skip cloud pairing and configure local-only MCP
   --non-interactive          Disable interactive prompts and onboarding
   --allow-insecure-loopback  Allow HTTP on loopback for testing
+  --trusted-keys-file <path> Trust a test release key (release-trust.json or key array);
+                             only with --allow-insecure-loopback
   --help, -h                 Show this help message
 `);
-    process6.exit(0);
+    process8.exit(0);
+  }
+  if (trustedKeysFile !== void 0 && !allowInsecureLoopback) {
+    throw new Error(
+      "--trusted-keys-file is a test-only override and requires --allow-insecure-loopback."
+    );
   }
   try {
     const result = await bootstrapInstall({
+      trustedKeysJson: trustedKeysFile === void 0 ? void 0 : readTrustedKeysFile(trustedKeysFile),
       channel,
       channelUrl,
       resinHome,
@@ -17965,23 +20019,23 @@ Options:
       allowInsecureHttpForTests: allowInsecureLoopback,
       allowOverrides: channelUrl !== void 0
     });
-    process6.stdout.write(`${JSON.stringify(result, null, 2)}
+    process8.stdout.write(`${JSON.stringify(result, null, 2)}
 `);
   } catch (error) {
-    process6.stderr.write(
+    process8.stderr.write(
       `Installation failed: ${error instanceof Error ? error.message : String(error)}
 `
     );
-    process6.exit(1);
+    process8.exit(1);
   }
 }
-if (process6?.argv?.[1] && isMainModule(import.meta.url, process6.argv[1])) {
+if (process8?.argv?.[1] && isMainModule(import.meta.url, process8.argv[1])) {
   runCli().catch((err) => {
-    process6.stderr.write(
+    process8.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}
 `
     );
-    process6.exit(1);
+    process8.exit(1);
   });
 }
 export {
@@ -17998,10 +20052,12 @@ export {
   detectOnboardingSkipReason,
   isAlreadyInitialized,
   isMainModule,
+  readTrustedKeysFile,
   removeShellPath,
   resolveCandidateProfiles,
   resolveTrustedReleaseKeys,
   runCli,
+  secureWindowsResinHome,
   validateChannelUrl
 };
 /*! Bundled license information:

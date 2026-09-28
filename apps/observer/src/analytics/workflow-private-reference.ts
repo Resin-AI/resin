@@ -18,6 +18,16 @@ export function workflowPrivateReference(
 
 /** Demonstration slot holding a recorded call's callable and argument names. */
 export const WORKFLOW_CALL_IDENTITY_SLOT = "callable:v1";
+/**
+ * The shell dialect a later record proved for a call recorded with an unproven one: the executable
+ * a Codex command's end event names. Kept apart from the call's identity, which never changes.
+ */
+export const WORKFLOW_CALL_DIALECT_SLOT = "shell-dialect:v1";
+/**
+ * Set once a later record of such a call disagreed with the one that proved its dialect: the proof
+ * is revoked, whatever the dialect slot holds.
+ */
+export const WORKFLOW_CALL_DIALECT_CONFLICT_SLOT = "shell-dialect-conflict:v1";
 
 /**
  * Demonstration slot holding where the recorder placed a call among the calls it recorded,

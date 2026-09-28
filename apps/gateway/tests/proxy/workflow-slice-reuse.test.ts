@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,9 +25,14 @@ import {
 } from "@resin/runtime";
 import { expect, it } from "vitest";
 import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { posixShellAvailable, runPosixShell } from "./posix-shell.js";
 import { localCallsFor } from "./recorded-sessions.js";
 
-it("validates a selected release workflow from its full repeat and uses a fresh identifier inside the program", async () => {
+it("validates a selected release workflow from its full repeat and uses a fresh identifier inside the program", async ({
+  skip,
+}) => {
+  // The program step is a POSIX sh program: on Windows it runs only in Git for Windows' bash.
+  skip(!posixShellAvailable, "no POSIX shell (Git for Windows' bash) on this device");
   const owner = "slice-reuse-owner";
   const authorDir = mkdtempSync(path.join(tmpdir(), "resin-slice-author-"));
   const consumerDir = mkdtempSync(path.join(tmpdir(), "resin-slice-consumer-"));
@@ -94,10 +98,7 @@ it("validates a selected release workflow from its full repeat and uses a fresh 
       const release = makeResult("produce", { project }) as { id: string };
       pair(`produce-${round}`, "produce", { project }, release);
       const command = `mkdir -p release && printf '%s\\n' '${release.id}' > release/README.txt && cat release/README.txt`;
-      const printed = execFileSync("/bin/sh", ["-c", command], {
-        cwd: authorDir,
-        encoding: "utf8",
-      });
+      const printed = runPosixShell(command, { cwd: authorDir });
       pair(`program-${round}`, "bash", { command }, printed);
       pair(
         `seal-${round}`,

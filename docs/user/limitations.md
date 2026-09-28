@@ -13,7 +13,7 @@ This document specifies the supported scope, platform matrix, resource boundarie
 | **macOS** | Apple Silicon (`arm64`) | Supported | macOS 12+ (Monterey or later), Node.js >= 22.0.0 |
 | **macOS** | Intel (`x86_64`) | Supported | macOS 12+ (Monterey or later), Node.js >= 22.0.0 |
 | **Windows Subsystem for Linux** | `WSL2` (Ubuntu 22.04+) | Supported | WSL2 with systemd enabled, Node.js >= 22.0.0 |
-| **Windows Native (Win32)** | `x86_64` | Unsupported in V1 | Recommended to run inside WSL2 |
+| **Windows (native)** | `x86_64`, `arm64` | Supported | Windows 10/11, Node.js >= 22.0.0, Windows PowerShell 5.1 or PowerShell 7+ |
 
 ---
 

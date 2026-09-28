@@ -82,7 +82,8 @@ function createMockServiceManager(customUnitPath?: string): UserServiceManager {
 }
 
 describe("doctor & repair commands", () => {
-  const homeDir = "/home/testuser";
+  // Drive-qualified on Windows: doctor resolves every path it reads.
+  const homeDir = path.resolve("/home/testuser");
   const resinHome = path.join(homeDir, ".resin");
   const daemonPaths = resolvePaths({ home: homeDir });
   const lockFilePath = daemonPaths.lockFilePath;
@@ -354,7 +355,14 @@ describe("doctor & repair commands", () => {
     const ompConfigPath = path.join(homeDir, ".omp", "agent", "mcp.json");
     const codexConfigPath = path.join(homeDir, ".codex", "config.toml");
     const claudeConfigPath = path.join(homeDir, ".claude.json");
-    const resinCommand = path.join(homeDir, ".resin", "bin", "resin");
+    // Windows registers the installer's Node entry launched through node.exe (no shebang shims).
+    const resinLaunch =
+      process.platform === "win32"
+        ? {
+            command: process.execPath,
+            args: [path.join(homeDir, ".resin", "bin", "resin.mjs"), "mcp"],
+          }
+        : { command: path.join(homeDir, ".resin", "bin", "resin"), args: ["mcp"] };
     const fsBridge = createMockFsBridge({
       [ompConfigPath]: JSON.stringify({
         mcpServers: {
@@ -387,18 +395,18 @@ describe("doctor & repair commands", () => {
     });
 
     const omp = JSON.parse((await fsBridge.readFile(ompConfigPath)) ?? "{}");
-    expect(omp.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+    expect(omp.mcpServers.resin).toEqual(resinLaunch);
     expect(omp.mcpServers.custom).toEqual({ command: "custom-cmd" });
 
     const codex = await fsBridge.readFile(codexConfigPath);
     expect(codex).toContain("[mcp_servers.resin]");
-    expect(codex).toContain(`command = "${resinCommand}"`);
-    expect(codex).toContain('args = ["mcp"]');
+    expect(codex).toContain(`command = ${JSON.stringify(resinLaunch.command)}`);
+    expect(codex).toContain(`args = ${JSON.stringify(resinLaunch.args)}`);
     expect(codex).not.toContain("9400/mcp/sse");
     expect(codex).toContain("[mcp_servers.other]");
 
     const claude = JSON.parse((await fsBridge.readFile(claudeConfigPath)) ?? "{}");
-    expect(claude.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+    expect(claude.mcpServers.resin).toEqual(resinLaunch);
     expect(claude.mcpServers.other).toEqual({ command: "other-tool" });
   });
 
@@ -864,7 +872,8 @@ describe("doctor & repair commands", () => {
 });
 
 describe("doctor automatic update diagnostics", () => {
-  const homeDir = "/home/testuser";
+  // Drive-qualified on Windows: doctor resolves every path it reads.
+  const homeDir = path.resolve("/home/testuser");
   const resinHome = path.join(homeDir, ".resin");
   const configFile = resolvePaths({ home: homeDir }).configFile;
   const journalFile = path.join(resinHome, "journal.json");

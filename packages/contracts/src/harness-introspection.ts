@@ -14,9 +14,13 @@ import { type ProgramLanguage, type ProgramToken, tokenizeProgram } from "./prog
 /** Resin's MCP tool namespace as harnesses expose it: `mcp__resin__` (Codex, Claude) or `mcp__resin_` (OMP). */
 const RESIN_TOOL_NAMESPACE = /\bmcp__resin_/;
 
-/** A home directory as POSIX shells, cmd.exe and PowerShell spell it, or as normalization aliases it. */
+/**
+ * A home directory as POSIX shells, cmd.exe and PowerShell spell it, or as normalization aliases it
+ * (`$HOME` for the user's own, a `[REDACTED_USER_HOME:<tag>]` placeholder for another user's). A
+ * Windows profile matches on any drive or share, raw or JSON-escaped, with or without `\\?\`.
+ */
 const HOME =
-  /(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE|\$env:HOME|\/home\/[^/\\\s'"`]+|\/Users\/[^/\\\s'"`]+|\/root|[A-Za-z]:[\\/]+Users[\\/]+[^/\\\s'"`]+)/
+  /(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|%HOMEDRIVE%%HOMEPATH%|\$env:USERPROFILE|\$\{env:USERPROFILE\}|\$(?:env:|\{env:)HOMEDRIVE\}?\$(?:env:|\{env:)HOMEPATH\}?|\$env:HOME|\$\{env:HOME\}|\[REDACTED_USER_HOME:[0-9a-f]+\]|\/home\/[^/\\\s'"`]+|\/Users\/[^/\\\s'"`]+|\/root|[A-Za-z]:[\\/]+Users[\\/]+[^/\\\s'"`]+|\\+(?:Users|Documents and Settings)[\\/]+[^/\\\s'"`]+)/
     .source;
 
 /** Resin's and the harnesses' home state trees (`~/.resin`, `~/.codex`, `~/.omp`, `~/.claude`, `~/.claude.json`). */
@@ -104,10 +108,23 @@ const RUNNER_SUBCOMMANDS: Readonly<Record<string, Readonly<Record<string, true>>
   bun: { x: true },
 };
 
-/** Shells whose `-c` string is itself a shell program. */
-const SHELLS: Readonly<Record<string, true>> = { sh: true, bash: true, zsh: true, dash: true };
+/** Shells whose `-c` string is itself a shell program, with the grammar that program is read in. */
+const SHELLS: Readonly<Record<string, IntrospectedGrammar>> = {
+  sh: "shell",
+  bash: "shell",
+  zsh: "shell",
+  dash: "shell",
+  // Either PowerShell edition's `-Command` program; read in the wider 7+ grammar, which only adds
+  // `&&`/`||`, so a program either edition runs is looked at whole.
+  pwsh: "pwsh",
+  powershell: "pwsh",
+};
+
+/** The shell grammars whose command positions this module reads. */
+type IntrospectedGrammar = "shell" | "powershell" | "pwsh";
 
 const COMMAND_SEPARATORS: Readonly<Record<string, true>> = {
+  "\n": true,
   ";": true,
   "&&": true,
   "||": true,
@@ -122,10 +139,13 @@ const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const MAX_SHELL_DEPTH = 4;
 
 /** The simple commands of a shell program, as their word tokens; undefined when it does not tokenize. */
-function simpleCommands(source: string): ProgramToken[][] | undefined {
+function simpleCommands(
+  source: string,
+  grammar: IntrospectedGrammar,
+): ProgramToken[][] | undefined {
   let tokens: ProgramToken[];
   try {
-    tokens = tokenizeProgram("shell", source);
+    tokens = tokenizeProgram(grammar, source);
   } catch {
     return undefined;
   }
@@ -135,6 +155,8 @@ function simpleCommands(source: string): ProgramToken[][] | undefined {
   for (const token of tokens) {
     const newline = source.slice(previousEnd, token.start).includes("\n");
     previousEnd = token.end;
+    // PowerShell's call operator `&` only introduces the command it calls.
+    if (grammar !== "shell" && token.kind === "operator" && token.raw === "&") continue;
     if (newline || (token.kind === "operator" && Object.hasOwn(COMMAND_SEPARATORS, token.raw))) {
       if (current.length > 0) commands.push(current);
       current = [];
@@ -164,9 +186,13 @@ function commandIntrospects(words: readonly ProgramToken[], depth: number): bool
     const word = words[index]!;
     // Only a plain word names a program; quoting or expansion in it is never guessed through.
     if (word.kind !== "word" || word.value !== word.raw) return false;
-    const name = word.raw.slice(
+    const base = word.raw.slice(
       Math.max(word.raw.lastIndexOf("/"), word.raw.lastIndexOf("\\")) + 1,
     );
+    // A Windows executable is named with or without its extension (`codex.exe`, `resin.cmd`).
+    const name = Object.hasOwn(RESIN_EXECUTABLES, base)
+      ? base
+      : base.replace(/\.(?:exe|cmd|bat)$/iu, "").toLowerCase();
     const wrapperFlags = COMMAND_WRAPPERS[name];
     if (wrapperFlags !== undefined) {
       index += 1;
@@ -188,15 +214,24 @@ function commandIntrospects(words: readonly ProgramToken[], depth: number): bool
       while (index < words.length && words[index]!.raw.startsWith("-")) index += 1;
       continue;
     }
-    if (Object.hasOwn(SHELLS, name)) {
+    const shell = Object.hasOwn(SHELLS, name) ? SHELLS[name] : undefined;
+    if (shell !== undefined) {
       if (depth >= MAX_SHELL_DEPTH) return false;
       const flag = words
         .slice(index + 1)
-        .findIndex((next) => /^-[A-Za-z]*c[A-Za-z]*$/.test(next.raw));
+        .findIndex((next) =>
+          shell === "shell"
+            ? /^-[A-Za-z]*c[A-Za-z]*$/.test(next.raw)
+            : /^-(?:c|command)$/iu.test(next.raw),
+        );
       const script = flag === -1 ? undefined : literalText(words[index + 2 + flag]);
-      return script !== undefined && shellIntrospects(script, depth + 1);
+      return script !== undefined && shellIntrospects(script, depth + 1, shell);
     }
-    if (word.raw === name && Object.hasOwn(RESIN_EXECUTABLES, name)) return true;
+    if (
+      (word.raw === name || word.raw.toLowerCase() === `${name}.exe`) &&
+      Object.hasOwn(RESIN_EXECUTABLES, name)
+    )
+      return true;
     if (!Object.hasOwn(HARNESS_EXECUTABLES, name)) return false;
     for (let next = index + 1; next < words.length; next += 1) {
       const raw = words[next]!.raw;
@@ -208,8 +243,29 @@ function commandIntrospects(words: readonly ProgramToken[], depth: number): bool
   return false;
 }
 
-function shellIntrospects(source: string, depth: number): boolean {
-  return simpleCommands(source)?.some((words) => commandIntrospects(words, depth)) ?? false;
+function shellIntrospects(source: string, depth: number, grammar: IntrospectedGrammar): boolean {
+  return (
+    simpleCommands(source, grammar)?.some((words) => commandIntrospects(words, depth)) ?? false
+  );
+}
+
+/**
+ * Whether a cmd.exe program runs Resin or lists a harness's MCP tools. cmd is never tokenized: each
+ * command between cmd's separators is read only for a bare first word naming Resin or a harness
+ * followed by `mcp`.
+ */
+function cmdIntrospects(source: string): boolean {
+  return source.split(/[&|()\r\n]+/u).some((command) => {
+    const words = command
+      .trim()
+      .replace(/^@/u, "")
+      .split(/[ \t]+/u);
+    const name = (words[0] ?? "").replace(/^"|"$/gu, "").toLowerCase();
+    const base = name.replace(/\.(?:exe|cmd|bat)$/u, "");
+    if (Object.hasOwn(RESIN_EXECUTABLES, base) || Object.hasOwn(RESIN_EXECUTABLES, name))
+      return true;
+    return Object.hasOwn(HARNESS_EXECUTABLES, base) && words.slice(1).includes("mcp");
+  });
 }
 
 /**
@@ -227,15 +283,20 @@ export function referencesHarnessState(text: string): boolean {
 /**
  * Whether a recorded program introspects Resin or the agent harness: it names Resin's MCP tool
  * namespace, reads Resin's or a harness's home state, runs the `resin` CLI, or lists a harness's
- * MCP tools. `language` is the program's language; only a shell program has command positions.
+ * MCP tools. `language` is the program's language or grammar; only a shell program (POSIX,
+ * either PowerShell edition, or cmd.exe) has command positions.
  */
 export function isHarnessIntrospectionProgram(
   source: string,
-  language: ProgramLanguage = "shell",
+  language: ProgramLanguage | "cmd" = "shell",
 ): boolean {
   if (language === "patch") return false;
   if (referencesHarnessState(source)) return true;
-  return language === "shell" && shellIntrospects(source, 0);
+  if (language === "cmd") return cmdIntrospects(source);
+  return (
+    (language === "shell" || language === "powershell" || language === "pwsh") &&
+    shellIntrospects(source, 0, language)
+  );
 }
 
 /** Resin's own discovery meta tools; `invoke_tool` is the invocation surface and stays recorded. */

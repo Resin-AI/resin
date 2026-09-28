@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { encodeFrame } from "./ipc/framing.js";
+import { openDaemonConnection } from "./ipc/pipe-trust.js";
 import type { JsonObject } from "./normalization/redaction.js";
+import { ensurePrivateDirectory } from "./private-fs.js";
 export interface LockPayload {
   pid: number;
   startedAt: number;
@@ -114,7 +116,7 @@ function probeIpcOnce(socketPath: string, timeoutMs: number): Promise<boolean> {
   const { promise, resolve } = Promise.withResolvers<boolean>();
   const requestId = crypto.randomUUID();
   const nonce = crypto.randomUUID();
-  let socket: net.Socket | undefined;
+  let socket: Duplex | undefined;
   let responseBuffer = Buffer.alloc(0);
   let outcome: boolean | undefined;
 
@@ -132,70 +134,77 @@ function probeIpcOnce(socketPath: string, timeoutMs: number): Promise<boolean> {
   const timer = setTimeout(() => finish(false), timeoutMs);
   timer.unref?.();
 
-  try {
-    socket = net.createConnection(socketPath);
-  } catch {
-    finish(false);
-    return promise;
-  }
+  // Windows: the pipe is verified to belong to the current user on the connection used for the
+  // ping, so a pipe served by another principal is never pinged or taken for the daemon.
+  openDaemonConnection(socketPath, { timeoutMs }).then(
+    (opened) => {
+      if (outcome !== undefined) {
+        opened.destroy();
+        return;
+      }
+      attach(opened);
+    },
+    () => finish(false),
+  );
+  return promise;
 
-  socket.once("connect", () => {
-    socket?.write(
+  function attach(opened: Duplex): void {
+    socket = opened;
+    socket.write(
       encodeFrame({
         id: requestId,
         method: "ping",
         params: { nonce },
       }),
-      (error) => {
+      (error?: Error | null) => {
         if (error) finish(false);
       },
     );
-  });
-  socket.on("data", (chunk) => {
-    if (responseBuffer.length + chunk.length > MAX_IPC_PROBE_RESPONSE_BYTES + 4) {
-      finish(false);
-      return;
-    }
-
-    responseBuffer = Buffer.concat([responseBuffer, chunk]);
-    if (responseBuffer.length < 4) return;
-
-    const payloadLength = responseBuffer.readUInt32BE(0);
-    if (payloadLength > MAX_IPC_PROBE_RESPONSE_BYTES) {
-      finish(false);
-      return;
-    }
-    if (responseBuffer.length < payloadLength + 4) return;
-
-    try {
-      // SAFETY: IPC probe response body conforms to expected JSON envelope.
-      const response = JSON.parse(
-        responseBuffer.subarray(4, payloadLength + 4).toString("utf-8"),
-      ) as {
-        id?: unknown;
-        result?: { pong?: unknown; nonce?: unknown };
-        error?: { code?: unknown };
-      };
-      if (response.id !== requestId) {
+    socket.on("data", (chunk: Buffer) => {
+      if (responseBuffer.length + chunk.length > MAX_IPC_PROBE_RESPONSE_BYTES + 4) {
         finish(false);
         return;
       }
-      const authenticatedPong = response.result?.pong === true && response.result.nonce === nonce;
-      const resinAuthenticationChallenge = response.error?.code === "UNAUTHORIZED";
-      finish(authenticatedPong || resinAuthenticationChallenge);
-    } catch {
-      finish(false);
-    }
-  });
-  socket.once("error", () => finish(false));
-  socket.once("close", () => {
-    if (outcome === undefined) {
-      outcome = false;
-      clearTimeout(timer);
-    }
-    resolve(outcome);
-  });
-  return promise;
+
+      responseBuffer = Buffer.concat([responseBuffer, chunk]);
+      if (responseBuffer.length < 4) return;
+
+      const payloadLength = responseBuffer.readUInt32BE(0);
+      if (payloadLength > MAX_IPC_PROBE_RESPONSE_BYTES) {
+        finish(false);
+        return;
+      }
+      if (responseBuffer.length < payloadLength + 4) return;
+
+      try {
+        // SAFETY: IPC probe response body conforms to expected JSON envelope.
+        const response = JSON.parse(
+          responseBuffer.subarray(4, payloadLength + 4).toString("utf-8"),
+        ) as {
+          id?: unknown;
+          result?: { pong?: unknown; nonce?: unknown };
+          error?: { code?: unknown };
+        };
+        if (response.id !== requestId) {
+          finish(false);
+          return;
+        }
+        const authenticatedPong = response.result?.pong === true && response.result.nonce === nonce;
+        const resinAuthenticationChallenge = response.error?.code === "UNAUTHORIZED";
+        finish(authenticatedPong || resinAuthenticationChallenge);
+      } catch {
+        finish(false);
+      }
+    });
+    socket.once("error", () => finish(false));
+    socket.once("close", () => {
+      if (outcome === undefined) {
+        outcome = false;
+        clearTimeout(timer);
+      }
+      resolve(outcome);
+    });
+  }
 }
 
 async function probeIpcEndpoint(
@@ -281,7 +290,7 @@ export class DaemonLock {
     }
 
     const lockDir = path.dirname(this.lockPath);
-    await fs.promises.mkdir(lockDir, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(lockDir);
 
     const inspectResult = await this.inspect();
     const socketCandidates = this.getSocketCandidates(inspectResult.lockData);

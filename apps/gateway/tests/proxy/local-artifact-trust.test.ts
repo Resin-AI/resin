@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,6 +13,7 @@ import {
   signBundlePayload,
 } from "@resin/runtime";
 import { resolveDenoExecutable } from "@resin/runtime";
+import { ensureOwnerOnly } from "@resin/windows-security";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalArtifactTrustConfigurationError } from "../../src/proxy/local-artifact-trust.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
@@ -21,8 +23,23 @@ import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
 const cloudOrigin = "http://127.0.0.1:43123";
 const hasDeno = resolveDenoExecutable() !== undefined;
 
-// Local trust intentionally requires POSIX file ownership rather than guessing Windows ACLs.
-describe.skipIf(process.getuid === undefined)(
+// Local trust requires owner-only files: POSIX uid/mode bits, or on Windows an owner-only DACL.
+const windows = process.platform === "win32";
+
+/** POSIX chmod, or on Windows an equivalent DACL change (grant Everyone for loose modes). */
+function setPrivacy(target: string, mode: number, directory: boolean): void {
+  if (!windows) {
+    fs.chmodSync(target, mode);
+    return;
+  }
+  ensureOwnerOnly(target, { directory });
+  if ((mode & 0o077) !== 0) {
+    const grant = directory ? "*S-1-1-0:(OI)(CI)(M)" : "*S-1-1-0:(R)";
+    execFileSync("icacls", [target, "/grant", grant], { stdio: "ignore" });
+  }
+}
+
+describe.skipIf(process.getuid === undefined && !windows)(
   "explicit local artifact trust through runtime factory",
   () => {
     let root: string;
@@ -36,6 +53,7 @@ describe.skipIf(process.getuid === undefined)(
       root = fs.mkdtempSync(path.join(os.tmpdir(), "resin-local-trust-"));
       resinHome = path.join(root, ".resin");
       fs.mkdirSync(resinHome, { mode: 0o700 });
+      setPrivacy(resinHome, 0o700, true);
       trustFile = path.join(resinHome, "local-artifact-trust.json");
       key = generateBundleKeyPair("ed25519", "local-pinned-key");
       store = new CloudCredentialStore({
@@ -46,7 +64,13 @@ describe.skipIf(process.getuid === undefined)(
 
     afterEach(() => {
       vi.unstubAllEnvs();
-      fs.rmSync(root, { recursive: true, force: true });
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch (error) {
+        // Windows: the proxy runtime keeps its SQLite handles open after stop(), and open files
+        // cannot be deleted there; leave the temporary profile behind rather than fail the case.
+        if (!windows || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      }
     });
 
     async function persistOrigin(origin: string): Promise<void> {
@@ -232,10 +256,10 @@ describe.skipIf(process.getuid === undefined)(
 
     it("rejects group-readable trust files and writable profile directories", async () => {
       configure();
-      fs.chmodSync(trustFile, 0o640);
+      setPrivacy(trustFile, 0o640, false);
       await expect(createRuntime()).rejects.toBeInstanceOf(LocalArtifactTrustConfigurationError);
-      fs.chmodSync(trustFile, 0o600);
-      fs.chmodSync(resinHome, 0o770);
+      setPrivacy(trustFile, 0o600, false);
+      setPrivacy(resinHome, 0o770, true);
       await expect(createRuntime()).rejects.toBeInstanceOf(LocalArtifactTrustConfigurationError);
     });
 
@@ -245,7 +269,13 @@ describe.skipIf(process.getuid === undefined)(
       fs.renameSync(trustFile, outside);
       vi.stubEnv("RESIN_LOCAL_ARTIFACT_TRUST_FILE", outside);
       await expect(createRuntime()).rejects.toBeInstanceOf(LocalArtifactTrustConfigurationError);
-      fs.symlinkSync(outside, trustFile);
+      try {
+        fs.symlinkSync(outside, trustFile);
+      } catch (error) {
+        // Windows only lets privileged or developer-mode accounts create symlinks.
+        if (windows && (error as NodeJS.ErrnoException).code === "EPERM") return;
+        throw error;
+      }
       vi.stubEnv("RESIN_LOCAL_ARTIFACT_TRUST_FILE", trustFile);
       await expect(createRuntime()).rejects.toBeInstanceOf(LocalArtifactTrustConfigurationError);
     });

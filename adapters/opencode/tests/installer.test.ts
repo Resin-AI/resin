@@ -168,33 +168,55 @@ describe("OpenCode version pinning", () => {
     expect(classifyHarnessVersion("1.18.33", opencodeHarness.testedVersions)).toBe("untested");
   });
 
-  it("probes the version from the npm package owning the executable without running it", async () => {
-    const pkgDir = path.join(home, "prefix", "lib", "node_modules", "opencode-ai");
-    const bin = path.join(home, "prefix", "bin");
-    fs.mkdirSync(path.join(pkgDir, "bin"), { recursive: true });
-    fs.mkdirSync(bin, { recursive: true });
+  // POSIX npm links the bin to its package with a file symlink (needs privilege on Windows).
+  it.skipIf(process.platform === "win32")(
+    "probes the version from the npm package owning the executable without running it",
+    async () => {
+      const pkgDir = path.join(home, "prefix", "lib", "node_modules", "opencode-ai");
+      const bin = path.join(home, "prefix", "bin");
+      fs.mkdirSync(path.join(pkgDir, "bin"), { recursive: true });
+      fs.mkdirSync(bin, { recursive: true });
+      fs.writeFileSync(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({ name: "opencode-ai", version: "1.18.32" }),
+      );
+      // A binary that fails if executed proves the probe read the package metadata instead.
+      fs.writeFileSync(path.join(pkgDir, "bin", "opencode.exe"), "#!/bin/sh\nexit 1\n", {
+        mode: 0o755,
+      });
+      fs.symlinkSync(path.join(pkgDir, "bin", "opencode.exe"), path.join(bin, "opencode"));
+      const installation = await probeOpencodeInstallation({ home, env: { PATH: bin } });
+      expect(installation).toMatchObject({
+        version: "1.18.32",
+        executablePath: path.join(bin, "opencode"),
+        status: "ready",
+        metadata: { versionClassification: "tested", store: "none" },
+      });
+
+      fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+      expect(await probeOpencodeInstallation({ home, env: { PATH: bin } })).toMatchObject({
+        version: UNKNOWN_HARNESS_VERSION,
+        status: "ready",
+      });
+      expect(await probeOpencodeInstallation({ home, env: { PATH: "" } })).toBeNull();
+    },
+  );
+
+  it("probes the version beside a Windows npm shim in the global prefix", async () => {
+    const prefix = path.join(home, "npm");
+    const pkgDir = path.join(prefix, "node_modules", "opencode-ai");
+    fs.mkdirSync(pkgDir, { recursive: true });
     fs.writeFileSync(
       path.join(pkgDir, "package.json"),
       JSON.stringify({ name: "opencode-ai", version: "1.18.32" }),
     );
-    // A binary that fails if executed proves the probe read the package metadata instead.
-    fs.writeFileSync(path.join(pkgDir, "bin", "opencode.exe"), "#!/bin/sh\nexit 1\n", {
-      mode: 0o755,
-    });
-    fs.symlinkSync(path.join(pkgDir, "bin", "opencode.exe"), path.join(bin, "opencode"));
-    const installation = await probeOpencodeInstallation({ home, env: { PATH: bin } });
-    expect(installation).toMatchObject({
+    fs.writeFileSync(path.join(prefix, "opencode.cmd"), "@exit /b 1\r\n");
+    fs.writeFileSync(path.join(prefix, "opencode"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    expect(await probeOpencodeInstallation({ home, env: { PATH: prefix } })).toMatchObject({
       version: "1.18.32",
-      executablePath: path.join(bin, "opencode"),
+      executablePath: path.join(prefix, "opencode"),
       status: "ready",
-      metadata: { versionClassification: "tested", store: "none" },
+      metadata: { versionClassification: "tested" },
     });
-
-    fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
-    expect(await probeOpencodeInstallation({ home, env: { PATH: bin } })).toMatchObject({
-      version: UNKNOWN_HARNESS_VERSION,
-      status: "ready",
-    });
-    expect(await probeOpencodeInstallation({ home, env: { PATH: "" } })).toBeNull();
   });
 });

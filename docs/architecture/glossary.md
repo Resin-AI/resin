@@ -49,7 +49,7 @@ The local background MCP server component within the **Local Daemon** that acts 
 ---
 
 ### Harness Adapter
-A dedicated integration module (e.g., `@resin/adapter-claude-code`, `@resin/adapter-codex`, `@resin/adapter-omp`) that normalizes transport differences, configuration formats, and session lifecycles between specific external AI coding harnesses and the **Gateway**. See [ADR 0003](../adr/0003-supported-harnesses-and-platforms.md).
+A dedicated integration module (e.g., `@resin/adapter-claude-code`, `@resin/adapter-codex`, `@resin/adapter-omp`) that normalizes transport differences, configuration formats, and session lifecycles between specific external AI coding harnesses and the **Gateway**. See [ADR 0014](../adr/0014-native-windows-support.md).
 
 ---
 

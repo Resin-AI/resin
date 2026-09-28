@@ -10,6 +10,10 @@ import { CLAUDE_GUIDANCE_MARKERS } from "@resin/adapter-claude-code";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { removeHarnessMcpConfigurations } from "../../src/commands/uninstall.js";
 import {
+  resolveHarnessMcpLaunch,
+  resolveInstalledResinMcpCommand,
+} from "../../src/installer/harness-config.js";
+import {
   HarnessReconciler,
   ReconciliationNodeFsBridge,
 } from "../../src/installer/harness-reconciler.js";
@@ -43,7 +47,8 @@ describe("Claude Code registration on a temporary HOME", () => {
     await fs.writeFile(configPath, JSON.stringify({ numStartups: 3, mcpServers: { other: {} } }));
     await fs.mkdir(path.dirname(guidancePath));
     await fs.writeFile(guidancePath, "# My rules\n");
-    const env = { HOME: home };
+    // Windows resolves the harness home from USERPROFILE and ignores HOME.
+    const env = { HOME: home, USERPROFILE: home };
 
     const first = await reconcile(env);
     expect(first.results[0]).toMatchObject({
@@ -54,10 +59,9 @@ describe("Claude Code registration on a temporary HOME", () => {
     const config = JSON.parse(await fs.readFile(configPath, "utf8"));
     expect(config.numStartups).toBe(3);
     expect(config.mcpServers.other).toEqual({});
-    expect(config.mcpServers.resin).toEqual({
-      command: path.join(home, ".resin", "bin", "resin"),
-      args: ["mcp"],
-    });
+    expect(config.mcpServers.resin).toEqual(
+      resolveHarnessMcpLaunch({ command: resolveInstalledResinMcpCommand(home) }),
+    );
     const guidance = await fs.readFile(guidancePath, "utf8");
     expect(guidance.startsWith(`# My rules\n\n${CLAUDE_GUIDANCE_MARKERS.start}\n`)).toBe(true);
     expect(guidance.endsWith(`${CLAUDE_GUIDANCE_MARKERS.end}\n`)).toBe(true);
@@ -74,14 +78,14 @@ describe("Claude Code registration on a temporary HOME", () => {
 
   it("follows CLAUDE_CONFIG_DIR and removes the config and guidance Resin created there", async () => {
     const configDir = path.join(home, "profile");
-    const env = { HOME: home, CLAUDE_CONFIG_DIR: configDir };
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: configDir };
 
     await reconcile(env);
     const configPath = path.join(configDir, ".claude.json");
     const guidancePath = path.join(configDir, "CLAUDE.md");
-    expect(JSON.parse(await fs.readFile(configPath, "utf8")).mcpServers.resin.args).toEqual([
-      "mcp",
-    ]);
+    expect(JSON.parse(await fs.readFile(configPath, "utf8")).mcpServers.resin.args).toEqual(
+      resolveHarnessMcpLaunch({ command: resolveInstalledResinMcpCommand(home) }).args,
+    );
     expect(await fs.readFile(guidancePath, "utf8")).toContain(CLAUDE_GUIDANCE_MARKERS.start);
     await expect(fs.access(path.join(home, ".claude.json"))).rejects.toThrow();
 

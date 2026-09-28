@@ -16,6 +16,11 @@ import {
 } from "../../src/installer/asset-downloader.js";
 import type { ReleaseProvenance } from "../../src/installer/release-client.js";
 
+/** A published global command: a symlink on POSIX, a `.cmd` launcher on Windows. */
+function globalLauncherPath(resinHome: string, name: string): string {
+  return path.join(resinHome, "bin", process.platform === "win32" ? `${name}.cmd` : name);
+}
+
 /**
  * Creates an in-memory .tar.gz archive buffer from a list of files.
  */
@@ -363,7 +368,12 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     // Replace regular file with symlink
     const targetCli = path.join(resinHome, "versions", "v1.0.0", "bin", "resin");
     fs.unlinkSync(targetCli);
-    fs.symlinkSync("/bin/sh", targetCli);
+    if (process.platform === "win32") {
+      // Unprivileged Windows users cannot create file symlinks; a junction is a link as well.
+      fs.symlinkSync(os.tmpdir(), targetCli, "junction");
+    } else {
+      fs.symlinkSync("/bin/sh", targetCli);
+    }
 
     await expect(
       installReleaseVersion({
@@ -506,7 +516,7 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     expect(getActiveVersion(resinHome)).toBe("1.0.0");
 
     // Global bin points to v1.0.0
-    const globalCli = path.join(resinHome, "bin", "resin");
+    const globalCli = globalLauncherPath(resinHome, "resin");
     expect(fs.existsSync(globalCli)).toBe(true);
   });
 
@@ -565,10 +575,9 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     expect(getActiveVersion(resinHome)).toBe("2.0.0");
 
     // Verify all global binaries belong to v2.0.0
-    const globalBinDir = path.join(resinHome, "bin");
-    const globalCli = path.join(globalBinDir, "resin");
-    const globalDaemon = path.join(globalBinDir, "resin-daemon");
-    const globalMcp = path.join(globalBinDir, "resin-mcp");
+    const globalCli = globalLauncherPath(resinHome, "resin");
+    const globalDaemon = globalLauncherPath(resinHome, "resin-daemon");
+    const globalMcp = globalLauncherPath(resinHome, "resin-mcp");
     expect(fs.existsSync(globalCli)).toBe(true);
     expect(fs.existsSync(globalDaemon)).toBe(true);
     expect(fs.existsSync(globalMcp)).toBe(false);
@@ -633,7 +642,7 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     const currentTarget = fs.readlinkSync(path.join(resinHome, "current"));
     expect(currentTarget).toContain("v1.0.0");
     expect(fs.existsSync(path.join(v1Dir, "version.json"))).toBe(true);
-    const globalCli = path.join(resinHome, "bin", "resin");
+    const globalCli = globalLauncherPath(resinHome, "resin");
     expect(fs.existsSync(globalCli)).toBe(true);
 
     // Missing version.json must fail closed and reject activation
@@ -704,9 +713,13 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     expect(getActiveVersion(resinHome)).toBe("1.0.0");
 
     // Global bin was restored to v1.0.0 from backup
-    const globalCli = path.join(resinHome, "bin", "resin");
+    const globalCli = globalLauncherPath(resinHome, "resin");
     expect(fs.existsSync(globalCli)).toBe(true);
-    const globalTarget = fs.readlinkSync(globalCli);
+    // Windows launchers are batch files naming the release instead of symlinks into it.
+    const globalTarget =
+      process.platform === "win32"
+        ? fs.readFileSync(globalCli, "utf8")
+        : fs.readlinkSync(globalCli);
     expect(globalTarget).toContain("v1.0.0");
     expect(globalTarget).not.toContain("v2.0.0");
   });

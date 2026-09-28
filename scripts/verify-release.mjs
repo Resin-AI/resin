@@ -16,15 +16,21 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { resolveReleaseMilestones } from "./generate-release-evidence.mjs";
 import {
   PLATFORMS,
   RELEASE_VERSION,
+  WINDOWS_PE_MACHINE,
+  WINDOWS_PREBUILD_FILES,
   canonicalJson,
   extractTarEntries,
   fileSha256,
   isForbiddenReleasePath,
+  isWindowsPrebuildPlaceholder,
   packageRelease,
+  readPeMachine,
+  windowsCmdLauncher,
 } from "./package-release.mjs";
 import { loadTrustedReleaseKeysFromEnv, verifyReleasePayloadSignature } from "./release-trust.mjs";
 
@@ -92,13 +98,10 @@ export const PROPRIETARY_CLOUD_IDENTIFIERS = Object.freeze([
 export const ALLOWED_RELEASE_BINARIES = Object.freeze([
   "resin/bin/resin",
   "resin/bin/resin.cmd",
-  "resin/bin/resin.ps1",
   "resin/bin/resin-daemon",
   "resin/bin/resin-daemon.cmd",
-  "resin/bin/resin-daemon.ps1",
   "resin/bin/resin-gateway",
   "resin/bin/resin-gateway.cmd",
-  "resin/bin/resin-gateway.ps1",
   "resin/bin/cli.js",
   "resin/bin/daemon.js",
   "resin/bin/gateway.js",
@@ -106,7 +109,6 @@ export const ALLOWED_RELEASE_BINARIES = Object.freeze([
   "resin/bin/resin-linux-arm64",
   "resin/bin/resin-darwin-x64",
   "resin/bin/resin-darwin-arm64",
-  "resin/bin/resin-windows-x64.exe",
   "resin/bin/resin-wsl",
 ]);
 
@@ -148,6 +150,7 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
       "@resin/contracts",
       "@resin/harness-contracts",
       "@resin/db",
+      "@resin/windows-security",
       "@resin/adapter-claude-code",
       "@resin/adapter-codex",
       "@resin/adapter-omp",
@@ -169,6 +172,7 @@ export function loadBoundaryManifest(rootDir = process.cwd()) {
       "@resin/contracts",
       "@resin/harness-contracts",
       "@resin/db",
+      "@resin/windows-security",
       "@resin/adapter-claude-code",
       "@resin/adapter-codex",
       "@resin/adapter-omp",
@@ -362,6 +366,7 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
     "contracts",
     "harness-contracts",
     "db",
+    "windows-security",
   ]);
   const allowedAdapterDirs = new Set([
     "claude-code",
@@ -411,11 +416,7 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
     } else if (topSegment === "bin") {
       const isAllowedBin =
         allowedBins.has(normalized) ||
-        PLATFORMS.some(
-          (p) =>
-            normalized === `resin/bin/resin-${p.id}` ||
-            normalized === `resin/bin/resin-${p.id}.exe`,
-        );
+        PLATFORMS.some((p) => p.os !== "win32" && normalized === `resin/bin/resin-${p.id}`);
       if (!isAllowedBin) {
         violations.push({
           rule: "UNEXPECTED_BINARY",
@@ -488,6 +489,92 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
 
   return violations;
 }
+const WINDOWS_PREBUILD_PATH_PATTERN =
+  /^resin\/(?:node_modules\/@resin\/windows-security|packages\/windows-security)\/prebuilds\//;
+
+/**
+ * Lane-specific contents: native Windows artifacts must carry the `.cmd` launchers and exactly
+ * their own architecture's `@resin/windows-security` prebuilds (real PE images; marked
+ * placeholders only in test-only verification). Every other artifact carries neither.
+ * @returns {Array<{ rule: string, file: string, message: string }>}
+ */
+export function verifyPlatformNativeEntries(entries, platform, options = {}) {
+  const violations = [];
+  const byName = new Map(entries.map((entry) => [entry.name.replace(/\\/g, "/"), entry]));
+  const prebuildNames = [...byName.keys()].filter((name) =>
+    WINDOWS_PREBUILD_PATH_PATTERN.test(name),
+  );
+  const launcherNames = [...byName.keys()].filter((name) => /^resin\/bin\/.+\.cmd$/.test(name));
+
+  if (platform.os !== "win32") {
+    for (const name of [...prebuildNames, ...launcherNames]) {
+      violations.push({
+        rule: "UNEXPECTED_WINDOWS_ENTRY",
+        file: platform.filename,
+        message: `Non-Windows release tarball ${platform.filename} contains Windows-only entry '${name}'.`,
+      });
+    }
+    return violations;
+  }
+
+  for (const name of ["resin", "resin-daemon", "resin-gateway"]) {
+    const launcher = byName.get(`resin/bin/${name}.cmd`);
+    const entry = byName.get(`resin/bin/${name}`);
+    if (!launcher || !entry) {
+      violations.push({
+        rule: "MISSING_WINDOWS_LAUNCHER",
+        file: platform.filename,
+        message: `Windows release tarball ${platform.filename} is missing resin/bin/${name}${launcher ? "" : ".cmd"}.`,
+      });
+    } else if (
+      (launcher.content || Buffer.alloc(0)).toString("utf8") !== windowsCmdLauncher(name)
+    ) {
+      violations.push({
+        rule: "INVALID_WINDOWS_LAUNCHER",
+        file: platform.filename,
+        message: `Windows release tarball ${platform.filename} has an unexpected resin/bin/${name}.cmd launcher.`,
+      });
+    }
+  }
+
+  const ownPrefix = `resin/node_modules/@resin/windows-security/prebuilds/win32-${platform.arch}/`;
+  for (const fileName of WINDOWS_PREBUILD_FILES) {
+    const entry = byName.get(`${ownPrefix}${fileName}`);
+    const content = entry?.content || Buffer.alloc(0);
+    if (!entry || content.length === 0) {
+      violations.push({
+        rule: "MISSING_WINDOWS_PREBUILD",
+        file: platform.filename,
+        message: `Windows release tarball ${platform.filename} is missing ${ownPrefix}${fileName}.`,
+      });
+    } else if (isWindowsPrebuildPlaceholder(content)) {
+      if (options.allowTestEvidence !== true) {
+        violations.push({
+          rule: "PLACEHOLDER_WINDOWS_PREBUILD",
+          file: platform.filename,
+          message: `Windows release tarball ${platform.filename} contains a test-only placeholder for ${fileName}.`,
+        });
+      }
+    } else if (readPeMachine(content) !== WINDOWS_PE_MACHINE[platform.arch]) {
+      violations.push({
+        rule: "WRONG_ARCH_WINDOWS_PREBUILD",
+        file: platform.filename,
+        message: `Windows release tarball ${platform.filename} entry ${ownPrefix}${fileName} is not a win32-${platform.arch} PE image.`,
+      });
+    }
+  }
+  for (const name of prebuildNames) {
+    if (!name.includes(`/prebuilds/win32-${platform.arch}/`)) {
+      violations.push({
+        rule: "FOREIGN_ARCH_WINDOWS_PREBUILD",
+        file: platform.filename,
+        message: `Windows release tarball ${platform.filename} contains another architecture's prebuild '${name}'.`,
+      });
+    }
+  }
+  return violations;
+}
+
 /**
  * Validates existence of all required release artifact files and legal notices.
  * @param {string} releaseDir
@@ -572,6 +659,7 @@ export function verifyReleaseFiles(releaseDir, options = {}) {
             ...options,
           });
           violations.push(...tarViolations);
+          violations.push(...verifyPlatformNativeEntries(entries, platform, options));
         } catch (err) {
           violations.push({
             rule: "CORRUPT_TARBALL",
@@ -1608,7 +1696,7 @@ export function verifyRelease(options = {}) {
 // CLI Execution
 if (
   process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
 ) {
   const rootDir = process.cwd();
   const defaultReleaseDir = path.resolve(rootDir, `dist/release/v${RELEASE_VERSION}`);

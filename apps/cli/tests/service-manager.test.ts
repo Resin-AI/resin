@@ -104,59 +104,67 @@ describe("SystemdUserServiceManager", () => {
   const homeDir = "/home/testuser";
   const resinHome = "/home/testuser/.resin";
 
-  it("generates correct systemd service definition for native binary", () => {
-    const manager = new SystemdUserServiceManager({
-      homeDir,
-      resinHome,
-      nodePath: "/home/testuser/.local/bin/node",
-    });
-    const def = manager.getUnitDefinition({
-      daemonPath: "/home/testuser/.resin/bin/resin-daemon",
-    });
-    const execStart = def.match(/^ExecStart=(.*)$/m)?.[1]?.split(" ");
+  // POSIX-only: systemd/launchd unit generation with POSIX paths; Windows uses a scheduled task.
+  it.skipIf(process.platform === "win32")(
+    "generates correct systemd service definition for native binary",
+    () => {
+      const manager = new SystemdUserServiceManager({
+        homeDir,
+        resinHome,
+        nodePath: "/home/testuser/.local/bin/node",
+      });
+      const def = manager.getUnitDefinition({
+        daemonPath: "/home/testuser/.resin/bin/resin-daemon",
+      });
+      const execStart = def.match(/^ExecStart=(.*)$/m)?.[1]?.split(" ");
 
-    expect(def).toContain("[Unit]");
-    expect(def).toContain("Description=Resin Daemon");
-    expect(execStart).toEqual([
-      "/home/testuser/.local/bin/node",
-      expect.stringMatching(/\/index\.js$/),
-      SERVICE_SUPERVISOR_COMMAND,
-      "--resin-home",
-      resinHome,
-      "--",
-      "/home/testuser/.resin/bin/resin-daemon",
-      "--foreground",
-    ]);
-    expect(def).toContain("Environment=RESIN_HOME=/home/testuser/.resin");
-    expect(def).toContain("Environment=NODE_ENV=production");
-    expect(def).toMatch(/Environment="?PATH=\/home\/testuser\/\.local\/bin/);
-    expect(def).toContain("Restart=on-failure");
-    expect(def).toContain("WantedBy=default.target");
-  });
+      expect(def).toContain("[Unit]");
+      expect(def).toContain("Description=Resin Daemon");
+      expect(execStart).toEqual([
+        "/home/testuser/.local/bin/node",
+        expect.stringMatching(/\/index\.js$/),
+        SERVICE_SUPERVISOR_COMMAND,
+        "--resin-home",
+        resinHome,
+        "--",
+        "/home/testuser/.resin/bin/resin-daemon",
+        "--foreground",
+      ]);
+      expect(def).toContain("Environment=RESIN_HOME=/home/testuser/.resin");
+      expect(def).toContain("Environment=NODE_ENV=production");
+      expect(def).toMatch(/Environment="?PATH=\/home\/testuser\/\.local\/bin/);
+      expect(def).toContain("Restart=on-failure");
+      expect(def).toContain("WantedBy=default.target");
+    },
+  );
 
-  it("generates correct systemd service definition for Node.js JS script", () => {
-    const manager = new SystemdUserServiceManager({
-      homeDir,
-      resinHome,
-      nodePath: "/usr/bin/node",
-    });
-    const def = manager.getUnitDefinition({
-      daemonPath: "/home/testuser/.resin/dist/daemon.js",
-    });
-    const execStart = def.match(/^ExecStart=(.*)$/m)?.[1]?.split(" ");
+  // POSIX-only: systemd/launchd unit generation with POSIX paths; Windows uses a scheduled task.
+  it.skipIf(process.platform === "win32")(
+    "generates correct systemd service definition for Node.js JS script",
+    () => {
+      const manager = new SystemdUserServiceManager({
+        homeDir,
+        resinHome,
+        nodePath: "/usr/bin/node",
+      });
+      const def = manager.getUnitDefinition({
+        daemonPath: "/home/testuser/.resin/dist/daemon.js",
+      });
+      const execStart = def.match(/^ExecStart=(.*)$/m)?.[1]?.split(" ");
 
-    expect(execStart).toEqual([
-      "/usr/bin/node",
-      expect.stringMatching(/\/index\.js$/),
-      SERVICE_SUPERVISOR_COMMAND,
-      "--resin-home",
-      resinHome,
-      "--",
-      "/usr/bin/node",
-      "/home/testuser/.resin/dist/daemon.js",
-      "--foreground",
-    ]);
-  });
+      expect(execStart).toEqual([
+        "/usr/bin/node",
+        expect.stringMatching(/\/index\.js$/),
+        SERVICE_SUPERVISOR_COMMAND,
+        "--resin-home",
+        resinHome,
+        "--",
+        "/usr/bin/node",
+        "/home/testuser/.resin/dist/daemon.js",
+        "--foreground",
+      ]);
+    },
+  );
 
   it("installs systemd service, reloads daemon, enables and starts service", async () => {
     const fsBridge = createMockFsBridge();

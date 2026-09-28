@@ -1,6 +1,12 @@
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  WINDOWS_PIPE_PREFIX,
+  canonicalLocalPipeName,
+  currentUserSid,
+  windowsDaemonPipeName,
+} from "@resin/windows-security";
+import { ensurePrivateDirectory, ensurePrivateDirectorySync } from "./private-fs.js";
 
 export interface DaemonPaths {
   readonly homeDir: string;
@@ -26,6 +32,11 @@ export interface PathResolutionOptions {
   lockFilePath?: string;
   pidFilePath?: string;
   configFile?: string;
+  /**
+   * SID used to derive the Windows daemon pipe name. Defaults to the current user's SID on
+   * Windows; required when simulating `platform: "win32"` elsewhere.
+   */
+  windowsUserSid?: string;
 }
 
 /**
@@ -91,20 +102,22 @@ export function resolvePaths(options: PathResolutionOptions = {}): DaemonPaths {
   const baseStateDir = path.join(baseHomeDir, "state");
   const baseLogDir = path.join(baseHomeDir, "logs");
 
-  const defaultSocketPath =
-    platform === "win32" ? "\\\\.\\pipe\\resin-daemon" : path.join(baseStateDir, "daemon.sock");
+  const override = options.socketPath ?? env.RESIN_SOCKET_PATH;
+  let socketPath: string;
+  if (platform === "win32") {
+    socketPath =
+      override !== undefined
+        ? (canonicalLocalPipeName(override) ?? path.resolve(override))
+        : windowsDaemonPipeName(baseHomeDir, windowsUserSidFor(options.windowsUserSid));
+  } else {
+    socketPath = path.resolve(override ?? path.join(baseStateDir, "daemon.sock"));
+  }
 
   // Apply environment variable and options overrides
   const configDir = path.resolve(options.configDir ?? env.RESIN_CONFIG_DIR ?? baseConfigDir);
   const dataDir = path.resolve(options.dataDir ?? env.RESIN_DATA_DIR ?? baseDataDir);
   const stateDir = path.resolve(options.stateDir ?? env.RESIN_STATE_DIR ?? baseStateDir);
   const logDir = path.resolve(options.logDir ?? env.RESIN_LOG_DIR ?? baseLogDir);
-
-  let socketPath = options.socketPath ?? env.RESIN_SOCKET_PATH ?? defaultSocketPath;
-  // If not a Windows named pipe, resolve to absolute path
-  if (platform !== "win32" || !socketPath.startsWith("\\\\.\\pipe\\")) {
-    socketPath = path.resolve(socketPath);
-  }
 
   const lockFilePath = path.resolve(
     options.lockFilePath ?? env.RESIN_LOCK_FILE ?? path.join(stateDir, "daemon.lock"),
@@ -129,6 +142,16 @@ export function resolvePaths(options: PathResolutionOptions = {}): DaemonPaths {
   };
 }
 
+function windowsUserSidFor(explicit: string | undefined): string {
+  if (explicit !== undefined) return explicit;
+  if (process.platform !== "win32") {
+    throw new Error(
+      "Resolving the Windows daemon pipe name needs the user's SID; pass windowsUserSid when simulating win32.",
+    );
+  }
+  return currentUserSid();
+}
+
 export function getDaemonPaths(options?: PathResolutionOptions): DaemonPaths {
   return resolvePaths(options);
 }
@@ -139,13 +162,12 @@ export function getDaemonPaths(options?: PathResolutionOptions): DaemonPaths {
 export async function ensureDaemonDirectories(paths: DaemonPaths): Promise<void> {
   const dirs = [paths.homeDir, paths.configDir, paths.dataDir, paths.stateDir, paths.logDir];
   for (const dir of dirs) {
-    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(dir);
   }
 
   // Ensure socket directory exists if socket path is a filesystem path
-  if (!paths.socketPath.startsWith("\\\\.\\pipe\\")) {
-    const socketDir = path.dirname(paths.socketPath);
-    await fs.promises.mkdir(socketDir, { recursive: true, mode: 0o700 });
+  if (!paths.socketPath.startsWith(WINDOWS_PIPE_PREFIX)) {
+    await ensurePrivateDirectory(path.dirname(paths.socketPath));
   }
 }
 
@@ -155,11 +177,10 @@ export async function ensureDaemonDirectories(paths: DaemonPaths): Promise<void>
 export function ensureDaemonDirectoriesSync(paths: DaemonPaths): void {
   const dirs = [paths.homeDir, paths.configDir, paths.dataDir, paths.stateDir, paths.logDir];
   for (const dir of dirs) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(dir);
   }
 
-  if (!paths.socketPath.startsWith("\\\\.\\pipe\\")) {
-    const socketDir = path.dirname(paths.socketPath);
-    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  if (!paths.socketPath.startsWith(WINDOWS_PIPE_PREFIX)) {
+    ensurePrivateDirectorySync(path.dirname(paths.socketPath));
   }
 }

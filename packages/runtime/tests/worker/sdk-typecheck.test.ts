@@ -3,7 +3,11 @@ import ts from "typescript";
 import { expect, it } from "vitest";
 
 it("accepts typed and inferred handlers through the published runtime declarations", () => {
-  const fileName = fileURLToPath(new URL("./typed-sdk-consumer.mts", import.meta.url));
+  // TypeScript hands the compiler host `/`-separated paths on every platform.
+  const fileName = fileURLToPath(new URL("./typed-sdk-consumer.mts", import.meta.url)).replaceAll(
+    "\\",
+    "/",
+  );
   const source = `
     import { defineTool, type ToolContext } from "@resin/runtime";
     type Input = { path: string };

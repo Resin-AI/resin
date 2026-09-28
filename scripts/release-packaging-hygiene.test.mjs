@@ -13,6 +13,8 @@ import {
   PLATFORMS,
   PUBLIC_RELEASE_PACKAGES,
   RELEASE_VERSION,
+  WINDOWS_PE_MACHINE,
+  WINDOWS_PREBUILD_FILES,
   assertCleanProductionDist,
   assertInstallHelperTrustRoot,
   assertNoForbiddenReleaseArtifacts,
@@ -26,11 +28,38 @@ import {
   gzipDeterministic,
   isForbiddenReleasePath,
   isProductionDistFile,
+  isWindowsPrebuildPlaceholder,
+  readPeMachine,
   resolvePublicReleasePackages,
+  resolveWindowsPrebuilds,
+  windowsCmdLauncher,
   writeCliReleaseTrustBundle,
 } from "./package-release.mjs";
 import { createTestReleaseSigningKey } from "./release-trust.mjs";
-import { verifyReleaseFiles } from "./verify-release.mjs";
+import { verifyPlatformNativeEntries, verifyReleaseFiles } from "./verify-release.mjs";
+
+/** Minimal PE image header with the given COFF machine type. */
+function fakePeImage(machine, marker = "") {
+  const buffer = Buffer.alloc(0x100);
+  buffer.write("MZ", 0, "latin1");
+  buffer.writeUInt32LE(0x80, 0x3c);
+  buffer.writeUInt32LE(0x00004550, 0x80);
+  buffer.writeUInt16LE(machine, 0x84);
+  buffer.write(marker, 0xa0, "latin1");
+  return buffer;
+}
+
+function writeFakeWindowsPrebuilds(dir, archs = ["x64", "arm64"]) {
+  for (const arch of archs) {
+    fs.mkdirSync(path.join(dir, `win32-${arch}`), { recursive: true });
+    for (const fileName of WINDOWS_PREBUILD_FILES) {
+      fs.writeFileSync(
+        path.join(dir, `win32-${arch}`, fileName),
+        fakePeImage(WINDOWS_PE_MACHINE[arch], `${arch}/${fileName}`),
+      );
+    }
+  }
+}
 
 describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
   const rootDir = process.cwd();
@@ -243,6 +272,8 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
     it("createPlatformReleaseTarballs packages release with non-destructive guarantees", async () => {
       const outputDir = path.join(tempDir, "release-output");
       fs.mkdirSync(outputDir, { recursive: true });
+      const prebuildsDir = path.join(tempDir, "windows-prebuilds");
+      writeFakeWindowsPrebuilds(prebuildsDir);
 
       // Building every platform tarball is long synchronous CPU work; a child process keeps this
       // test worker responsive to the runner, which otherwise times out its RPC.
@@ -257,7 +288,7 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
           "-e",
           [
             `const { createPlatformReleaseTarballs } = await import(${JSON.stringify(packageRelease)});`,
-            `const result = createPlatformReleaseTarballs(${JSON.stringify(rootDir)}, ${JSON.stringify(outputDir)});`,
+            `const result = createPlatformReleaseTarballs(${JSON.stringify(rootDir)}, ${JSON.stringify(outputDir)}, { testOnly: true, windowsPrebuildsDir: ${JSON.stringify(prebuildsDir)} });`,
             `(await import("node:fs")).writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify(result));`,
           ].join("\n"),
         ],
@@ -288,8 +319,99 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
         expect(() => {
           assertNoForbiddenReleaseArtifacts(entries, platform.filename);
         }).not.toThrow();
+
+        const byName = new Map(entries.map((entry) => [entry.name, entry]));
+        const platformJson = JSON.parse(byName.get("resin/platform.json").content.toString());
+        expect(platformJson).toMatchObject({ platform: platform.os, arch: platform.arch });
+        expect(verifyPlatformNativeEntries(entries, platform)).toEqual([]);
+        if (platform.os === "win32") {
+          expect(platform.filename).toBe(`resin-v${RELEASE_VERSION}-${platform.id}.tar.gz`);
+          for (const name of ["resin", "resin-daemon", "resin-gateway"]) {
+            expect(byName.get(`resin/bin/${name}.cmd`).content.toString()).toBe(
+              windowsCmdLauncher(name),
+            );
+          }
+          for (const fileName of WINDOWS_PREBUILD_FILES) {
+            const prebuild = byName.get(
+              `resin/node_modules/@resin/windows-security/prebuilds/win32-${platform.arch}/${fileName}`,
+            );
+            expect(readPeMachine(prebuild.content)).toBe(WINDOWS_PE_MACHINE[platform.arch]);
+            expect(prebuild.content.toString("latin1")).toContain(`${platform.arch}/${fileName}`);
+          }
+          expect(
+            entryNames.some((n) => /resin-win32-|\.exe$/.test(n) && n.startsWith("resin/bin/")),
+          ).toBe(false);
+        } else {
+          expect(entryNames.some((n) => n.endsWith(".cmd"))).toBe(false);
+          expect(entryNames.some((n) => n.includes("/prebuilds/"))).toBe(false);
+          expect(byName.get(`resin/bin/resin-${platform.os}-${platform.arch}`)).toBeDefined();
+        }
       }
     }, 240_000);
+
+    it("requires real, matching-architecture Windows prebuilds outside test-only packaging", () => {
+      const missingDir = path.join(tempDir, "prebuilds-missing");
+      writeFakeWindowsPrebuilds(missingDir, ["x64"]);
+      expect(() => resolveWindowsPrebuilds(rootDir, { prebuildsDir: missingDir })).toThrow(
+        /windows-arm64 requires @resin\/windows-security prebuilds, missing win32-arm64\/resin_windows_security\.node, win32-arm64\/resin-service-host\.exe/,
+      );
+
+      const swappedDir = path.join(tempDir, "prebuilds-swapped");
+      writeFakeWindowsPrebuilds(swappedDir);
+      fs.copyFileSync(
+        path.join(swappedDir, "win32-x64", "resin-service-host.exe"),
+        path.join(swappedDir, "win32-arm64", "resin-service-host.exe"),
+      );
+      expect(() => resolveWindowsPrebuilds(rootDir, { prebuildsDir: swappedDir })).toThrow(
+        /is not a win32-arm64 PE image \(machine 0x8664\)/,
+      );
+
+      const logs = [];
+      const testOnly = resolveWindowsPrebuilds(rootDir, {
+        prebuildsDir: missingDir,
+        testOnly: true,
+        logger: (message) => logs.push(message),
+      });
+      expect(testOnly.get("x64").placeholder).toBe(false);
+      expect(testOnly.get("arm64").placeholder).toBe(true);
+      expect(
+        isWindowsPrebuildPlaceholder(testOnly.get("arm64").files.get("resin-service-host.exe")),
+      ).toBe(true);
+      expect(logs.join("\n")).toContain("placeholder Windows prebuilds for win32-arm64");
+    });
+
+    it("verifyPlatformNativeEntries rejects placeholders, foreign architectures and stray launchers", () => {
+      const windows = PLATFORMS.find((platform) => platform.id === "windows-x64");
+      const linux = PLATFORMS.find((platform) => platform.id === "linux-x64");
+      const prefix = "resin/node_modules/@resin/windows-security/prebuilds";
+      const base = ["resin", "resin-daemon", "resin-gateway"].flatMap((name) => [
+        { name: `resin/bin/${name}`, content: Buffer.from("import '../x.js';\n") },
+        { name: `resin/bin/${name}.cmd`, content: Buffer.from(windowsCmdLauncher(name)) },
+      ]);
+      const placeholder = Buffer.from("RESIN-TEST-ONLY-WINDOWS-PREBUILD-PLACEHOLDER x\n");
+      const entries = [
+        ...base,
+        { name: `${prefix}/win32-x64/resin_windows_security.node`, content: placeholder },
+        { name: `${prefix}/win32-x64/resin-service-host.exe`, content: fakePeImage(0xaa64) },
+        { name: `${prefix}/win32-arm64/resin-service-host.exe`, content: fakePeImage(0xaa64) },
+      ];
+      const rules = verifyPlatformNativeEntries(entries, windows).map((v) => v.rule);
+      expect(rules).toEqual([
+        "PLACEHOLDER_WINDOWS_PREBUILD",
+        "WRONG_ARCH_WINDOWS_PREBUILD",
+        "FOREIGN_ARCH_WINDOWS_PREBUILD",
+      ]);
+      expect(
+        verifyPlatformNativeEntries(entries, windows, { allowTestEvidence: true }).map(
+          (v) => v.rule,
+        ),
+      ).not.toContain("PLACEHOLDER_WINDOWS_PREBUILD");
+      expect(verifyPlatformNativeEntries(base, linux).map((v) => v.rule)).toEqual([
+        "UNEXPECTED_WINDOWS_ENTRY",
+        "UNEXPECTED_WINDOWS_ENTRY",
+        "UNEXPECTED_WINDOWS_ENTRY",
+      ]);
+    });
 
     it("verifyReleaseFiles reports FORBIDDEN_RELEASE_ARTIFACT if a tarball contains seeded forbidden files", () => {
       const corruptedReleaseDir = path.join(tempDir, "corrupted-release");
@@ -399,6 +521,7 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
         "@resin/observer",
         "@resin/runtime",
         "@resin/crypto",
+        "@resin/windows-security",
         "@resin/protocol",
         "@resin/contracts",
         "@resin/harness-contracts",
@@ -415,7 +538,7 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
       ];
       const actualNames = PUBLIC_RELEASE_PACKAGES.map((p) => p.name);
       expect(actualNames).toEqual(expectedPublicPackages);
-      expect(PUBLIC_RELEASE_PACKAGES).toHaveLength(18);
+      expect(PUBLIC_RELEASE_PACKAGES).toHaveLength(19);
     });
 
     it("ensures no private package is included in PUBLIC_RELEASE_PACKAGES", () => {

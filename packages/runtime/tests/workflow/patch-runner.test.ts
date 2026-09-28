@@ -83,7 +83,10 @@ describe("recorded patch steps", () => {
         "path: /orders\n  - name: media\n    port: 8083\n    path: /media\n",
       ),
     );
-    expect(fs.statSync(path.join(workspace, "services.yaml")).mode & 0o777).toBe(0o640);
+    // NTFS exposes only the read-only bit, so Windows reports the writable file as 0o666.
+    expect(fs.statSync(path.join(workspace, "services.yaml")).mode & 0o777).toBe(
+      process.platform === "win32" ? 0o666 : 0o640,
+    );
     expect(fs.readdirSync(workspace)).toEqual(["services.yaml"]);
   });
 
@@ -140,12 +143,16 @@ describe("recorded patch steps", () => {
     fs.writeFileSync(path.join(outside, "services.yaml"), SERVICES);
     const viaParent = ADD_MEDIA.replaceAll("/app/services.yaml", "/app/../outside/services.yaml");
     await expect(replay(viaParent)).rejects.toThrow(/outside the step's working directory/);
-    fs.symlinkSync(outside, path.join(workspace, "linked"));
+    // A junction on Windows, where unprivileged users cannot create symlinks (ignored on POSIX).
+    fs.symlinkSync(outside, path.join(workspace, "linked"), "junction");
     const viaLink = ADD_MEDIA.replaceAll("/app/services.yaml", "/app/linked/services.yaml");
     await expect(replay(viaLink)).rejects.toThrow(/outside the step's working directory/);
-    fs.symlinkSync(path.join(outside, "services.yaml"), path.join(workspace, "alias.yaml"));
-    const viaFileLink = ADD_MEDIA.replaceAll("/app/services.yaml", "/app/alias.yaml");
-    await expect(replay(viaFileLink)).rejects.toThrow(/outside the step's working directory/);
+    // File symlinks need admin or Developer Mode on Windows, and junctions cannot target files.
+    if (process.platform !== "win32") {
+      fs.symlinkSync(path.join(outside, "services.yaml"), path.join(workspace, "alias.yaml"));
+      const viaFileLink = ADD_MEDIA.replaceAll("/app/services.yaml", "/app/alias.yaml");
+      await expect(replay(viaFileLink)).rejects.toThrow(/outside the step's working directory/);
+    }
     expect(fs.readFileSync(path.join(outside, "services.yaml"), "utf8")).toBe(SERVICES);
   });
 

@@ -4,7 +4,7 @@
  * Resin Public Release Publisher
  *
  * Fixed CLI Modes & Library API:
- * 1. mirror-runtimes: Mirror and verify all 4 pinned upstream Deno runtimes to S3.
+ * 1. mirror-runtimes: Mirror and verify all 6 pinned upstream Deno runtimes to S3.
  * 2. verify-candidate: Verify candidate package integrity, signatures, and assets before upload.
  * 3. publish-immutable: Upload immutable release objects to S3 with HEAD-before-PUT and immutable cache-control.
  * 4. verify-public: Anonymous manual-redirect public CDN verification with zero credentials.
@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 
@@ -60,6 +61,8 @@ export const REQUIRED_RUNTIME_PLATFORMS = Object.freeze([
   "linux-arm64",
   "darwin-x64",
   "darwin-arm64",
+  "windows-x64",
+  "windows-arm64",
 ]);
 
 export const REQUIRED_ARTIFACT_PLATFORMS = Object.freeze([
@@ -68,6 +71,8 @@ export const REQUIRED_ARTIFACT_PLATFORMS = Object.freeze([
   "darwin-x64",
   "darwin-arm64",
   "wsl-x64",
+  "windows-x64",
+  "windows-arm64",
 ]);
 
 export const PUBLISHER_MODES = Object.freeze([
@@ -2997,7 +3002,7 @@ export function parseCliArgs(argv) {
 
 if (
   process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
 ) {
   const { mode, options } = parseCliArgs(process.argv.slice(2));
   if (!mode) {
@@ -3005,15 +3010,17 @@ if (
     console.error(`Modes: ${PUBLISHER_MODES.join(", ")}`);
     process.exit(1);
   }
+  // Set the exit code and let the event loop drain: `process.exit()` while fetch sockets are still
+  // closing aborts Node on Windows (libuv `UV_HANDLE_CLOSING` assertion, status 0xC0000409).
   publishPublicRelease(mode, options)
     .then((result) => {
       console.log(JSON.stringify(result, null, 2));
       if (result && result.success === false) {
-        process.exit(1);
+        process.exitCode = 1;
       }
     })
     .catch((err) => {
       console.error(`❌ Publisher error [${mode}]:`, err.message);
-      process.exit(1);
+      process.exitCode = 1;
     });
 }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./normalization/redaction.js";
+import { ensurePrivateDirectory, writeNewPrivateFileSync } from "./private-fs.js";
 
 export const OpportunityTrackingConfigSchema = z
   .object({
@@ -235,11 +236,9 @@ function backUpMalformedConfig(configPath: string, rawContent: string): string {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const backupPath = nextCorruptBackupPath(configPath);
     try {
-      fs.writeFileSync(backupPath, rawContent, {
-        encoding: "utf-8",
-        flag: "wx",
-        mode: 0o600,
-      });
+      // Private from the moment it exists (Windows: owner-only DACL in the create call), wherever
+      // the config lives.
+      writeNewPrivateFileSync(backupPath, rawContent);
       return backupPath;
     } catch (err) {
       // SAFETY: Node.js filesystem error carries standard ErrnoException code.
@@ -347,10 +346,7 @@ async function writeConfigRecoveryWarningState(
   warning: ConfigRecoveryWarning | null,
 ): Promise<void> {
   const resolvedStatePath = path.resolve(warningStatePath);
-  await fs.promises.mkdir(path.dirname(resolvedStatePath), {
-    recursive: true,
-    mode: 0o700,
-  });
+  await ensurePrivateDirectory(path.dirname(resolvedStatePath));
 
   const existing = await inspectPersistedConfigRecoveryWarning(resolvedStatePath);
   if (existing.exists && !existing.valid) {

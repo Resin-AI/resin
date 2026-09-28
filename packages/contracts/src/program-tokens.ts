@@ -16,9 +16,22 @@
 
 import { parser as javascriptParser } from "@lezer/javascript";
 import { parser as pythonParser } from "@lezer/python";
-import type { WorkflowRecordedProgram, WorkflowValueTemplate } from "./recorded-workflow.js";
+import {
+  isCodeFlagWord,
+  isCodeRunnerWord,
+  isEvaluatorWord,
+  posixCommandWords,
+  posixWrapperEvaluates,
+} from "./code-evaluation.js";
+import { powershellTokens, renderPowerShellTokenValue } from "./powershell-tokens.js";
+import type { WorkflowProgramLanguage, WorkflowValueTemplate } from "./recorded-workflow.js";
 
-export type ProgramLanguage = WorkflowRecordedProgram["kind"];
+/**
+ * The grammar a program's text is read in: a recorded program kind, or a PowerShell edition's own
+ * grammar for a shell program recorded in Windows PowerShell 5.1 (`powershell`) or PowerShell 7+
+ * (`pwsh`). `shell` alone is the POSIX shell grammar.
+ */
+export type ProgramLanguage = WorkflowProgramLanguage;
 
 export type ProgramTokenKind =
   | "word"
@@ -115,29 +128,65 @@ function matchFileDescriptorOperator(source: string, index: number): string | un
   return source.slice(index, end);
 }
 
-/**
- * Programs whose `-c`/`-e` argument is source code they run: shells, script interpreters, stream
- * editors and database clients. Elsewhere the flag takes data — `sha256sum -c sums`, `grep -e
- * pattern`, `head -c 10` — and the word after it is a value like any other.
- */
-const CODE_RUNNER =
-  /^(?:(?:ba|z|da|k|mk|a|c|tc|fi)?sh|busybox|python(?:[0-9.]*)?|pypy[0-9.]*|node(?:js)?|deno|bun|perl[0-9.]*|ruby[0-9.]*|php[0-9.]*|lua[0-9.]*|luajit|rscript|tclsh[0-9.]*|pwsh|powershell|osascript|g?sed|[gmn]?awk|psql|mysql|mariadb|sqlite3|duckdb|clickhouse(?:-client)?|mongo(?:sh)?|redis-cli|jshell|groovy|scala|julia|elixir|erl|swift)$/i;
+/** Operators after which a POSIX word stands at a command's start. */
+const POSIX_COMMAND_SEPARATORS = ["&&", "||", ";", "|", "|&", "(", ")", "&", "\n"];
 
 /**
  * Whether the simple command the latest token belongs to runs a code-running program: any word of
  * it, since wrappers (`sudo`, `env`, `timeout 5`, `xargs`) put the interpreter past command position.
+ * Elsewhere a `-c`/`-e` flag takes data — `sha256sum -c sums`, `grep -e pattern`, `head -c 10`.
  */
 function commandRunsCode(tokens: readonly ProgramToken[]): boolean {
   for (let index = tokens.length - 1; index >= 0; index -= 1) {
     const token = tokens[index]!;
     if (token.kind === "operator") {
-      if (["&&", "||", ";", "|", "|&", "(", "&", "\n"].includes(token.raw)) return false;
+      if (POSIX_COMMAND_SEPARATORS.includes(token.raw)) return false;
       continue;
     }
-    const base = token.raw.slice(token.raw.lastIndexOf("/") + 1);
-    if (CODE_RUNNER.test(base)) return true;
+    if (isCodeRunnerWord(token.raw)) return true;
   }
   return false;
+}
+
+/**
+ * Applies the shared code-evaluation policy (see `code-evaluation.ts`) to a POSIX program's tokens:
+ * a program that runs an evaluator (`eval`, `trap`, `ssh`, `cmd /c`, `pwsh -Command`, `sudo -s`, …)
+ * in command position binds nothing; one that runs a code runner's code string binds no assignment,
+ * which that code can read.
+ */
+function applyPosixCodeEvaluation(tokens: ProgramToken[]): void {
+  let evaluates = false;
+  let runsCode = false;
+  let words: string[] = [];
+  const settle = (): void => {
+    if (
+      posixCommandWords(words).some((word) => isEvaluatorWord(word, "posix")) ||
+      posixWrapperEvaluates(words)
+    ) {
+      evaluates = true;
+    }
+    words = [];
+  };
+  for (const [index, token] of tokens.entries()) {
+    if (token.kind === "operator") {
+      if (POSIX_COMMAND_SEPARATORS.includes(token.raw)) settle();
+      continue;
+    }
+    const previous = tokens[index - 1];
+    if (
+      previous?.kind === "word" &&
+      isCodeFlagWord(previous.raw) &&
+      commandRunsCode(tokens.slice(0, index))
+    ) {
+      runsCode = true;
+    }
+    words.push(typeof token.value === "string" ? token.value : token.raw);
+  }
+  settle();
+  if (!evaluates && !runsCode) return;
+  for (const token of tokens) {
+    if (evaluates || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token.raw)) token.bindable = false;
+  }
 }
 
 function shellTokens(source: string): ProgramToken[] {
@@ -253,7 +302,7 @@ function shellTokens(source: string): ProgramToken[] {
       bindable:
         bindable &&
         start !== 0 &&
-        !(["-c", "-e"].includes(tokens.at(-1)?.raw ?? "") && commandRunsCode(tokens)) &&
+        !(isCodeFlagWord(tokens.at(-1)?.raw ?? "") && commandRunsCode(tokens)) &&
         !["&&", "||", ";", "|", "(", "&"].includes(tokens.at(-1)?.raw ?? "") &&
         !(
           tokens.at(-1)?.kind === "operator" &&
@@ -394,6 +443,7 @@ function shellTokens(source: string): ProgramToken[] {
     tokens[position]!.bindable = false;
     delete tokens[position]!.value;
   }
+  applyPosixCodeEvaluation(tokens);
   return tokens;
 }
 
@@ -868,6 +918,7 @@ function scriptTokens(source: string, language: ProgramLanguage): ProgramToken[]
  */
 export function tokenizeProgram(language: ProgramLanguage, source: string): ProgramToken[] {
   if (language === "patch") return patchTokens(source);
+  if (language === "powershell" || language === "pwsh") return powershellTokens(source, language);
   return language === "shell" ? shellTokens(source) : scriptTokens(source, language);
 }
 
@@ -1280,6 +1331,9 @@ export function renderProgramTokenValue(
     return language === "python" ? "None" : "null";
   }
   const text = typeof value === "string" ? value : value === null ? "null" : String(value);
+  if (language === "powershell" || language === "pwsh") {
+    return renderPowerShellTokenValue(token, text);
+  }
   if (language !== "shell") return renderScriptString(token, text, language);
   const quote = token.raw[0];
   if (token.kind === "string" && quote === "'") return quoteShellSingle(text);

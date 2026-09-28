@@ -210,7 +210,10 @@ export class ResinInstaller {
    * Runs the complete installation workflow or handles rollback request.
    */
   async run(options: InstallerOptions = {}): Promise<InstallationSummary> {
-    const customHome = options.customHome ?? options.env?.HOME ?? process.env.HOME ?? os.homedir();
+    // On Windows HOME is often a Git-Bash/MSYS value; native installs use %USERPROFILE%.
+    const posixHome =
+      process.platform === "win32" ? undefined : (options.env?.HOME ?? process.env.HOME);
+    const customHome = options.customHome ?? posixHome ?? os.homedir();
     const harnessEnv =
       options.env ?? (options.customHome === undefined ? process.env : { HOME: customHome });
     const workspacePath = path.resolve(options.workspace ?? process.cwd());

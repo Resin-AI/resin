@@ -627,7 +627,7 @@ describe("verifyDaemonReadiness first-start window", () => {
         // The supervisor records a crash roughly every 2.5s.
         const crashes = Math.floor(clock.elapsed() / 2_500);
         fsBridge.files.set(
-          `${resinHome}/logs/crash-recovery.log`,
+          path.join(resinHome, "logs", "crash-recovery.log"),
           `${Array.from({ length: crashes }, (_, i) => crash((i + 1) * 2_500)).join("\n")}\n`,
         );
         return createDaemonStartupProbe({

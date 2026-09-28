@@ -17,6 +17,9 @@
       "path": "./packages/crypto"
     },
     {
+      "path": "./packages/windows-security"
+    },
+    {
       "path": "./packages/db"
     },
     {

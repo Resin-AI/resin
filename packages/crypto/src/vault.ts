@@ -1,8 +1,21 @@
 import { Buffer } from "node:buffer";
-import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  pbkdf2Sync,
+  randomBytes,
+  randomUUID,
+} from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  checkOwnerOnly,
+  ensureOwnerOnly,
+  ensurePrivateDirectoryBoundary,
+  writePrivateFileExclusive,
+} from "@resin/windows-security";
 import type {
   EncryptedVaultOptions,
   SecretMetadata,
@@ -66,18 +79,20 @@ export class EncryptedVaultSecretStore implements SecretStore {
     const rawPassphrase =
       options.passphrase ?? process.env.RESIN_VAULT_PASSPHRASE ?? this.resolveMachineMasterKey();
 
-    // Initialize or load vault salt
+    // Initialize or load vault salt. Windows: the vault file is repaired or refused before it is
+    // read (a refused vault also fails every later load).
+    let salt: Buffer | undefined;
     if (!this.isInMemory && fs.existsSync(this.vaultPath!)) {
       try {
+        this.assertVaultFilePrivate();
         const content = fs.readFileSync(this.vaultPath!, "utf-8");
         const parsed: VaultFilePayload = JSON.parse(content);
-        this.vaultSalt = Buffer.from(parsed.salt, "hex");
+        salt = Buffer.from(parsed.salt, "hex");
       } catch {
-        this.vaultSalt = randomBytes(32);
+        salt = undefined;
       }
-    } else {
-      this.vaultSalt = randomBytes(32);
     }
+    this.vaultSalt = salt ?? randomBytes(32);
 
     // Derive 256-bit AES key from master passphrase
     this.derivedKey = pbkdf2Sync(rawPassphrase, this.vaultSalt, this.kdfIterations, 32, "sha512");
@@ -106,15 +121,10 @@ export class EncryptedVaultSecretStore implements SecretStore {
 
     const lockPath = `${this.vaultPath}.lock`;
     const startTime = Date.now();
+    this.ensureVaultDirectory();
 
     while (Date.now() - startTime < this.lockTimeoutMs) {
       try {
-        // Ensure directory exists with 0700 permissions
-        const dir = path.dirname(lockPath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        }
-
         // Check if existing lock is stale
         if (fs.existsSync(lockPath)) {
           try {
@@ -183,6 +193,7 @@ export class EncryptedVaultSecretStore implements SecretStore {
     if (!fs.existsSync(this.vaultPath)) {
       return {};
     }
+    this.assertVaultFilePrivate();
 
     try {
       const content = fs.readFileSync(this.vaultPath, "utf-8");
@@ -202,10 +213,7 @@ export class EncryptedVaultSecretStore implements SecretStore {
       return;
     }
 
-    const dir = path.dirname(this.vaultPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
+    this.ensureVaultDirectory();
 
     const payload: VaultFilePayload = {
       version: DEFAULT_VAULT_VERSION,
@@ -216,19 +224,65 @@ export class EncryptedVaultSecretStore implements SecretStore {
       updatedAt: Date.now(),
     };
 
-    const tmpPath = `${this.vaultPath}.${process.pid}.${Date.now()}.tmp`;
-    const fd = fs.openSync(
-      tmpPath,
-      fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC,
-      0o600,
-    );
-    fs.writeSync(fd, JSON.stringify(payload, null, 2), undefined, "utf-8");
-    fs.closeSync(fd);
-    fs.chmodSync(tmpPath, 0o600);
+    // Unpredictable name, created exclusively inside the verified private directory; on Windows
+    // the owner-only DACL is part of the create call, so the file is never broader than that.
+    const tmpPath = `${this.vaultPath}.${randomUUID()}.tmp`;
+    const serialized = JSON.stringify(payload, null, 2);
+    if (process.platform === "win32") {
+      writePrivateFileExclusive(tmpPath, serialized);
+    } else {
+      const fd = fs.openSync(tmpPath, "wx", 0o600);
+      try {
+        fs.writeSync(fd, serialized, undefined, "utf-8");
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.chmodSync(tmpPath, 0o600);
+    }
 
     // Atomic rename
-    fs.renameSync(tmpPath, this.vaultPath);
-    fs.chmodSync(this.vaultPath, 0o600);
+    try {
+      fs.renameSync(tmpPath, this.vaultPath);
+    } catch (error) {
+      fs.rmSync(tmpPath, { force: true });
+      throw error;
+    }
+    if (process.platform !== "win32") fs.chmodSync(this.vaultPath, 0o600);
+  }
+
+  /**
+   * Makes sure the vault directory is a private boundary on every access. POSIX: created 0700
+   * when missing. Windows: created with a protected owner-only DACL, or validated as owned by this
+   * user with one, repaired when it is not, refused when another principal owns it.
+   */
+  private ensureVaultDirectory(): void {
+    const dir = path.dirname(this.vaultPath!);
+    if (process.platform === "win32") {
+      ensurePrivateDirectoryBoundary(dir);
+    } else if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+  }
+
+  /**
+   * Windows: before any secret is read, the vault must be a regular file private to this user;
+   * one this user owns is repaired, anything else is refused.
+   */
+  private assertVaultFilePrivate(): void {
+    if (process.platform !== "win32") return;
+    const vaultPath = this.vaultPath!;
+    const stat = fs.lstatSync(vaultPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`Refusing to read vault '${vaultPath}': it is not a regular file`);
+    }
+    const check = checkOwnerOnly(vaultPath);
+    if (check.ok) return;
+    if (!check.ownedByCurrentUser) {
+      throw new Error(
+        `Refusing to read vault '${vaultPath}': it is not private to the current user (${check.problems.join("; ")})`,
+      );
+    }
+    ensureOwnerOnly(vaultPath, { directory: false });
   }
 
   /**

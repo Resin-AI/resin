@@ -41,6 +41,7 @@ export function generatePlannedClaudeConfig(
   gatewayUrl?: string,
   serverKey = CANONICAL_RESIN_MCP_SERVER_KEY,
   command = CANONICAL_RESIN_MCP_COMMAND,
+  args: readonly string[] = CANONICAL_RESIN_MCP_ARGS,
 ): string {
   let doc: ClaudeConfigDoc = {};
 
@@ -65,7 +66,7 @@ export function generatePlannedClaudeConfig(
   // Configure resin gateway MCP endpoint
   const serverConfig: ClaudeMcpServerConfig = {
     command,
-    args: [...CANONICAL_RESIN_MCP_ARGS],
+    args: [...args],
   };
   doc.mcpServers = migrateJsonMcpServers(existingServers, serverConfig, gatewayUrl, serverKey);
   // Format with consistent 2-space indentation and trailing newline
@@ -80,6 +81,7 @@ export async function planClaudeMcpConfig(
   gatewayUrl?: string,
   fsBridge: ConfigFsBridge = defaultFsBridge,
   command = CANONICAL_RESIN_MCP_COMMAND,
+  args: readonly string[] = CANONICAL_RESIN_MCP_ARGS,
 ): Promise<ConfigMutationPlan> {
   const targetPath = workspace.mcpConfigPath || workspace.configPath;
   const currentContent = await fsBridge.readFile(targetPath);
@@ -88,6 +90,7 @@ export async function planClaudeMcpConfig(
     gatewayUrl,
     CANONICAL_RESIN_MCP_SERVER_KEY,
     command,
+    args,
   );
 
   return planConfigMutation({

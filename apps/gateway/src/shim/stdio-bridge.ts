@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
+import type { Duplex } from "node:stream";
 import {
   OmpHarnessAdapter,
   applyOmpCatalogInstructions,
@@ -10,7 +10,13 @@ import {
 import type { V1LockedToolEntry } from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection, type LocalStateStore, createLocalStateStore } from "@resin/db";
-import { type CloudCredentialStore, getDaemonPaths, resolvePaths } from "@resin/observer";
+import {
+  type CloudCredentialStore,
+  ensurePrivateDirectorySync,
+  getDaemonPaths,
+  openDaemonConnection,
+  resolvePaths,
+} from "@resin/observer";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
@@ -77,40 +83,24 @@ export interface ShimStatus {
  */
 export async function checkDaemonReachable(socketPath: string, timeoutMs = 1500): Promise<boolean> {
   const { promise, resolve } = withResolvers<boolean>();
+  let resolved = false;
+  const settle = (reachable: boolean): void => {
+    if (resolved) return;
+    resolved = true;
+    clearTimeout(timer);
+    resolve(reachable);
+  };
+  const timer = setTimeout(() => settle(false), timeoutMs);
 
-  try {
-    const socket = net.createConnection(socketPath);
-    let resolved = false;
-
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        socket.destroy();
-        resolve(false);
-      }
-    }, timeoutMs);
-
-    socket.once("connect", () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        socket.end();
-        socket.destroy();
-        resolve(true);
-      }
-    });
-
-    socket.once("error", () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        socket.destroy();
-        resolve(false);
-      }
-    });
-  } catch {
-    resolve(false);
-  }
+  // Windows: only a pipe verified to belong to the current user (on this connection) counts.
+  openDaemonConnection(socketPath, { timeoutMs }).then(
+    (socket) => {
+      socket.on("error", () => {});
+      socket.destroy();
+      settle(true);
+    },
+    () => settle(false),
+  );
 
   return promise;
 }
@@ -167,7 +157,7 @@ export class McpStdioShim {
    */
   private activeCloudRuntime?: ProductionProxyRuntime;
   private ownedStateStore?: LocalStateStore;
-  private activeSocket?: net.Socket;
+  private activeSocket?: Duplex;
   private isRunning = false;
   private surface?: ToolSearchSurface;
 
@@ -248,24 +238,21 @@ export class McpStdioShim {
   private async bridgeToDaemonSocket(): Promise<void> {
     const { promise, resolve, reject } = withResolvers<void>();
 
-    const socket = net.createConnection(this.socketPath);
-    this.activeSocket = socket;
-
-    socket.once("connect", () => {
+    // Windows: the pipe is verified to belong to the current user on this very connection,
+    // before any MCP traffic flows.
+    openDaemonConnection(this.socketPath).then((socket) => {
+      this.activeSocket = socket;
+      // Failures surface as "close", which stops the shim.
+      socket.on("error", () => {});
+      socket.once("close", () => {
+        this.stop();
+      });
       this.isRunning = true;
       const transport = this.prepareTransport();
       transport.input.pipe(socket);
       socket.pipe(transport.output);
       resolve();
-    });
-
-    socket.once("error", (err) => {
-      reject(err);
-    });
-
-    socket.once("close", () => {
-      this.stop();
-    });
+    }, reject);
 
     return promise;
   }
@@ -312,6 +299,7 @@ export class McpStdioShim {
     ) {
       const paths = resolvePaths({ home: this.options.home, resinHome: this.options.resinHome });
       const dbPath = path.join(paths.dataDir, "state.db");
+      ensurePrivateDirectorySync(paths.dataDir);
       const store = createLocalStateStore({ path: dbPath });
       try {
         await store.initialize();

@@ -19,19 +19,34 @@ import {
   probeOmpInstallation,
   resolveOmpHome,
 } from "../src/discovery.js";
+import { FILE_SYMLINKS_SUPPORTED } from "./symlinks.js";
+
+/**
+ * Writes an `omp` that prints `output`: a batch file on Windows, where PATHEXT lookup never picks
+ * an extensionless script and a `#!` script cannot run.
+ */
+async function writeMockOmp(dir: string, output: string): Promise<string> {
+  const windows = process.platform === "win32";
+  const file = path.join(dir, windows ? "omp.cmd" : "omp");
+  await fsp.writeFile(file, windows ? `@echo ${output}\r\n` : `#!/bin/sh\necho ${output}\n`, {
+    mode: 0o755,
+  });
+  return file;
+}
 
 describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
   it("resolves OMP home directory accurately with overrides and defaults", () => {
     const custom = resolveOmpHome({ customHome: "/custom/omp/home" });
     expect(custom).toBe(path.resolve("/custom/omp/home"));
 
+    // Host-absolute paths: on Windows a rooted POSIX value is a leaked MSYS/WSL variable and ignored.
     const fromEnv = resolveOmpHome({
-      env: { OMP_HOME: "/env/omp" },
+      env: { OMP_HOME: path.resolve("/env/omp") },
     });
     expect(fromEnv).toBe(path.resolve("/env/omp"));
 
     const fromResinEnv = resolveOmpHome({
-      env: { RESIN_OMP_HOME: "/te/omp" },
+      env: { RESIN_OMP_HOME: path.resolve("/te/omp") },
     });
     expect(fromResinEnv).toBe(path.resolve("/te/omp"));
 
@@ -44,8 +59,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
   it("probes executable from custom path, env var, and directory search", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-probe-test-"));
     try {
-      const mockBin = path.join(tmpDir, "omp");
-      await fsp.writeFile(mockBin, "#!/bin/sh\necho omp 1.4.2\n", { mode: 0o755 });
+      const mockBin = await writeMockOmp(tmpDir, "omp 1.4.2");
 
       // Direct custom path
       const foundCustom = await findOmpExecutable({ customExecutablePath: mockBin });
@@ -74,9 +88,8 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
   it("detects version from executable or package.json fallback", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-ver-test-"));
     try {
-      const mockBin = path.join(tmpDir, "bin", "omp");
-      await fsp.mkdir(path.dirname(mockBin), { recursive: true });
-      await fsp.writeFile(mockBin, "#!/bin/sh\necho omp 0.12.5\n", { mode: 0o755 });
+      await fsp.mkdir(path.join(tmpDir, "bin"), { recursive: true });
+      const mockBin = await writeMockOmp(path.join(tmpDir, "bin"), "omp 0.12.5");
 
       const version = await detectOmpVersion(mockBin);
       expect(version).toBe("0.12.5");
@@ -102,8 +115,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     try {
       const ompHome = path.join(tmpDir, ".omp");
       await fsp.mkdir(path.join(ompHome, "bin"), { recursive: true });
-      const mockBin = path.join(ompHome, "bin", "omp");
-      await fsp.writeFile(mockBin, "#!/bin/sh\necho 1.0.0\n", { mode: 0o755 });
+      const mockBin = await writeMockOmp(path.join(ompHome, "bin"), "1.0.0");
 
       const installation = await probeOmpInstallation({
         customHome: ompHome,
@@ -861,7 +873,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
 
       // Symlink pointing to canonical
       const symlinkFile = path.join(sessionsDir, "current.jsonl");
-      await fsp.symlink(canonicalFile, symlinkFile);
+      if (FILE_SYMLINKS_SUPPORTED) await fsp.symlink(canonicalFile, symlinkFile);
 
       // Sibling file with same header session id
       const duplicateFile = path.join(sessionsDir, "copy.jsonl");
@@ -1469,11 +1481,11 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
 
       // File alias: symlink pointing to fileL0
       const symlinkFile = path.join(level2, "alias_l0.jsonl");
-      await fsp.symlink(fileL0, symlinkFile);
+      if (FILE_SYMLINKS_SUPPORTED) await fsp.symlink(fileL0, symlinkFile);
 
       // Directory cycle: symlink from level2 pointing to rootSessionsDir
       const cycleDir = path.join(level2, "cycle_to_root");
-      await fsp.symlink(rootSessionsDir, cycleDir);
+      await fsp.symlink(rootSessionsDir, cycleDir, "junction");
 
       // Sibling directory symlink
       const siblingDir = path.join(rootSessionsDir, "sibling");
@@ -1481,11 +1493,11 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       const siblingFile = path.join(siblingDir, "sibling_session.jsonl");
       await fsp.writeFile(siblingFile, makeSessionRow("sess-sibling"));
       const siblingCycle = path.join(siblingDir, "loop_to_level1");
-      await fsp.symlink(level1, siblingCycle);
+      await fsp.symlink(level1, siblingCycle, "junction");
 
       // Broken symlink
       const brokenSymlink = path.join(siblingDir, "broken_link");
-      await fsp.symlink(path.join(tmpDir, "non_existent_target"), brokenSymlink);
+      await fsp.symlink(path.join(tmpDir, "non_existent_target"), brokenSymlink, "junction");
 
       // 1. Test collectTranscriptFiles directly
       const run1 = await collectTranscriptFiles([rootSessionsDir]);
@@ -1501,7 +1513,7 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
       expect(run1).toContain(fileL3);
       expect(run1).toContain(fileL4);
       expect(run1).toContain(siblingFile);
-      expect(run1).toContain(symlinkFile);
+      if (FILE_SYMLINKS_SUPPORTED) expect(run1).toContain(symlinkFile);
 
       // Verify depth > 4 is excluded
       expect(run1).not.toContain(fileL5);

@@ -35,6 +35,7 @@ import {
   parseExtractLocator,
   programTokenPath,
   programTokenValueAt,
+  recordedProgramLanguage,
   segmentOriginal,
   tokenizeProgram,
 } from "@resin/contracts";
@@ -310,12 +311,15 @@ function bindCandidateLeaf(
     const address = programTokenPath(path);
     if (program === undefined || program.argument !== candidate.argument) return false;
     if (address === undefined) return false;
+    // A program read in no grammar (cmd.exe, an unproven shell dialect) is never bound.
+    const language = recordedProgramLanguage(program);
+    if (language === undefined) return false;
     const recorded = sourceAsTemplate(argument.source);
     argument.source = {
       kind: "template",
       template: bindProgramToken(
         recorded,
-        program.kind,
+        language,
         address.token,
         proposedTemplate(candidate),
         address.embedded,
@@ -657,7 +661,9 @@ async function demonstratedTokenValue(
   const program = step?.callable.program;
   if (program === undefined || program.argument !== candidate.argument) return undefined;
   if (typeof supplied !== "string") return undefined;
-  if (address.span === undefined) return programTokenValueAt(program.kind, supplied, address);
+  const language = recordedProgramLanguage(program);
+  if (language === undefined) return undefined;
+  if (address.span === undefined) return programTokenValueAt(language, supplied, address);
   // A span is read against the recorded token: the demonstration decides it only when it keeps
   // the recorded text around the span.
   const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
@@ -667,7 +673,7 @@ async function demonstratedTokenValue(
       : segmentOriginal(step!, argument.name, await recordedProgramText(argument.source, resolve));
   if (typeof recorded !== "string") return undefined;
   return demonstratedProgramTokenSpanValue(
-    program.kind,
+    language,
     recorded,
     supplied,
     address,
@@ -1135,6 +1141,8 @@ async function demonstratedTokenAt(
   if (address === undefined || program === undefined || program.argument !== target.argument) {
     return undefined;
   }
+  const language = recordedProgramLanguage(program);
+  if (language === undefined) return undefined;
   const text = await demonstratedProgramText(
     plan,
     context,
@@ -1145,7 +1153,7 @@ async function demonstratedTokenAt(
   if (text === undefined) return undefined;
   let value: ProgramTokenValue | undefined;
   if (address.span === undefined || context.label === "baseline") {
-    value = programTokenValueAt(program.kind, text, address);
+    value = programTokenValueAt(language, text, address);
   } else {
     const argument = step?.arguments.find((entry) => entry.name === target.argument);
     const recorded =
@@ -1153,7 +1161,7 @@ async function demonstratedTokenAt(
     value =
       typeof recorded === "string"
         ? demonstratedProgramTokenSpanValue(
-            program.kind,
+            language,
             recorded,
             text,
             address,
@@ -1495,7 +1503,11 @@ async function evaluateDerivationCandidates(
             .program!;
           if (candidate.proposed.kind !== "result") continue;
           const derived = demonstratedValueAtPath(outcome.result, candidate.proposed.path);
-          if (!derivedValueReproduces(program.kind, read.text, address, derived, read.value)) {
+          const language = recordedProgramLanguage(program);
+          if (
+            language === undefined ||
+            !derivedValueReproduces(language, read.text, address, derived, read.value)
+          ) {
             outcomes.set(
               candidate,
               refused(

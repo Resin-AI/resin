@@ -2,6 +2,7 @@ import type { ProtocolMessage } from "@resin/protocol";
 
 // Paths & Environment Resolution
 export * from "./paths.js";
+export * from "./private-fs.js";
 // Actionable Notification State & Observer Projection
 export * from "./notifications.js";
 
@@ -24,6 +25,7 @@ export * from "./ipc/framing.js";
 export * from "./ipc/transport.js";
 export * from "./ipc/server.js";
 export * from "./ipc/client.js";
+export * from "./ipc/pipe-trust.js";
 
 // Worker Process Supervision & Isolation
 export * from "./worker-supervisor.js";

@@ -273,8 +273,15 @@ describe("Locked Artifact Cache", () => {
       await fs.promises.mkdir(path.join(stagingDir, "src"), { recursive: true });
       await fs.promises.writeFile(path.join(stagingDir, "manifest.json"), canonicalJson(manifest));
       await fs.promises.writeFile(path.join(stagingDir, "src/index.ts"), "export const test = 1;");
-      // Create symlink pointing outside stagingDir
-      await fs.promises.symlink("/etc/passwd", path.join(stagingDir, "evil-link"));
+      // Create symlink pointing outside stagingDir. Unprivileged Windows users cannot create
+      // symlinks, so there it is a directory junction, which escapes the same way.
+      if (process.platform === "win32") {
+        const outside = path.join(tempRoot, "outside");
+        await fs.promises.mkdir(outside, { recursive: true });
+        await fs.promises.symlink(outside, path.join(stagingDir, "evil-link"), "junction");
+      } else {
+        await fs.promises.symlink("/etc/passwd", path.join(stagingDir, "evil-link"));
+      }
     };
 
     await expect(cache.installLockedArtifact(lockedEntry, evilExtractor)).rejects.toThrow();

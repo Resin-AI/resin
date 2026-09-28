@@ -1,22 +1,23 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
-import type {
-  HarnessInstallation,
-  HarnessSession,
-  HarnessWorkspace,
-  InstallationStatus,
-  ProbeInstallationOptions,
-  SessionStatus,
+import {
+  type HarnessInstallation,
+  type HarnessSession,
+  type HarnessWorkspace,
+  type InstallationStatus,
+  type ProbeInstallationOptions,
+  type SessionStatus,
+  findHostExecutable,
+  readHostEnv,
+  readHostPathEnv,
+  resolveHarnessUserHome,
+  runHarnessCommand,
 } from "@resin/harness-contracts";
 import { z } from "zod";
 import { getOmpSessionExitReason } from "./session-exit.js";
 
-const execFileAsync = promisify(execFile);
 const ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 60_000;
 
 export interface OmpBreadcrumb {
@@ -31,7 +32,10 @@ export interface OmpBreadcrumb {
 
 export interface OmpDiscoveryOptions extends ProbeInstallationOptions {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  /** User home OMP expands `~` against (`os.homedir()` in OMP: `%USERPROFILE%` on Windows). */
   homeDir?: string;
+  /** Host platform (tests inject `win32`); defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
   cwd?: string;
   customHome?: string;
   ompHome?: string;
@@ -183,6 +187,21 @@ function classifyTranscriptSessionKindWithKeys(
   return "user";
 }
 
+/**
+ * Resolves a working directory OMP recorded. A Windows path (`C:\…`, `\\server\share\…`) resolves
+ * with Windows semantics on any host and its drive letter is upper-cased, so `c:\app` and
+ * `C:\app` name one workspace. On a Windows host a POSIX path keeps POSIX semantics; everything
+ * else resolves against the host.
+ */
+export function resolveRecordedPath(value: string): string {
+  if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value)) {
+    return path.win32.resolve(value).replace(/^[a-z](?=:)/, (drive) => drive.toUpperCase());
+  }
+  // On Windows a POSIX cwd was recorded by OMP under Linux/WSL; keep it off the current drive.
+  if (process.platform === "win32" && value.startsWith("/")) return path.posix.resolve(value);
+  return path.resolve(value);
+}
+
 /** Exact OMP versions qualified with recorded fixtures. */
 export const OMP_TESTED_VERSIONS: readonly string[] = ["18.3.2"];
 
@@ -194,22 +213,37 @@ export function resolveOmpHome(options?: {
   ompHome?: string;
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
+  platform?: NodeJS.Platform;
 }): string {
   const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
   if (options?.customHome) {
     return path.resolve(options.customHome);
   }
   if (options?.ompHome) {
     return path.resolve(options.ompHome);
   }
-  if (env.OMP_HOME) {
-    return path.resolve(env.OMP_HOME);
+  const configured =
+    readHostPathEnv(env, "OMP_HOME", platform) ?? readHostPathEnv(env, "RESIN_OMP_HOME", platform);
+  if (configured) {
+    return configured;
   }
-  if (env.RESIN_OMP_HOME) {
-    return path.resolve(env.RESIN_OMP_HOME);
-  }
-  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os.homedir();
-  return path.resolve(userHome, ".omp");
+  return path.resolve(resolveOmpUserHome(options), ".omp");
+}
+
+/**
+ * The home OMP resolves `~/.omp` against: its `os.homedir()` is `$HOME` on POSIX and
+ * `%USERPROFILE%` on Windows (Bun, like Node, never reads `HOME` there).
+ */
+function resolveOmpUserHome(options?: {
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  homeDir?: string;
+  platform?: NodeJS.Platform;
+}): string {
+  return (
+    options?.homeDir ??
+    resolveHarnessUserHome({ platform: options?.platform, env: options?.env ?? process.env })
+  );
 }
 
 /**
@@ -220,8 +254,10 @@ export async function findOmpExecutable(options?: {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   homeDir?: string;
   searchPaths?: string[];
+  platform?: NodeJS.Platform;
 }): Promise<string | null> {
   const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
 
   // 1. Direct custom path
   if (options?.customExecutablePath) {
@@ -242,8 +278,9 @@ export async function findOmpExecutable(options?: {
   }
 
   // 2. Explicit environment variable
-  if (env.OMP_BIN) {
-    const binPath = path.resolve(env.OMP_BIN);
+  const ompBin = readHostEnv(env, "OMP_BIN", platform);
+  if (ompBin) {
+    const binPath = path.resolve(ompBin);
     try {
       const stat = await fsp.stat(binPath);
       if (stat.isFile()) {
@@ -254,54 +291,44 @@ export async function findOmpExecutable(options?: {
     }
   }
 
-  const ompHome = resolveOmpHome({ env, homeDir: options?.homeDir });
-  const userHome = options?.homeDir ?? env.HOME ?? env.USERPROFILE ?? os.homedir();
-  const isWindows = process.platform === "win32";
-  const binaryNames = isWindows ? ["omp.exe", "omp.cmd", "omp.bat", "omp"] : ["omp"];
+  const ompHome = resolveOmpHome({ env, homeDir: options?.homeDir, platform });
+  const userHome = resolveOmpUserHome({ env, homeDir: options?.homeDir, platform });
 
-  // 3. Search paths list in priority order
-  const searchDirs: string[] = [];
-
-  // A. Explicit searchPaths passed in options
-  if (options?.searchPaths && options.searchPaths.length > 0) {
-    searchDirs.push(...options.searchPaths);
-  }
-
-  // B. PATH environment variable
-  if (env.PATH) {
-    const pathDirs = env.PATH.split(path.delimiter).filter(Boolean);
-    searchDirs.push(...pathDirs);
-  }
-
-  // C. OMP home and user bin directories
-  searchDirs.push(
+  // 3. Search paths list in priority order: explicit searchPaths, PATH, then OMP's install dirs.
+  // On Windows, OMP's installer (`irm https://omp.sh/install.ps1 | iex`) writes
+  // `%LOCALAPPDATA%\omp\omp.exe` (`%PI_INSTALL_DIR%` when set) and `bun install -g` writes
+  // `%USERPROFILE%\.bun\bin\omp.exe`; npm installs `%APPDATA%\npm\omp.cmd`.
+  const fallbackDirs = [
     path.join(ompHome, "bin"),
     path.join(ompHome, "dist", "bin"),
     path.join(userHome, ".local", "bin"),
+    path.join(userHome, ".bun", "bin"),
     path.join(userHome, ".cargo", "bin"),
     path.join(userHome, ".npm-global", "bin"),
-  );
-
-  // D. System directories (only if homeDir was not explicitly overridden)
-  if (!options?.homeDir && !options?.searchPaths?.length) {
-    searchDirs.push("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin");
+  ];
+  if (platform === "win32") {
+    const localAppData =
+      readHostEnv(env, "LOCALAPPDATA", platform) ?? path.join(userHome, "AppData", "Local");
+    const appData =
+      readHostEnv(env, "APPDATA", platform) ?? path.join(userHome, "AppData", "Roaming");
+    const installDir = readHostEnv(env, "PI_INSTALL_DIR", platform);
+    fallbackDirs.push(
+      ...(installDir ? [installDir] : []),
+      path.join(localAppData, "omp"),
+      path.join(appData, "npm"),
+    );
+  } else if (!options?.homeDir && !options?.searchPaths?.length) {
+    // System directories (only if homeDir was not explicitly overridden)
+    fallbackDirs.push("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin");
   }
 
-  for (const dir of searchDirs) {
-    for (const binName of binaryNames) {
-      const candidate = path.join(dir, binName);
-      try {
-        const stat = await fsp.stat(candidate);
-        if (stat.isFile()) {
-          return path.resolve(candidate);
-        }
-      } catch {
-        // continue
-      }
-    }
-  }
-
-  return null;
+  const found = await findHostExecutable(["omp"], {
+    platform,
+    env,
+    preferredDirs: options?.searchPaths ?? [],
+    fallbackDirs,
+  });
+  return found ? path.resolve(found) : null;
 }
 
 function parseOmpSemver(value: string): string | null {
@@ -320,9 +347,7 @@ export async function detectOmpVersion(
   const timeoutMs = options?.timeoutMs ?? 3000;
 
   try {
-    const { stdout } = await execFileAsync(executablePath, ["--version"], {
-      timeout: timeoutMs,
-    });
+    const { stdout } = await runHarnessCommand(executablePath, ["--version"], { timeoutMs });
     const detected = parseOmpSemver(stdout);
     if (detected) {
       return detected;
@@ -824,7 +849,7 @@ export async function inspectTranscriptFile(
                 headerSessionId = parsed.id;
               }
               if (typeof parsed.cwd === "string" && parsed.cwd) {
-                headerCwd = path.resolve(parsed.cwd);
+                headerCwd = resolveRecordedPath(parsed.cwd);
               }
               if (parsed.timestamp) {
                 createdAt = String(parsed.timestamp);
@@ -855,7 +880,7 @@ export async function inspectTranscriptFile(
                 headerSessionId = parsed.id;
               }
               if (typeof parsed.cwd === "string" && parsed.cwd) {
-                headerCwd = path.resolve(parsed.cwd);
+                headerCwd = resolveRecordedPath(parsed.cwd);
               }
               if (parsed.timestamp) {
                 createdAt = String(parsed.timestamp);
@@ -911,7 +936,7 @@ export async function inspectTranscriptFile(
       try {
         canonicalCwd = await fsp.realpath(headerCwd);
       } catch {
-        canonicalCwd = path.resolve(headerCwd);
+        canonicalCwd = resolveRecordedPath(headerCwd);
       }
     }
 
@@ -1386,7 +1411,8 @@ export async function buildOmpDiscoveryCatalog(
 
     // Add header-cwd workspaces
     const headerCwd =
-      inspected.canonicalCwd ?? (inspected.headerCwd ? path.resolve(inspected.headerCwd) : null);
+      inspected.canonicalCwd ??
+      (inspected.headerCwd ? resolveRecordedPath(inspected.headerCwd) : null);
     if (headerCwd) {
       const realHeaderCwd = headerCwd;
       if (!workspacesMap.has(realHeaderCwd)) {
@@ -1415,9 +1441,9 @@ export async function buildOmpDiscoveryCatalog(
   for (const workspace of allWorkspaces) {
     const realWsRoot = await resolveWorkspaceRoot(
       workspace.rootPath,
-      path.resolve(workspace.rootPath),
+      resolveRecordedPath(workspace.rootPath),
     );
-    const resolvedRoot = path.resolve(workspace.rootPath);
+    const resolvedRoot = resolveRecordedPath(workspace.rootPath);
     const workspaceKeys = getWorkspaceKeys(workspace);
     const matchingTranscriptIndexes = findMatchingTranscriptIndexes(
       transcriptMatchIndex,
@@ -1497,7 +1523,7 @@ export async function buildOmpDiscoveryCatalog(
       }
 
       // Dynamic fallback matching for workspaces not pre-registered in workspacesMap
-      const resolvedRoot = path.resolve(workspace.rootPath);
+      const resolvedRoot = resolveRecordedPath(workspace.rootPath);
       const workspaceKeys = getWorkspaceKeys(workspace);
       const matchingTranscriptIndexes = findMatchingTranscriptIndexes(
         transcriptMatchIndex,
@@ -1611,8 +1637,12 @@ function getWorkspaceKeys(workspace: HarnessWorkspace): Set<string> {
     keys.add(wsPathId.replace(/^[-_]+|[-_]+$/g, ""));
 
     try {
-      const home = os.homedir();
-      if (raw.startsWith(home)) {
+      // Compare in the same `/`-separated form as `raw`; Windows paths ignore case.
+      const home = resolveHarnessUserHome().replace(/\\/g, "/").replace(/\/+$/, "");
+      const windowsPath = /^[a-zA-Z]:\//.test(raw) || raw.startsWith("//");
+      const [rawKey, homeKey] = windowsPath ? [raw.toLowerCase(), home.toLowerCase()] : [raw, home];
+      const underHome = rawKey === homeKey || rawKey.startsWith(`${homeKey}/`);
+      if (home.length > 0 && underHome) {
         const rel = raw.slice(home.length).replace(/[^a-zA-Z0-9_.-]/g, "-");
         keys.add(rel.toLowerCase());
         keys.add(rel.toLowerCase().replace(/^[-_]+|[-_]+$/g, ""));
@@ -1669,7 +1699,7 @@ function createTranscriptMatchIndex(transcripts: ParsedTranscript[]): Transcript
     if (transcript.canonicalCwd || transcript.headerCwd) {
       const cwd =
         transcript.canonicalCwd ??
-        (transcript.headerCwd ? path.resolve(transcript.headerCwd) : null);
+        (transcript.headerCwd ? resolveRecordedPath(transcript.headerCwd) : null);
       if (cwd !== null) {
         addIndex(cwdByPath, cwd, transcriptIndex);
       }

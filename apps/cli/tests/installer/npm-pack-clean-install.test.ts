@@ -377,7 +377,12 @@ describe("npm-pack-clean-install: Public bootstrap package & clean environment i
     expect(getActiveVersion(resinHome)).toBe("1.0.0");
 
     // Global bin shims check
-    const globalDaemonBin = path.join(resinHome, "bin", "resin-daemon");
+    // A symlink on POSIX; Windows publishes a `.cmd` launcher per command instead.
+    const globalDaemonBin = path.join(
+      resinHome,
+      "bin",
+      process.platform === "win32" ? "resin-daemon.cmd" : "resin-daemon",
+    );
     expect(fs.existsSync(globalDaemonBin)).toBe(true);
 
     // Create a mock release tarball for v1.1.0 (upgrade)

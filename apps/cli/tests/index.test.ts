@@ -171,7 +171,7 @@ describe("cli", () => {
         fs.writeFileSync(realScriptPath, "// test", "utf8");
 
         const currentSymlink = path.join(tmpDir, "current");
-        fs.symlinkSync(path.join(tmpDir, "versions", "1.0.23"), currentSymlink, "dir");
+        fs.symlinkSync(path.join(tmpDir, "versions", "1.0.23"), currentSymlink, "junction");
 
         const symlinkedArgv = path.join(currentSymlink, "apps", "cli", "dist", "index.js");
         const canonicalMetaUrl = pathToFileURL(realScriptPath).href;
@@ -182,13 +182,21 @@ describe("cli", () => {
       }
     });
 
-    it("detects direct entry when argv1 is a direct file symlink to the script", () => {
+    it("detects direct entry when argv1 is a direct file symlink to the script", (ctx) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-symlink-file-test-"));
       try {
         const targetFile = path.join(tmpDir, "target.js");
         const linkFile = path.join(tmpDir, "link.js");
         fs.writeFileSync(targetFile, "// target", "utf8");
-        fs.symlinkSync(targetFile, linkFile, "file");
+        try {
+          fs.symlinkSync(targetFile, linkFile, "file");
+        } catch (error) {
+          // Unprivileged Windows users cannot create file symlinks (no junction form for files).
+          if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+            ctx.skip();
+          }
+          throw error;
+        }
 
         const canonicalMetaUrl = pathToFileURL(targetFile).href;
 

@@ -176,9 +176,13 @@ describe("syncOmpCatalogInstructions", () => {
 
 describe("OMP guidance surface", () => {
   it("resolves the user AGENTS.md under OMP_HOME, else ~/.omp/agent", () => {
-    expect(resolveOmpGuidancePath("/home/dev", {})).toBe("/home/dev/.omp/agent/AGENTS.md");
-    expect(resolveOmpGuidancePath("/home/dev", { OMP_HOME: "/profiles/omp" })).toBe(
-      "/profiles/omp/agent/AGENTS.md",
+    expect(resolveOmpGuidancePath("/home/dev", {})).toBe(
+      path.join("/home/dev", ".omp", "agent", "AGENTS.md"),
+    );
+    // A host-absolute path: on Windows a rooted POSIX OMP_HOME is a leaked MSYS/WSL value and ignored.
+    const ompHome = path.resolve("/profiles/omp");
+    expect(resolveOmpGuidancePath("/home/dev", { OMP_HOME: ompHome })).toBe(
+      path.join(ompHome, "agent", "AGENTS.md"),
     );
   });
 

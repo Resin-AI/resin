@@ -326,6 +326,10 @@ export const PROBE_CMD_SUBSTITUTION: SecurityProbe = {
   requiredForProduction: true,
   run: async (context: SecurityProbeContext): Promise<ProbeExecutionResult> => {
     const startTime = Date.now();
+    // `echo` is a cmd.exe builtin on Windows, not an executable the broker can resolve; the
+    // Node running this probe always is, and `--version` exits 0 without running any code.
+    const probeBinary = process.platform === "win32" ? "node" : "echo";
+    const safeArgs = process.platform === "win32" ? ["--version"] : ["safe-arg"];
     try {
       const manager = new CapabilityBrokerManager({
         allowUnverifiedBoundaries: true,
@@ -341,7 +345,7 @@ export const PROBE_CMD_SUBSTITUTION: SecurityProbe = {
         toolVersion: context.manifest.version,
         capabilities: CapabilityManifestSchema.parse({
           command: {
-            allowedBinaries: ["echo"],
+            allowedBinaries: [probeBinary],
             allowShellExecution: false,
             forbiddenPatterns: ["\\$\\([\\s\\S]*\\)", "`[\\s\\S]*`", ";", "\\|", "&"],
           },
@@ -355,7 +359,7 @@ export const PROBE_CMD_SUBSTITUTION: SecurityProbe = {
       const clients = createBrokerClients(handler);
 
       // Test valid command execution
-      const execResult = await clients.cmd.exec("echo", ["safe-arg"]);
+      const execResult = await clients.cmd.exec(probeBinary, safeArgs);
       if (!execResult || execResult.exitCode !== 0) {
         return {
           probeId: "probe-cmd-substitution",
@@ -369,7 +373,7 @@ export const PROBE_CMD_SUBSTITUTION: SecurityProbe = {
       // Test command substitution rejection
       let deniedSub = false;
       try {
-        await clients.cmd.exec("echo", ["$(whoami)"]);
+        await clients.cmd.exec(probeBinary, ["$(whoami)"]);
       } catch {
         deniedSub = true;
       }
@@ -388,7 +392,7 @@ export const PROBE_CMD_SUBSTITUTION: SecurityProbe = {
       // Test pipe rejection
       let deniedPipe = false;
       try {
-        await clients.cmd.exec("echo", ["hello | sh"]);
+        await clients.cmd.exec(probeBinary, ["hello | sh"]);
       } catch {
         deniedPipe = true;
       }

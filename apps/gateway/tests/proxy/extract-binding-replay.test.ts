@@ -3,7 +3,6 @@
  * against its own recording, the printed-id bindings are confirmed and the promoted plan feeds each
  * invocation's own id to the later commands.
  */
-import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -31,6 +30,7 @@ import {
 } from "@resin/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
+import { posixShellAvailable, runPosixShell } from "./posix-shell.js";
 import { localCallsFor } from "./recorded-sessions.js";
 
 const owner = "extract-binding-owner";
@@ -108,9 +108,8 @@ function recordJob(
     content: "Deploy the worker app to staging, wait, smoke test /health and promote to production",
   });
   const run = (callId: string, command: string): string => {
-    const printed = execFileSync("/bin/sh", ["-c", command], {
+    const printed = runPosixShell(command, {
       cwd: authorDir,
-      encoding: "utf8",
       env: { ...process.env, DEPLOY_ID: recordedId },
     });
     emit({ type: "tool_call", callId, toolName: "bash", parameters: { command } });
@@ -141,7 +140,8 @@ async function validate(plan: RecordedWorkflow, store: InMemoryPrivateValueStore
   })(plan);
 }
 
-describe("extract bindings confirmed against the recording", () => {
+// `deployctl` is a POSIX sh script: on Windows it runs only in Git for Windows' bash.
+describe.skipIf(!posixShellAvailable)("extract bindings confirmed against the recording", () => {
   it("confirms the printed id bindings and the promoted plan runs with fresh ids", async () => {
     const store = new InMemoryPrivateValueStore();
     const { plan, id } = recordJob(store);

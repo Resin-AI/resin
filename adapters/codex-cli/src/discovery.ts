@@ -1,17 +1,18 @@
-import { execFile } from "node:child_process";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import {
   type HarnessInstallation,
   type ProbeInstallationOptions,
   type SessionStatus,
   classifyHarnessVersion,
+  executableFileNames,
+  findHostExecutable,
+  readHostEnv,
+  readHostPathEnv,
+  resolveHarnessUserHome,
+  runHarnessCommand,
 } from "@resin/harness-contracts";
-
-const execFileAsync = promisify(execFile);
 
 export const CODEX_HARNESS_ID = "codex-cli";
 export const CODEX_DISPLAY_NAME = "Codex CLI";
@@ -41,22 +42,48 @@ export type CommandExecutor = (
  */
 export type PathLookupFn = (binName: string) => Promise<string | null>;
 
+const CODEX_COMMAND_NAMES = ["codex", "codex-cli"] as const;
+
 /**
- * Candidate binary names for Codex CLI depending on OS.
+ * Candidate binary names for Codex CLI depending on OS. On Windows each name takes the `PATHEXT`
+ * extensions (`codex.exe` from the standalone release, `codex.cmd` from npm); the extensionless
+ * `codex` npm also writes is a POSIX shell script Windows cannot run.
  */
-export function getCandidateBinaryNames(platform: NodeJS.Platform = process.platform): string[] {
-  if (platform === "win32") {
-    return [
-      "codex.exe",
-      "codex.cmd",
-      "codex.bat",
-      "codex-cli.exe",
-      "codex-cli.cmd",
-      "codex-cli.bat",
-      "codex",
-    ];
-  }
-  return ["codex", "codex-cli"];
+export function getCandidateBinaryNames(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return CODEX_COMMAND_NAMES.flatMap((name) => executableFileNames(name, { platform, env }));
+}
+
+/**
+ * Install locations searched besides `PATH`: `~/.codex/bin`, `~/.cargo/bin` (cargo install),
+ * `~/.local/bin`, `~/bin`; on Windows also npm's global bin (`%APPDATA%\npm`) and WinGet's links.
+ */
+function codexInstallDirs(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): { preferredDirs: string[]; fallbackDirs: string[] } {
+  const userHome = resolveHarnessUserHome({ platform, env });
+  const fallbackDirs = [
+    path.join(userHome, ".codex", "bin"),
+    path.join(userHome, ".cargo", "bin"),
+    path.join(userHome, ".local", "bin"),
+    path.join(userHome, "bin"),
+  ];
+  if (platform !== "win32") return { preferredDirs: [], fallbackDirs };
+  const appData =
+    readHostEnv(env, "APPDATA", platform) ?? path.join(userHome, "AppData", "Roaming");
+  const localAppData =
+    readHostEnv(env, "LOCALAPPDATA", platform) ?? path.join(userHome, "AppData", "Local");
+  return {
+    preferredDirs: [],
+    fallbackDirs: [
+      ...fallbackDirs,
+      path.join(appData, "npm"),
+      path.join(localAppData, "Microsoft", "WinGet", "Links"),
+    ],
+  };
 }
 
 /**
@@ -79,29 +106,11 @@ export async function defaultPathLookup(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string | null> {
-  const pathEnv = env.PATH || env.Path || "";
-  const delimiter = platform === "win32" ? ";" : ":";
-  const searchDirs = pathEnv.split(delimiter).filter(Boolean);
-
-  // Also check standard user bin locations
-  const home = env.CODEX_HOME || env.HOME || env.USERPROFILE || os.homedir();
-  if (home) {
-    searchDirs.push(
-      path.join(home, ".codex", "bin"),
-      path.join(home, ".cargo", "bin"),
-      path.join(home, ".local", "bin"),
-      path.join(home, "bin"),
-    );
-  }
-
-  for (const dir of searchDirs) {
-    const fullPath = path.join(dir, binName);
-    if (await fileExists(fullPath)) {
-      return fullPath;
-    }
-  }
-
-  return null;
+  return await findHostExecutable([binName], {
+    platform,
+    env,
+    ...codexInstallDirs(env, platform),
+  });
 }
 
 /**
@@ -124,11 +133,17 @@ export async function findCodexExecutable(options?: {
 
   const platform = options?.platform ?? process.platform;
   const env = options?.env ?? process.env;
-  const lookup = options?.pathLookup ?? ((bin) => defaultPathLookup(bin, env, platform));
-  const candidateNames = getCandidateBinaryNames(platform);
-
-  for (const candidate of candidateNames) {
-    const resolved = await lookup(candidate);
+  if (!options?.pathLookup) {
+    // Windows semantics: per directory, every name and PATHEXT extension before the next one.
+    const found = await findHostExecutable(CODEX_COMMAND_NAMES, {
+      platform,
+      env,
+      ...codexInstallDirs(env, platform),
+    });
+    return found ? path.resolve(found) : null;
+  }
+  for (const candidate of getCandidateBinaryNames(platform, env)) {
+    const resolved = await options.pathLookup(candidate);
     if (resolved) {
       return path.resolve(resolved);
     }
@@ -164,14 +179,12 @@ export function compareSemver(v1: string, v2: string): number {
 }
 
 /**
- * Default command execution function using child_process.execFile.
+ * Default command execution function: `execFile` without a shell, through `cmd.exe` only for the
+ * Windows `codex.cmd` launcher (Windows refuses to spawn batch files directly).
  */
 export const defaultCommandExecutor: CommandExecutor = async (file: string, args: string[]) => {
   try {
-    const { stdout, stderr } = await execFileAsync(file, args, {
-      timeout: 5000,
-      encoding: "utf8",
-    });
+    const { stdout, stderr } = await runHarnessCommand(file, args, { timeoutMs: 5000 });
     return { stdout, stderr, exitCode: 0 };
   } catch (err: unknown) {
     // SAFETY: Node child_process execFile error objects contain stdout, stderr, code, and message properties.
@@ -211,16 +224,21 @@ export async function probeCodexVersion(
 export async function resolveCodexPaths(options?: {
   customConfigPath?: string;
   customSessionRoot?: string;
+  /** Codex home itself (what `$CODEX_HOME` would name). */
   homeDir?: string;
+  /** The user's home; Codex home defaults to `<userHome>/.codex`. */
+  userHome?: string;
   env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
 }): Promise<CodexResolvedPaths> {
   const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
+  // Codex reads `$CODEX_HOME`, else `dirs::home_dir()/.codex`: `$HOME` on POSIX, the profile
+  // folder (`%USERPROFILE%`) on Windows, where `HOME` is ignored.
   const home =
-    env.CODEX_HOME ||
-    options?.homeDir ||
-    (env.HOME || env.USERPROFILE
-      ? path.join(env.HOME || env.USERPROFILE!, ".codex")
-      : os.homedir());
+    readHostPathEnv(env, "CODEX_HOME", platform) ??
+    options?.homeDir ??
+    path.join(options?.userHome ?? resolveHarnessUserHome({ platform, env }), ".codex");
 
   let configPath: string;
   let configFormat: "toml" | "json" = "toml";
@@ -228,8 +246,8 @@ export async function resolveCodexPaths(options?: {
   if (options?.customConfigPath) {
     configPath = path.resolve(options.customConfigPath);
     configFormat = configPath.endsWith(".json") ? "json" : "toml";
-  } else if (env.CODEX_CONFIG_PATH) {
-    configPath = path.resolve(env.CODEX_CONFIG_PATH);
+  } else if (readHostPathEnv(env, "CODEX_CONFIG_PATH", platform)) {
+    configPath = readHostPathEnv(env, "CODEX_CONFIG_PATH", platform)!;
     configFormat = configPath.endsWith(".json") ? "json" : "toml";
   } else {
     const tomlPath = path.join(home, "config.toml");
@@ -254,8 +272,8 @@ export async function resolveCodexPaths(options?: {
   let sessionRoot: string;
   if (options?.customSessionRoot) {
     sessionRoot = path.resolve(options.customSessionRoot);
-  } else if (env.CODEX_SESSIONS_DIR) {
-    sessionRoot = path.resolve(env.CODEX_SESSIONS_DIR);
+  } else if (readHostPathEnv(env, "CODEX_SESSIONS_DIR", platform)) {
+    sessionRoot = readHostPathEnv(env, "CODEX_SESSIONS_DIR", platform)!;
   } else {
     const defaultSessions = path.join(home, "sessions");
     const rollouts = path.join(home, "rollouts");
@@ -453,9 +471,20 @@ async function readCodexHeader(
 
 async function canonicalCodexCwd(cwd: string | undefined): Promise<string | null> {
   if (!cwd) return null;
-  const pathApi = /^[a-zA-Z]:[\\/]/.test(cwd) || cwd.startsWith("\\\\") ? path.win32 : path;
+  const windowsShaped = /^[a-zA-Z]:[\\/]/.test(cwd) || cwd.startsWith("\\\\");
+  if (!windowsShaped && process.platform === "win32") {
+    // A POSIX cwd in a Windows Codex home comes from Codex under Linux/WSL sharing this
+    // CODEX_HOME. Keep its POSIX identity instead of resolving it onto the current drive.
+    return cwd.startsWith("/") ? path.posix.resolve(cwd) : null;
+  }
+  const pathApi = windowsShaped ? path.win32 : path;
   if (!pathApi.isAbsolute(cwd)) return null;
-  const resolved = pathApi.resolve(cwd);
+  // Windows tools disagree on drive-letter case (`c:\` from VS Code, `C:\` elsewhere); one
+  // directory is one workspace.
+  const resolved =
+    pathApi === path.win32
+      ? pathApi.resolve(cwd).replace(/^[a-z](?=:)/, (drive) => drive.toUpperCase())
+      : pathApi.resolve(cwd);
   if (pathApi === path.win32 && process.platform !== "win32") return resolved;
   try {
     return await fs.realpath(resolved);
@@ -740,6 +769,8 @@ export async function discoverCodexTranscripts(
  */
 export interface CodexProbeOptions extends ProbeInstallationOptions {
   platform?: NodeJS.Platform;
+  /** The user's home (`resin init --home`); Codex home defaults to `<userHome>/.codex`. */
+  userHome?: string;
   executor?: CommandExecutor;
   pathLookup?: PathLookupFn;
   testedVersions?: readonly string[];
@@ -760,6 +791,8 @@ export async function probeCodexInstallation(
   const resolvedPaths = await resolveCodexPaths({
     customConfigPath: options?.customConfigPath,
     env: options?.env,
+    platform: options?.platform,
+    userHome: options?.userHome,
   });
 
   const executablePath = await findCodexExecutable({

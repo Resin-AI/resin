@@ -77,18 +77,22 @@ describe("Command Identity Policy & Verification", () => {
       expect(identity.sha256).toMatch(/^[a-f0-9]{64}$/);
     });
 
-    it("resolves canonical absolute path through symlinks", () => {
-      const realTarget = path.join(tempDir, "real_binary");
-      fs.writeFileSync(realTarget, "#!/bin/sh\necho real", { mode: 0o755 });
+    // File symlinks need admin or Developer Mode on Windows; junctions cannot target files.
+    it.skipIf(process.platform === "win32")(
+      "resolves canonical absolute path through symlinks",
+      () => {
+        const realTarget = path.join(tempDir, "real_binary");
+        fs.writeFileSync(realTarget, "#!/bin/sh\necho real", { mode: 0o755 });
 
-      const symlinkPath = path.join(tempDir, "symlink_binary");
-      fs.symlinkSync(realTarget, symlinkPath);
+        const symlinkPath = path.join(tempDir, "symlink_binary");
+        fs.symlinkSync(realTarget, symlinkPath);
 
-      const identity = resolveCanonicalBinary(symlinkPath, { computeDigest: true });
-      expect(identity.canonicalPath).toBe(path.resolve(symlinkPath));
-      expect(identity.realPath).toBe(fs.realpathSync(realTarget));
-      expect(identity.sha256).toBeDefined();
-    });
+        const identity = resolveCanonicalBinary(symlinkPath, { computeDigest: true });
+        expect(identity.canonicalPath).toBe(path.resolve(symlinkPath));
+        expect(identity.realPath).toBe(fs.realpathSync(realTarget));
+        expect(identity.sha256).toBeDefined();
+      },
+    );
 
     it("rejects non-existent binary when allowNonExistent is false", () => {
       expect(() =>
@@ -119,7 +123,8 @@ describe("Command Identity Policy & Verification", () => {
       expect(verification.reason).toBeUndefined();
     });
 
-    it("detects symlink swap attack before execution", () => {
+    // File symlinks need admin or Developer Mode on Windows; junctions cannot target files.
+    it.skipIf(process.platform === "win32")("detects symlink swap attack before execution", () => {
       const originalTarget = path.join(tempDir, "legit_target");
       fs.writeFileSync(originalTarget, "#!/bin/sh\necho legit", { mode: 0o755 });
 

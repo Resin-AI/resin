@@ -42,6 +42,39 @@ export const WORKFLOW_VALIDATION_LEASE_STALE_MS = 30 * 60_000;
 /** A takeover is a few file operations; a guard older than this was left by a process that died. */
 const WORKFLOW_VALIDATION_TAKEOVER_GUARD_STALE_MS = 60_000;
 
+/**
+ * Backoff between retries of a rename Windows refused because some process had the file open:
+ * another gateway or the daemon reading the lease, or an antivirus scan of the file just written.
+ */
+const SHARING_VIOLATION_RETRY_DELAYS_MS = [10, 20, 40, 80, 160, 320];
+
+/**
+ * `fs.rename`, waiting out a Windows sharing violation. Windows refuses to replace or move a file any
+ * process holds open (EPERM, EACCES or EBUSY) where POSIX renames over it at once; those handles
+ * are gone within moments, so the rename is retried on a short backoff. Never retries off Windows.
+ */
+async function renameWaitingForReaders(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const delayMs = SHARING_VIOLATION_RETRY_DELAYS_MS[attempt];
+      if (
+        process.platform !== "win32" ||
+        delayMs === undefined ||
+        (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")
+      ) {
+        throw error;
+      }
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, delayMs);
+      await promise;
+    }
+  }
+}
+
 interface LeasePayload {
   pid: number;
   token: string;
@@ -151,7 +184,7 @@ export class FileWorkflowValidationPassLease implements WorkflowValidationPassLe
       if (!this.isAbandoned(parsePayload(text))) return false;
       const aside = `${this.filePath}.${randomUUID()}.stale`;
       try {
-        await fs.rename(this.filePath, aside);
+        await renameWaitingForReaders(this.filePath, aside);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
         throw error;
@@ -178,7 +211,12 @@ export class FileWorkflowValidationPassLease implements WorkflowValidationPassLe
     if (!(await this.holds(token))) return;
     const next = `${this.filePath}.${randomUUID()}.renew`;
     await fs.writeFile(next, this.payload(token), { mode: 0o600 });
-    await fs.rename(next, this.filePath);
+    try {
+      await renameWaitingForReaders(next, this.filePath);
+    } catch (error) {
+      await fs.rm(next, { force: true });
+      throw error;
+    }
   }
 
   private async release(token: string): Promise<void> {

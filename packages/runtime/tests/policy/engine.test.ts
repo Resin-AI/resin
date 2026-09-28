@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { CapabilityEnvelope, CapabilityManifest, ToolManifest } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -5,6 +6,9 @@ import {
   type InvocationContext,
   verifyInvocationGrant,
 } from "../../src/policy/index.js";
+
+// Fully qualified on every platform: a drive-less "/tmp/…" is not an absolute root on Windows.
+const testWorkspaceRoot = path.resolve("/tmp/ws_prod_01");
 
 const testEnvelope: CapabilityEnvelope = {
   envelopeId: "env_ws_prod",
@@ -56,13 +60,13 @@ const validContext: InvocationContext = {
   toolId: "typecheck_runner",
   toolVersion: "1.0.0",
   workspaceId: "ws_prod_01",
-  workspaceRoot: "/tmp/ws_prod_01",
+  workspaceRoot: testWorkspaceRoot,
 };
 
 describe("CapabilityPolicyEngine", () => {
   it("grants invocation when requested capabilities are within approved envelope", () => {
     const engine = new CapabilityPolicyEngine({
-      workspaceRoot: "/tmp/ws_prod_01",
+      workspaceRoot: testWorkspaceRoot,
     });
     engine.setEnvelope(testEnvelope);
 
@@ -123,7 +127,7 @@ describe("CapabilityPolicyEngine", () => {
 
   it("evaluates a full ToolManifest input correctly", () => {
     const engine = new CapabilityPolicyEngine({
-      workspaceRoot: "/tmp/ws_prod_01",
+      workspaceRoot: testWorkspaceRoot,
     });
 
     const toolManifest: ToolManifest = {
@@ -192,7 +196,7 @@ describe("CapabilityPolicyEngine", () => {
   describe("Denial on Attempted Envelope Expansion", () => {
     it("denies expansion on unauthorized filesystem path", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifest: CapabilityManifest = {
@@ -246,7 +250,7 @@ describe("CapabilityPolicyEngine", () => {
 
     it("denies expansion on path traversal escaping workspace root", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifest: CapabilityManifest = {
@@ -300,7 +304,7 @@ describe("CapabilityPolicyEngine", () => {
 
     it("denies expansion on unauthorized network domain", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifest: CapabilityManifest = {
@@ -353,7 +357,7 @@ describe("CapabilityPolicyEngine", () => {
 
     it("denies expansion when tool attempts shell execution", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifest: CapabilityManifest = {
@@ -408,7 +412,7 @@ describe("CapabilityPolicyEngine", () => {
   describe("Unknown Capability Types Rejection", () => {
     it("denies requests with unknown top-level capability properties", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifestWithUnknown = {
@@ -464,7 +468,7 @@ describe("CapabilityPolicyEngine", () => {
 
     it("denies requests with unknown subsystem properties", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const manifestWithUnknownSub = {
@@ -520,7 +524,7 @@ describe("CapabilityPolicyEngine", () => {
   describe("Frozen Envelope & Workspace Mismatch", () => {
     it("denies dynamic expansion attempts on frozen envelope", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const frozenEnvelope: CapabilityEnvelope = {
@@ -578,7 +582,7 @@ describe("CapabilityPolicyEngine", () => {
 
     it("denies invocation when context workspaceId does not match envelope workspaceId", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
 
       const mismatchedContext: InvocationContext = {
@@ -638,7 +642,7 @@ describe("CapabilityPolicyEngine", () => {
   describe("Cache Invalidation", () => {
     it("caches evaluation results and invalidates immediately when envelope is updated", () => {
       const engine = new CapabilityPolicyEngine({
-        workspaceRoot: "/tmp/ws_prod_01",
+        workspaceRoot: testWorkspaceRoot,
       });
       engine.setEnvelope(testEnvelope);
 

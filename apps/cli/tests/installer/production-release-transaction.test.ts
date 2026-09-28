@@ -110,14 +110,17 @@ describe("production signed release transaction", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-prod-install-"));
     homes.push(home);
     const release = tarGz();
-    const denoZip = zipStored("deno", Buffer.from("#!/bin/sh\nexit 0\n"));
+    // Windows releases ship `deno.exe`; the manifest names it as the runtime executable.
+    const denoExecutable = process.platform === "win32" ? "deno.exe" : "deno";
+    const denoZip = zipStored(denoExecutable, Buffer.from("#!/bin/sh\nexit 0\n"));
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const publicKeyHex = publicKey
       .export({ type: "spki", format: "der" })
       .subarray(-32)
       .toString("hex");
     const keyId = "test-production-key";
-    const assetKey = `${process.platform}-${process.arch}`;
+    // Release lanes name native Windows `windows-<arch>` (see PINNED_DENO_RUNTIMES).
+    const assetKey = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
     const releaseFilename = `resin-v1.0.0-${assetKey}.tar.gz`;
     const denoFilename = `deno-${assetKey}.zip`;
 
@@ -152,7 +155,7 @@ describe("production signed release transaction", () => {
               url: "__DENO__",
               sha256: sha256(denoZip),
               archive: "zip",
-              executable: "deno",
+              executable: denoExecutable,
             },
           },
         },

@@ -802,7 +802,10 @@ export function selectPlatformAsset(
   const isWsl = Boolean(platform.isWsl) || platform.os === "wsl";
   const arch =
     platform.arch === "x86_64" ? "x64" : platform.arch === "aarch64" ? "arm64" : platform.arch;
-  const osName = isWsl ? "wsl" : platform.os;
+  // Native Windows lanes are keyed `windows-<arch>`; their manifest entries carry Node's
+  // process.platform value `win32`.
+  const isWindows = !isWsl && (platform.os === "win32" || platform.os === "windows");
+  const osName = isWsl ? "wsl" : isWindows ? "windows" : platform.os;
 
   if (isWsl && arch !== "x64" && arch !== "arm64") {
     throw new Error(
@@ -839,8 +842,9 @@ export function selectPlatformAsset(
 
   // Native (non-WSL) property search if not found by exact key: never match WSL assets
   if (!asset && !isWsl) {
+    const assetPlatform = isWindows ? "win32" : osName;
     asset = Object.values(manifest.assets).find(
-      (a) => a.arch === arch && a.platform === osName && !a.isWsl,
+      (a) => a.arch === arch && a.platform === assetPlatform && !a.isWsl,
     );
   }
   if (!asset) {

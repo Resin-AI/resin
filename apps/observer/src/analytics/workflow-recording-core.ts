@@ -33,6 +33,7 @@ import {
   type WorkflowCallCandidate,
   type WorkflowCallCarrier,
   type WorkflowCallHeldOut,
+  applyWorkflowDialectUpgrades,
   isWorkflowCallEvent,
   isWorkflowResultEvent,
   readWorkflowCallCarrier,
@@ -184,9 +185,19 @@ interface RepeatCall {
 
 export function reconstructWorkflowFromEvents(
   workflowId: string,
-  events: readonly RecordableEvent[],
-  options: WorkflowRecordingCoreOptions = {},
+  recordedEvents: readonly RecordableEvent[],
+  recordedOptions: WorkflowRecordingCoreOptions = {},
 ): RecordedRecipe | undefined {
+  // A call whose shell dialect a later record proved is read as proven everywhere below.
+  const sources = [...recordedEvents, ...(recordedOptions.supportingEvents ?? [])];
+  const events = applyWorkflowDialectUpgrades(recordedEvents, sources);
+  const options: WorkflowRecordingCoreOptions =
+    recordedOptions.supportingEvents === undefined
+      ? recordedOptions
+      : {
+          ...recordedOptions,
+          supportingEvents: applyWorkflowDialectUpgrades(recordedOptions.supportingEvents, sources),
+        };
   const allOrdered = [...events].sort(compareRecordedEvents);
   const firstExecutionCall = allOrdered.find(
     (event) =>

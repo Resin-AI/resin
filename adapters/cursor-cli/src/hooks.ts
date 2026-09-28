@@ -33,8 +33,6 @@ export const CURSOR_CAPTURE_HOOK_EVENTS = [
 
 export const CURSOR_HOOK_TIMEOUT_SECONDS = 10;
 
-const SCRIPT_BASENAME = "cursor-capture.mjs";
-
 /**
  * The capture hook. Reads one hook payload from stdin and appends it, stamped with
  * `resin_received_at` and without `user_email`, to
@@ -71,23 +69,36 @@ try {
 }
 `;
 
-/** Shell-quotes a path for the hook command (cursor-agent runs hook commands through a shell). */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+/**
+ * Shell-quotes a path for the hook command. cursor-agent runs hook commands through `sh` on POSIX
+ * and through PowerShell on Windows, whose single-quoted strings escape `'` by doubling it.
+ */
+function shellQuote(value: string, platform: NodeJS.Platform): string {
+  return platform === "win32"
+    ? `'${value.replace(/'/g, "''")}'`
+    : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function renderCursorHookCommand(scriptPath: string): string {
-  return `node ${shellQuote(scriptPath)}`;
+export function renderCursorHookCommand(
+  scriptPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return `node ${shellQuote(scriptPath, platform)}`;
 }
 
 type JsonRecord = Record<string, unknown>;
 
-/** Resin's entries are recognized by the script basename, so moved Resin homes are cleaned too. */
+/**
+ * Resin's entries are recognized by the script basename, so moved Resin homes are cleaned too.
+ * Either separator matches: the command embeds a host path, which uses backslashes on Windows.
+ */
+const RESIN_HOOK_SCRIPT_SUFFIX = /[\\/]\.resin[\\/]hooks[\\/]cursor-capture\.mjs/;
+
 function isResinHookEntry(entry: unknown): boolean {
   return (
     isRecord(entry) &&
     typeof entry.command === "string" &&
-    entry.command.includes(`/.resin/hooks/${SCRIPT_BASENAME}`)
+    RESIN_HOOK_SCRIPT_SUFFIX.test(entry.command)
   );
 }
 

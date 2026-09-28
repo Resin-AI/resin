@@ -363,6 +363,8 @@ describe("executing a recorded plan over the connections it names", () => {
       parameters: {},
       context: resolveWorkspaceContext({ cwd: root }),
     });
+    // Releases the runtime's handles under the workspace, which Windows cannot delete while open.
+    await runtime.stop();
 
     expect(result.isError, textOf(result)).toBeUndefined();
     // Each step reached the server its own connection names, and its callable is the tool's own

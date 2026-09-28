@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import net from "node:net";
+import type { Duplex } from "node:stream";
 import type { DaemonConfig } from "../config.js";
 import type {
   ConfigReloadResult,
@@ -8,6 +8,7 @@ import type {
   ModuleStatusReport,
 } from "../supervisor.js";
 import { FrameDecoder, encodeFrame } from "./framing.js";
+import { openDaemonConnection } from "./pipe-trust.js";
 import {
   type GetModuleStatusParams,
   type GracefulShutdownParams,
@@ -39,7 +40,7 @@ interface PendingRequest {
 export class IpcClient {
   readonly socketPath?: string;
   private transport: IpcTransport | null = null;
-  private socket: net.Socket | null = null;
+  private socket: Duplex | null = null;
   private defaultTimeoutMs: number;
   private pendingRequests = new Map<string, PendingRequest>();
   private decoder = new FrameDecoder();
@@ -71,23 +72,25 @@ export class IpcClient {
       throw new Error("No socketPath or transport provided to IpcClient");
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection(targetSocket, () => {
-        this.socket = socket;
-        this.isConnected = true;
-        this.setupSocketListeners(socket);
-        resolve();
-      });
-
-      socket.once("error", (err) => {
-        reject(
-          new Error(`Failed to connect to daemon socket at ${this.socketPath}: ${err.message}`),
-        );
-      });
-    });
+    let socket: Duplex;
+    try {
+      // Windows: the pipe is verified to belong to the current user on this very connection.
+      socket = await openDaemonConnection(targetSocket);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof Error && "code" in err ? err.code : undefined;
+      throw Object.assign(
+        new Error(`Failed to connect to daemon socket at ${this.socketPath}: ${message}`),
+        code === undefined ? {} : { code },
+        { cause: err },
+      );
+    }
+    this.socket = socket;
+    this.isConnected = true;
+    this.setupSocketListeners(socket);
   }
 
-  private setupSocketListeners(socket: net.Socket): void {
+  private setupSocketListeners(socket: Duplex): void {
     socket.on("data", (data) => {
       try {
         const frames = this.decoder.push(data);

@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { CodexRecordDecoder } from "@resin/adapter-codex";
 import { type NormalizedSessionEvent, validateRecordedWorkflow } from "@resin/contracts";
 import {
@@ -66,7 +67,8 @@ function command(id: string, cmd: string, stdout: string, at: number, root: stri
         type: "CommandExecution",
         id,
         command: ["/bin/bash", "-lc", cmd],
-        cwd: `file://${root}`,
+        // Codex records the cwd as the host's file URL (`file:///C:/…` on Windows).
+        cwd: pathToFileURL(root).href,
         status: "completed",
         stdout,
         stderr: "",
@@ -112,10 +114,14 @@ async function recordServiceConfig(store: InMemoryPrivateValueStore, root: strin
           type: "FileChange",
           id: "exec-patch",
           changes: {
-            [`${root}/services.yaml`]: { type: "update", unified_diff: DIFF, move_path: null },
+            [path.join(root, "services.yaml")]: {
+              type: "update",
+              unified_diff: DIFF,
+              move_path: null,
+            },
           },
           status: "completed",
-          stdout: `Success. Updated the following files:\nM ${root}/services.yaml\n`,
+          stdout: `Success. Updated the following files:\nM ${path.join(root, "services.yaml")}\n`,
           stderr: "",
         },
         started_at_ms: 2_000,

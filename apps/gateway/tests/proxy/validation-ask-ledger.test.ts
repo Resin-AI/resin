@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { windowsPrivacyProblem } from "@resin/observer";
 import { describe, expect, it } from "vitest";
 import { FileValidationAskLedger } from "../../src/proxy/validation-ask-ledger.js";
 
@@ -38,7 +39,9 @@ describe("the validation ask ledger", () => {
     const { ledger: asks, filePath } = ledger(now);
     asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1", "call:2"] });
     asks.admit({ requestId: "b", planDigest: "d2", keys: ["call:3"] });
-    expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+    // Windows keeps the file owner-only through the private directory's DACL, not mode bits.
+    if (process.platform === "win32") expect(windowsPrivacyProblem(filePath)).toBeUndefined();
+    else expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
     const entries = fs
       .readFileSync(filePath, "utf8")
       .trim()

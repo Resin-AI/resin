@@ -118,7 +118,9 @@ describe("real Deno read-only broker path", () => {
       if (kind === "worktree-config") git("config", "extensions.worktreeConfig", "true");
       if (kind === "alternates")
         fs.writeFileSync(path.join(root, ".git/objects/info/alternates"), "/outside/objects");
-      if (kind === "symlink") fs.symlinkSync("/outside", path.join(root, ".git/escape"));
+      // Unprivileged Windows users cannot create symlinks; a directory junction is the same escape.
+      if (kind === "symlink")
+        fs.symlinkSync(path.resolve("/outside"), path.join(root, ".git/escape"), "junction");
       const result = await execute(
         root,
         `return context.broker.cmd.exec("git", ${JSON.stringify(statusArgs)}, { readOnlyGit: true });`,

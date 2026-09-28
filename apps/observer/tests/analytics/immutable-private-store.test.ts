@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { checkOwnerOnly } from "@resin/windows-security";
+import { PROBE_ACCESS, probeOpenWithUserSidDisabled } from "@resin/windows-security/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FilePrivateValueStore,
@@ -140,9 +142,15 @@ describe("immutable private reference persistence", () => {
     }
     const entries = path.join(root, "private-values", "entries-v2");
     expect(readdirSync(entries)).toHaveLength(192);
-    if (process.platform !== "win32") {
-      for (const name of readdirSync(entries))
-        expect(statSync(path.join(entries, name)).mode & 0o777).toBe(0o600);
+    for (const name of readdirSync(entries)) {
+      const file = path.join(entries, name);
+      if (process.platform === "win32") {
+        // Published through a temporary file and a hard link inside the owner-only directory.
+        expect(checkOwnerOnly(file)).toMatchObject({ ok: true, problems: [] });
+        expect(probeOpenWithUserSidDisabled(file, PROBE_ACCESS.read).win32Error).toBe(5);
+      } else {
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+      }
     }
   });
 

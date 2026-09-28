@@ -107,7 +107,7 @@ describe("Grok config.toml registration", () => {
     const agents = await fs.readFile(path.join(home, ".grok", "AGENTS.md"), "utf8");
     expect(agents.match(/resin:grok-guidance:start/g)).toHaveLength(1);
     expect(grokBuildHarness.mcpConfig.resolvePath(home, { GROK_HOME: "/elsewhere" })).toBe(
-      "/elsewhere/config.toml",
+      path.resolve("/elsewhere", "config.toml"),
     );
   });
 
@@ -153,25 +153,29 @@ describe("Grok config.toml registration", () => {
 });
 
 describe("grok installation probe", () => {
-  it("reads the version from the installed release binary name without running it", async () => {
-    const home = await tempHome();
-    const bin = path.join(home, ".grok", "bin");
-    await fs.mkdir(bin, { recursive: true });
-    // A binary that fails if executed proves the probe read its name instead.
-    await fs.writeFile(path.join(bin, "grok-1.0.13"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    await fs.symlink("grok-1.0.13", path.join(bin, "grok"));
-    const installation = await grokBuildHarness.probeInstallation({ home, env: { PATH: "" } });
-    expect(installation).toMatchObject({
-      version: "1.0.13",
-      executablePath: path.join(bin, "grok"),
-      status: "ready",
-    });
+  // Grok's POSIX installer links `grok` to the release binary with a file symlink (needs privilege on Windows).
+  it.skipIf(process.platform === "win32")(
+    "reads the version from the installed release binary name without running it",
+    async () => {
+      const home = await tempHome();
+      const bin = path.join(home, ".grok", "bin");
+      await fs.mkdir(bin, { recursive: true });
+      // A binary that fails if executed proves the probe read its name instead.
+      await fs.writeFile(path.join(bin, "grok-1.0.13"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      await fs.symlink("grok-1.0.13", path.join(bin, "grok"));
+      const installation = await grokBuildHarness.probeInstallation({ home, env: { PATH: "" } });
+      expect(installation).toMatchObject({
+        version: "1.0.13",
+        executablePath: path.join(bin, "grok"),
+        status: "ready",
+      });
 
-    await fs.rm(path.join(bin, "grok"));
-    await fs.writeFile(path.join(bin, "grok"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    expect(await grokBuildHarness.probeInstallation({ home, env: { PATH: "" } })).toMatchObject({
-      version: UNKNOWN_HARNESS_VERSION,
-      status: "ready",
-    });
-  });
+      await fs.rm(path.join(bin, "grok"));
+      await fs.writeFile(path.join(bin, "grok"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      expect(await grokBuildHarness.probeInstallation({ home, env: { PATH: "" } })).toMatchObject({
+        version: UNKNOWN_HARNESS_VERSION,
+        status: "ready",
+      });
+    },
+  );
 });

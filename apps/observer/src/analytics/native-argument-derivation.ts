@@ -35,6 +35,8 @@ import {
   extractCharsetOf,
   extractPrintedValue,
   inputRoleName,
+  isShellGrammar,
+  powershellValueName,
   programTokenPath,
   scriptRecordFieldKeys,
   scriptTokenContextName,
@@ -66,7 +68,15 @@ export interface DerivationCall {
    * argument whose text holds it. A value embedded in that text is part of the program rather than a
    * leaf of an argument, so it is only comparable once the text has been read as the program it is.
    */
-  program?: { kind: ProgramLanguage; argument: string };
+  program?: {
+    kind: ProgramLanguage;
+    argument: string;
+    /**
+     * A program Resin never tokenizes (cmd.exe, or a shell the record did not prove): nothing is
+     * proposed inside its text, for its text as a whole, or for the call's other arguments.
+     */
+    opaque?: true;
+  };
 }
 
 export interface DerivedCall {
@@ -193,10 +203,10 @@ function isProgramValue(
     return false;
   }
   if (value.startsWith("/dev/")) return false;
-  const flag = longFlagName(previous);
+  const flag = longFlagName(previous) ?? powershellParameter(language, previous);
   if (flag !== undefined && /pass|secret|token|key|auth|cred/.test(flag)) return false;
   const shaped = /[/.\d]/.test(value);
-  if (language !== "shell") return token.kind === "string" && shaped;
+  if (!isShellGrammar(language)) return token.kind === "string" && shaped;
   if (token.kind === "word" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.raw)) return false;
   return token.kind === "string" || shaped || flag !== undefined || shared;
 }
@@ -236,17 +246,18 @@ function shellArgumentPositions(tokens: readonly ProgramToken[]): Array<number |
 function sharedShellWords(calls: readonly DerivationCall[]): Set<string> {
   const callsByWord = new Map<string, number>();
   for (const call of calls) {
-    if (call.program?.kind !== "shell") continue;
+    if (call.program === undefined || call.program.opaque || !isShellGrammar(call.program.kind))
+      continue;
     const text = call.arguments[call.program.argument];
     if (typeof text !== "string") continue;
     let tokens: ProgramToken[];
     try {
-      tokens = tokenizeProgram("shell", text);
+      tokens = tokenizeProgram(call.program.kind, text);
     } catch (error) {
       if (error instanceof ProgramTokenizationError) continue;
       throw error;
     }
-    const bodyStart = heredocStart("shell", text);
+    const bodyStart = heredocStart(call.program.kind, text);
     const positions = shellArgumentPositions(tokens);
     const words = new Set<string>();
     for (const [index, token] of tokens.entries()) {
@@ -263,7 +274,7 @@ function sharedShellWords(calls: readonly DerivationCall[]): Set<string> {
 function sharedEmbeddedStrings(calls: readonly DerivationCall[]): Set<string> {
   const callsByValue = new Map<string, number>();
   for (const call of calls) {
-    if (call.program?.kind !== "shell") continue;
+    if (call.program?.kind !== "shell" || call.program.opaque) continue;
     const text = call.arguments[call.program.argument];
     if (typeof text !== "string") continue;
     const values = new Set<string>();
@@ -277,6 +288,17 @@ function sharedEmbeddedStrings(calls: readonly DerivationCall[]): Set<string> {
     for (const value of values) callsByValue.set(value, (callsByValue.get(value) ?? 0) + 1);
   }
   return new Set([...callsByValue].flatMap(([value, count]) => (count >= 2 ? [value] : [])));
+}
+
+/** A PowerShell parameter's name (`-ApiToken` → `apitoken`), for a program in a PowerShell grammar. */
+function powershellParameter(
+  language: ProgramLanguage,
+  token: ProgramToken | undefined,
+): string | undefined {
+  if (language !== "powershell" && language !== "pwsh") return undefined;
+  const parameter =
+    token?.kind === "word" ? /^-([A-Za-z][A-Za-z0-9_]{0,30})$/.exec(token.raw) : null;
+  return parameter?.[1]?.toLowerCase();
 }
 
 function longFlagName(token: ProgramToken | undefined): string | undefined {
@@ -295,8 +317,11 @@ function programInputBaseName(
   index: number,
   language: ProgramLanguage,
 ): string {
-  const flag = valueFlag(tokens, index);
-  const command = language === "shell" ? shellCommandSite(tokens, index) : undefined;
+  const flag =
+    language === "powershell" || language === "pwsh"
+      ? (powershellValueName(tokens, index) ?? valueFlag(tokens, index))
+      : valueFlag(tokens, index);
+  const command = isShellGrammar(language) ? shellCommandSite(tokens, index) : undefined;
   return inputRoleName([
     {
       value,
@@ -459,7 +484,7 @@ export function deriveNativeCalls(
     // position rather than the text the value happens to sit in. Only a word or a string is offered
     // — an operator denotes no value — and the same producer rule decides it, so a token that merely
     // repeats something the record already contained is not offered either.
-    if (call.program !== undefined) {
+    if (call.program !== undefined && call.program.opaque !== true) {
       const text = call.arguments[call.program.argument];
       if (typeof text !== "string") continue;
       let tokens: ProgramToken[];
@@ -496,13 +521,13 @@ export function deriveNativeCalls(
 
       // A token an earlier call printed inside its text output (`created deployment dep-9e983a`).
       // Whole-value equality above cannot see it; a locator on the producer's output can.
-      if (call.program.kind === "shell") {
+      if (isShellGrammar(call.program.kind)) {
         const bound = new Set(
           candidates
             .filter((entry) => entry.stepId === call.stepId && entry.path[0] === "tokens")
             .map((entry) => entry.path[1]),
         );
-        const bodyStart = heredocStart("shell", text);
+        const bodyStart = heredocStart(call.program.kind, text);
         for (const [tokenIndex, token] of tokens.entries()) {
           if (resultFull()) break;
           if (token.start >= bodyStart) break;
@@ -530,7 +555,9 @@ export function deriveNativeCalls(
       // A shell word at command position — the first word of a simple command after any leading
       // assignments — names the program to run, never a value it runs with. A bare word past the
       // subcommand's position is a value when other calls ran with it too.
-      const positions = call.program.kind === "shell" ? shellArgumentPositions(tokens) : undefined;
+      const positions = isShellGrammar(call.program.kind)
+        ? shellArgumentPositions(tokens)
+        : undefined;
       // A script's record-field keys (`x['merchant']`) are its schema, never its data.
       const script = call.program.kind === "python" || call.program.kind === "javascript";
       const fieldKeys = script ? scriptRecordFieldKeys(text, tokens) : new Set<number>();
@@ -552,8 +579,9 @@ export function deriveNativeCalls(
         if (name === undefined) {
           if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
           const contextName = script ? scriptTokenContextName(text, tokens, tokenIndex) : undefined;
-          const command =
-            call.program.kind === "shell" ? shellCommandSite(tokens, tokenIndex) : undefined;
+          const command = isShellGrammar(call.program.kind)
+            ? shellCommandSite(tokens, tokenIndex)
+            : undefined;
           name = uniqueRoleName(
             contextName ?? programInputBaseName(token.value, tokens, tokenIndex, call.program.kind),
             command === undefined ? [] : [{ command }],

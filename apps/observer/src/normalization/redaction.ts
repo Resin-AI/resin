@@ -4,6 +4,7 @@ import path from "node:path";
 import type { RedactionMeta, RedactionStrategy } from "@resin/contracts";
 import { z } from "zod";
 import { ContentScanner } from "./scanner.js";
+import { WindowsIdentityScrubber, environmentValue, isWindowsPath } from "./windows-identity.js";
 
 export type JsonPrimitive = string | number | boolean | null | undefined;
 export type JsonArray = JsonValue[];
@@ -44,6 +45,12 @@ export interface RedactionConfig {
    * Defaults to this process's environment.
    */
   environment?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Platform the redacted session ran on (default: this process's). A Windows session also scrubs
+   * its `USERNAME`, `USERDOMAIN`, `USERDNSDOMAIN` and `COMPUTERNAME` values and looks variables up
+   * case-insensitively; Windows home directories are scrubbed from every session's content.
+   */
+  platform?: NodeJS.Platform;
   /**
    * Device-local HMAC key for placeholder tags. It never leaves the device, so an uploaded tag
    * cannot be matched against guessed secrets or correlated across devices. Defaults to a fresh
@@ -161,6 +168,7 @@ export class RedactionEngine {
     name: string;
   }>;
   private readonly customSecretReplacements: Array<{ secret: string; fingerprint: string }>;
+  private readonly windowsIdentity: WindowsIdentityScrubber;
   private readonly fingerprintKey: Uint8Array;
   private readonly localOnlyFieldsSet: Set<string>;
   private readonly preserveWorkspaceRootCwd: boolean;
@@ -206,7 +214,13 @@ export class RedactionEngine {
       rawPathMap[path.resolve(this.config.repoRoot)] = "$REPO_ROOT";
     }
 
-    if (this.config.homeDir && this.config.homeDir.length > 1) {
+    // A Windows home is aliased by the Windows identity step in every spelling (separators, case,
+    // `\\?\` prefix), which a literal replacement here would pre-empt with a partial match.
+    if (
+      this.config.homeDir &&
+      this.config.homeDir.length > 1 &&
+      !isWindowsPath(this.config.homeDir)
+    ) {
       rawPathMap[this.config.homeDir] = "$HOME";
       rawPathMap[path.resolve(this.config.homeDir)] = "$HOME";
     }
@@ -218,6 +232,12 @@ export class RedactionEngine {
 
     // Build env secrets list from the session's environment
     const environment = config.environment ?? process.env;
+    const platform = config.platform ?? process.platform;
+    this.windowsIdentity = new WindowsIdentityScrubber({
+      homeDir: this.config.homeDir,
+      environment,
+      platform,
+    });
     const sensitiveEnvVars =
       this.config.sensitiveEnvVars ??
       Array.from(
@@ -228,7 +248,7 @@ export class RedactionEngine {
       );
     this.envSecretReplacements = [];
     for (const envVarName of sensitiveEnvVars) {
-      const val = environment[envVarName];
+      const val = environmentValue(environment, envVarName, platform);
       if (val && val.trim().length >= 6) {
         const fp = computeFingerprint(this.fingerprintKey, val);
         this.envSecretReplacements.push({
@@ -297,6 +317,21 @@ export class RedactionEngine {
         fingerprints.push(fingerprint);
         this.config.onRedact?.(placeholder, secret);
       }
+    }
+
+    // 3b. Windows identity: home directories in every spelling, OneDrive organizations, and the
+    // session's user, domain and machine names. After the secret values, which may contain them.
+    const identity = this.windowsIdentity.scrub(current, (type, original) => {
+      const fingerprint = computeFingerprint(this.fingerprintKey, original);
+      const placeholder = `[REDACTED_${type}:${fingerprint}]`;
+      fingerprints.push(fingerprint);
+      this.config.onRedact?.(placeholder, original);
+      return placeholder;
+    });
+    if (identity.text !== current) {
+      current = identity.text;
+      changed = true;
+      patterns.push(...identity.patterns);
     }
 
     // 4. Content Scanning (Regex & High Entropy)

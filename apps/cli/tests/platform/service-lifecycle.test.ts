@@ -99,35 +99,39 @@ describe("Cross-Platform Service Lifecycle Suite", () => {
       expect(validation.errors).toHaveLength(0);
     });
 
-    it("generates and validates a valid macOS launchd plist file", () => {
-      const plistContent = generateLaunchdPlist({
-        serviceName: "com.resin.daemon",
-        daemonPath: "/Users/test/.resin/bin/daemon",
-        nodePath: "/usr/local/bin/node",
-        homeDir: "/Users/test",
-        resinHome: "/Users/test/.resin",
-        logDir: "/Users/test/Library/Logs/resin",
-        env: {
-          RESIN_STAGE: "release",
-        },
-      });
+    // POSIX-only: systemd/launchd unit generation with POSIX paths; Windows uses a scheduled task.
+    it.skipIf(process.platform === "win32")(
+      "generates and validates a valid macOS launchd plist file",
+      () => {
+        const plistContent = generateLaunchdPlist({
+          serviceName: "com.resin.daemon",
+          daemonPath: "/Users/test/.resin/bin/daemon",
+          nodePath: "/usr/local/bin/node",
+          homeDir: "/Users/test",
+          resinHome: "/Users/test/.resin",
+          logDir: "/Users/test/Library/Logs/resin",
+          env: {
+            RESIN_STAGE: "release",
+          },
+        });
 
-      expect(plistContent).toContain("<!DOCTYPE plist PUBLIC");
-      expect(plistContent).toContain("<key>Label</key>");
-      expect(plistContent).toContain("<string>com.resin.daemon</string>");
-      expect(plistContent).toContain("<key>RunAtLoad</key>");
-      expect(plistContent).toContain("<true/>");
-      expect(plistContent).toContain("<key>StandardOutPath</key>");
-      expect(plistContent).toContain("/Users/test/Library/Logs/resin/daemon.log");
-      expect(plistContent).toContain("<key>RESIN_STAGE</key>");
+        expect(plistContent).toContain("<!DOCTYPE plist PUBLIC");
+        expect(plistContent).toContain("<key>Label</key>");
+        expect(plistContent).toContain("<string>com.resin.daemon</string>");
+        expect(plistContent).toContain("<key>RunAtLoad</key>");
+        expect(plistContent).toContain("<true/>");
+        expect(plistContent).toContain("<key>StandardOutPath</key>");
+        expect(plistContent).toContain("/Users/test/Library/Logs/resin/daemon.log");
+        expect(plistContent).toContain("<key>RESIN_STAGE</key>");
 
-      expect(plistContent).not.toContain("daemon.token");
-      expect(plistContent).not.toContain("auth.token");
-      expect(plistContent).not.toContain("RESIN_AUTH_TOKEN");
-      const validation = validateServiceDefinition("launchd", plistContent);
-      expect(validation.valid).toBe(true);
-      expect(validation.errors).toHaveLength(0);
-    });
+        expect(plistContent).not.toContain("daemon.token");
+        expect(plistContent).not.toContain("auth.token");
+        expect(plistContent).not.toContain("RESIN_AUTH_TOKEN");
+        const validation = validateServiceDefinition("launchd", plistContent);
+        expect(validation.valid).toBe(true);
+        expect(validation.errors).toHaveLength(0);
+      },
+    );
 
     it("generates and validates a WSL supervisor fallback runner script", () => {
       const scriptContent = generateWslFallbackScript({

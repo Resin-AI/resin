@@ -95,7 +95,7 @@ describe("Oh My Pi (OMP) Harness Qualification Suite [REM-017]", () => {
       };
 
       const fsBridge = new InMemoryConfigFsBridge();
-      const configPath = "/home/user/.omp/config.json";
+      const configPath = path.resolve("/home/user/.omp/config.json");
       await fsBridge.writeFile(configPath, JSON.stringify(initialUserConfig, null, 2));
 
       const workspace: HarnessWorkspace = {
@@ -153,7 +153,7 @@ describe("Oh My Pi (OMP) Harness Qualification Suite [REM-017]", () => {
 
     it("enforces precondition hash checking and rejects concurrent modifications", async () => {
       const fsBridge = new InMemoryConfigFsBridge();
-      const configPath = "/home/user/.omp/config.json";
+      const configPath = path.resolve("/home/user/.omp/config.json");
       await fsBridge.writeFile(configPath, JSON.stringify({ mcpServers: {} }));
 
       const workspace: HarnessWorkspace = {

@@ -1,10 +1,13 @@
 import child_process, { type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { checkOwnerOnly } from "@resin/windows-security";
+import { squatPipeForTesting } from "@resin/windows-security/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
@@ -33,6 +36,19 @@ const childProcesses = new Set<ChildProcess>();
 const socketServers = new Set<net.Server>();
 const childClosePromises = new Map<ChildProcess, Promise<void>>();
 const serverConnections = new Map<net.Server, Set<net.Socket>>();
+
+/** POSIX: no group/other mode bits. Windows: an owner-only DACL. */
+async function expectOwnerOnly(file: string): Promise<void> {
+  if (process.platform === "win32") {
+    expect(checkOwnerOnly(file)).toMatchObject({ ok: true, problems: [] });
+  } else {
+    expect((await fs.promises.stat(file)).mode & 0o077).toBe(0);
+  }
+}
+
+function windowsTestPipeName(label: string): string {
+  return `\\\\.\\pipe\\resin-recovery-${label}-${process.pid}-${randomUUID()}`;
+}
 
 async function createTemporaryDirectory(): Promise<string> {
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "resin-recovery-healing-"));
@@ -201,7 +217,7 @@ describe("runtime state healing", () => {
         pid: process.pid,
         socketPath,
       });
-      expect((await fs.promises.stat(lockPath)).mode & 0o077).toBe(0);
+      await expectOwnerOnly(lockPath);
     } finally {
       await lock.release();
     }
@@ -326,6 +342,72 @@ describe("runtime state healing", () => {
         } finally {
           await closeSocketServer(server);
         }
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "preserves a live lock when the daemon answers IPC over its named pipe",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const lockPath = path.join(directory, "daemon.lock");
+      const socketPath = windowsTestPipeName("live");
+      const server = await startResponsiveIpcSocket(socketPath);
+      const originalLockContent = `${JSON.stringify(
+        {
+          pid: process.pid,
+          startedAt: Date.now() - 60_000,
+          lastHeartbeat: Date.now() - 60_000,
+          version: "0.1.0",
+          socketPath,
+        },
+        null,
+        2,
+      )}\n`;
+      await fs.promises.writeFile(lockPath, originalLockContent, { mode: 0o600 });
+
+      try {
+        for (const lockState of ["live", "missing", "corrupt"] as const) {
+          if (lockState === "missing") await fs.promises.rm(lockPath);
+          if (lockState === "corrupt") await fs.promises.writeFile(lockPath, "{corrupt-lock");
+          const contender = new DaemonLock({ lockPath, socketPath, ipcProbeTimeoutMs: 500 });
+          const result = await contender.acquire();
+          expect(result.status).toBe("already_running");
+          expect(contender.isLocked).toBe(false);
+          if (lockState === "live") {
+            expect(await fs.promises.readFile(lockPath, "utf-8")).toBe(originalLockContent);
+          }
+        }
+      } finally {
+        await closeSocketServer(server);
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "never mistakes a pipe squatted by another principal for the live daemon",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const lockPath = path.join(directory, "daemon.lock");
+      const socketPath = windowsTestPipeName("squat");
+      // Only SYSTEM may open it: the current user gets ERROR_ACCESS_DENIED, like a foreign pipe.
+      const squatter = squatPipeForTesting(socketPath, "D:P(A;;GA;;;SY)");
+      const lock = new DaemonLock({ lockPath, socketPath, ipcProbeTimeoutMs: 100 });
+      try {
+        const result = await lock.acquire();
+        expect(result.status).not.toBe("already_running");
+        expect(lock.isLocked).toBe(true);
+
+        // The daemon then refuses to serve on the squatted name instead of sharing it.
+        const supervisor = new RecoveryAwareDaemonSupervisor({
+          config: DaemonConfigSchema.parse({ socketPath }),
+          enableSignalHandlers: false,
+        });
+        const server = new IpcServer({ supervisor, socketPath });
+        await expect(server.start()).rejects.toMatchObject({ code: "EADDRINUSE" });
+      } finally {
+        await lock.release();
+        squatter.release();
       }
     },
   );
@@ -460,67 +542,70 @@ describe("runtime state healing", () => {
 });
 
 describe("recovery observability", () => {
-  it.skipIf(process.platform === "win32")(
-    "includes persisted recovery in the live IPC health response",
-    async () => {
-      const directory = await createTemporaryDirectory();
-      const paths = resolvePaths({
-        resinHome: directory,
-        socketPath: path.join(directory, "state", "daemon.sock"),
-      });
-      await ensureDaemonDirectories(paths);
-      await fs.promises.writeFile(
-        path.join(paths.stateDir, "recovery-state.json"),
-        JSON.stringify({
-          version: 1,
-          status: "TRIPPED",
-          restartCount: 6,
-          crashTimestamps: [1, 2, 3, 4, 5, 6],
-          trippedAt: Date.now(),
-          lastFailure: { timestamp: Date.now(), category: "RUNTIME" },
-        }),
-        { mode: 0o600 },
-      );
+  it("includes persisted recovery in the live IPC health response", async () => {
+    const directory = await createTemporaryDirectory();
+    // Windows serves the default per-user, per-home owner-only pipe derived from the home.
+    const paths = resolvePaths({
+      resinHome: directory,
+      ...(process.platform === "win32"
+        ? {}
+        : { socketPath: path.join(directory, "state", "daemon.sock") }),
+    });
+    await ensureDaemonDirectories(paths);
+    await fs.promises.writeFile(
+      path.join(paths.stateDir, "recovery-state.json"),
+      JSON.stringify({
+        version: 1,
+        status: "TRIPPED",
+        restartCount: 6,
+        crashTimestamps: [1, 2, 3, 4, 5, 6],
+        trippedAt: Date.now(),
+        lastFailure: { timestamp: Date.now(), category: "RUNTIME" },
+      }),
+      { mode: 0o600 },
+    );
 
-      const supervisor = new RecoveryAwareDaemonSupervisor({
-        config: DaemonConfigSchema.parse({ socketPath: paths.socketPath }),
-        paths,
-        enableSignalHandlers: false,
-      });
-      const server = new IpcServer({
-        supervisor,
-        socketPath: paths.socketPath,
-        authToken: "test-ipc-token",
-      });
-      const client = new IpcClient({
-        socketPath: paths.socketPath,
-        authToken: "test-ipc-token",
-        timeoutMs: 500,
-      });
+    const supervisor = new RecoveryAwareDaemonSupervisor({
+      config: DaemonConfigSchema.parse({ socketPath: paths.socketPath }),
+      paths,
+      enableSignalHandlers: false,
+    });
+    const server = new IpcServer({
+      supervisor,
+      socketPath: paths.socketPath,
+      authToken: "test-ipc-token",
+    });
+    const client = new IpcClient({
+      socketPath: paths.socketPath,
+      authToken: "test-ipc-token",
+      timeoutMs: 500,
+    });
 
-      await server.start();
-      try {
-        await client.connect();
-        // SAFETY: Client getHealth response carries recovery metadata in test.
-        const health = (await client.getHealth()) as RecoveryAwareHealthReport;
-        expect(health.recovery).toMatchObject({
-          restartCount: 6,
-          circuitBreaker: "TRIPPED",
-          circuitBreakerTripped: true,
-        });
-        expect(health.recovery.lastFailure?.remediation).toContain("resin doctor");
-      } finally {
-        await client.close();
-        await server.stop();
-      }
-    },
-  );
+    await server.start();
+    try {
+      await client.connect();
+      // SAFETY: Client getHealth response carries recovery metadata in test.
+      const health = (await client.getHealth()) as RecoveryAwareHealthReport;
+      expect(health.recovery).toMatchObject({
+        restartCount: 6,
+        circuitBreaker: "TRIPPED",
+        circuitBreakerTripped: true,
+      });
+      expect(health.recovery.lastFailure?.remediation).toContain("resin doctor");
+    } finally {
+      await client.close();
+      await server.stop();
+    }
+  });
 
   it("surfaces TRIPPED recovery state even when the daemon is down", async () => {
     const directory = await createTemporaryDirectory();
     const paths = resolvePaths({
       resinHome: directory,
-      socketPath: path.join(directory, "state", "missing.sock"),
+      socketPath:
+        process.platform === "win32"
+          ? windowsTestPipeName("missing")
+          : path.join(directory, "state", "missing.sock"),
     });
     await ensureDaemonDirectories(paths);
     await fs.promises.writeFile(
@@ -625,7 +710,7 @@ describe("configuration healing", () => {
 
     const warningStatePath = path.join(paths.stateDir, CONFIG_RECOVERY_WARNING_STATE_FILE_NAME);
     expect(await readPersistedConfigRecoveryWarning(warningStatePath)).toEqual(warnings[0]);
-    expect((await fs.promises.stat(warningStatePath)).mode & 0o077).toBe(0);
+    await expectOwnerOnly(warningStatePath);
     const recovery = await getRecoverySnapshot(paths);
     expect(recovery.circuitBreaker).toBe("DEGRADED");
     expect(recovery.configurationWarning).toEqual(warnings[0]);
@@ -636,7 +721,7 @@ describe("configuration healing", () => {
     // SAFETY: Test backups array has at least one backup filename string.
     const backupPath = path.join(directory, backups[0] as string);
     expect(await fs.promises.readFile(backupPath, "utf-8")).toBe(malformedContent);
-    expect((await fs.promises.stat(backupPath)).mode & 0o077).toBe(0);
+    await expectOwnerOnly(backupPath);
 
     const finalStat = await fs.promises.stat(configPath);
     expect(await fs.promises.readFile(configPath, "utf-8")).toBe(malformedContent);

@@ -43,7 +43,7 @@ export interface HarnessRegistrationContext {
   readonly gatewayUrl: string;
   /** Absolute Resin shim command the harness should spawn. */
   readonly command: string;
-  /** Always `["mcp"]` today. */
+  /** `["mcp"]`, or `[<resin.mjs>, "mcp"]` when `command` is `node.exe` on native Windows. */
   readonly args: readonly string[];
   readonly fsBridge: ConfigFsBridge;
 }
@@ -53,6 +53,11 @@ export interface HarnessRegistrationCheckContext {
   readonly targetPath: string;
   /** Absolute Resin shim command the harness should spawn. */
   readonly command: string;
+  /**
+   * Arguments the harness passes to `command`; `["mcp"]` when omitted. On native Windows the
+   * command is `node.exe` and the arguments are `[<resin.mjs>, "mcp"]` (see `resolveResinMcpLaunch`).
+   */
+  readonly args?: readonly string[];
   readonly fsBridge: ConfigFsBridge;
 }
 

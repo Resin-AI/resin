@@ -1,9 +1,7 @@
-import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { HarnessId } from "@resin/contracts";
 import {
-  CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   type ConfigBackup,
   type ConfigFsBridge,
@@ -12,7 +10,10 @@ import {
   type HarnessMcpConfigSurface,
   type HarnessWorkspace,
   LEGACY_RESIN_MCP_SERVER_ALIASES,
+  type ResinMcpLaunch,
   isRecognizedResinMcpEntry,
+  resolveHarnessUserHome,
+  resolveResinMcpLaunch,
 } from "@resin/harness-contracts";
 import { parse as parseToml } from "smol-toml";
 import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../harness-registry.js";
@@ -78,6 +79,10 @@ export interface HarnessAdapterOperationOptions {
   readonly gatewayUrl: string;
   readonly command?: string;
   readonly fsBridge: ConfigFsBridge;
+  /** Host platform deciding how `command` is launched; defaults to `process.platform`. */
+  readonly platform?: NodeJS.Platform;
+  /** `node.exe` a Windows harness runs a `resin.mjs` entry with; defaults to `process.execPath`. */
+  readonly nodePath?: string;
 }
 
 export interface HarnessProbeOptions {
@@ -105,9 +110,29 @@ export function resolveHarnessConfigPath(
 /**
  * Resolves the stable CLI shim used by harnesses. An absolute path avoids
  * relying on a shell profile or the parent application's inherited PATH.
+ *
+ * Native Windows has no shebang shim a harness can spawn without a shell, so it registers the
+ * installer's stable Node entry `<home>\.resin\bin\resin.mjs`, launched as
+ * `node.exe <entry> mcp` (see {@link resolveHarnessMcpLaunch}).
  */
-export function resolveInstalledResinMcpCommand(customHome: string): string {
-  return path.join(path.resolve(customHome), ".resin", "bin", "resin");
+export function resolveInstalledResinMcpCommand(
+  customHome: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    return path.win32.join(path.win32.resolve(customHome), ".resin", "bin", "resin.mjs");
+  }
+  return path.posix.join(path.posix.resolve(customHome), ".resin", "bin", "resin");
+}
+
+/** The `{ command, args }` a harness is registered with for Resin's CLI entry `command`. */
+export function resolveHarnessMcpLaunch(
+  options: Pick<HarnessAdapterOperationOptions, "command" | "platform" | "nodePath">,
+): ResinMcpLaunch {
+  return resolveResinMcpLaunch(options.command ?? CANONICAL_RESIN_MCP_COMMAND, {
+    platform: options.platform,
+    nodePath: options.nodePath,
+  });
 }
 
 /**
@@ -130,7 +155,7 @@ export async function probeHarnessInstallation(
 export async function planHarnessRegistration(
   options: HarnessAdapterOperationOptions,
 ): Promise<ConfigMutationPlan> {
-  const command = options.command ?? CANONICAL_RESIN_MCP_COMMAND;
+  const launch = resolveHarnessMcpLaunch(options);
   const workspaceName = path.basename(options.workspacePath) || "workspace";
   const workspace: HarnessWorkspace = {
     workspaceId: `${options.harnessId}_${workspaceName}`,
@@ -145,8 +170,8 @@ export async function planHarnessRegistration(
     targetPath: options.targetPath,
     workspace,
     gatewayUrl: options.gatewayUrl,
-    command,
-    args: CANONICAL_RESIN_MCP_ARGS,
+    command: launch.command,
+    args: launch.args,
     fsBridge: options.fsBridge,
   });
 }
@@ -159,7 +184,10 @@ export function isTomlRegistrationPath(
   return mcpConfig.format === "codex-toml" && !targetPath.endsWith(".json");
 }
 
-function isExpectedResinStdioServer(server: HarnessConfigRecord, expectedCommand: string): boolean {
+function isExpectedResinStdioServer(
+  server: HarnessConfigRecord,
+  expected: ResinMcpLaunch,
+): boolean {
   if (
     server.url !== undefined ||
     server.endpoint !== undefined ||
@@ -167,11 +195,15 @@ function isExpectedResinStdioServer(server: HarnessConfigRecord, expectedCommand
   ) {
     return false;
   }
-  if (server.command !== expectedCommand) {
+  if (server.command !== expected.command) {
     return false;
   }
   const args = server.args;
-  return Array.isArray(args) && args.length === 1 && args[0] === "mcp";
+  return (
+    Array.isArray(args) &&
+    args.length === expected.args.length &&
+    expected.args.every((arg, index) => args[index] === arg)
+  );
 }
 
 /**
@@ -181,12 +213,13 @@ function isExpectedResinStdioServer(server: HarnessConfigRecord, expectedCommand
 export async function verifyHarnessRegistration(
   options: HarnessAdapterOperationOptions,
 ): Promise<boolean> {
-  const expectedCommand = options.command ?? CANONICAL_RESIN_MCP_COMMAND;
+  const expected = resolveHarnessMcpLaunch(options);
   const { mcpConfig } = getHarnessDefinition(options.harnessId);
   if (mcpConfig.verifyRegistration !== undefined) {
     return mcpConfig.verifyRegistration({
       targetPath: options.targetPath,
-      command: expectedCommand,
+      command: expected.command,
+      args: expected.args,
       fsBridge: options.fsBridge,
     });
   }
@@ -201,7 +234,7 @@ export async function verifyHarnessRegistration(
     const server = isTomlRegistrationPath(mcpConfig, options.targetPath)
       ? findCodexTomlServerConfig(parseCodexTomlConfig(content), mcpConfig.serverKey)
       : findJsonServerConfig(asObject(JSON.parse(content)), mcpConfig);
-    return server !== null && isExpectedResinStdioServer(server, expectedCommand);
+    return server !== null && isExpectedResinStdioServer(server, expected);
   } catch {
     return false;
   }
@@ -935,7 +968,8 @@ export class HarnessConfigOrchestrator {
 
   async configureHarnesses(options: MultiHarnessConfigOptions = {}): Promise<OrchestrationResult> {
     const gatewayUrl = options.gatewayUrl ?? DEFAULT_GATEWAY_URL;
-    const customHome = options.customHome ?? options.env?.HOME ?? process.env.HOME ?? os.homedir();
+    const customHome =
+      options.customHome ?? resolveHarnessUserHome({ env: { ...process.env, ...options.env } });
     const env =
       options.env ?? (options.customHome === undefined ? process.env : { HOME: customHome });
     const workspacePath = options.workspacePath ?? process.cwd();

@@ -44,7 +44,8 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
 }
 describe("CLI Safety Gate Doctor & Status Diagnostics", () => {
   const originalEnv = { ...process.env };
-  const homeDir = "/home/testuser";
+  // Drive-qualified on Windows: doctor and status resolve every path they read.
+  const homeDir = path.resolve("/home/testuser");
   const resinHome = path.join(homeDir, ".resin");
   const attestationPath = path.join(resinHome, "safety-attestation.json");
 

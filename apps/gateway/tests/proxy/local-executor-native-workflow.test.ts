@@ -624,8 +624,10 @@ describe("recorded workflows of ordinary calls", () => {
     expect(allowed.isError, String(allowed.content[0]?.text)).toBeUndefined();
     expect(allowed.content[0]?.text).toContain("5942");
     const escaped = path.join(workspaceDir, "escaped.txt");
+    // Forward slashes name the same host file on Windows, where Pyodide's POSIX filesystem would
+    // otherwise take `C:\…\escaped.txt` for one bare file name in its own working directory.
     const writing = await invoke(
-      `open(${JSON.stringify(escaped)}, "w").write("x")\n${lookup}`,
+      `open(${JSON.stringify(escaped.split(path.sep).join("/"))}, "w").write("x")\n${lookup}`,
       "wf_derive_write",
     );
     expect(writing.isError).toBe(true);
@@ -953,7 +955,8 @@ describe("recorded workflows of ordinary calls", () => {
     // callable was reached by its own name through the host's routing.
     expect(seen).toHaveLength(1);
     expect(seen[0]!.name).toBe("vendor.score");
-    expect(seen[0]!.parameters).toEqual({ rows: '{"rows": [1, 2, 3]}\n' });
+    // Python's print ends a line with the platform's newline: CRLF on Windows.
+    expect(seen[0]!.parameters).toEqual({ rows: `{"rows": [1, 2, 3]}${os.EOL}` });
   });
 
   it("runs an optional middle step by default and skips it when its toggle is false", async () => {

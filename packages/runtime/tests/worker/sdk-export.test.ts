@@ -231,7 +231,10 @@ describe("@resin/runtime/sdk subpath export and lightweight SDK suite", () => {
 
   describe("ToolContext generic declarations and type checking via @resin/runtime/sdk", () => {
     it("accepts strongly typed and inferred handlers through published SDK declarations", () => {
-      const fileName = fileURLToPath(new URL("./typed-subpath-consumer.mts", import.meta.url));
+      // TypeScript hands the compiler host `/`-separated paths on every platform.
+      const fileName = fileURLToPath(
+        new URL("./typed-subpath-consumer.mts", import.meta.url),
+      ).replaceAll("\\", "/");
       const source = `
         import {
           defineTool,
@@ -301,7 +304,10 @@ describe("@resin/runtime/sdk subpath export and lightweight SDK suite", () => {
     });
 
     it("enforces generic type boundaries and rejects non-existent input fields", () => {
-      const fileName = fileURLToPath(new URL("./invalid-subpath-consumer.mts", import.meta.url));
+      // TypeScript hands the compiler host `/`-separated paths on every platform.
+      const fileName = fileURLToPath(
+        new URL("./invalid-subpath-consumer.mts", import.meta.url),
+      ).replaceAll("\\", "/");
       const source = `
         import { defineTool, type ToolContext } from "@resin/runtime/sdk";
 

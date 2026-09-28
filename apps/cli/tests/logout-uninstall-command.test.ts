@@ -11,6 +11,7 @@ import {
   removeHarnessMcpConfigurations,
   uninstallCommand,
 } from "../src/commands/uninstall.js";
+import type { ServiceUninstallResult, UserServiceManager } from "../src/service/manager.js";
 
 function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   const files = new Map<string, string>(Object.entries(initialFiles));
@@ -36,6 +37,29 @@ function createMockFsBridge(initialFiles: Record<string, string> = {}) {
       files.delete(filePath);
     },
     async chmod(_filePath: string, _mode: number): Promise<void> {},
+  };
+}
+
+/** A service manager whose uninstall succeeds, for tests about harness and file cleanup. */
+function removedServiceStub(): UserServiceManager {
+  return {
+    name: "stub",
+    platform: "systemd",
+    install: vi.fn(),
+    uninstall: vi.fn().mockResolvedValue({
+      success: true,
+      unitPath: "",
+      stopped: true,
+      disabled: true,
+      removed: true,
+    }),
+    start: vi.fn(),
+    stop: vi.fn(),
+    restart: vi.fn(),
+    status: vi.fn(),
+    isInstalled: vi.fn().mockResolvedValue(false),
+    getUnitDefinition: () => "",
+    getUnitPath: () => "",
   };
 }
 
@@ -96,7 +120,9 @@ describe("logout command", () => {
 });
 
 describe("uninstall command & harness cleanup", () => {
-  const homeDir = "/home/testuser";
+  // Drive-qualified on Windows: uninstall resolves every harness path it touches.
+  const homeDir = path.resolve("/home/testuser");
+  const profilesDir = path.resolve("/profiles");
   const resinHome = path.join(homeDir, ".resin");
   const claudePath = path.join(homeDir, ".claude.json");
   const codexPath = path.join(homeDir, ".codex", "config.toml");
@@ -169,10 +195,10 @@ url = "http://localhost:9400"
   });
 
   it("cleans environment-specific harness homes and the prior Claude path", async () => {
-    const activeClaudePath = "/profiles/claude/.claude.json";
+    const activeClaudePath = path.join(profilesDir, "claude", ".claude.json");
     const priorClaudePath = path.join(homeDir, ".claude", "claude.json");
-    const activeCodexPath = "/profiles/codex/config.toml";
-    const activeOmpPath = "/profiles/omp/agent/mcp.json";
+    const activeCodexPath = path.join(profilesDir, "codex", "config.toml");
+    const activeOmpPath = path.join(profilesDir, "omp", "agent", "mcp.json");
     const resinJson = JSON.stringify({
       mcpServers: { resin: { command: "resin", args: ["mcp"] } },
     });
@@ -186,9 +212,11 @@ url = "http://localhost:9400"
     const cleaned = await removeHarnessMcpConfigurations({
       env: {
         HOME: homeDir,
-        CLAUDE_CONFIG_DIR: "/profiles/claude",
-        CODEX_HOME: "/profiles/codex",
-        OMP_HOME: "/profiles/omp",
+        // Windows resolves the user home from USERPROFILE, not HOME.
+        USERPROFILE: homeDir,
+        CLAUDE_CONFIG_DIR: path.join(profilesDir, "claude"),
+        CODEX_HOME: path.join(profilesDir, "codex"),
+        OMP_HOME: path.join(profilesDir, "omp"),
       },
       fsBridge,
     });
@@ -201,14 +229,14 @@ url = "http://localhost:9400"
   });
 
   it("removes the Resin guidance block from Codex AGENTS.md and keeps user content", async () => {
-    const agentsPath = "/profiles/codex/AGENTS.md";
+    const agentsPath = path.join(profilesDir, "codex", "AGENTS.md");
     const fsBridge = createMockFsBridge({
       [agentsPath]:
         "# Mine\n\n<!-- resin:codex-guidance:start -->\nguidance\n<!-- resin:codex-guidance:end -->\n",
     });
 
     const cleaned = await removeHarnessMcpConfigurations({
-      env: { HOME: homeDir, CODEX_HOME: "/profiles/codex" },
+      env: { HOME: homeDir, CODEX_HOME: path.join(profilesDir, "codex") },
       fsBridge,
     });
 
@@ -320,6 +348,7 @@ url = "http://localhost:9400"
     try {
       const exitCode = await uninstallCommand(["--json", "--home", homeDir], {
         fsBridge,
+        serviceManager: removedServiceStub(),
       });
 
       expect(exitCode).toBe(0);
@@ -350,6 +379,7 @@ url = "http://localhost:9400"
     try {
       const exitCode = await uninstallCommand(["--purge-secrets", "--json", "--home", homeDir], {
         fsBridge,
+        serviceManager: removedServiceStub(),
       });
 
       expect(exitCode).toBe(0);
@@ -379,6 +409,9 @@ url = "http://localhost:9400"
     try {
       const exitCode = await uninstallCommand(["--purge-all", "--yes", "--home", homeDir], {
         fsBridge,
+        serviceManager: removedServiceStub(),
+        // POSIX shell profiles only; never touch the real Windows user PATH from a test.
+        platform: "linux",
       });
 
       expect(exitCode).toBe(0);
@@ -408,5 +441,171 @@ url = "http://localhost:9400"
     } finally {
       await rm(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("uninstall failure reporting and native Windows cleanup", () => {
+  const homeDir = path.resolve(tmpdir(), "resin-uninstall-reporting");
+  const resinHome = path.join(homeDir, ".resin");
+
+  function serviceManagerReturning(result: ServiceUninstallResult): UserServiceManager {
+    return {
+      name: "windows-task",
+      platform: "windows-task",
+      install: vi.fn(),
+      uninstall: vi.fn().mockResolvedValue(result),
+      start: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      status: vi.fn(),
+      isInstalled: vi.fn().mockResolvedValue(true),
+      getUnitDefinition: () => "",
+      getUnitPath: () => path.join(resinHome, "services", "windows-task.xml"),
+    };
+  }
+
+  const removedService = serviceManagerReturning({
+    success: true,
+    unitPath: path.join(resinHome, "services", "windows-task.xml"),
+    stopped: true,
+    disabled: true,
+    removed: true,
+  });
+
+  async function runJson(
+    args: string[],
+    options: Parameters<typeof uninstallCommand>[1],
+  ): Promise<{ exitCode: number; output: Record<string, unknown> }> {
+    const chunks: string[] = [];
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    try {
+      const exitCode = await uninstallCommand(["--json", "--home", homeDir, ...args], options);
+      return { exitCode, output: JSON.parse(chunks.join("")) };
+    } finally {
+      process.stdout.write = originalStdout;
+    }
+  }
+
+  it("reports a purge it could not complete and exits non-zero", async () => {
+    const dataDir = path.join(resinHome, "data");
+    const { exitCode, output } = await runJson(["--purge-data"], {
+      fsBridge: createMockFsBridge({ [resinHome]: "dir", [dataDir]: "dir" }),
+      platform: "linux",
+      serviceManager: removedService,
+      removePath: async (target) => {
+        if (target === dataDir) {
+          throw Object.assign(new Error(`EBUSY: resource busy or locked, rmdir '${target}'`), {
+            code: "EBUSY",
+          });
+        }
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.success).toBe(false);
+    expect(output.purgeFailures).toEqual([
+      { path: dataDir, error: expect.stringContaining("EBUSY") },
+    ]);
+    expect(output.removedPaths).not.toContain(dataDir);
+  });
+
+  it("reports a service that could not be removed", async () => {
+    const { output } = await runJson([], {
+      fsBridge: createMockFsBridge({ [resinHome]: "dir" }),
+      platform: "win32",
+      serviceManager: serviceManagerReturning({
+        success: false,
+        unitPath: path.join(resinHome, "services", "windows-task.xml"),
+        stopped: true,
+        disabled: false,
+        removed: false,
+        error: "Failed to delete scheduled task \\Resin\\ResinDaemon: Access is denied.",
+      }),
+    });
+
+    expect(output.serviceUninstalled).toBe(false);
+    expect(output.success).toBe(false);
+    expect(output.serviceError).toContain("Access is denied");
+  });
+
+  it("on Windows, removes the user PATH entry and defers locked files until after exit", async () => {
+    const removeWindowsUserPath = vi.fn().mockResolvedValue({
+      attempted: true,
+      changed: true,
+      present: false,
+      binDir: path.join(resinHome, "bin"),
+    });
+    const scheduleDeferredRemoval = vi.fn();
+    const { exitCode, output } = await runJson(["--purge-all"], {
+      fsBridge: createMockFsBridge({ [resinHome]: "dir" }),
+      platform: "win32",
+      serviceManager: removedService,
+      removeWindowsUserPath,
+      scheduleDeferredRemoval,
+      purgeWindowsTree: async (_target, purgeOptions) => ({
+        removed:
+          purgeOptions.keep.length === 1 && purgeOptions.keep[0] === path.join(resinHome, "bin"),
+        stagedFiles: [path.join(tmpdir(), "stage", "0-resin_windows_security.node")],
+        stagingDir: path.join(tmpdir(), "stage"),
+        remaining: [],
+      }),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(removeWindowsUserPath).toHaveBeenCalledWith({ resinHome, platform: "win32" });
+    expect(scheduleDeferredRemoval).toHaveBeenCalledWith([path.join(tmpdir(), "stage")]);
+    expect(output).toMatchObject({
+      success: true,
+      removedPaths: [resinHome],
+      deferredRemoval: [path.join(tmpdir(), "stage")],
+    });
+    expect(output.purgeFailures).toBeUndefined();
+  });
+
+  it("on Windows, reports locked paths when the deferred cleanup cannot start", async () => {
+    const busyBin = path.join(resinHome, "bin");
+    const { exitCode, output } = await runJson(["--purge-all"], {
+      fsBridge: createMockFsBridge({ [resinHome]: "dir" }),
+      platform: "win32",
+      serviceManager: removedService,
+      removeWindowsUserPath: vi.fn().mockResolvedValue({
+        attempted: true,
+        changed: true,
+        present: false,
+        binDir: busyBin,
+      }),
+      purgeWindowsTree: async () => ({ removed: false, stagedFiles: [], remaining: [busyBin] }),
+      scheduleDeferredRemoval: () => {
+        throw new Error("WMI unavailable");
+      },
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.purgeFailures).toEqual([
+      { path: resinHome, error: "in use; deferred removal failed: WMI unavailable" },
+    ]);
+  });
+
+  it("on Windows, reports a PATH cleanup failure", async () => {
+    const { exitCode, output } = await runJson(["--purge-all"], {
+      fsBridge: createMockFsBridge({}),
+      purgeWindowsTree: async () => ({ removed: true, stagedFiles: [], remaining: [] }),
+      platform: "win32",
+      serviceManager: removedService,
+      removeWindowsUserPath: vi.fn().mockResolvedValue({
+        attempted: true,
+        changed: false,
+        present: true,
+        binDir: path.join(resinHome, "bin"),
+        error: "reg.exe failed",
+      }),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(output.pathCleanupError).toBe("reg.exe failed");
   });
 });

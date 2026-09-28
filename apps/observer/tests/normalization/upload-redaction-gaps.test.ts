@@ -1,7 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, statSync, truncateSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { checkOwnerOnly } from "@resin/windows-security";
+import { PROBE_ACCESS, probeOpenWithUserSidDisabled } from "@resin/windows-security/testing";
 import { describe, expect, it } from "vitest";
 import {
   FilePrivateValueStore,
@@ -10,6 +13,29 @@ import {
 } from "../../src/analytics/private-value-store.js";
 import { RedactionEngine } from "../../src/normalization/index.js";
 import { RawDataExfiltrationError, assertNoProhibitedRawData } from "../../src/sync/types.js";
+
+/** POSIX: mode 0600. Windows: owner-only DACL that every other principal is denied by. */
+function expectOwnerOnlyFile(file: string): void {
+  if (process.platform !== "win32") {
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    return;
+  }
+  expect(checkOwnerOnly(file)).toMatchObject({ ok: true, problems: [] });
+  expect(probeOpenWithUserSidDisabled(file, PROBE_ACCESS.read)).toEqual({
+    ok: false,
+    win32Error: 5,
+  });
+}
+
+/** POSIX: chmod 0644. Windows: grant Everyone read on the file itself. */
+function makeReadableByOthers(file: string): void {
+  if (process.platform !== "win32") {
+    chmodSync(file, 0o644);
+    return;
+  }
+  execFileSync("icacls", [file, "/grant", "*S-1-1-0:(R)"], { stdio: "ignore" });
+  expect(probeOpenWithUserSidDisabled(file, PROBE_ACCESS.read).ok).toBe(true);
+}
 
 const engine = (config: ConstructorParameters<typeof RedactionEngine>[0] = {}) =>
   new RedactionEngine({ sensitiveEnvVars: [], ...config });
@@ -153,7 +179,7 @@ describe("placeholder tags", () => {
     const store = new FilePrivateValueStore(root);
     const key = store.redactionKey();
     const keyFile = path.join(root, "private-values", "redaction-key");
-    expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expectOwnerOnlyFile(keyFile);
     expect(Buffer.from(new FilePrivateValueStore(root).redactionKey())).toEqual(Buffer.from(key));
 
     const pipelineEngine = engine({ fingerprintKey: key });
@@ -165,7 +191,7 @@ describe("placeholder tags", () => {
   });
 
   it.each([
-    ["readable by others", (file: string) => chmodSync(file, 0o644)],
+    ["readable by others", makeReadableByOthers],
     ["truncated", (file: string) => truncateSync(file, 7)],
   ])("replace a key file that is %s and keep earlier placeholders resolvable", (_label, damage) => {
     const root = mkdtempSync(path.join(os.tmpdir(), "resin-redaction-key-"));
@@ -182,7 +208,7 @@ describe("placeholder tags", () => {
 
     const reopened = new FilePrivateValueStore(root);
     const newKey = Buffer.from(reopened.redactionKey());
-    expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expectOwnerOnlyFile(keyFile);
     expect(newKey).toHaveLength(32);
     expect(newKey).not.toEqual(oldKey);
     expect(resolvePrivateReference(reopened, "private:old")).toBe(

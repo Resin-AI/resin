@@ -13,6 +13,7 @@ import {
 import { z } from "zod";
 import type { JsonObject } from "./normalization/redaction.js";
 import { type DaemonPaths, type PathResolutionOptions, resolvePaths } from "./paths.js";
+import { ensurePrivateDirectory } from "./private-fs.js";
 import type { DaemonHealthReport } from "./supervisor.js";
 export const NOTIFICATION_INBOX_FILE_NAME = "notification-inbox.json";
 export const HARNESS_HEALTH_STATE_FILE_NAME = "harness-health.json";
@@ -141,7 +142,7 @@ async function readInboxFile(filePath: string): Promise<NotificationInboxState> 
 async function writeInboxFile(filePath: string, state: NotificationInboxState): Promise<void> {
   const parsed = NotificationInboxStateSchema.parse(state);
   const directory = path.dirname(filePath);
-  await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(directory);
   const temporaryPath = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,

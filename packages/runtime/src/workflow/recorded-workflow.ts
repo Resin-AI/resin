@@ -15,7 +15,9 @@ import {
   embeddedPrograms,
   extractPrintedValue,
   parseExtractLocator,
+  programNotLearnableReason,
   programTokenValueAt,
+  recordedProgramLanguage,
   segmentOriginal,
   tokenizeProgram,
   validateWorkflowProgramProjection,
@@ -393,6 +395,27 @@ async function buildTemplate(
       return built;
     }
     case "program": {
+      // The program the step records is read in its own shell dialect: a template in another
+      // grammar would render its values with another shell's quoting, and a program Resin never
+      // tokenizes (cmd.exe, an unproven dialect) takes no template at all.
+      const recorded = step.callable.program;
+      if (recorded?.kind === "shell" && recorded.argument === argumentName) {
+        const expected = recordedProgramLanguage(recorded);
+        if (expected === undefined) {
+          throw new WorkflowBindingError(
+            programNotLearnableReason(recorded) ?? "the recorded shell program is not learnable",
+            step.id,
+            argumentName,
+          );
+        }
+        if (template.language !== expected) {
+          throw new WorkflowBindingError(
+            "the program template is written in another shell dialect than its recorded program",
+            step.id,
+            argumentName,
+          );
+        }
+      }
       const text = await originalProgramText(
         template,
         step,

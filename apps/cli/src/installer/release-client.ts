@@ -83,6 +83,22 @@ export const PINNED_DENO_RUNTIMES: Record<
     sourceUrl:
       "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip",
   }),
+  // Source: https://github.com/denoland/deno/releases/tag/v2.9.5 — digests equal the release's
+  // `deno-*-pc-windows-msvc.zip.sha256sum` files and GitHub's recorded asset digests.
+  "windows-x64": Object.freeze({
+    filename: "deno-x86_64-pc-windows-msvc.zip",
+    sha256: "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
+    sizeBytes: 42691248,
+    sourceUrl:
+      "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+  }),
+  "windows-arm64": Object.freeze({
+    filename: "deno-aarch64-pc-windows-msvc.zip",
+    sha256: "73f20b3566a0a6e3f6912fd7bf5b3a7ccd04d68414baedea3b397437bdec6472",
+    sizeBytes: 40905829,
+    sourceUrl:
+      "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-pc-windows-msvc.zip",
+  }),
 });
 
 export interface RuntimeAssetDescriptor {
@@ -1339,6 +1355,7 @@ function platformKey(platform: { os: string; arch: string; isWsl?: boolean }): s
   const arch =
     platform.arch === "x86_64" ? "x64" : platform.arch === "aarch64" ? "arm64" : platform.arch;
   if (platform.isWsl || platform.os === "wsl") return `wsl-${arch}`;
+  if (platform.os === "win32" || platform.os === "windows") return `windows-${arch}`;
   return `${platform.os}-${arch}`;
 }
 

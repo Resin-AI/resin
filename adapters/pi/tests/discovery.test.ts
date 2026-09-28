@@ -167,35 +167,58 @@ describe("PiHarnessAdapter discovery", () => {
 });
 
 describe("pi installation probe", () => {
-  it("reads the version from the npm package owning the executable without running it", async () => {
-    const pkgDir = path.join(
-      home,
-      "prefix",
-      "lib",
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-    );
-    const bin = path.join(home, "prefix", "bin");
-    await fsp.mkdir(path.join(pkgDir, "dist", "bundle"), { recursive: true });
-    await fsp.mkdir(bin, { recursive: true });
+  // POSIX npm links the bin to its package with a file symlink (needs privilege on Windows).
+  it.skipIf(process.platform === "win32")(
+    "reads the version from the npm package owning the executable without running it",
+    async () => {
+      const pkgDir = path.join(
+        home,
+        "prefix",
+        "lib",
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+      );
+      const bin = path.join(home, "prefix", "bin");
+      await fsp.mkdir(path.join(pkgDir, "dist", "bundle"), { recursive: true });
+      await fsp.mkdir(bin, { recursive: true });
+      await fsp.writeFile(
+        path.join(pkgDir, "package.json"),
+        JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.87.1" }),
+      );
+      // A CLI that fails if executed proves the probe read the package metadata instead.
+      const cli = path.join(pkgDir, "dist", "bundle", "cli.js");
+      await fsp.writeFile(cli, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      await fsp.symlink(cli, path.join(bin, "pi"));
+      const probe = () =>
+        probePiInstallation({ env: { PATH: bin }, configPath: "/c", homePath: "/h" });
+      expect(await probe()).toMatchObject({
+        version: "0.87.1",
+        executablePath: path.join(bin, "pi"),
+        status: "ready",
+      });
+
+      await fsp.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
+      expect(await probe()).toMatchObject({ version: UNKNOWN_HARNESS_VERSION, status: "unknown" });
+    },
+  );
+
+  it("reads the version beside a Windows npm shim in the global prefix", async () => {
+    const prefix = path.join(home, "npm");
+    const pkgDir = path.join(prefix, "node_modules", "@earendil-works", "pi-coding-agent");
+    await fsp.mkdir(pkgDir, { recursive: true });
     await fsp.writeFile(
       path.join(pkgDir, "package.json"),
       JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.87.1" }),
     );
-    // A CLI that fails if executed proves the probe read the package metadata instead.
-    const cli = path.join(pkgDir, "dist", "bundle", "cli.js");
-    await fsp.writeFile(cli, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    await fsp.symlink(cli, path.join(bin, "pi"));
-    const probe = () =>
-      probePiInstallation({ env: { PATH: bin }, configPath: "/c", homePath: "/h" });
-    expect(await probe()).toMatchObject({
+    await fsp.writeFile(path.join(prefix, "pi.cmd"), "@exit /b 1\r\n");
+    await fsp.writeFile(path.join(prefix, "pi"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    expect(
+      await probePiInstallation({ env: { PATH: prefix }, configPath: "/c", homePath: "/h" }),
+    ).toMatchObject({
       version: "0.87.1",
-      executablePath: path.join(bin, "pi"),
+      executablePath: path.join(prefix, "pi"),
       status: "ready",
     });
-
-    await fsp.writeFile(path.join(pkgDir, "package.json"), JSON.stringify({ name: "other" }));
-    expect(await probe()).toMatchObject({ version: UNKNOWN_HARNESS_VERSION, status: "unknown" });
   });
 });

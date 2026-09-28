@@ -136,6 +136,8 @@ export async function planOpencodeMcpConfig(
 export async function verifyOpencodeMcpConfig(options: {
   targetPath: string;
   command?: string;
+  /** Expected arguments after `command`; `["mcp"]` by default. */
+  args?: readonly string[];
   serverKey?: string;
   fsBridge?: ConfigFsBridge;
 }): Promise<boolean> {
@@ -151,8 +153,9 @@ export async function verifyOpencodeMcpConfig(options: {
     : undefined;
   if (!isObject(entry) || entry.enabled === false || entry.type !== "local") return false;
   const argv = Array.isArray(entry.command) ? entry.command : [];
-  if (argv.length !== 1 + CANONICAL_RESIN_MCP_ARGS.length) return false;
-  if (!CANONICAL_RESIN_MCP_ARGS.every((arg, index) => argv[index + 1] === arg)) return false;
+  const expectedArgs = options.args ?? CANONICAL_RESIN_MCP_ARGS;
+  if (argv.length !== 1 + expectedArgs.length) return false;
+  if (!expectedArgs.every((arg, index) => argv[index + 1] === arg)) return false;
   return options.command === undefined ? isResinOpencodeEntry(entry) : argv[0] === options.command;
 }
 

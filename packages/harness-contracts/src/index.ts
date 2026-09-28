@@ -29,3 +29,6 @@ export * from "./definition.js";
 
 // Managed instruction-file blocks
 export * from "./managed-block.js";
+
+// Host facts for harness probes: home, PATH/PATHEXT lookup, Windows batch launchers.
+export * from "./host.js";

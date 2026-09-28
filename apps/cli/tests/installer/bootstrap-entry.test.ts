@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { defaultFsBridge } from "@resin/harness-contracts";
 import { getActiveVersion } from "../../src/installer/asset-downloader.js";
@@ -22,14 +22,33 @@ import {
   detectOnboardingSkipReason,
   isAlreadyInitialized,
   isMainModule,
+  readTrustedKeysFile,
   resolveCandidateProfiles,
   resolveTrustedReleaseKeys,
   runCli,
   validateChannelUrl,
 } from "../../src/installer/bootstrap-entry.js";
 import { canonicalJson } from "../../src/installer/channel-verifier.js";
+import type * as WindowsInstall from "../../src/installer/windows-install.js";
 import { type PlatformInfo, UnsupportedPlatformError } from "../../src/platform/index.js";
 import type { UserServiceManager } from "../../src/service/manager.js";
+
+// Installs on a Windows host must never rewrite the real HKCU\Environment Path: unless a test
+// injects its own runner, the PATH update reports success without running PowerShell.
+vi.mock("../../src/installer/windows-install.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof WindowsInstall>();
+  const fakeRunner: WindowsInstall.WindowsPathRunner = async (_script, env) => {
+    const added = env.RESIN_PATH_MODE === "add";
+    return { exitCode: 0, stdout: JSON.stringify({ changed: true, present: added }), stderr: "" };
+  };
+  return {
+    ...actual,
+    addWindowsUserPath: (options: WindowsInstall.WindowsUserPathOptions) =>
+      actual.addWindowsUserPath({ ...options, runner: options.runner ?? fakeRunner }),
+    removeWindowsUserPath: (options: WindowsInstall.WindowsUserPathOptions) =>
+      actual.removeWindowsUserPath({ ...options, runner: options.runner ?? fakeRunner }),
+  };
+});
 
 interface ReleaseSignatureItem {
   keyId: string;
@@ -48,15 +67,24 @@ function sha256Hex(buf: Buffer): string {
 
 type TarGzFixture = string | { readonly content: string; readonly mode?: number };
 
+/** Release entries the host can run: Windows launchers run them through node, not a shebang. */
+const HOST_CLI_ENTRY =
+  process.platform === "win32" ? 'console.log("resin 1.0.0");\n' : "#!/bin/sh\necho resin 1.0.0\n";
+const HOST_DAEMON_ENTRY =
+  process.platform === "win32" ? "process.exitCode = 0;\n" : "#!/bin/sh\nexit 0\n";
+const DEFAULT_RELEASE_ENTRIES: Array<[string, TarGzFixture]> = [
+  ["bin/resin", HOST_CLI_ENTRY],
+  ["bin/resin-daemon", HOST_DAEMON_ENTRY],
+];
+
+/** The public CLI entry an install runs checks through (`bin\resin.mjs` on Windows). */
+function publicCliPath(resinHome: string): string {
+  return path.join(resinHome, "bin", process.platform === "win32" ? "resin.mjs" : "resin");
+}
+
 function tarGz(files: Record<string, TarGzFixture> = {}): Buffer {
   const fileEntries = Object.entries(files);
-  const defaultEntries: Array<[string, TarGzFixture]> =
-    fileEntries.length > 0
-      ? fileEntries
-      : [
-          ["bin/resin", "#!/bin/sh\necho resin 1.0.0\n"],
-          ["bin/resin-daemon", "#!/bin/sh\nexit 0\n"],
-        ];
+  const defaultEntries = fileEntries.length > 0 ? fileEntries : DEFAULT_RELEASE_ENTRIES;
 
   const tarBuffers: Buffer[] = [];
 
@@ -170,7 +198,7 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
     corruptManifestAssetSizeBytes,
   } = options;
 
-  const defaultDenoBytes = zipStored("deno", Buffer.from("#!/bin/sh\nexit 0\n"));
+  const defaultDenoBytes = zipStored(HOST_DENO_EXECUTABLE, Buffer.from("#!/bin/sh\nexit 0\n"));
   const activeDenoBytes = options.denoBytes ?? defaultDenoBytes;
 
   const releaseAssetSha256 = corruptManifestAssetSha256 ?? sha256Hex(releaseBytes);
@@ -297,6 +325,19 @@ function createSignedReleaseFixtures(options: SignedReleaseFixturesOptions) {
   };
 }
 
+/** The installer extracts the Deno executable the host can run (`deno.exe` on Windows). */
+const HOST_DENO_EXECUTABLE = process.platform === "win32" ? "deno.exe" : "deno";
+
+/**
+ * Target of a fixture `current` link. POSIX keeps Resin's relative symlink; Windows uses a
+ * junction (no symlink privilege needed), and junction targets must be absolute.
+ */
+function releasePointerTarget(resinHome: string, releaseDirectory: string): string {
+  return process.platform === "win32"
+    ? path.join(resinHome, "versions", releaseDirectory)
+    : path.join("versions", releaseDirectory);
+}
+
 const testHomes: string[] = [];
 afterEach(() => {
   for (const home of testHomes.splice(0)) {
@@ -412,7 +453,7 @@ describe("bootstrap-entry", () => {
     const linkDir = `${realDir}-link`;
     testHomes.push(realDir, linkDir);
     fs.writeFileSync(path.join(realDir, "install-helper-v1.mjs"), "");
-    fs.symlinkSync(realDir, linkDir);
+    fs.symlinkSync(realDir, linkDir, "junction");
     const moduleUrl = pathToFileURL(path.join(realDir, "install-helper-v1.mjs")).href;
 
     expect(isMainModule(moduleUrl, path.join(linkDir, "install-helper-v1.mjs"))).toBe(true);
@@ -504,7 +545,7 @@ describe("bootstrap-entry", () => {
       expect(result.healthCheck.passed).toBe(true);
 
       // Verify health check targeted public bin path
-      expect(checkedCliPath).toBe(path.join(home, "bin", "resin"));
+      expect(checkedCliPath).toBe(publicCliPath(home));
 
       // Verify active version
       expect(getActiveVersion(home)).toBe("1.0.0");
@@ -626,7 +667,7 @@ describe("bootstrap-entry", () => {
       JSON.stringify({ version: "1.0.0", installedAt: new Date().toISOString() }),
       "utf8",
     );
-    fs.symlinkSync(v1Dir, path.join(home, "current"));
+    fs.symlinkSync(v1Dir, path.join(home, "current"), "junction");
     fs.writeFileSync(
       path.join(home, "version-state.json"),
       JSON.stringify({ activeVersion: "1.0.0", previousVersion: null }),
@@ -865,17 +906,32 @@ describe("bootstrap-entry", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-healthcheck-test-"));
     testHomes.push(tmpDir);
 
+    // Windows runs release entries through node (no shebangs), so the fixtures are JS there.
+    const writeEntry = (name: string, shBody: string, jsBody: string): string => {
+      const entryPath = path.join(tmpDir, name);
+      fs.writeFileSync(entryPath, process.platform === "win32" ? jsBody : `#!/bin/sh\n${shBody}`, {
+        mode: 0o755,
+      });
+      return entryPath;
+    };
+
     // 1. Successful execution
-    const okScript = path.join(tmpDir, "resin-ok.sh");
-    fs.writeFileSync(okScript, "#!/bin/sh\necho resin 1.0.0\nexit 0\n", { mode: 0o755 });
+    const okScript = writeEntry(
+      "resin-ok",
+      "echo resin 1.0.0\nexit 0\n",
+      'console.log("resin 1.0.0");\n',
+    );
     const okResult = await defaultHealthCheckRunner(okScript, []);
     expect(okResult.passed).toBe(true);
     expect(okResult.exitCode).toBe(0);
     expect(okResult.stdout).toBe("resin 1.0.0");
 
     // 2. Failing execution
-    const failScript = path.join(tmpDir, "resin-fail.sh");
-    fs.writeFileSync(failScript, "#!/bin/sh\necho crash >&2\nexit 2\n", { mode: 0o755 });
+    const failScript = writeEntry(
+      "resin-fail",
+      "echo crash >&2\nexit 2\n",
+      'console.error("crash");\nprocess.exitCode = 2;\n',
+    );
     const failResult = await defaultHealthCheckRunner(failScript, []);
     expect(failResult.passed).toBe(false);
     expect(failResult.exitCode).toBe(2);
@@ -887,10 +943,11 @@ describe("bootstrap-entry", () => {
     expect(missingResult.exitCode).toBe(1);
 
     // 4. Output overflow capping
-    const overflowScript = path.join(tmpDir, "resin-overflow.sh");
-    fs.writeFileSync(overflowScript, "#!/bin/sh\nhead -c 2000 /dev/zero | tr '\\0' 'A'\nexit 0\n", {
-      mode: 0o755,
-    });
+    const overflowScript = writeEntry(
+      "resin-overflow",
+      "head -c 2000 /dev/zero | tr '\\0' 'A'\nexit 0\n",
+      'process.stdout.write("A".repeat(2000));\n',
+    );
     const overflowResult = await defaultHealthCheckRunner(overflowScript, [], {
       maxOutputBytes: 100,
     });
@@ -898,8 +955,11 @@ describe("bootstrap-entry", () => {
     expect(overflowResult.outputOverflow).toBe(true);
 
     // 5. Execution timeout
-    const hangScript = path.join(tmpDir, "resin-hang.sh");
-    fs.writeFileSync(hangScript, "#!/bin/sh\nsleep 10\nexit 0\n", { mode: 0o755 });
+    const hangScript = writeEntry(
+      "resin-hang",
+      "sleep 10\nexit 0\n",
+      "setTimeout(() => {}, 10_000);\n",
+    );
     const timeoutResult = await defaultHealthCheckRunner(hangScript, [], {
       timeoutMs: 100,
     });
@@ -922,11 +982,11 @@ describe("bootstrap-entry", () => {
 
     const releaseBytes = tarGz({
       "bin/resin": {
-        content: "#!/bin/sh\necho resin 1.0.0\n",
+        content: HOST_CLI_ENTRY,
         mode: 0o600,
       },
       "bin/resin-daemon": {
-        content: "#!/bin/sh\nexit 0\n",
+        content: HOST_DAEMON_ENTRY,
         mode: 0o600,
       },
       "bin/release-notes.txt": {
@@ -1314,7 +1374,12 @@ describe("bootstrap-entry", () => {
       expect(result.skipped).toBe(false);
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);
-      expect(result.error).toMatch(/Failed to spawn onboarding process/);
+      // Windows launches release entries through node, which starts and then fails to load it.
+      expect(result.error).toMatch(
+        process.platform === "win32"
+          ? /Onboarding process exited with code 1/
+          : /Failed to spawn onboarding process/,
+      );
     });
 
     it("streams the browser URL and device code during headless continuation", async () => {
@@ -1455,7 +1520,7 @@ describe("bootstrap-entry", () => {
 
           expect(result.success).toBe(true);
           expect(onboardingInvoked).toBe(true);
-          expect(invokedCliPath).toBe(path.join(home, "bin", "resin"));
+          expect(invokedCliPath).toBe(publicCliPath(home));
           expect(invokedArgs).toEqual(["init", "--auto-approve"]);
           expect(result.onboarding?.attempted).toBe(true);
           expect(result.onboarding?.success).toBe(true);
@@ -1666,6 +1731,8 @@ describe("bootstrap-entry", () => {
       }
     });
   });
+  // The profile writer is POSIX-only; the direct calls opt in with `isPosix: true` so it is
+  // exercised on a Windows host too (installs there use the per-user PATH registry value).
   describe("shell PATH configuration & concise output", () => {
     it("resolves candidate profiles and defaults according to detected shell", () => {
       const zsh = resolveCandidateProfiles("zsh");
@@ -1692,6 +1759,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
 
@@ -1716,6 +1784,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/bash",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/bash", PATH: "/usr/bin:/bin" },
       });
 
@@ -1735,6 +1804,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/sh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/sh", PATH: "/usr/bin:/bin" },
       });
 
@@ -1761,6 +1831,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/bash",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/bash", PATH: "/usr/bin:/bin" },
       });
 
@@ -1785,6 +1856,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
 
@@ -1802,6 +1874,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
       expect(res1.updated).toBe(true);
@@ -1814,6 +1887,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
       expect(res2.updated).toBe(false);
@@ -1838,6 +1912,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
 
@@ -1859,6 +1934,7 @@ describe("bootstrap-entry", () => {
         resinHome,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
 
@@ -1877,6 +1953,7 @@ describe("bootstrap-entry", () => {
         resinHome: customOutside,
         homeDir: tmpHome,
         shell: "/bin/zsh",
+        isPosix: true,
         env: { HOME: tmpHome, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" },
       });
       expect(resOutside.updated).toBe(true);
@@ -1899,156 +1976,160 @@ describe("bootstrap-entry", () => {
       expect(fs.readdirSync(tmpHome)).toHaveLength(0);
     });
 
-    it("executes concise bootstrap installation with shell PATH updates and reload guidance", async () => {
-      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-path-home-"));
-      testHomes.push(home);
+    // POSIX-only: Windows installs add the user PATH registry value instead of a shell profile.
+    it.skipIf(process.platform === "win32")(
+      "executes concise bootstrap installation with shell PATH updates and reload guidance",
+      async () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-e2e-path-home-"));
+        testHomes.push(home);
 
-      const releaseBytes = tarGz();
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-      const publicKeyHex = publicKey
-        .export({ type: "spki", format: "der" })
-        .subarray(-32)
-        .toString("hex");
+        const releaseBytes = tarGz();
+        const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+        const publicKeyHex = publicKey
+          .export({ type: "spki", format: "der" })
+          .subarray(-32)
+          .toString("hex");
 
-      const trustedKey = {
-        keyId: "test-key-path",
-        algorithm: "Ed25519",
-        publicKeyHex,
-        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-      };
+        const trustedKey = {
+          keyId: "test-key-path",
+          algorithm: "Ed25519",
+          publicKeyHex,
+          publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+        };
 
-      const fixtures = createSignedReleaseFixtures({
-        version: "1.0.0",
-        keyId: "test-key-path",
-        publicKeyHex,
-        privateKey,
-        releaseBytes,
-      });
-
-      const server = http.createServer((req, res) => {
-        if (req.url === "/channels.json") {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(fixtures.channelBytes);
-          return;
-        }
-        if (req.url === fixtures.manifestPath) {
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(fixtures.manifestBytes);
-          return;
-        }
-        if (req.url === fixtures.tarballPath) {
-          res.writeHead(200, { "content-type": "application/gzip" });
-          res.end(releaseBytes);
-          return;
-        }
-        if (req.url === fixtures.denoPath) {
-          res.writeHead(200, { "content-type": "application/zip" });
-          res.end(fixtures.denoBytes);
-          return;
-        }
-        res.writeHead(404);
-        res.end();
-      });
-
-      let resolveListen!: (port: number) => void;
-      const listenPromise = new Promise<number>((resolve) => {
-        resolveListen = resolve;
-      });
-      server.listen(0, "127.0.0.1", () => {
-        const addr = server.address();
-        resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
-      });
-      const serverPort = await listenPromise;
-
-      try {
-        const logs: string[] = [];
-        const resinHome = path.join(home, ".resin");
-        const result = await bootstrapInstall({
-          channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
-          allowInsecureHttpForTests: true,
-          allowOverrides: true,
-          trustedReleaseKeys: [trustedKey],
-          resinHome,
-          customHome: home,
-          shell: "/bin/zsh",
-          env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
-          platform: defaultTestPlatform,
-          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
-          skipOnboarding: true,
-          logger: (msg) => logs.push(msg),
+        const fixtures = createSignedReleaseFixtures({
+          version: "1.0.0",
+          keyId: "test-key-path",
+          publicKeyHex,
+          privateKey,
+          releaseBytes,
         });
 
-        expect(result.success).toBe(true);
-        expect(result.pathConfig?.updated).toBe(true);
-        expect(result.pathConfig?.profileName).toBe("~/.zshrc");
-
-        const zshrcPath = path.join(home, ".zshrc");
-        expect(fs.existsSync(zshrcPath)).toBe(true);
-        expect(fs.readFileSync(zshrcPath, "utf8")).toBe('export PATH="$HOME/.resin/bin:$PATH"\n');
-
-        const logOutput = logs.join("\n");
-        // Concise default output checks
-        expect(logOutput).toContain("✔ Verified Resin v1.0.0 for linux");
-        expect(logOutput).toContain("✔ Installed Resin v1.0.0");
-        expect(logOutput).toContain("✔ Added ~/.resin/bin to PATH in ~/.zshrc");
-        expect(logOutput).toContain("source ~/.zshrc");
-        expect(logOutput).toContain("resin");
-        // Must NOT contain low-level debug steps in normal mode
-        expect(logOutput).not.toContain("==> Resolving release metadata");
-        expect(logOutput).not.toContain("==> Fetching release asset");
-        expect(logOutput).not.toContain("==> Installing release");
-
-        // Repeat install test on same directory
-        const repeatLogs: string[] = [];
-        const repeatResult = await bootstrapInstall({
-          channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
-          allowInsecureHttpForTests: true,
-          allowOverrides: true,
-          trustedReleaseKeys: [trustedKey],
-          resinHome,
-          customHome: home,
-          shell: "/bin/zsh",
-          env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
-          platform: defaultTestPlatform,
-          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
-          skipOnboarding: true,
-          logger: (msg) => repeatLogs.push(msg),
+        const server = http.createServer((req, res) => {
+          if (req.url === "/channels.json") {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(fixtures.channelBytes);
+            return;
+          }
+          if (req.url === fixtures.manifestPath) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(fixtures.manifestBytes);
+            return;
+          }
+          if (req.url === fixtures.tarballPath) {
+            res.writeHead(200, { "content-type": "application/gzip" });
+            res.end(releaseBytes);
+            return;
+          }
+          if (req.url === fixtures.denoPath) {
+            res.writeHead(200, { "content-type": "application/zip" });
+            res.end(fixtures.denoBytes);
+            return;
+          }
+          res.writeHead(404);
+          res.end();
         });
 
-        expect(repeatResult.success).toBe(true);
-        expect(repeatResult.pathConfig?.updated).toBe(false);
-        expect(repeatResult.pathConfig?.alreadyConfigured).toBe(true);
-        expect(repeatLogs.join("\n")).toContain("Run 'resin' to get started.");
-
-        // Exactly one occurrence in profile
-        const zshrcFinal = fs.readFileSync(zshrcPath, "utf8");
-        expect(zshrcFinal.match(/resin\/bin/g)).toHaveLength(1);
-
-        // Verbose mode test
-        const verboseLogs: string[] = [];
-        await bootstrapInstall({
-          channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
-          allowInsecureHttpForTests: true,
-          allowOverrides: true,
-          trustedReleaseKeys: [trustedKey],
-          resinHome,
-          customHome: home,
-          shell: "/bin/zsh",
-          env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
-          platform: defaultTestPlatform,
-          healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
-          skipOnboarding: true,
-          verbose: true,
-          logger: (msg) => verboseLogs.push(msg),
+        let resolveListen!: (port: number) => void;
+        const listenPromise = new Promise<number>((resolve) => {
+          resolveListen = resolve;
         });
-        const verboseOutput = verboseLogs.join("\n");
-        expect(verboseOutput).toContain("==> Resolving release metadata");
-        expect(verboseOutput).toContain("==> Fetching release asset");
-        expect(verboseOutput).toContain("==> Installing release");
-      } finally {
-        server.close();
-      }
-    });
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          resolveListen(addr && !Array.isArray(addr) && "port" in addr ? addr.port : 0);
+        });
+        const serverPort = await listenPromise;
+
+        try {
+          const logs: string[] = [];
+          const resinHome = path.join(home, ".resin");
+          const result = await bootstrapInstall({
+            channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
+            allowInsecureHttpForTests: true,
+            allowOverrides: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            shell: "/bin/zsh",
+            env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            logger: (msg) => logs.push(msg),
+          });
+
+          expect(result.success).toBe(true);
+          expect(result.pathConfig?.updated).toBe(true);
+          expect(result.pathConfig?.profileName).toBe("~/.zshrc");
+
+          const zshrcPath = path.join(home, ".zshrc");
+          expect(fs.existsSync(zshrcPath)).toBe(true);
+          expect(fs.readFileSync(zshrcPath, "utf8")).toBe('export PATH="$HOME/.resin/bin:$PATH"\n');
+
+          const logOutput = logs.join("\n");
+          // Concise default output checks
+          expect(logOutput).toContain("✔ Verified Resin v1.0.0 for linux");
+          expect(logOutput).toContain("✔ Installed Resin v1.0.0");
+          expect(logOutput).toContain("✔ Added ~/.resin/bin to PATH in ~/.zshrc");
+          expect(logOutput).toContain("source ~/.zshrc");
+          expect(logOutput).toContain("resin");
+          // Must NOT contain low-level debug steps in normal mode
+          expect(logOutput).not.toContain("==> Resolving release metadata");
+          expect(logOutput).not.toContain("==> Fetching release asset");
+          expect(logOutput).not.toContain("==> Installing release");
+
+          // Repeat install test on same directory
+          const repeatLogs: string[] = [];
+          const repeatResult = await bootstrapInstall({
+            channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
+            allowInsecureHttpForTests: true,
+            allowOverrides: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            shell: "/bin/zsh",
+            env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            logger: (msg) => repeatLogs.push(msg),
+          });
+
+          expect(repeatResult.success).toBe(true);
+          expect(repeatResult.pathConfig?.updated).toBe(false);
+          expect(repeatResult.pathConfig?.alreadyConfigured).toBe(true);
+          expect(repeatLogs.join("\n")).toContain("Run 'resin' to get started.");
+
+          // Exactly one occurrence in profile
+          const zshrcFinal = fs.readFileSync(zshrcPath, "utf8");
+          expect(zshrcFinal.match(/resin\/bin/g)).toHaveLength(1);
+
+          // Verbose mode test
+          const verboseLogs: string[] = [];
+          await bootstrapInstall({
+            channelUrl: `http://127.0.0.1:${serverPort}/channels.json`,
+            allowInsecureHttpForTests: true,
+            allowOverrides: true,
+            trustedReleaseKeys: [trustedKey],
+            resinHome,
+            customHome: home,
+            shell: "/bin/zsh",
+            env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin", RESIN_ALLOW_ROOT: "1" },
+            platform: defaultTestPlatform,
+            healthCheckRunner: async () => ({ passed: true, exitCode: 0, stdout: "1.0.0" }),
+            skipOnboarding: true,
+            verbose: true,
+            logger: (msg) => verboseLogs.push(msg),
+          });
+          const verboseOutput = verboseLogs.join("\n");
+          expect(verboseOutput).toContain("==> Resolving release metadata");
+          expect(verboseOutput).toContain("==> Fetching release asset");
+          expect(verboseOutput).toContain("==> Installing release");
+        } finally {
+          server.close();
+        }
+      },
+    );
   });
 
   describe("existing user service activation & skip-onboarding handling", () => {
@@ -2332,7 +2413,7 @@ describe("bootstrap-entry", () => {
       fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
       const currentSymlink = path.join(resinHome, "current");
       fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
-      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.symlinkSync(releasePointerTarget(resinHome, "v0.9.0"), currentSymlink, "junction");
       fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
 
       const releaseBytes = tarGz();
@@ -2490,7 +2571,7 @@ describe("bootstrap-entry", () => {
       fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
       const currentSymlink = path.join(resinHome, "current");
       fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
-      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.symlinkSync(releasePointerTarget(resinHome, "v0.9.0"), currentSymlink, "junction");
       fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
 
       const releaseBytes = tarGz();
@@ -2642,7 +2723,7 @@ describe("bootstrap-entry", () => {
       fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
       const currentSymlink = path.join(resinHome, "current");
       fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
-      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.symlinkSync(releasePointerTarget(resinHome, "v0.9.0"), currentSymlink, "junction");
       fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
 
       const releaseBytes = tarGz();
@@ -2742,7 +2823,7 @@ describe("bootstrap-entry", () => {
       fs.writeFileSync(path.join(v090Dir, "version.json"), JSON.stringify({ version: "0.9.0" }));
       const currentSymlink = path.join(resinHome, "current");
       fs.mkdirSync(path.dirname(currentSymlink), { recursive: true });
-      fs.symlinkSync(path.join("versions", "v0.9.0"), currentSymlink);
+      fs.symlinkSync(releasePointerTarget(resinHome, "v0.9.0"), currentSymlink, "junction");
       fs.writeFileSync(path.join(resinHome, "current-version"), "0.9.0\n");
 
       const releaseBytes = tarGz();
@@ -2892,5 +2973,33 @@ describe("bootstrap-entry", () => {
         server.close();
       }
     });
+  });
+});
+
+describe("test-only trusted keys file", () => {
+  it("accepts release-trust.json, trust records and key arrays, keeping only keyId/publicKeyHex", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-trust-file-"));
+    try {
+      const key = { keyId: "resin-test-key", publicKeyHex: "ab".repeat(32) };
+      const files = {
+        "release-trust.json": { schemaVersion: "1.0.0", signingKey: { ...key, publicKeyPem: "x" } },
+        "record.json": { trustedKeys: [{ ...key, algorithm: "ed25519" }] },
+        "array.json": [key],
+      };
+      for (const [name, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(dir, name), JSON.stringify(content));
+        expect(JSON.parse(readTrustedKeysFile(path.join(dir, name)))).toEqual([key]);
+      }
+      fs.writeFileSync(path.join(dir, "bad.json"), "{}");
+      expect(() => readTrustedKeysFile(path.join(dir, "bad.json"))).toThrow(/no signingKey/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses --trusted-keys-file without the loopback test mode", async () => {
+    await expect(runCli(["--trusted-keys-file", "trust.json"])).rejects.toThrow(
+      /requires --allow-insecure-loopback/,
+    );
   });
 });

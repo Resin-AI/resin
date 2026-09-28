@@ -74,8 +74,12 @@ describe("muse settings.json registration", () => {
 
   it("honours XDG_CONFIG_HOME for the settings and rules paths", () => {
     const env = { XDG_CONFIG_HOME: "/x/cfg" };
-    expect(museCodeHarness.mcpConfig.resolvePath(home, env)).toBe("/x/cfg/muse/settings.json");
-    expect(museCodeHarness.guidance?.resolvePath(home, env)).toBe("/x/cfg/muse/AGENTS.md");
+    expect(museCodeHarness.mcpConfig.resolvePath(home, env)).toBe(
+      path.join("/x/cfg", "muse", "settings.json"),
+    );
+    expect(museCodeHarness.guidance?.resolvePath(home, env)).toBe(
+      path.join("/x/cfg", "muse", "AGENTS.md"),
+    );
     expect(museCodeHarness.mcpConfig.resolvePath(home, {})).toBe(
       path.join(home, ".config/muse/settings.json"),
     );

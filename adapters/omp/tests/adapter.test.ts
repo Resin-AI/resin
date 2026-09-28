@@ -5,6 +5,7 @@ import { type StrictHarnessAdapter, classifyHarnessVersion } from "@resin/harnes
 import { describe, expect, it, vi } from "vitest";
 import * as discoveryModule from "../src/discovery.js";
 import { OmpAdapter, OmpHarnessAdapter, ompHarness } from "../src/index.js";
+import { FILE_SYMLINKS_SUPPORTED } from "./symlinks.js";
 
 describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
   it("satisfies StrictHarnessAdapter interface contract and metadata", () => {
@@ -54,8 +55,13 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       await fsp.mkdir(path.join(ompHome, "bin"), { recursive: true });
       await fsp.mkdir(sessionsDir, { recursive: true });
 
-      const mockBin = path.join(ompHome, "bin", "omp");
-      await fsp.writeFile(mockBin, "#!/bin/sh\necho omp 1.0.0\n", { mode: 0o755 });
+      // Windows runs the mock as a batch file: PATHEXT lookup never picks an extensionless script.
+      const mockBin = path.join(ompHome, "bin", process.platform === "win32" ? "omp.cmd" : "omp");
+      await fsp.writeFile(
+        mockBin,
+        process.platform === "win32" ? "@echo omp 1.0.0\r\n" : "#!/bin/sh\necho omp 1.0.0\n",
+        { mode: 0o755 },
+      );
 
       const transcriptPath = path.join(sessionsDir, "session-e2e.jsonl");
       await fsp.writeFile(
@@ -872,9 +878,9 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       );
 
       // Symlink cycle between subDirA and subDirB
-      await fsp.symlink(subDirA, path.join(subDirB, "loopToA"));
+      await fsp.symlink(subDirA, path.join(subDirB, "loopToA"), "junction");
       // Symlink alias to sessA
-      await fsp.symlink(sessA, path.join(subDirB, "aliasA.jsonl"));
+      if (FILE_SYMLINKS_SUPPORTED) await fsp.symlink(sessA, path.join(subDirB, "aliasA.jsonl"));
 
       const adapter = new OmpHarnessAdapter({ customHome: ompHome });
       const workspaces = await adapter.listWorkspaces();

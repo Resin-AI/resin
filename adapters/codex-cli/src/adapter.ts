@@ -154,6 +154,12 @@ export interface CodexHarnessAdapterOptions {
   executor?: CommandExecutor;
   pathLookup?: PathLookupFn;
   capabilities?: Partial<AdapterCapabilities>;
+  /** Host environment (`CODEX_HOME`, `USERPROFILE`, `PATH`); defaults to `process.env`. */
+  env?: NodeJS.ProcessEnv;
+  /** Host platform (tests inject `win32`); defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
+  /** User home Codex resolves `~/.codex` against; defaults to the platform's user home. */
+  userHome?: string;
 }
 
 /**
@@ -171,6 +177,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   private readonly customSessionRoot?: string;
   private readonly executor?: CommandExecutor;
   private readonly pathLookup?: PathLookupFn;
+  private readonly host: Pick<CodexHarnessAdapterOptions, "env" | "platform" | "userHome">;
   private readonly capabilities: AdapterCapabilities;
   private cachedCatalog?: CodexSessionCatalog;
   private readonly inspectionCache: CodexInspectionCache = new Map();
@@ -182,6 +189,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
     this.customSessionRoot = options?.customSessionRoot;
     this.executor = options?.executor;
     this.pathLookup = options?.pathLookup;
+    this.host = { env: options?.env, platform: options?.platform, userHome: options?.userHome };
 
     this.capabilities = {
       ...CODEX_ADAPTER_CAPABILITIES,
@@ -207,7 +215,9 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       customConfigPath: this.customConfigPath,
       executor: this.executor,
       pathLookup: this.pathLookup,
-      env: options?.env,
+      env: options?.env ?? this.host.env,
+      platform: this.host.platform,
+      userHome: this.host.userHome,
     });
   }
 
@@ -215,6 +225,9 @@ export class CodexHarnessAdapter implements HarnessAdapter {
     const resolved = await resolveCodexPaths({
       customConfigPath: this.customConfigPath,
       customSessionRoot: this.customSessionRoot,
+      env: this.host.env,
+      platform: this.host.platform,
+      userHome: this.host.userHome,
     });
     const sessionRoot = path.resolve(sessionRootOverride ?? resolved.sessionRoot);
     const inspections = await discoverCodexTranscripts(sessionRoot, {

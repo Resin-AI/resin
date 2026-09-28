@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { ensurePrivateDirectorySync, windowsPrivacyProblem } from "../private-fs.js";
 
 export interface PrivateValueOrigin {
   workspaceId?: string;
@@ -92,6 +93,8 @@ function redactionKeyProblem(target: string): string | undefined {
     return "owned by another user";
   }
   if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) return "mode looser than 0600";
+  const windowsProblem = windowsPrivacyProblem(target);
+  if (windowsProblem !== undefined) return windowsProblem;
   if (stat.size !== REDACTION_KEY_BYTES) return "truncated or corrupt";
   return undefined;
 }
@@ -211,7 +214,9 @@ export class FilePrivateValueStore implements PrivateValueStore {
   redactionKey(): Uint8Array {
     if (this.deviceRedactionKey !== undefined) return this.deviceRedactionKey;
     const target = path.join(path.dirname(this.file), REDACTION_KEY_FILE);
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    // Windows: the owner-only directory DACL is inherited by the temporary key file, so both
+    // link and rename publication keep the key private.
+    ensurePrivateDirectorySync(path.dirname(target));
     let problem = redactionKeyProblem(target);
     if (problem === "missing") {
       publishRedactionKey(target, (temporary) => {
@@ -286,7 +291,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
       return;
     }
     const target = this.immutablePath(key);
-    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(path.dirname(target));
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
     try {
       fs.writeFileSync(temporary, JSON.stringify({ ...entry, key }), { flag: "wx", mode: 0o600 });
@@ -369,7 +374,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
     if (legacy.pending.size === 0) return;
     const entries = this.load();
     const directory = path.dirname(this.file);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectorySync(directory);
     try {
       fs.chmodSync(directory, 0o700);
     } catch {

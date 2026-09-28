@@ -115,8 +115,11 @@ export async function planCopilotMcpRegistration(
 export async function verifyCopilotMcpRegistration(options: {
   targetPath: string;
   command: string;
+  /** Expected arguments; `["mcp"]` by default (`[<resin.mjs>, "mcp"]` under node on Windows). */
+  args?: readonly string[];
   fsBridge: ConfigFsBridge;
 }): Promise<boolean> {
+  const expectedArgs = options.args ?? CANONICAL_RESIN_MCP_ARGS;
   const content = await options.fsBridge.readFile(options.targetPath);
   if (content === null) return false;
   let doc: ConfigMetadataRecord;
@@ -135,8 +138,8 @@ export async function verifyCopilotMcpRegistration(options: {
     entry.url === undefined &&
     entry.command === options.command &&
     Array.isArray(entry.args) &&
-    entry.args.length === CANONICAL_RESIN_MCP_ARGS.length &&
-    entry.args.every((arg, index) => arg === CANONICAL_RESIN_MCP_ARGS[index]) &&
+    entry.args.length === expectedArgs.length &&
+    entry.args.every((arg, index) => arg === expectedArgs[index]) &&
     // Copilot treats a missing `tools` as all tools; an explicit list must include "*".
     (tools === undefined || (Array.isArray(tools) && tools.includes("*")))
   );
