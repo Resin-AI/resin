@@ -7,7 +7,9 @@
  * one after another, each aborting the rest on a non-zero exit, is exactly what the chain did.
  *
  * - Printable ASCII only; the only blanks are space and tab.
- * - Outside quotes, none of `$ \ `` # ! ( ) { } < > * ? [ ] ~ ; | % ^`, no `&` but the `&&`
+ * - Outside quotes, none of `$ \ `` # ! ( ) { } < > * ? [ ] ~ ; | % ^` (from version 3, a `~`
+ *   inside a word after neither `=` nor `:`, and a `|` joining two commands of one segment into a
+ *   pipeline, are allowed — never `||` or `|&`), no `&` but the `&&`
  *   separators, and no word starting with `=` — except these redirections, each starting a word
  *   after a segment's command word and staying inside that segment's text:
  *   - `>`, `>>`, `<`, `2>` and `2>>`, each followed (after optional blanks) by one target word in
@@ -19,7 +21,8 @@
  *   a redirection without a target and a redirection before the command word never split.
  * - Quotes are plain single-quoted strings (POSIX has no escapes inside them) and double-quoted
  *   strings drawn from the same safe set (no `$`, backtick, backslash or `!` inside).
- * - Every segment's first word, quotes removed, is an external command: never a builtin, keyword or
+ * - Every segment's first word (every pipeline command's, from version 3), quotes removed, is an
+ *   external command: never a builtin, keyword or
  *   special word of bash or dash, never an assignment, never an option.
  *
  * Anything else stays one program.
@@ -36,14 +39,34 @@
 import type { WorkflowStep } from "./recorded-workflow.js";
 
 /** The version of these splitting rules; bump it whenever a program would split differently. */
-export const SHELL_AND_CHAIN_SPLITTER_VERSION = 2 as const;
+export const SHELL_AND_CHAIN_SPLITTER_VERSION = 3 as const;
 
 /**
  * Every splitter version this device still re-splits under: version 1 is the grammar without
- * redirections, so plans and tools split by an older device keep verifying and running.
+ * redirections, version 2 the grammar without a `~` inside a word, so plans and tools split by an
+ * older device keep verifying and running.
  */
-export type ShellAndChainSplitterVersion = 1 | typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
-const SPLITTER_VERSIONS: ReadonlySet<number> = new Set([1, SHELL_AND_CHAIN_SPLITTER_VERSION]);
+export type ShellAndChainSplitterVersion = 1 | 2 | typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
+const SPLITTER_VERSIONS: ReadonlySet<number> = new Set([1, 2, SHELL_AND_CHAIN_SPLITTER_VERSION]);
+
+/**
+ * A `~` no shell expands: inside a word, after neither `=` nor `:` (`HEAD~2..HEAD`). Tilde
+ * expansion happens only at a word's start and after `=` or `:` in an assignment. From version 3.
+ */
+function literalTilde(
+  text: string,
+  index: number,
+  wordStart: boolean,
+  version: ShellAndChainSplitterVersion,
+): boolean {
+  return (
+    version >= 3 &&
+    text[index] === "~" &&
+    !wordStart &&
+    text[index - 1] !== "=" &&
+    text[index - 1] !== ":"
+  );
+}
 
 /**
  * Where a redirection may never point, after quote removal: the kernel's and bash's special files
@@ -238,15 +261,18 @@ function redirectionAt(
 function segmentWords(
   text: string,
   version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
-): { words: string[]; redirects: boolean } | undefined {
-  const words: string[] = [];
+): { words: string[]; redirects: boolean; pipeline: string[][] } | undefined {
+  // From version 3 a segment may be a pipeline: each `|`-separated command's words, in order.
+  const pipeline: string[][] = [[]];
+  let words = pipeline[0]!;
   let redirects = false;
   let index = 0;
+  const pipes = version >= 3;
   /** The word starting at `index`, quotes removed, advancing past it; undefined when not safe. */
   const word = (): string | undefined => {
     let value = "";
     if (text[index] === "=") return undefined;
-    while (index < text.length && !isBlank(text[index])) {
+    while (index < text.length && !isBlank(text[index]) && !(pipes && text[index] === "|")) {
       const char = text[index]!;
       if (char === "'" || char === '"') {
         const close = text.indexOf(char, index + 1);
@@ -258,7 +284,11 @@ function segmentWords(
         index = close + 1;
         continue;
       }
-      if (UNSAFE.has(char) || char === "&") return undefined;
+      if (
+        (UNSAFE.has(char) && !literalTilde(text, index, value.length === 0, version)) ||
+        char === "&"
+      )
+        return undefined;
       value += char;
       index += 1;
     }
@@ -266,6 +296,16 @@ function segmentWords(
   };
   while (index < text.length) {
     if (isBlank(text[index])) {
+      index += 1;
+      continue;
+    }
+    if (pipes && text[index] === "|") {
+      // `||` and `|&` are never in the grammar; a pipe joins two commands, neither empty.
+      if (text[index + 1] === "|" || text[index + 1] === "&" || words.length === 0) {
+        return undefined;
+      }
+      words = [];
+      pipeline.push(words);
       index += 1;
       continue;
     }
@@ -286,18 +326,28 @@ function segmentWords(
     if (next === undefined) return undefined;
     words.push(next);
   }
-  return { words, redirects };
+  if (words.length === 0) return undefined;
+  return { words: pipeline[0]!, redirects, pipeline };
 }
 
-/** Whether a segment runs an external command, the only kind of segment a chain splits into. */
+/**
+ * Whether a segment runs external commands only — one, or from version 3 a pipeline of them — the
+ * only kind of segment a chain splits into.
+ */
 function runsExternalCommand(text: string, version: ShellAndChainSplitterVersion): boolean {
-  const first = segmentWords(text, version)?.words[0];
+  const pipeline = segmentWords(text, version)?.pipeline;
   return (
-    first !== undefined &&
-    first.length > 0 &&
-    !SHELL_WORDS.has(first) &&
-    !first.startsWith("-") &&
-    !first.includes("=")
+    pipeline !== undefined &&
+    pipeline.every((command) => {
+      const first = command[0];
+      return (
+        first !== undefined &&
+        first.length > 0 &&
+        !SHELL_WORDS.has(first) &&
+        !first.startsWith("-") &&
+        !first.includes("=")
+      );
+    })
   );
 }
 
@@ -338,6 +388,12 @@ export function splitShellAndChain(
       wordStart = true;
       continue;
     }
+    // From version 3 a pipe stays inside its segment: `a | b && c` runs `a | b`, then `c`.
+    if (char === "|" && version >= 3) {
+      if (source[index + 1] === "|" || source[index + 1] === "&") return undefined;
+      wordStart = true;
+      continue;
+    }
     if (wordStart && version !== 1) {
       // A redirection stays inside its segment; `segmentWords` checks its place and its target.
       const redirection = redirectionAt(source, index);
@@ -347,7 +403,11 @@ export function splitShellAndChain(
         continue;
       }
     }
-    if (UNSAFE.has(char) || (wordStart && char === "=")) return undefined;
+    if (
+      (UNSAFE.has(char) && !literalTilde(source, index, wordStart, version)) ||
+      (wordStart && char === "=")
+    )
+      return undefined;
     wordStart = false;
     if (char === "'" || char === '"') quote = char;
   }
@@ -402,7 +462,7 @@ export function shellAndChainSegmentText(
  */
 export function isOptionalSetupSegment(text: string): boolean {
   const parsed = segmentWords(text);
-  if (parsed === undefined || parsed.redirects) return false;
+  if (parsed === undefined || parsed.redirects || parsed.pipeline.length > 1) return false;
   const { words } = parsed;
   return (
     words.length >= 3 &&
@@ -447,6 +507,7 @@ export function isReadOnlyInspectionSegment(text: string): boolean {
   if (
     parsed === undefined ||
     parsed.redirects ||
+    parsed.pipeline.length > 1 ||
     first === undefined ||
     first.includes("/") ||
     first.includes("=") ||
@@ -473,7 +534,7 @@ export function isSkippableSegment(
   return (
     isOptionalSetupSegment(text) ||
     (position.trailing &&
-      version >= SHELL_AND_CHAIN_SPLITTER_VERSION &&
+      version >= 2 &&
       isReadOnlyInspectionSegment(text))
   );
 }

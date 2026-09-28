@@ -135,7 +135,8 @@ describe("OpenCode tool capture", () => {
         candidate.proposed.kind === "input" ? [candidate.proposed.name] : [],
       ),
     );
-    // `sales.csv` is data and `region-report.txt` a document in every call that uses them.
-    expect(names).toEqual(["data_path", "text", "data_path", "document_path", "document_path"]);
+    // `sales.csv` is data and `region-report.txt` a document in every call that uses them; the
+    // value `tail -n` takes is a count.
+    expect(names).toEqual(["data_path", "count", "data_path", "document_path", "document_path"]);
   });
 });

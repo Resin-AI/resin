@@ -220,7 +220,11 @@ function shellTokens(source: string): ProgramToken[] {
       }
       if (matchShellOperator(source, index) !== undefined) break;
       if (matchFileDescriptorOperator(source, index) !== undefined) break;
-      if ("$*?[]{}~".includes(current)) bindable = false;
+      if ("$*?[]{}".includes(current)) bindable = false;
+      // A shell expands `~` only at a word's start or after `=` or `:`; `HEAD~2` is literal text.
+      if (current === "~" && (index === start || "=:".includes(source[index - 1]!))) {
+        bindable = false;
+      }
       if (current === "$" && source[index + 1] === "(") {
         expectsCommandParenthesis = true;
         bindable = false;

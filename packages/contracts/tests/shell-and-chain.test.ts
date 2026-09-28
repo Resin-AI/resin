@@ -18,6 +18,7 @@ import {
   shellAndChainSegmentText,
   splitShellAndChain,
 } from "../src/shell-and-chain.js";
+import { tokenizeProgram } from "../src/program-tokens.js";
 
 /** The report chains the monthly-report sessions ran, with their recorded values. */
 /** The backup job a demo session ran as one chain, writing its checksum through a redirection. */
@@ -163,7 +164,6 @@ describe("splitting a shell && chain", () => {
     ["a parent-directory target", "make > ../log && ls"],
     ["an absolute parent-directory target", "make > /tmp/../dev/stdout && ls"],
     ["a slash-only target", "make > / && ls"],
-    ["a pipe", "make | tee log && ls"],
     ["an or-list", "make || ls && ls"],
     ["a semicolon", "make; ls && ls"],
     ["a newline", "make &&\nls"],
@@ -207,8 +207,50 @@ describe("splitting a shell && chain", () => {
       "make > log",
     );
     expect(
-      shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 3 }),
+      shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 4 }),
     ).toBeUndefined();
+  });
+
+  it("splits a `~` inside a word from version 3, never one a shell expands", () => {
+    const range = "git log --oneline HEAD~2..HEAD > notes && wc -l notes";
+    expect(splitShellAndChain("bash", range)?.segments.map((segment) => segment.text)).toEqual([
+      "git log --oneline HEAD~2..HEAD > notes",
+      "wc -l notes",
+    ]);
+    // A version-2 address re-splits under the version-2 grammar, which has no `~`.
+    expect(splitShellAndChain("bash", range, 2)).toBeUndefined();
+    for (const expands of [
+      "ls ~ && ls",
+      "ls ~/src && ls",
+      "cp a ~root && ls",
+      "tool --dir=~/x && ls",
+      "tool a:~/x && ls",
+      "cat > ~/out && ls",
+    ])
+      expect(splitShellAndChain("bash", expands)).toBeUndefined();
+  });
+
+  it("keeps a pipeline inside its segment from version 3, never `||` or `|&`", () => {
+    // Cursor's recorded manifest job, one chained Shell call.
+    const manifest =
+      "find assets -name '*.png' -type f | sort | xargs -r sha256sum > manifest.txt && wc -l manifest.txt && cat manifest.txt";
+    expect(splitShellAndChain("bash", manifest)?.segments.map((segment) => segment.text)).toEqual([
+      "find assets -name '*.png' -type f | sort | xargs -r sha256sum > manifest.txt",
+      "wc -l manifest.txt",
+      "cat manifest.txt",
+    ]);
+    expect(splitShellAndChain("bash", manifest, 2)).toBeUndefined();
+    for (const never of [
+      "make || ls && ls",
+      "make |& sort && ls",
+      "make | && ls",
+      "| sort && ls",
+      "make | cd x && ls",
+      "make | x=1 && ls",
+    ])
+      expect(splitShellAndChain("bash", never)).toBeUndefined();
+    // A pipeline only inspects nothing: it is never a skippable trailing inspection.
+    expect(isSkippableSegment("cat f | head", 3, { trailing: true })).toBe(false);
   });
 
   it("lets a version-2 chain skip mkdir -p anywhere and a file inspection only when trailing", () => {
@@ -291,6 +333,11 @@ describe.runIf(bashAvailable)("the allowlist against the commands bash runs", ()
     "sha256sum",
     "cat",
     "sort",
+    "wc",
+    "find",
+    "xargs",
+    "uniq",
+    "tee",
   ];
   /** How many external commands bash actually runs for `source`, with every command stubbed. */
   function bashRuns(source: string): number {
@@ -336,12 +383,32 @@ describe.runIf(bashAvailable)("the allowlist against the commands bash runs", ()
     "make &> log && ls",
     "cat <<< x && ls",
     "make 3> log && ls",
+    "git log HEAD~2..HEAD > log && wc -l log",
+    "ls ~ && ls",
+    "tool --dir=~/x && ls",
+    "find assets -name '*.png' -type f | sort | xargs -r sha256sum > manifest && wc -l manifest",
+    "sort in | uniq -c > log || ls",
+    "make |& sort && ls",
+    "ls | 'sort' && ls",
+    "make | tee log && ls",
   ];
 
   it.each(CORPUS)("splits %j only into the commands bash runs", (source) => {
     const chain = splitShellAndChain("bash", source);
     // Whatever splits is exactly the commands bash ran, one segment each.
-    if (chain !== undefined) expect(bashRuns(source)).toBe(chain.segments.length);
+    // A segment that is a pipeline runs each of its commands.
+    if (chain !== undefined) {
+      const commands = chain.segments.reduce(
+        (total, segment) =>
+          total +
+          1 +
+          tokenizeProgram("shell", segment.text).filter(
+            (token) => token.kind === "operator" && token.raw === "|",
+          ).length,
+        0,
+      );
+      expect(bashRuns(source)).toBe(commands);
+    }
     // The review's exploit: bash runs one command where a naive split would see three.
     if (source.includes("$'")) {
       expect(chain).toBeUndefined();

@@ -135,6 +135,12 @@ const SHELL_EXITED_ZERO: Readonly<Record<string, true>> = {
 
 const KNOWN_SHELL_COMMANDS: readonly {
   argument: string;
+  /**
+   * Arguments that only label the call for the user (`description`): the shell never reads them,
+   * so they are not part of what the step does, and a label the model reworded each run would
+   * otherwise be a pinned value no two recordings share.
+   */
+  labels?: readonly string[];
   proves: (event: Extract<NormalizedSessionEvent, { type: "tool_call" }>) => boolean;
 }[] = [
   {
@@ -165,12 +171,14 @@ const KNOWN_SHELL_COMMANDS: readonly {
   },
   {
     argument: "command",
+    labels: ["description"],
     proves: (event) =>
       event.toolName === "Bash" &&
       event.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY] === "claude-bash",
   },
   {
     argument: "command",
+    labels: ["description"],
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
@@ -184,6 +192,7 @@ const KNOWN_SHELL_COMMANDS: readonly {
   },
   {
     argument: "command",
+    labels: ["description"],
     proves: (event) =>
       event.toolName === "bash" &&
       event.connection === undefined &&
@@ -1036,6 +1045,11 @@ export class WorkflowCallRecorder {
         continue;
       if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
       delete observedParameters[argument];
+    }
+    for (const label of KNOWN_SHELL_COMMANDS.find((shell) => shell.proves(event))?.labels ?? []) {
+      if (!Object.hasOwn(observedParameters, label)) continue;
+      if (observedParameters === rawParameters) observedParameters = { ...rawParameters };
+      delete observedParameters[label];
     }
     const codex = event.toolName === "exec" ? readCodexCommandMetadata(event.metadata) : undefined;
     const parameters =

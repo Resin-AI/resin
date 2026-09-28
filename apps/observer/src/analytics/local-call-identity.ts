@@ -225,47 +225,63 @@ export function createLocalCallIdentity(options: {
     | { expiresAt: number; sessions: ReadonlyMap<string, string | undefined> | undefined }
     | undefined;
   let inFlight: Promise<ReadonlyMap<string, string | undefined> | undefined> | undefined;
-  const sessions = async (): Promise<ReadonlyMap<string, string | undefined> | undefined> => {
-    if (cached !== undefined && Date.now() < cached.expiresAt) return cached.sessions;
-    if (inFlight !== undefined) return await inFlight;
+  /** The discovered sessions, and whether this call discovered them rather than the cache. */
+  const sessions = async (
+    fresh = false,
+  ): Promise<{ found: ReadonlyMap<string, string | undefined> | undefined; fresh: boolean }> => {
+    if (!fresh && cached !== undefined && Date.now() < cached.expiresAt) {
+      return { found: cached.sessions, fresh: false };
+    }
+    if (inFlight !== undefined) return { found: await inFlight, fresh: true };
     const pending = discoverSessionIds(adapters).then((found) => {
       cached = { expiresAt: Date.now() + cacheTtlMs, sessions: found };
       if (inFlight === pending) inFlight = undefined;
       return found;
     });
     inFlight = pending;
-    return await pending;
+    return { found: await pending, fresh: true };
   };
 
   return {
     async lookup(callId) {
       if (workspaceId.trim().length === 0 || workspaceId === "unknown") return undefined;
       if (callId.length === 0) return undefined;
-      const discovered = await sessions();
-      if (discovered === undefined) throw new LocalSessionDiscoveryUnavailableError();
-
-      let match:
-        | {
-            sessionId: string;
-            representation: PrivateValueRepresentation;
-            identity: unknown;
+      type Match = {
+        sessionId: string;
+        representation: PrivateValueRepresentation;
+        identity: unknown;
+      };
+      const find = (known: ReadonlyMap<string, string | undefined>): Match | null | undefined => {
+        let found: Match | undefined;
+        for (const sessionId of known.keys()) {
+          for (const representation of PRIVATE_REPRESENTATIONS) {
+            const reference = workflowPrivateReference(
+              "demonstration",
+              workspaceId,
+              representation,
+              [sessionId, callId, WORKFLOW_CALL_IDENTITY_SLOT],
+            );
+            const owned = ownedValue(store, reference, representation, workspaceId);
+            if (owned === undefined) continue;
+            // A call id recorded in two sessions is not one call; refuse rather than pick one.
+            if (found !== undefined) return null;
+            found = { sessionId, representation, identity: owned.value };
           }
-        | undefined;
-      for (const sessionId of discovered.keys()) {
-        for (const representation of PRIVATE_REPRESENTATIONS) {
-          const reference = workflowPrivateReference("demonstration", workspaceId, representation, [
-            sessionId,
-            callId,
-            WORKFLOW_CALL_IDENTITY_SLOT,
-          ]);
-          const owned = ownedValue(store, reference, representation, workspaceId);
-          if (owned === undefined) continue;
-          // A call id recorded in two sessions is not one call; refuse rather than pick one.
-          if (match !== undefined) return undefined;
-          match = { sessionId, representation, identity: owned.value };
         }
+        return found;
+      };
+      let discovery = await sessions();
+      if (discovery.found === undefined) throw new LocalSessionDiscoveryUnavailableError();
+      let match = find(discovery.found);
+      // A session begun since the cached discovery (a held-out run recorded seconds before its
+      // validation request) is not in it yet: a miss is looked up once more in a fresh discovery.
+      if (match === undefined && !discovery.fresh) {
+        discovery = await sessions(true);
+        if (discovery.found === undefined) throw new LocalSessionDiscoveryUnavailableError();
+        match = find(discovery.found);
       }
-      if (match === undefined) return undefined;
+      const discovered = discovery.found;
+      if (match === undefined || match === null) return undefined;
 
       const parsed = RecordedCallIdentity.safeParse(match.identity);
       if (!parsed.success) return undefined;
