@@ -54,6 +54,11 @@ export interface HarnessConfigResult {
 
 export interface MultiHarnessConfigOptions {
   harnesses?: HarnessId[];
+  /**
+   * Harnesses to register even when no installation is detected: the ones the user named with
+   * `resin init --harness`. Every other harness is registered only when it is present.
+   */
+  installedHarnesses?: readonly HarnessId[];
   workspacePath?: string;
   gatewayUrl?: string;
   customHome?: string;
@@ -943,6 +948,7 @@ export class HarnessConfigOrchestrator {
     const reconciler = new HarnessReconciler();
     const report = await reconciler.reconcile({
       harnesses: targetHarnesses,
+      installedHarnesses: options.installedHarnesses,
       customHome,
       env,
       resinCommand: options.resinCommand ?? resolveInstalledResinMcpCommand(customHome),

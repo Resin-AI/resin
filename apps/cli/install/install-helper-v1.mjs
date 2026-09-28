@@ -7432,7 +7432,7 @@ async function probeOmpInstallation(options) {
     }
   };
 }
-var execFileAsync4, ACTIVE_ONLY_TERMINAL_GRACE_MS, OMP_TESTED_VERSIONS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema;
+var execFileAsync4, ACTIVE_ONLY_TERMINAL_GRACE_MS, OMP_TESTED_VERSIONS, OmpWorkspaceEntrySchema, OmpWorkspacesRegistrySchema, MAX_CHUNK_BYTES, OmpActivityMessageSchema, QUIET_DIRECTORY_MS, transcriptPathCollator;
 var init_discovery7 = __esm({
   "adapters/omp/dist/discovery.js"() {
     "use strict";
@@ -7479,6 +7479,8 @@ var init_discovery7 = __esm({
       role: external_exports.enum(["user", "assistant", "system", "toolResult", "tool_result", "tool"]),
       content: external_exports.union([external_exports.string(), external_exports.array(external_exports.record(external_exports.unknown()))])
     });
+    QUIET_DIRECTORY_MS = 10 * 6e4;
+    transcriptPathCollator = new Intl.Collator();
   }
 });
 
@@ -11243,7 +11245,8 @@ var DeviceTokenExchangeResponseSchema = external_exports.object({
   tokenType: external_exports.literal("Bearer").default("Bearer"),
   expiresIn: external_exports.number().int().positive().default(3600),
   // 1 hour
-  refreshToken: external_exports.string().min(1),
+  /** Absent for one-time grants (privacy:delete elevation), which cannot be refreshed. */
+  refreshToken: external_exports.string().min(1).optional(),
   claims: AuthClaimsSchema
 });
 var TokenRotationRequestSchema = external_exports.object({

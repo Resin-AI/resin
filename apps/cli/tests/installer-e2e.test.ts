@@ -318,6 +318,32 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(present.every((h) => h.wasAlreadyConfigured)).toBe(true);
   });
 
+  it("registers the harnesses named with --harness even when none is present yet", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const home = "/home/developer";
+    const installer = new ResinInstaller({
+      fsBridge: bridge,
+      logger: () => {},
+    });
+
+    const run = await installer.run({
+      customHome: home,
+      workspace: "/home/developer/code/my-app",
+      nonInteractive: true,
+      autoApprove: true,
+      harness: "omp,codex-cli",
+    });
+
+    expect(run.success).toBe(true);
+    expect(
+      run.harnesses
+        .filter((h) => h.configured)
+        .map((h) => h.harnessId)
+        .sort(),
+    ).toEqual(["codex-cli", "omp"]);
+    expect(await bridge.readFile(resolveHarnessConfigPath("omp", home))).toContain('"resin"');
+  });
+
   it("rolls back all applied configurations atomically upon failure injection", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const home = "/home/developer";
