@@ -74,6 +74,10 @@ describe("isResinDiscoveryToolCall", () => {
     ["resin-manage_tools", undefined],
     ["manage_tools", "resin"],
     ["manage_tools", undefined],
+    // Grok Build.
+    ["resin__search_tools", undefined],
+    // Claude Code 2.1.283 loading deferred tools: `{"query":"resin","max_results":10}`.
+    ["ToolSearch", undefined],
   ])("drops %s over %s", (name, connection) => {
     expect(isResinDiscoveryToolCall(name, connection)).toBe(true);
   });
@@ -84,6 +88,8 @@ describe("isResinDiscoveryToolCall", () => {
     ["mcp__resin__backup_orders", undefined],
     ["manage_tools", "fixture"],
     ["resin_orders", undefined],
+    ["resin__orders", undefined],
+    ["ToolSearch", "fixture"],
     ["Shell", undefined],
   ])("keeps %s over %s", (name, connection) => {
     expect(isResinDiscoveryToolCall(name, connection)).toBe(false);
