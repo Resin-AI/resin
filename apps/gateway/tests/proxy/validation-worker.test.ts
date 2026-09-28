@@ -356,6 +356,32 @@ describe("WorkflowValidationWorker", () => {
     expect(result.notRecordedHere).toBeUndefined();
   });
 
+  it("skips an ask when this device holds only some of the calls it names", async () => {
+    const recorded = recording();
+    const plan = recorded.plan;
+    const heldOutIds = new Set((plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds));
+    expect(heldOutIds.size).toBeGreaterThan(0);
+    const all = localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]);
+    // This device recorded the plan's own run; the held-out run was recorded on another machine.
+    const lookup = async (callId: string) =>
+      heldOutIds.has(callId) ? undefined : await all.lookup(callId);
+    const { calls, fetchImpl } = recordingFetch((url) =>
+      url.includes("/pending")
+        ? jsonResponse({ requests: [requestFor(plan)] })
+        : jsonResponse({ status: "recorded" }),
+    );
+    const worker = new WorkflowValidationWorker({
+      client: clientOver(fetchImpl),
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      privateValues: recorded.store,
+      localCalls: { lookup },
+      now: () => new Date(DECIDED_AT),
+    });
+
+    expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0 });
+    expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+  });
+
   it("still answers a failed decision when this device recorded the demonstration", async () => {
     const recorded = recording();
     const plan = { ...recorded.plan, steps: recorded.plan.steps.slice().reverse() };

@@ -77,8 +77,8 @@ export interface LocalWorkflowValidationResult {
    */
   unavailable?: string;
   /**
-   * Set when none of the calls the plan names (its own and the held-out's) is in this device's
-   * recordings: the demonstration was recorded on another device, which is the one to answer.
+   * Set when any call the plan names (its own or the held-out's) is missing from this device's
+   * recordings: a device holding all of them answers, or the ask lapses.
    */
   notRecordedHere?: true;
 }
@@ -681,7 +681,8 @@ export function createRecordingCheckValidator(
           "the selected workflow has no recorded demonstration; no recording check or parameter decision was performed",
       };
     }
-    // A plan none of whose calls this device recorded is another device's to check.
+    // A plan naming any call this device did not record is another device's to check: a device
+    // holding only some of them (run 1 here, run 2 on another machine) cannot answer truthfully.
     const namedCallIds = new Set([
       ...plan.steps.flatMap((step) =>
         step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
@@ -690,14 +691,14 @@ export function createRecordingCheckValidator(
       ),
       ...(plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
     ]);
-    let recordedHere = false;
+    let recordedHere = true;
     for (const callId of namedCallIds) {
-      if ((await options.localCalls.lookup(callId)) !== undefined) {
-        recordedHere = true;
+      if ((await options.localCalls.lookup(callId)) === undefined) {
+        recordedHere = false;
         break;
       }
     }
-    if (namedCallIds.size > 0 && !recordedHere) {
+    if (!recordedHere) {
       return { verdicts: [], unavailable: UNAVAILABLE, notRecordedHere: true };
     }
     const derivation = options.derivation ?? createProgramAdapter({ timeoutMs: options.timeoutMs });
