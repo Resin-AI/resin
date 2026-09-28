@@ -141,9 +141,9 @@ export class ProtocolClient {
     return this.claims;
   }
 
-  setTokens(accessToken: string, refreshToken: string, claims: AuthClaims): void {
+  setTokens(accessToken: string, refreshToken: string | undefined, claims: AuthClaims): void {
     this.accessToken = accessToken;
-    this.refreshToken = refreshToken;
+    this.refreshToken = refreshToken ?? null;
     this.claims = claims;
   }
 
