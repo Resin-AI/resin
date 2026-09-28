@@ -9530,7 +9530,7 @@ import child_process from "node:child_process";
 import fs11 from "node:fs";
 import os11 from "node:os";
 import path32 from "node:path";
-import process5 from "node:process";
+import process6 from "node:process";
 import { fileURLToPath as fileURLToPath2, pathToFileURL } from "node:url";
 
 // apps/cli/src/platform/platform.ts
@@ -10905,10 +10905,11 @@ function createUserServiceManager(options = {}) {
 }
 
 // apps/cli/src/service/verification.ts
-import os10 from "node:os";
-import path30 from "node:path";
 init_zod();
 init_dist();
+import os10 from "node:os";
+import path30 from "node:path";
+import process4 from "node:process";
 
 // apps/observer/dist/paths.js
 import os9 from "node:os";
@@ -13634,6 +13635,62 @@ var VerificationDetailValueSchema = external_exports.lazy(
     external_exports.record(external_exports.string(), VerificationDetailValueSchema)
   ])
 );
+var DEFAULT_DAEMON_STARTUP_TIMEOUT_MS = 6e4;
+var DEFAULT_READINESS_PROGRESS_INTERVAL_MS = 5e3;
+var STARTUP_CRASH_LOOP_THRESHOLD = 2;
+var STARTUP_PROBE_INTERVAL_MS = 1e3;
+function defaultIsProcessAlive(pid) {
+  try {
+    process4.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function createDaemonStartupProbe(options) {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+  const crashLogPath = path30.join(options.resinHome, "logs", "crash-recovery.log");
+  return async () => {
+    const status = await options.serviceStatus();
+    if (!status.active) {
+      return {
+        state: "failed",
+        reason: `Daemon service is ${status.state ?? "not active"}`
+      };
+    }
+    if (status.pid !== void 0 && status.pid > 0 && !isProcessAlive(status.pid)) {
+      return { state: "failed", reason: `Daemon process ${status.pid} exited` };
+    }
+    const crashLog = await fsBridge.readFile(crashLogPath).catch(() => null);
+    let crashes = 0;
+    let lastExitCode;
+    let restartAbandoned = false;
+    for (const line of crashLog?.split("\n") ?? []) {
+      if (!line.trim()) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (record.event !== "runtime_crash" || typeof record.timestamp !== "number" || record.timestamp < options.startedAt) {
+        continue;
+      }
+      crashes += 1;
+      if (typeof record.exitCode === "number") lastExitCode = record.exitCode;
+      if (record.restartScheduled === false) restartAbandoned = true;
+    }
+    if (restartAbandoned || crashes >= STARTUP_CRASH_LOOP_THRESHOLD) {
+      const exit = lastExitCode === void 0 ? "" : ` (last exit code ${lastExitCode})`;
+      return {
+        state: "failed",
+        reason: `Daemon crashed ${crashes} time${crashes === 1 ? "" : "s"} during startup${exit}; see ${crashLogPath}`
+      };
+    }
+    return { state: "starting" };
+  };
+}
 var verifyDaemonReadiness = async (options) => {
   const homeDir = options.homeDir ?? os10.homedir();
   const resinHome = options.resinHome ?? path30.join(homeDir, ".resin");
@@ -13642,7 +13699,18 @@ var verifyDaemonReadiness = async (options) => {
   const socketPath = daemonPaths.socketPath;
   const timeoutMs = Math.max(0, options.timeoutMs ?? 15e3);
   const retryIntervalMs = Math.max(25, options.retryIntervalMs ?? 250);
-  const deadline = Date.now() + timeoutMs;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
+  const startedAt = now();
+  const baseDeadline = startedAt + timeoutMs;
+  const startupDeadline = startedAt + Math.max(timeoutMs, options.startupTimeoutMs ?? DEFAULT_DAEMON_STARTUP_TIMEOUT_MS);
+  const progressIntervalMs = Math.max(
+    1,
+    options.progressIntervalMs ?? DEFAULT_READINESS_PROGRESS_INTERVAL_MS
+  );
+  let nextProgressAt = startedAt + progressIntervalMs;
+  let deadline = baseDeadline;
+  let nextProbeAt = startedAt;
   const strictReadiness = options.expectedCloudIdentity !== void 0 || options.startedAfter !== void 0;
   let attempts = 0;
   let lastError = "Daemon readiness deadline elapsed";
@@ -13720,13 +13788,32 @@ var verifyDaemonReadiness = async (options) => {
         });
       }
     }
-    const remainingMs = deadline - Date.now();
-    if (remainingMs > 0) {
-      await new Promise(
-        (resolve6) => setTimeout(resolve6, Math.min(retryIntervalMs, remainingMs))
-      );
+    if (options.startupProbe && now() >= nextProbeAt) {
+      nextProbeAt = now() + STARTUP_PROBE_INTERVAL_MS;
+      const startup = await options.startupProbe().catch(() => void 0);
+      if (startup?.state === "failed") {
+        return {
+          ready: false,
+          ipcReady: lastIpcReady,
+          cloudReady: lastCloudReady,
+          attempts,
+          socketPath,
+          healthStatus: lastHealthStatus,
+          version: lastVersion,
+          error: `${startup.reason} (last readiness error: ${lastError})`
+        };
+      }
+      deadline = startup ? startupDeadline : baseDeadline;
     }
-  } while (Date.now() < deadline);
+    const remainingMs = deadline - now();
+    if (remainingMs > 0) {
+      if (options.onWaiting && now() >= nextProgressAt) {
+        options.onWaiting(now() - startedAt);
+        nextProgressAt = now() + progressIntervalMs;
+      }
+      await sleep(Math.min(retryIntervalMs, remainingMs));
+    }
+  } while (now() < deadline);
   return {
     ready: false,
     ipcReady: lastIpcReady,
@@ -13745,7 +13832,7 @@ import crypto3 from "node:crypto";
 import fs9 from "node:fs";
 import fsPromises from "node:fs/promises";
 import path31 from "node:path";
-import process4 from "node:process";
+import process5 from "node:process";
 import zlib from "node:zlib";
 function sha256Hex(buf) {
   return crypto3.createHash("sha256").update(buf).digest("hex");
@@ -14004,7 +14091,7 @@ function setSafeDirectoryMode(directoryPath, desiredMode, fsSync2) {
       `Security violation: archive extraction encountered a linked or non-directory component: '${directoryPath}'.`
     );
   }
-  if (process4.platform !== "win32" && (stats.mode & RELEASE_MODE_MASK) !== desiredMode) {
+  if (process5.platform !== "win32" && (stats.mode & RELEASE_MODE_MASK) !== desiredMode) {
     fsSync2.chmodSync(directoryPath, desiredMode);
   }
 }
@@ -14024,7 +14111,7 @@ function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes
     currentPath = path31.join(currentPath, segment);
     let stats = lstatIfExists(currentPath, fsSync2);
     if (!stats) {
-      const desiredMode2 = process4.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+      const desiredMode2 = process5.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
       try {
         fsSync2.mkdirSync(currentPath, { recursive: false, mode: desiredMode2 });
       } catch (error) {
@@ -14039,7 +14126,7 @@ function ensureSafeDirectoryPath(root, relativeDirectory, explicitDirectoryModes
         `Security violation: archive extraction encountered a linked or non-directory component: '${portablePath}'.`
       );
     }
-    const desiredMode = process4.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+    const desiredMode = process5.platform === "win32" ? explicitDirectoryModes.get(portablePath) ?? RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
     setSafeDirectoryMode(currentPath, desiredMode, fsSync2);
   }
   return currentPath;
@@ -14058,7 +14145,7 @@ function writeExclusiveRegularFile(targetPath, fileData, mode, fsSync2) {
       );
     }
     fsSync2.writeFileSync(descriptor, fileData);
-    if (process4.platform !== "win32") {
+    if (process5.platform !== "win32") {
       fsSync2.fchmodSync(descriptor, mode);
       if ((fsSync2.fstatSync(descriptor).mode & RELEASE_MODE_MASK) !== mode) {
         throw new Error(
@@ -14112,7 +14199,7 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
   for (const entry of entries) {
     const targetPath = resolveContainedArchivePath(root, entry.relativePath);
     if (entry.isDirectory) {
-      const directoryMode = process4.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
+      const directoryMode = process5.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_DIRECTORY_MODE : RELEASE_DIRECTORY_MODE;
       explicitDirectoryModes.set(entry.relativePath, directoryMode);
       ensureSafeDirectoryPath(root, entry.relativePath, explicitDirectoryModes, fsSync2);
       setSafeDirectoryMode(targetPath, directoryMode, fsSync2);
@@ -14132,7 +14219,7 @@ function extractTarArchive(tarData, destinationDir, fsSync2 = fs9) {
         `Security violation: archive file parent escaped the extraction root: '${entry.relativePath}'.`
       );
     }
-    const fileMode = process4.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_FILE_MODE : entry.archiveMarksExecutable ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
+    const fileMode = process5.platform === "win32" ? entry.sanitizedArchiveMode || RELEASE_FILE_MODE : entry.archiveMarksExecutable ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
     const fileData = tarData.subarray(entry.dataOffset, entry.dataOffset + entry.fileSize);
     writeExclusiveRegularFile(targetPath, fileData, fileMode, fsSync2);
     extractedFiles.push(targetPath);
@@ -14319,7 +14406,7 @@ function normalizeReleaseTreeModes(baseDir, executablePaths) {
       `Security violation: non-regular file detected in release staging tree at '${scan.nonRegularNonDirs[0].relativePath}'.`
     );
   }
-  if (process4.platform === "win32") return executableRelativePaths;
+  if (process5.platform === "win32") return executableRelativePaths;
   if ((rootStats.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
     fs9.chmodSync(root, RELEASE_DIRECTORY_MODE);
   }
@@ -14344,7 +14431,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
       `Security violation: installed version root must be a real directory: '${targetDir}'.`
     );
   }
-  if (process4.platform !== "win32" && (targetRootStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
+  if (process5.platform !== "win32" && (targetRootStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
     throw new Error(
       `Integrity violation: directory permission mode drift at '.': expected 0o${RELEASE_DIRECTORY_MODE.toString(8)}, got 0o${(targetRootStat.mode & RELEASE_MODE_MASK).toString(8)}.`
     );
@@ -14402,7 +14489,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
           `Integrity violation: expected directory at '${relPath}', but found non-directory in installed version tree.`
         );
       }
-      if (process4.platform !== "win32" && (targetStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
+      if (process5.platform !== "win32" && (targetStat.mode & RELEASE_MODE_MASK) !== RELEASE_DIRECTORY_MODE) {
         throw new Error(
           `Integrity violation: directory permission mode drift at '${relPath}': expected 0o${RELEASE_DIRECTORY_MODE.toString(8)}, got 0o${(targetStat.mode & RELEASE_MODE_MASK).toString(8)}.`
         );
@@ -14414,7 +14501,7 @@ function verifyInstalledVersionTree(targetDir, stagingDir, cleanVersion, expecte
         `Integrity violation: expected regular file at '${relPath}', but found non-regular file in installed version tree.`
       );
     }
-    if (process4.platform !== "win32") {
+    if (process5.platform !== "win32") {
       const targetMode = targetStat.mode & RELEASE_MODE_MASK;
       const expectedMode = expectedExecutableFiles.has(relPath) ? RELEASE_EXECUTABLE_MODE : RELEASE_FILE_MODE;
       if (targetMode !== expectedMode) {
@@ -14503,7 +14590,7 @@ async function installReleaseVersion(options) {
       `Security violation: release versions path must be a real directory: '${versionsDir}'.`
     );
   }
-  if (process4.platform !== "win32") {
+  if (process5.platform !== "win32") {
     await fsPromises.chmod(versionsDir, RELEASE_DIRECTORY_MODE);
   }
   const stagingDir = resolveVersionChildPath(
@@ -14523,7 +14610,7 @@ async function installReleaseVersion(options) {
     log(`Extracting release archive for version v${cleanVersion} into staging directory...`);
     await fsPromises.mkdir(stagingDir, { recursive: false, mode: 448 });
     stagingCreated = true;
-    if (process4.platform !== "win32") {
+    if (process5.platform !== "win32") {
       await fsPromises.chmod(stagingDir, 448);
     }
     let { extractedFiles, executableFiles } = extractTarGzBuffer(tarGzBuffer, stagingDir);
@@ -14556,7 +14643,7 @@ async function installReleaseVersion(options) {
       await fsBridge.mkdirp(denoDir);
       await fsPromises.chmod(denoDir, 493).catch(() => {
       });
-      const denoExecutableName = process4.platform === "win32" ? "deno.exe" : "deno";
+      const denoExecutableName = process5.platform === "win32" ? "deno.exe" : "deno";
       const denoExecutable = extractSingleFileZip(runtimeBuffer, denoExecutableName);
       const denoTarget = path31.join(denoDir, denoExecutableName);
       await fsPromises.writeFile(denoTarget, denoExecutable, {
@@ -14670,11 +14757,11 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
           daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
           cli: path31.join(targetVersionDir, "bin", "resin"),
           deno: fs9.existsSync(
-            path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
+            path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno")
           ) ? path31.join(
             targetVersionDir,
             "deno",
-            process4.platform === "win32" ? "deno.exe" : "deno"
+            process5.platform === "win32" ? "deno.exe" : "deno"
           ) : void 0
         }
       };
@@ -14709,8 +14796,8 @@ await import(path.resolve(__dirname, "../apps/daemon/dist/bin/resin-daemon.js"))
         daemon: path31.join(targetVersionDir, "bin", "resin-daemon"),
         cli: path31.join(targetVersionDir, "bin", "resin"),
         deno: fs9.existsSync(
-          path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno")
-        ) ? path31.join(targetVersionDir, "deno", process4.platform === "win32" ? "deno.exe" : "deno") : void 0
+          path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno")
+        ) ? path31.join(targetVersionDir, "deno", process5.platform === "win32" ? "deno.exe" : "deno") : void 0
       }
     };
   } catch (error) {
@@ -16746,7 +16833,7 @@ async function defaultHealthCheckRunner(cliPath, args = ["version"], options = {
   try {
     child = child_process.spawn(cliPath, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process5.env, ...options.env || {} }
+      env: { ...process6.env, ...options.env || {} }
     });
   } catch (err) {
     return {
@@ -16870,7 +16957,7 @@ async function detectOnboardingSkipReason(options) {
   if (options.autoOnboard === false) {
     return "Explicitly disabled via autoOnboard option";
   }
-  const env = options.env ?? process5.env;
+  const env = options.env ?? process6.env;
   if (env.RESIN_NO_ONBOARD === "1" || env.RESIN_NO_ONBOARD === "true") {
     return "Disabled via RESIN_NO_ONBOARD environment variable";
   }
@@ -16898,7 +16985,7 @@ async function detectOnboardingSkipReason(options) {
     return "Non-interactive environment detected";
   }
   const allowRoot = env.RESIN_ALLOW_ROOT === "1" || env.RESIN_ALLOW_ROOT === "true";
-  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : process5.getuid instanceof Function ? process5.getuid() === 0 : false);
+  const isRoot = options.isRoot ?? (options.getuid !== void 0 ? options.getuid() === 0 : process6.getuid instanceof Function ? process6.getuid() === 0 : false);
   if (isRoot && !allowRoot) {
     return "Running in root/sudo context (avoiding root-owned browser launch or user config)";
   }
@@ -16907,13 +16994,13 @@ async function detectOnboardingSkipReason(options) {
 async function defaultOnboardingRunner(cliPath, args = ["init", "--auto-approve"], options = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ONBOARDING_TIMEOUT_MS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_ONBOARDING_MAX_OUTPUT_BYTES;
-  const interactive = options.interactive ?? Boolean(process5.stdin?.isTTY && process5.stdout?.isTTY);
+  const interactive = options.interactive ?? Boolean(process6.stdin?.isTTY && process6.stdout?.isTTY);
   const stdio = options.stdio ?? (interactive ? "inherit" : ["ignore", "pipe", "pipe"]);
   let child;
   try {
     child = child_process.spawn(cliPath, args, {
       stdio,
-      env: { ...process5.env, ...options.env || {} }
+      env: { ...process6.env, ...options.env || {} }
     });
   } catch (err) {
     return {
@@ -17169,9 +17256,9 @@ async function removeShellPath(options) {
   return cleaned;
 }
 async function configureShellPath(options) {
-  const env = options.env ?? process5.env;
+  const env = options.env ?? process6.env;
   const fsBridge = options.fsBridge ?? defaultFsBridge;
-  const isPosix = options.isPosix ?? process5.platform !== "win32";
+  const isPosix = options.isPosix ?? process6.platform !== "win32";
   const resinHome = path32.resolve(options.resinHome);
   const binDir = path32.join(resinHome, "bin");
   const homeDir = path32.resolve(
@@ -17283,8 +17370,8 @@ async function configureShellPath(options) {
   }
 }
 async function bootstrapInstall(options = {}) {
-  const env = options.env ?? process5.env;
-  const log = options.logger ?? ((msg) => process5.stderr.write(`${msg}
+  const env = options.env ?? process6.env;
+  const log = options.logger ?? ((msg) => process6.stderr.write(`${msg}
 `));
   const fsBridge = options.fsBridge ?? defaultFsBridge;
   const isVerbose = Boolean(
@@ -17308,10 +17395,10 @@ async function bootstrapInstall(options = {}) {
       platform: targetPlatform,
       arch: normalizedArch,
       env: options.env ? {
-        ...process5.env,
+        ...process6.env,
         ...options.env,
         RESIN_IS_WSL: isWslRequested ? "1" : options.env.RESIN_IS_WSL
-      } : process5.env
+      } : process6.env
     });
   } else {
     platformInfo = detectPlatform2();
@@ -17570,6 +17657,7 @@ async function bootstrapInstall(options = {}) {
       if (typeof serviceManager.reload === "function") {
         await serviceManager.reload();
       }
+      const restartedAt = Date.now();
       await serviceManager.restart();
       logVerbose("==> Verifying daemon readiness and running release version...");
       const readiness = await readinessVerifier({
@@ -17578,7 +17666,14 @@ async function bootstrapInstall(options = {}) {
         fsBridge,
         expectedVersion: release.version,
         timeoutMs: options.daemonReadinessTimeoutMs,
-        retryIntervalMs: options.daemonReadinessRetryIntervalMs
+        retryIntervalMs: options.daemonReadinessRetryIntervalMs,
+        startupProbe: createDaemonStartupProbe({
+          resinHome,
+          fsBridge,
+          serviceStatus: () => serviceManager.status(),
+          startedAt: restartedAt
+        }),
+        onWaiting: (elapsedMs) => log(`Waiting for the Resin daemon to start (${Math.round(elapsedMs / 1e3)}s)\u2026`)
       });
       if (!readiness.ready) {
         throw new Error(
@@ -17724,7 +17819,7 @@ To get started, reload your shell or run:
   };
 }
 function isMainModule(metaUrl = import.meta.url, argv1) {
-  const targetPath = argv1 ?? (process5?.argv ? process5.argv[1] : void 0);
+  const targetPath = argv1 ?? (process6?.argv ? process6.argv[1] : void 0);
   if (!targetPath) return false;
   try {
     const resolvedPath = path32.resolve(targetPath);
@@ -17734,7 +17829,7 @@ function isMainModule(metaUrl = import.meta.url, argv1) {
     return false;
   }
 }
-async function runCli(argv = process5.argv.slice(2)) {
+async function runCli(argv = process6.argv.slice(2)) {
   let channel;
   let channelUrl;
   let resinHome;
@@ -17803,7 +17898,7 @@ async function runCli(argv = process5.argv.slice(2)) {
     }
   }
   if (help) {
-    process5.stderr.write(`Resin Standalone Bootstrap Installer
+    process6.stderr.write(`Resin Standalone Bootstrap Installer
 Usage:
   node install-helper-v1.mjs [options]
 
@@ -17821,7 +17916,7 @@ Options:
   --allow-insecure-loopback  Allow HTTP on loopback for testing
   --help, -h                 Show this help message
 `);
-    process5.exit(0);
+    process6.exit(0);
   }
   try {
     const result = await bootstrapInstall({
@@ -17837,23 +17932,23 @@ Options:
       allowInsecureHttpForTests: allowInsecureLoopback,
       allowOverrides: channelUrl !== void 0
     });
-    process5.stdout.write(`${JSON.stringify(result, null, 2)}
+    process6.stdout.write(`${JSON.stringify(result, null, 2)}
 `);
   } catch (error) {
-    process5.stderr.write(
+    process6.stderr.write(
       `Installation failed: ${error instanceof Error ? error.message : String(error)}
 `
     );
-    process5.exit(1);
+    process6.exit(1);
   }
 }
-if (process5?.argv?.[1] && isMainModule(import.meta.url, process5.argv[1])) {
+if (process6?.argv?.[1] && isMainModule(import.meta.url, process6.argv[1])) {
   runCli().catch((err) => {
-    process5.stderr.write(
+    process6.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}
 `
     );
-    process5.exit(1);
+    process6.exit(1);
   });
 }
 export {

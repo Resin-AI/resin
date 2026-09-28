@@ -21,6 +21,8 @@ import {
 import {
   type DaemonReadinessResult,
   type DaemonReadinessVerifier,
+  type DaemonStartupProbe,
+  createDaemonStartupProbe,
   verifyDaemonReadiness,
 } from "../service/verification.js";
 
@@ -72,6 +74,8 @@ export interface SetupDaemonServiceResult {
   readonly details?: string;
   readonly error?: string;
   readonly rollback?: () => Promise<void>;
+  /** Reports whether the (re)started daemon is still making startup progress. */
+  readonly startupProbe?: DaemonStartupProbe;
 }
 
 export interface HealthCheckDaemonOptions {
@@ -219,6 +223,14 @@ export async function setupAndStartDaemonService(
     }
   };
 
+  const startedAt = Date.now();
+  const startupProbe = createDaemonStartupProbe({
+    resinHome,
+    fsBridge,
+    serviceStatus: () => manager.status(),
+    startedAt,
+  });
+
   try {
     const targetUnitDefinition = manager.getUnitDefinition({
       daemonPath: options.daemonPath,
@@ -271,6 +283,7 @@ export async function setupAndStartDaemonService(
           pid,
           details: healthDetails,
           rollback,
+          startupProbe,
         };
       }
     }
@@ -396,6 +409,7 @@ export async function setupAndStartDaemonService(
       pid,
       details: healthDetails,
       rollback,
+      startupProbe,
     };
   } catch (err: unknown) {
     await rollback();

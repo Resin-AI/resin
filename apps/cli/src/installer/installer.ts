@@ -821,6 +821,14 @@ export class ResinInstaller {
             expectedVersion: versionSwitchResult?.activeVersion ?? options.targetVersion,
             timeoutMs: options.readinessTimeoutMs,
             retryIntervalMs: options.readinessRetryIntervalMs,
+            startupProbe: serviceSetupResult.startupProbe,
+            onWaiting: (elapsedMs) => {
+              if (this.verbosity !== "quiet") {
+                this.logger(
+                  `Waiting for the Resin daemon to start (${Math.round(elapsedMs / 1000)}s)…`,
+                );
+              }
+            },
           });
           if (!daemonReadinessResult.ready) {
             throw new Error(
