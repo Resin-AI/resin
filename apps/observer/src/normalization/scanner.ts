@@ -423,9 +423,14 @@ export class ContentScanner {
         if (!/[0-9]/.test(candidate) || !/[a-f]/i.test(candidate) || covered(start, end)) continue;
         const score = normalizedEntropy(candidate, 16);
         if (score < MIN_NORMALIZED_ENTROPY) continue;
-        // A digest named by a path or file (`build-<sha>.log`, `/cache/<md5>/x`) is content-addressed.
+        // A digest named by a path or file (`build-<sha>.log`, `/cache/<md5>/x`) is content-addressed,
+        // unless a value slot (`key=`, `token:`) or a secret label (`token`, `/hooks/`) precedes it.
+        const lineBefore = lineAround(text, start, end).before;
         const pathNeighbour =
-          /[/._-]/.test(text[start - 1] ?? "") || /[/._-]/.test(text[end] ?? "");
+          (/[/._-]/.test(text[start - 1] ?? "") || /[/._-]/.test(text[end] ?? "")) &&
+          !/[=:]$/.test(lineBefore) &&
+          !SECRET_CONTEXT.test(lineBefore.slice(-32)) &&
+          !/hooks?\/$/i.test(lineBefore);
         if (pathNeighbour || isHashContext(text, start, end)) {
           digests.push({ start, end });
           continue;

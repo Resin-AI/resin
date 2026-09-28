@@ -49,6 +49,21 @@ describe("upload redaction of credentials without a named vendor prefix", () => 
       "ddsend --app web api token 5f0c8d2e-3b4a-4c1d-9e8f-7a6b5c4d3e2f",
       "5f0c8d2e-3b4a-4c1d-9e8f-7a6b5c4d3e2f",
     ],
+    [
+      "hex key before a path",
+      "fetch key=3f9a1c07b2e84d65a0f1c2d3e4b5a697/x",
+      "3f9a1c07b2e84d65a0f1c2d3e4b5a697",
+    ],
+    [
+      "hex token query before a path",
+      "curl https://api.example.com/v1?token=3f9a1c07b2e84d65a0f1c2d3e4b5a697/",
+      "3f9a1c07b2e84d65a0f1c2d3e4b5a697",
+    ],
+    [
+      "webhook secret path segment",
+      "curl -X POST https://ci.example.com/hooks/3f9a1c07b2e84d65a0f1c2d3e4b5a697/",
+      "3f9a1c07b2e84d65a0f1c2d3e4b5a697",
+    ],
     ["JSON api_key", '{"api_key":"q8Zr2Lk9Wm4x"}', "q8Zr2Lk9Wm4x"],
     ["JSON password", '{"user": "ops", "password": "Hunter2Hunter2"}', "Hunter2Hunter2"],
     [
