@@ -66,24 +66,39 @@ function powershellJson<T>(script: string): T {
   return JSON.parse(stdout);
 }
 
-function processTable(): Array<{ ProcessId: number; ParentProcessId: number; Name: string }> {
+interface ProcessRow {
+  ProcessId: number;
+  ParentProcessId: number;
+  Name: string;
+  /** Creation time, Unix milliseconds. */
+  Created: number;
+}
+
+function processTable(): ProcessRow[] {
   return powershellJson(
-    "@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name)",
+    "@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name," +
+      "@{n='Created';e={if ($_.CreationDate) { [DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() } else { 0 }}})",
   );
 }
 
+/**
+ * The process tree under `rootPid`. Windows keeps a process's ParentProcessId after the parent
+ * exits and reuses PIDs, so a child only counts if it was created after its parent: an unrelated
+ * older process (e.g. a runner's wsl.exe) whose long-gone parent had the same PID is not ours.
+ */
 function descendants(rootPid: number): Array<{ ProcessId: number; Name: string; depth: number }> {
   const table = processTable();
   const found: Array<{ ProcessId: number; Name: string; depth: number }> = [];
-  const visit = (pid: number, depth: number): void => {
+  const visit = (pid: number, created: number, depth: number): void => {
     for (const entry of table) {
-      if (entry.ParentProcessId === pid && entry.ProcessId !== pid) {
+      if (entry.ParentProcessId === pid && entry.ProcessId !== pid && entry.Created >= created) {
         found.push({ ProcessId: entry.ProcessId, Name: entry.Name, depth });
-        visit(entry.ProcessId, depth + 1);
+        visit(entry.ProcessId, entry.Created, depth + 1);
       }
     }
   };
-  visit(rootPid, 1);
+  const root = table.find((entry) => entry.ProcessId === rootPid);
+  visit(rootPid, root?.Created ?? 0, 1);
   return found;
 }
 
