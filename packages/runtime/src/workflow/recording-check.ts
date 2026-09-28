@@ -39,6 +39,8 @@ export interface RecordedCall {
   };
   arguments: Record<string, WorkflowJsonValue>;
   result: WorkflowJsonValue;
+  /** Whether secret redaction removed part of this output from its upload's view. */
+  resultRedacted?: boolean;
   /**
    * Argument positions whose recorded value first appeared in an earlier step's recorded output.
    * A plan that still carries such a position as literal recorded text depends on a value it does

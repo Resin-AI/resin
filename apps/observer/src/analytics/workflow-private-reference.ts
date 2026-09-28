@@ -40,6 +40,13 @@ export const WORKFLOW_CALL_EXIT_CODE_SLOT = "exit-code:v1";
  */
 export const WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT = "private-positions:v1";
 
+/**
+ * Demonstration slot holding whether the output a call's upload carried (its redacted view) had
+ * secret redaction applied: `true` when any redaction placeholder replaced part of it. A recorded
+ * result without this slot is treated as redacted.
+ */
+export const WORKFLOW_CALL_RESULT_REDACTED_SLOT = "result-redacted:v1";
+
 /** Demonstration slot holding one whole recorded argument of a call. */
 export function workflowCallArgumentSlot(argument: string): string {
   return `argument:${argument}`;

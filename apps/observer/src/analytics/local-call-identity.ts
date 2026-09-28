@@ -12,6 +12,7 @@ import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
   WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+  WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -47,7 +48,16 @@ export interface LocalRecordedCall {
   /** The exit status this device recorded for a shell call, when the harness established one. */
   exitCode?: number;
   /** Absent when the recording kept no successful result for the call. */
-  result?: { value: WorkflowJsonValue; reference: string; comparison?: "text-trim" };
+  result?: {
+    value: WorkflowJsonValue;
+    reference: string;
+    comparison?: "text-trim";
+    /**
+     * Whether secret redaction removed part of this output from its upload's view. A result
+     * recorded without that record counts as redacted.
+     */
+    redacted: boolean;
+  };
   /**
    * Where the recorder placed this call in the order it recorded calls: comparable only between
    * calls of the same `epoch`. Absent for a call recorded before the recorder kept an order.
@@ -315,8 +325,24 @@ export function createLocalCallIdentity(options: {
             value: owned.value,
             reference,
             ...(comparison === undefined ? {} : { comparison }),
+            redacted: true,
           };
         }
+      }
+      if (result !== undefined) {
+        const flags = PRIVATE_REPRESENTATIONS.map((representation) =>
+          ownedValue(
+            store,
+            workflowPrivateReference("demonstration", workspaceId, representation, [
+              match.sessionId,
+              callId,
+              WORKFLOW_CALL_RESULT_REDACTED_SLOT,
+            ]),
+            representation,
+            workspaceId,
+          ),
+        ).filter((flag) => flag !== undefined);
+        result.redacted = flags.length === 0 || flags.some((flag) => flag.value !== false);
       }
       const order = ownedValue(
         store,

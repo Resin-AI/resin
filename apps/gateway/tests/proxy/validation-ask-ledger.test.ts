@@ -67,4 +67,19 @@ describe("the validation ask ledger", () => {
     fs.rmSync(`${filePath}.lock`);
     expect(asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:9"] })).toBe(true);
   });
+
+  it("breaks a lock its holder left behind, moving it aside rather than deleting in place", () => {
+    const now = { value: Date.parse("2026-09-27T00:00:00Z") };
+    const { ledger: asks, filePath } = ledger(now);
+    const lock = `${filePath}.lock`;
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, "");
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(lock, past, past);
+    expect(asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1"] })).toBe(true);
+    expect(fs.existsSync(lock)).toBe(false);
+    expect(fs.readdirSync(path.dirname(lock)).filter((name) => name.includes(".stale."))).toEqual(
+      [],
+    );
+  });
 });
