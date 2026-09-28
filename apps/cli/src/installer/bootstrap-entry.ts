@@ -31,6 +31,7 @@ import {
 import {
   type DaemonReadinessResult,
   type DaemonReadinessVerifier,
+  createDaemonStartupProbe,
   verifyDaemonReadiness,
 } from "../service/verification.js";
 import {
@@ -1306,6 +1307,7 @@ export async function bootstrapInstall(
       if (typeof serviceManager.reload === "function") {
         await serviceManager.reload();
       }
+      const restartedAt = Date.now();
       await serviceManager.restart();
 
       logVerbose("==> Verifying daemon readiness and running release version...");
@@ -1316,6 +1318,14 @@ export async function bootstrapInstall(
         expectedVersion: release.version,
         timeoutMs: options.daemonReadinessTimeoutMs,
         retryIntervalMs: options.daemonReadinessRetryIntervalMs,
+        startupProbe: createDaemonStartupProbe({
+          resinHome,
+          fsBridge,
+          serviceStatus: () => serviceManager.status(),
+          startedAt: restartedAt,
+        }),
+        onWaiting: (elapsedMs) =>
+          log(`Waiting for the Resin daemon to start (${Math.round(elapsedMs / 1000)}s)…`),
       });
       if (!readiness.ready) {
         throw new Error(

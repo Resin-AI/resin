@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createUserServiceManager } from "../src/service/manager.js";
 import {
   VerificationSuite,
+  createDaemonStartupProbe,
   runVerificationSuite,
   verifyDaemonReadiness,
 } from "../src/service/verification.js";
@@ -552,5 +553,116 @@ describe("onboarding daemon readiness", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("verifyDaemonReadiness first-start window", () => {
+  function fakeClock() {
+    let now = 1_000_000;
+    return {
+      now: () => now,
+      sleep: async (ms: number) => {
+        now += ms;
+      },
+      elapsed: () => now - 1_000_000,
+    };
+  }
+
+  function daemonReadyAt(clock: ReturnType<typeof fakeClock>, readyAtMs: number): IpcClient {
+    // SAFETY: Mock ipcClient implements the IpcClient ping and getHealth methods used by readiness.
+    return new MockIpcClient({
+      ping: async () => {
+        if (clock.elapsed() < readyAtMs) throw new Error("IPC socket is not available");
+        return { pong: true, timestamp: clock.now() };
+      },
+      getHealth: async () => ({ status: "healthy", modules: {} }),
+    }) as IpcClient;
+  }
+
+  it("keeps waiting for a slow but progressing daemon that becomes ready at ~40s", async () => {
+    const clock = fakeClock();
+    const waits: number[] = [];
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient: daemonReadyAt(clock, 40_000),
+      cloudRequired: false,
+      now: clock.now,
+      sleep: clock.sleep,
+      startupProbe: createDaemonStartupProbe({
+        resinHome: "/home/test/.resin",
+        fsBridge: createMockFsBridge(),
+        serviceStatus: async () => ({ active: true, state: "activating", pid: 4242 }),
+        startedAt: clock.now(),
+        isProcessAlive: () => true,
+      }),
+      onWaiting: (elapsedMs) => waits.push(elapsedMs),
+    });
+
+    expect(result.ready).toBe(true);
+    expect(clock.elapsed()).toBeGreaterThanOrEqual(40_000);
+    expect(clock.elapsed()).toBeLessThan(60_000);
+    expect(waits.length).toBeGreaterThanOrEqual(7);
+    expect(waits[0]).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it("fails fast when the starting daemon crash-loops with exit 127", async () => {
+    const clock = fakeClock();
+    const resinHome = "/home/test/.resin";
+    const startedAt = clock.now();
+    const crash = (offsetMs: number) =>
+      JSON.stringify({
+        event: "runtime_crash",
+        timestamp: startedAt + offsetMs,
+        exitCode: 127,
+        restartScheduled: true,
+      });
+    const fsBridge = createMockFsBridge();
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient: daemonReadyAt(clock, 40_000),
+      cloudRequired: false,
+      now: clock.now,
+      sleep: clock.sleep,
+      startupProbe: async () => {
+        // The supervisor records a crash roughly every 2.5s.
+        const crashes = Math.floor(clock.elapsed() / 2_500);
+        fsBridge.files.set(
+          `${resinHome}/logs/crash-recovery.log`,
+          `${Array.from({ length: crashes }, (_, i) => crash((i + 1) * 2_500)).join("\n")}\n`,
+        );
+        return createDaemonStartupProbe({
+          resinHome,
+          fsBridge,
+          serviceStatus: async () => ({ active: true, state: "activating", pid: 4242 }),
+          startedAt,
+          isProcessAlive: () => true,
+        })();
+      },
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.error).toContain("Daemon crashed 2 times during startup (last exit code 127)");
+    expect(clock.elapsed()).toBeLessThan(10_000);
+  });
+
+  it("stops at once when the service has failed", async () => {
+    const clock = fakeClock();
+    const result = await verifyDaemonReadiness({
+      homeDir: "/home/test",
+      ipcClient: daemonReadyAt(clock, 40_000),
+      cloudRequired: false,
+      now: clock.now,
+      sleep: clock.sleep,
+      startupProbe: createDaemonStartupProbe({
+        resinHome: "/home/test/.resin",
+        fsBridge: createMockFsBridge(),
+        serviceStatus: async () => ({ active: false, state: "failed" }),
+        startedAt: clock.now(),
+      }),
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.error).toContain("Daemon service is failed");
+    expect(clock.elapsed()).toBe(0);
   });
 });

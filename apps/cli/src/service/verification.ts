@@ -103,6 +103,105 @@ export interface DaemonReadinessOptions {
   startedAfter?: number;
   timeoutMs?: number;
   retryIntervalMs?: number;
+  /**
+   * Reports whether a daemon that is not ready yet is still starting. While it
+   * reports `starting`, readiness keeps waiting past `timeoutMs` up to
+   * `startupTimeoutMs`; a `failed` report ends the wait immediately.
+   */
+  startupProbe?: DaemonStartupProbe;
+  /** Upper bound on the wait while `startupProbe` reports progress. Defaults to 60s. */
+  startupTimeoutMs?: number;
+  /** Called about every `progressIntervalMs` while readiness is still pending. */
+  onWaiting?: (elapsedMs: number) => void;
+  progressIntervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export type DaemonStartupState = { state: "starting" } | { state: "failed"; reason: string };
+export type DaemonStartupProbe = () => Promise<DaemonStartupState>;
+
+export const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS = 60_000;
+const DEFAULT_READINESS_PROGRESS_INTERVAL_MS = 5_000;
+/** Crashes after the start at which a first-start daemon counts as crash-looping. */
+const STARTUP_CRASH_LOOP_THRESHOLD = 2;
+const STARTUP_PROBE_INTERVAL_MS = 1_000;
+
+export interface DaemonStartupProbeOptions {
+  resinHome: string;
+  fsBridge?: ConfigFsBridge;
+  serviceStatus: () => Promise<{ active: boolean; state?: string; pid?: number }>;
+  /** Epoch ms of the service (re)start; earlier crash records are ignored. */
+  startedAt: number;
+  isProcessAlive?: (pid: number) => boolean;
+}
+
+function defaultIsProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Probes a starting daemon service: the unit must be active/activating, its main
+ * process alive, and the supervisor's crash-recovery log must not show a crash
+ * loop (repeated `runtime_crash` records, or a tripped breaker) since `startedAt`.
+ */
+export function createDaemonStartupProbe(options: DaemonStartupProbeOptions): DaemonStartupProbe {
+  const fsBridge = options.fsBridge ?? defaultFsBridge;
+  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+  const crashLogPath = path.join(options.resinHome, "logs", "crash-recovery.log");
+  return async () => {
+    const status = await options.serviceStatus();
+    if (!status.active) {
+      return {
+        state: "failed",
+        reason: `Daemon service is ${status.state ?? "not active"}`,
+      };
+    }
+    if (status.pid !== undefined && status.pid > 0 && !isProcessAlive(status.pid)) {
+      return { state: "failed", reason: `Daemon process ${status.pid} exited` };
+    }
+    const crashLog = await fsBridge.readFile(crashLogPath).catch(() => null);
+    let crashes = 0;
+    let lastExitCode: number | undefined;
+    let restartAbandoned = false;
+    for (const line of crashLog?.split("\n") ?? []) {
+      if (!line.trim()) continue;
+      let record: {
+        event?: unknown;
+        timestamp?: unknown;
+        exitCode?: unknown;
+        restartScheduled?: unknown;
+      };
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (
+        record.event !== "runtime_crash" ||
+        typeof record.timestamp !== "number" ||
+        record.timestamp < options.startedAt
+      ) {
+        continue;
+      }
+      crashes += 1;
+      if (typeof record.exitCode === "number") lastExitCode = record.exitCode;
+      if (record.restartScheduled === false) restartAbandoned = true;
+    }
+    if (restartAbandoned || crashes >= STARTUP_CRASH_LOOP_THRESHOLD) {
+      const exit = lastExitCode === undefined ? "" : ` (last exit code ${lastExitCode})`;
+      return {
+        state: "failed",
+        reason: `Daemon crashed ${crashes} time${crashes === 1 ? "" : "s"} during startup${exit}; see ${crashLogPath}`,
+      };
+    }
+    return { state: "starting" };
+  };
 }
 
 export interface DaemonReadinessResult {
@@ -650,7 +749,20 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
   const socketPath = daemonPaths.socketPath;
   const timeoutMs = Math.max(0, options.timeoutMs ?? 15_000);
   const retryIntervalMs = Math.max(25, options.retryIntervalMs ?? 250);
-  const deadline = Date.now() + timeoutMs;
+  const now = options.now ?? Date.now;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const startedAt = now();
+  const baseDeadline = startedAt + timeoutMs;
+  const startupDeadline =
+    startedAt + Math.max(timeoutMs, options.startupTimeoutMs ?? DEFAULT_DAEMON_STARTUP_TIMEOUT_MS);
+  const progressIntervalMs = Math.max(
+    1,
+    options.progressIntervalMs ?? DEFAULT_READINESS_PROGRESS_INTERVAL_MS,
+  );
+  let nextProgressAt = startedAt + progressIntervalMs;
+  let deadline = baseDeadline;
+  let nextProbeAt = startedAt;
   const strictReadiness =
     options.expectedCloudIdentity !== undefined || options.startedAfter !== undefined;
   let attempts = 0;
@@ -754,13 +866,34 @@ export const verifyDaemonReadiness: DaemonReadinessVerifier = async (
       }
     }
 
-    const remainingMs = deadline - Date.now();
-    if (remainingMs > 0) {
-      await new Promise<void>((resolve) =>
-        setTimeout(resolve, Math.min(retryIntervalMs, remainingMs)),
-      );
+    if (options.startupProbe && now() >= nextProbeAt) {
+      nextProbeAt = now() + STARTUP_PROBE_INTERVAL_MS;
+      // An unreadable service state neither extends nor ends the wait.
+      const startup = await options.startupProbe().catch(() => undefined);
+      if (startup?.state === "failed") {
+        return {
+          ready: false,
+          ipcReady: lastIpcReady,
+          cloudReady: lastCloudReady,
+          attempts,
+          socketPath,
+          healthStatus: lastHealthStatus,
+          version: lastVersion,
+          error: `${startup.reason} (last readiness error: ${lastError})`,
+        };
+      }
+      deadline = startup ? startupDeadline : baseDeadline;
     }
-  } while (Date.now() < deadline);
+
+    const remainingMs = deadline - now();
+    if (remainingMs > 0) {
+      if (options.onWaiting && now() >= nextProgressAt) {
+        options.onWaiting(now() - startedAt);
+        nextProgressAt = now() + progressIntervalMs;
+      }
+      await sleep(Math.min(retryIntervalMs, remainingMs));
+    }
+  } while (now() < deadline);
 
   return {
     ready: false,

@@ -15,6 +15,7 @@ import {
   resolveLocalSourceInstallPaths,
 } from "../src/installer/installer.js";
 import { createUserServiceManager } from "../src/installer/user-service.js";
+import type { DaemonReadinessOptions } from "../src/service/verification.js";
 
 type TarGzFixture = string | { readonly content: string; readonly mode?: number };
 
@@ -784,6 +785,66 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
       expect.objectContaining({ expectedVersion: "1.0.0" }),
     );
   });
+
+  it.each([
+    { quiet: false, expectProgress: true },
+    { quiet: true, expectProgress: false },
+  ])(
+    "reports first-start readiness progress unless quiet (quiet=$quiet)",
+    async ({ quiet, expectProgress }) => {
+      const bridge = new NodeConfigFsBridge();
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-readiness-progress-"));
+      testHomes.push(home);
+      const resinHome = path.join(home, ".resin");
+      const workspace = path.join(home, "workspace");
+      fs.mkdirSync(workspace, { recursive: true });
+      const serviceRunner = {
+        run: async (_command: string, args: readonly string[]) => {
+          if (args.includes("is-active") || args.includes("is-enabled")) {
+            return {
+              stdout: args.includes("is-active") ? "active\n" : "enabled\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (args.includes("status")) {
+            return {
+              stdout: "Active: active (running)\nMain PID: 4321\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      };
+      const readinessVerifier = vi.fn(async (options: DaemonReadinessOptions) => {
+        expect(options.startupProbe).toBeTypeOf("function");
+        options.onWaiting?.(12_300);
+        return { ready: true, ipcReady: true, cloudReady: true, attempts: 3, socketPath: "" };
+      });
+      const logs: string[] = [];
+      const installer = new ResinInstaller({
+        fsBridge: bridge,
+        logger: (msg) => logs.push(msg),
+        quiet,
+      });
+
+      await installer.run({
+        customHome: home,
+        workspace,
+        nonInteractive: true,
+        autoApprove: true,
+        setupService: true,
+        targetVersion: "1.0.0",
+        assetTarball: tarGz(),
+        serviceRunner,
+        readinessVerifier,
+      });
+
+      expect(readinessVerifier).toHaveBeenCalledTimes(1);
+      expect(logs.includes("Waiting for the Resin daemon to start (12s)…")).toBe(expectProgress);
+    },
+  );
 
   it("handles initCommand CLI wrapper with --json and --dry-run", async () => {
     const bridge = new InMemoryConfigFsBridge();
