@@ -107,7 +107,7 @@ describe("the PowerShell tokenizer", () => {
   });
 
   it.each([
-    ["a script block", "Get-ChildItem | ForEach-Object { $_.Name } | Out-File a.txt"],
+    ["a script block that runs a command", "Get-ChildItem | ForEach-Object { Write-Output $_ }"],
     ["a group", "Write-Output (Get-Date) done.txt"],
     ["a here-string", "$x = @'\nhello\n'@\nWrite-Output x.txt"],
     ["splatting", "Copy-Item @params dest.txt"],
@@ -283,6 +283,232 @@ describe("rendering a bound PowerShell value", () => {
         name: "x",
       }),
     ).toThrow(/not safely bindable/);
+  });
+});
+
+describe("PowerShell script blocks", () => {
+  /** The job Codex ran on Windows, in the shape it recorded. */
+  const JOB =
+    "Import-Csv sales.csv | Where-Object { $_.region -eq 'emea' } | Measure-Object -Property amount -Sum | Select-Object -ExpandProperty Sum";
+
+  function renderAt(source: string, raw: string, value: string | number, edition = "powershell") {
+    const language = edition === "pwsh" ? "pwsh" : "powershell";
+    const tokens = tokenizeProgram(language, source);
+    const index = tokens.findIndex((token) => token.raw === raw);
+    expect(index, raw).toBeGreaterThanOrEqual(0);
+    return applyProgramTokenValues(source, tokens, new Map([[index, value]]), language);
+  }
+
+  it.each(EDITIONS)(
+    "reads a filter block's literal as data and resumes after it (%s)",
+    (edition) => {
+      expect(shape(JOB, edition)).toEqual([
+        "word:Import-Csv",
+        "word:sales.csv*",
+        "operator:|",
+        "word:Where-Object",
+        "operator:{",
+        "word:$_.region",
+        "operator:-eq",
+        "string:'emea'*=emea",
+        "operator:}",
+        "operator:|",
+        "word:Measure-Object",
+        "word:-Property",
+        "word:amount*",
+        "word:-Sum",
+        "operator:|",
+        "word:Select-Object",
+        "word:-ExpandProperty",
+        "word:Sum*",
+      ]);
+      for (const token of tokenizeProgram(edition, JOB)) {
+        expect(JOB.slice(token.start, token.end)).toBe(token.raw);
+      }
+    },
+  );
+
+  it("names a compared literal after the property it is compared with", () => {
+    const tokens = tokenizeProgram("powershell", JOB);
+    expect(powershellValueName(tokens, 7)).toBe("region");
+    const reversed = tokenizeProgram("pwsh", "Where-Object { 'emea' -ceq $PSItem.region }");
+    expect(powershellValueName(reversed, 2)).toBe("region");
+    // Where-Object's simplified syntax: `-eq` is a switch, not the value's name.
+    const simple = tokenizeProgram("powershell", "Where-Object region -eq 'emea'");
+    expect(simple[3]!.bindable).toBe(true);
+    expect(powershellValueName(simple, 3)).toBe("region");
+  });
+
+  it("renders a bound value in a block as a single-quoted literal", () => {
+    expect(renderAt(JOB, "'emea'", "apac")).toBe(JOB.replace("'emea'", "'apac'"));
+    expect(renderAt(JOB, "'emea'", "o'brien")).toBe(JOB.replace("'emea'", "'o''brien'"));
+    // A value that reads as code elsewhere is still one literal here.
+    expect(renderAt(JOB, "'emea'", "x' ; Remove-Item C:\\ ; '")).toBe(
+      JOB.replace("'emea'", "'x'' ; Remove-Item C:\\ ; '''"),
+    );
+    expect(renderAt(JOB, "'emea'", "12")).toBe(JOB.replace("'emea'", "'12'"));
+    const doubled = 'Where-Object { $_.region -eq "emea" }';
+    expect(renderAt(doubled, '"emea"', "apac")).toBe("Where-Object { $_.region -eq 'apac' }");
+  });
+
+  it("round-trips: an unchanged value renders the same program, a new one reads back", () => {
+    const sources = [
+      JOB,
+      "Get-Content a.csv | Where-Object { $_.n -gt 5 -and $_.region -in 'emea','apac' } | Out-File b.txt",
+    ];
+    for (const source of sources) {
+      for (const edition of EDITIONS) {
+        const tokens = tokenizeProgram(edition, source);
+        const values = new Map(
+          tokens.flatMap((token, index) =>
+            token.bindable && token.value !== undefined ? [[index, token.value] as const] : [],
+          ),
+        );
+        expect(applyProgramTokenValues(source, tokens, values, edition)).toBe(source);
+        const changed = new Map([...values].map(([index, value]) => [index, `${value}x`]));
+        const rendered = applyProgramTokenValues(source, tokens, changed, edition);
+        const reread = tokenizeProgram(edition, rendered);
+        expect(reread).toHaveLength(tokens.length);
+        for (const [index, value] of changed) {
+          expect(reread[index]!.value).toBe(value);
+          expect(reread[index]!.bindable).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("binds a plain number in a block and keeps it a number", () => {
+    const source = "Import-Csv a.csv | Where-Object { $_.amount -gt 5 }";
+    const tokens = tokenizeProgram("powershell", source);
+    expect(tokens[7]).toMatchObject({ kind: "number", raw: "5", value: 5, bindable: true });
+    expect(renderAt(source, "5", 7)).toBe(source.replace("5 }", "7 }"));
+    expect(renderAt(source, "5", -3)).toBe(source.replace("5 }", "-3 }"));
+    expect(renderAt(source, "5", "7.5")).toBe(source.replace("5 }", "7.5 }"));
+    expect(renderAt(source, "5", "abc")).toBe(source.replace("5 }", "'abc' }"));
+    expect(renderAt(source, "5", 1e21)).toBe(source.replace("5 }", "'1e+21' }"));
+    // Only a number whose text is its own value, standing apart, is bound.
+    for (const unbound of ["0.10", "007", "0x10", "1kb", "-5", "5d"]) {
+      expect(bindable(`Where-Object { $_.amount -gt ${unbound} }`), unbound).toEqual([]);
+    }
+  });
+
+  it("binds literals across the in-process filter and projection commands and their aliases", () => {
+    expect(bindable("gci | ? { $_.Name -ne 'a.txt' } | % { $_.Length * 2 }")).toEqual([
+      "a.txt",
+      "2",
+    ]);
+    expect(bindable("gci | ?{ $_.Name -ne 'a.txt' }")).toEqual(["a.txt"]);
+    expect(bindable("gci | where { $_.Name -ne 'a.txt' } | foreach { $_.Length + 1 }")).toEqual([
+      "a.txt",
+      "1",
+    ]);
+    expect(
+      bindable(
+        "Get-Process | Sort-Object { $_.Name -eq 'x' } | Group-Object -Property { $_.CPU -gt 10 }",
+      ),
+    ).toEqual(["x", "10"]);
+    expect(
+      bindable("gci | ForEach-Object -Begin { 0 } -Process { $_.Length } -End { 'done' }"),
+    ).toEqual(["0", "done"]);
+    expect(
+      bindable("gci | Where-Object {\r\n  ($_.a -eq 'x') -or\r\n  -not ($_.b -eq 'y')\r\n}"),
+    ).toEqual(["x", "y"]);
+  });
+
+  it("keeps pattern, format and type operands unbound", () => {
+    for (const block of [
+      "$_.region -like 'em*'",
+      "$_.region -notmatch '^e'",
+      "$_.region -replace 'e','a'",
+      "$_.region -csplit ','",
+      "'{0}' -f $_.region",
+      "$_.region -as 'int'",
+      "$_.region -is 'string'",
+    ]) {
+      expect(bindable(`Where-Object { ${block} }`), block).toEqual([]);
+    }
+  });
+
+  it("keeps expanding and escaped double-quoted strings unbound", () => {
+    expect(
+      bindable('Where-Object { $_.a -eq "$x" -or $_.b -eq "a`tb" -or $_.c -eq "ok" }'),
+    ).toEqual(["ok"]);
+  });
+
+  it.each([
+    ["a nested block", "Where-Object { $_.a -eq 'x' -and { 'y' } } | Out-File a.txt"],
+    ["a subexpression", "Where-Object { $_.a -eq $(Get-Date) } | Out-File a.txt"],
+    ["a subexpression in a string", 'Where-Object { $_.a -eq "$(whoami)" } | Out-File a.txt'],
+    ["an array expression", "Where-Object { @('x') -contains $_.a } | Out-File a.txt"],
+    ["a hashtable", "Select-Object @{ n = 'x'; e = { 'y' } } | Out-File a.txt"],
+    ["a cast", "Where-Object { [int]$_.a -gt 5 } | Out-File a.txt"],
+    ["a method call", "Where-Object { $_.a.StartsWith('x') } | Out-File a.txt"],
+    ["an index", "Where-Object { $_.a[0] -eq 'x' } | Out-File a.txt"],
+    ["a static member", "Where-Object { $_.a -eq [IO.Path]::Sep } | Out-File a.txt"],
+    ["a here-string", "Where-Object { $_.a -eq @'\nx\n'@ } | Out-File a.txt"],
+    ["a command", "ForEach-Object { Remove-Item 'x' } | Out-File a.txt"],
+    ["a pipeline", "ForEach-Object { 'x' | Out-File b.txt } | Out-File a.txt"],
+    ["an assignment", "ForEach-Object { $env:PATH = 'x' } | Out-File a.txt"],
+    ["a call", "ForEach-Object { & 'x' } | Out-File a.txt"],
+    ["dot-sourcing", "ForEach-Object { . 'x' } | Out-File a.txt"],
+    ["a redirection", "ForEach-Object { 'x' > b.txt } | Out-File a.txt"],
+    ["a keyword", "ForEach-Object { if ($_) { 'x' } } | Out-File a.txt"],
+    ["a range", "ForEach-Object { 1..5 } | Out-File a.txt"],
+    ["an increment", "ForEach-Object { $_.n++ } | Out-File a.txt"],
+    ["a member of the block", "Where-Object { 'x' }.Invoke() | Out-File a.txt"],
+    ["an unclosed block", "Where-Object { $_.a -eq 'x'"],
+    ["a block glued to a word", "Where-Object x{ 'x' } | Out-File a.txt"],
+  ])("leaves the rest opaque at %s", (_, source) => {
+    for (const edition of EDITIONS) {
+      const tokens = tokenizeProgram(edition, source);
+      expect(tokens.at(-1)!.kind, source).toBe("unsupported");
+      expect(tokens.at(-1)!.end).toBe(source.length);
+      expect(
+        tokens.some((token) => token.bindable && /'x'|'y'/u.test(token.raw)),
+        source,
+      ).toBe(false);
+    }
+  });
+
+  it.each([
+    ["Invoke-Command -ScriptBlock", "Invoke-Command -ScriptBlock { 'emea' }"],
+    ["icm", "icm { 'emea' }"],
+    ["Start-Job", "Start-Job { 'emea' }"],
+    ["Start-ThreadJob", "Start-ThreadJob -ScriptBlock { 'emea' }"],
+    ["the call operator", "& { 'emea' }"],
+    ["dot-sourcing", ". { 'emea' }"],
+    ["a scriptblock built from a string", "[scriptblock]::Create('emea')"],
+    ["an event action", "Register-EngineEvent -SourceIdentifier x -Action { 'emea' }"],
+    ["an object event action", "Register-ObjectEvent $t Elapsed -Action { 'emea' }"],
+    ["a command not on the allowlist", "gci | Tee-Object { 'emea' }"],
+    ["New-Module", "New-Module { 'emea' }"],
+    ["an evaluator elsewhere", "gci | Where-Object { $_.a -eq 'emea' }; iex 'x'"],
+    ["an alias redefined", "Set-Alias -Name ? -Value iex; gci | ? { $_.a -eq 'emea' }"],
+    ["a filter inside an evaluator's block", "Invoke-Command { gci | ? { $_.a -eq 'emea' } }"],
+  ])("binds nothing in a block passed to %s", (_, source) => {
+    for (const edition of EDITIONS) expect(bindable(source, edition), source).toEqual([]);
+  });
+
+  it("keeps PowerShell 7 chain operators after a block", () => {
+    const source = "gci | Where-Object { $_.a -eq 'x' } && Write-Output done.txt";
+    expect(bindable(source, "pwsh")).toEqual(["x", "done.txt"]);
+    expect(shape(source, "pwsh").slice(-4)).toEqual([
+      "operator:}",
+      "operator:&&",
+      "word:Write-Output",
+      "word:done.txt*",
+    ]);
+    expect(shape(source, "powershell").at(-1)).toBe("unsupported:&& Write-Output done.txt");
+  });
+
+  it.each([
+    ["a smart quote", "o\u2019brien"],
+    ["a double quote", 'a"b'],
+    ["a line break", "a\nb"],
+    ["a control character", "a\u0007b"],
+    ["empty", ""],
+  ])("refuses a block value that is %s", (_, value) => {
+    expect(() => renderAt(JOB, "'emea'", value)).toThrow();
   });
 });
 

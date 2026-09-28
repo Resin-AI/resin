@@ -363,13 +363,28 @@ function qualificationProblems(key: string, sessions: SessionCapture[]): string[
     }
     for (const reason of session.deadLetters) problems.push(`${at} dead letter ${reason}`);
     const nativeCarried = resultsCarriedByNativeCommand(session.events);
+    // A Codex cell whose effects are native items (a patch's edits, a carrier cell's commands) is
+    // transport: those items are the calls, so neither its call nor its result is a step.
+    const transportCells = new Set(
+      session.events.flatMap((event) => {
+        const kind =
+          event.type === "tool_call" ? readCodexCommandMetadata(event.metadata)?.kind : undefined;
+        return event.type === "tool_call" && (kind === "carrier-call" || kind === "patch-call")
+          ? [event.callId]
+          : [];
+      }),
+    );
     for (const event of session.events) {
       if (event.type === "tool_call") {
-        if (!readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])) {
+        if (
+          !transportCells.has(event.callId) &&
+          !readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY])
+        ) {
           problems.push(`${at} tool_call ${event.toolName} (${event.callId}) has no workflowCall`);
         }
       } else if (event.type === "tool_result") {
         if (
+          !transportCells.has(event.callId) &&
           !session.unknownOutcomeResults.has(event) &&
           !nativeCarried.has(event.callId) &&
           !readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY])

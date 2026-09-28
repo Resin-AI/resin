@@ -17,8 +17,19 @@
  *   `Invoke-Command`, `Start-Process`, `Start-Job`, `Add-Type`, the Windows shells (`cmd`,
  *   `powershell`, `pwsh`, whose whole remaining command line is code), a batch file, a command named
  *   by a variable, or an alias or function definition (see `code-evaluation.ts`).
- * - Opaque from where it starts to the end of the program, as one `unsupported` token: script
- *   blocks, groups and subexpressions (`{`, `(`, `$(`, `@(`, `@{`), here-strings, splatting, `--%`,
+ * - Script blocks: a `{ … }` argument of an in-process filter, projection or key command from the
+ *   allowlist in `code-evaluation.ts` (`Where-Object`/`where`/`?`, `ForEach-Object`/`foreach`/`%`,
+ *   `Sort-Object`/`sort`, `Group-Object`/`group`) is read in expression mode (see
+ *   {@link readScriptBlock}) as `{`, its tokens and `}`, and the program continues after it. Inside
+ *   one only a single-quoted string, a double-quoted string without `$` or backtick, and a plain
+ *   decimal standing apart are bindable, and only as an operand of a comparison, membership,
+ *   logical or arithmetic operator: an operand of `-like`, `-match`, `-replace`, `-split` (patterns),
+ *   `-f` (a format), `-as`/`-is` (types) or a bitwise operator is not. A block holding anything
+ *   else — a command, a nested block, `$()`, `@()`, `@{}`, a `[type]`, a method call or index, an
+ *   assignment, a redirection, a here-string — is opaque, as is a block passed to any other command
+ *   (`Invoke-Command`, `Start-Job`, `Register-*Event -Action`, `& { }`, `. { }`).
+ * - Opaque from where it starts to the end of the program, as one `unsupported` token: any other
+ *   script block, groups and subexpressions (`(`, `$(`, `@(`, `@{`), here-strings, splatting, `--%`,
  *   `<`, a statement that is not a command or the modeled assignment (a keyword such as `if`,
  *   `foreach`, `exit`, a string, a number, a type literal, dot-sourcing), a background `&`, and in
  *   Windows PowerShell 5.1 the `&&`/`||` chain operators (PowerShell 7+ only).
@@ -35,6 +46,7 @@ import {
   isCodeRunnerWord,
   isDefiningPowerShellPath,
   isEvaluatorWord,
+  isPowerShellBlockFilterWord,
 } from "./code-evaluation.js";
 import { type ProgramToken, ProgramTokenizationError } from "./program-tokens.js";
 
@@ -114,6 +126,37 @@ const isBlank = (char: string | undefined): boolean => char === " " || char === 
 
 /** A variable name after `$` in argument mode: `$x`, `$env:PATH`, `$script:x`, `$_`. */
 const VARIABLE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*:)?[A-Za-z_][A-Za-z0-9_]*|^\$[_?^$]/u;
+
+/**
+ * Comparison, membership and logical operators (with their case-sensitive `c` and explicit `i`
+ * variants) whose literal operands are plain data.
+ */
+const DATA_OPERATOR =
+  /^-(?:[ci]?(?:eq|ne|gt|ge|lt|le|contains|notcontains|in|notin)|and|or|xor|not|join)$/iu;
+/**
+ * Operators whose literal operand is not plain data: a wildcard or regular-expression pattern
+ * (`-like`, `-match`, `-replace`, `-split`), a format string (`-f`), a type name (`-as`, `-is`), or
+ * a bit pattern. A literal next to one is never bound.
+ */
+const PATTERN_OPERATOR =
+  /^-(?:[ci]?(?:like|notlike|match|notmatch|replace|split)|f|as|is|isnot|band|bor|bxor|bnot|shl|shr)$/iu;
+/** Symbols a data literal in a script block may stand next to. */
+const DATA_SYMBOLS: ReadonlySet<string> = new Set([
+  "{",
+  "}",
+  "(",
+  ")",
+  ",",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "!",
+]);
+/** A comparison operator, whose other operand names the compared value. */
+const COMPARISON_OPERATOR =
+  /^-[ci]?(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin)$/iu;
 
 interface QuotedRead {
   /** Offset just past the closing quote; undefined when it never closes or cannot be delimited. */
@@ -283,6 +326,8 @@ function scanPowerShell(source: string, edition: PowerShellEdition): ProgramToke
   let calledCommand = false;
   /** The previous token redirected output, so this word is the file it writes. */
   let redirectTarget = false;
+  /** The current command's name token when it is an in-process block filter (`Where-Object`). */
+  let blockFilter: ProgramToken | undefined;
   let index = 0;
 
   const opaque = (start: number): ProgramToken[] => {
@@ -326,6 +371,7 @@ function scanPowerShell(source: string, edition: PowerShellEdition): ProgramToke
       operator(char);
       commandStart = true;
       calledCommand = false;
+      blockFilter = undefined;
       continue;
     }
     if (char === "|" || char === "&") {
@@ -335,12 +381,14 @@ function scanPowerShell(source: string, edition: PowerShellEdition): ProgramToke
         if (edition !== "pwsh" || commandStart) return opaque(index);
         operator(char + char);
         commandStart = true;
+        blockFilter = undefined;
         continue;
       }
       if (char === "|") {
         if (commandStart) return opaque(index);
         operator("|");
         commandStart = true;
+        blockFilter = undefined;
         continue;
       }
       // `&` calls the command after it; anywhere else it backgrounds a pipeline (7+) or is an error.
@@ -354,9 +402,22 @@ function scanPowerShell(source: string, edition: PowerShellEdition): ProgramToke
       operator(",");
       continue;
     }
+    if (
+      char === "{" &&
+      !commandStart &&
+      blockFilter !== undefined &&
+      (isBlank(source[index - 1]) || tokens.at(-1) === blockFilter)
+    ) {
+      // A filter's script block, read in expression mode; anything it cannot model is opaque.
+      const block = readScriptBlock(source, index);
+      if (block === undefined) return opaque(index);
+      tokens.push(...block.tokens);
+      index = block.end;
+      continue;
+    }
     if ("(){}<@[".includes(char)) {
-      // Groups, script blocks, subexpressions, arrays, hashtables, here-strings, splatting and a
-      // type literal at a statement's start are expressions this grammar does not model; `<` is
+      // Groups, other script blocks, subexpressions, arrays, hashtables, here-strings, splatting and
+      // a type literal at a statement's start are expressions this grammar does not model; `<` is
       // reserved. A `[` inside an argument is an ordinary character, read as part of a word below.
       if (char !== "[" || commandStart) return opaque(index);
     }
@@ -420,25 +481,30 @@ function scanPowerShell(source: string, edition: PowerShellEdition): ProgramToke
     const isString = quotedParts === 1 && !bareParts;
     if (commandStart) {
       // A command's name: a plain word, or anything `&` calls. A quoted or keyword statement start
-      // is an expression, not a command.
+      // is an expression, not a command; `?` (Where-Object) is a name, and so is `foreach`
+      // (ForEach-Object) in a pipeline.
       if (!calledCommand) {
+        if (raw === "?") exact = true;
+        const pipedForEach = raw.toLowerCase() === "foreach" && tokens.at(-1)?.raw === "|";
         if (isString || quotedParts > 0 || !exact) return opaque(start);
         if (
-          KEYWORDS.has(raw.toLowerCase()) ||
+          (KEYWORDS.has(raw.toLowerCase()) && !pipedForEach) ||
           raw === "." ||
           NUMBER_FORM.test(raw) ||
           /^[+-]/u.test(raw)
         )
           return opaque(start);
       }
-      tokens.push({
+      const name: ProgramToken = {
         kind: isString ? "string" : "word",
         start,
         end: index,
         raw,
         ...(exact ? { value } : {}),
         bindable: false,
-      });
+      };
+      tokens.push(name);
+      blockFilter = !calledCommand && isPowerShellBlockFilterWord(raw) ? name : undefined;
       commandStart = false;
       calledCommand = false;
       continue;
@@ -507,15 +573,296 @@ function readAssignment(source: string, start: number, tokens: ProgramToken[]): 
 }
 
 /**
- * The name a PowerShell token's value is given: the parameter it follows (`-OutFile x` →
- * `OutFile`), or the variable it is assigned to (`$region = 'emea'` → `region`). Undefined for
- * anything else.
+ * Reads a filter's script block starting at its `{`, in expression mode, returning its tokens (`{`,
+ * the operands and operators inside, `}`) and the offset after its `}`; undefined when the block
+ * holds anything this grammar does not model, which leaves the rest of the program opaque.
+ *
+ * The grammar is expressions only: variables with property access (`$_.region`, one `word` token),
+ * string and number literals, parentheses, `,`, the arithmetic operators, `!` and the named
+ * comparison, membership, logical and pattern operators, separated into statements by newlines or
+ * `;`. A bare word — which would be a command or a keyword — is not in it, nor are nested blocks,
+ * `$()`, `@`, `[`, method calls, indexes, `::`, assignments, `++`/`--`, `..`, redirections, `|`,
+ * `&` and `.` dot-sourcing, so a block that reads can run no command. Statement separators emit no
+ * token: the block stays one command's argument to every later reader.
+ *
+ * A literal is bindable (a single-quoted string, a double-quoted one without `$` or backtick, or a
+ * decimal whose text is its own number and does not touch an operator before it) only when every
+ * token beside it is a data operator or symbol, a paren or the block's edge; an operand of a
+ * pattern, format or type operator stays unbound.
+ */
+function readScriptBlock(
+  source: string,
+  open: number,
+): { tokens: ProgramToken[]; end: number } | undefined {
+  const tokens: ProgramToken[] = [
+    { kind: "operator", start: open, end: open + 1, raw: "{", bindable: false },
+  ];
+  /** Indices of tokens that end a statement, so the next one starts another. */
+  const statementEnds = new Set<number>([0]);
+  /** Indices of literal tokens that may be bindable, depending on their neighbours. */
+  const literals = new Set<number>();
+  /** Whether the grammar expects an operand next (else an operator, a close or a separator). */
+  let operand = true;
+  let depth = 0;
+  let index = open + 1;
+  const atStatementStart = (): boolean => operand && statementEnds.has(tokens.length - 1);
+  const symbol = (raw: string): void => {
+    tokens.push({ kind: "operator", start: index, end: index + raw.length, raw, bindable: false });
+    index += raw.length;
+  };
+  /** A literal, variable or `)` may not be followed by `.`, `[`, `(` or another word character. */
+  const endsCleanly = (at: number): boolean => !/^[.[(:{$'"`@A-Za-z0-9_]/u.test(source[at] ?? "");
+
+  while (index < source.length) {
+    const char = source[index]!;
+    const next = source[index + 1];
+    if (isBlank(char) || (char === "\r" && next === "\n")) {
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      if (next === "\n") index += 2;
+      else if (next === "\r" && source[index + 2] === "\n") index += 3;
+      else return undefined;
+      continue;
+    }
+    if (char === "#") {
+      while (index < source.length && source[index] !== "\n") index += 1;
+      continue;
+    }
+    if (char === "<" && next === "#") {
+      const close = source.indexOf("#>", index + 2);
+      if (close === -1) return undefined;
+      index = close + 2;
+      continue;
+    }
+    if (char === "\n" || char === ";") {
+      // After an operand a newline or `;` ends the statement; after an operator a newline continues
+      // it. Inside parentheses neither is modeled.
+      if (!operand) {
+        if (depth > 0) return undefined;
+        statementEnds.add(tokens.length - 1);
+        operand = true;
+      } else if (char === ";" && !atStatementStart()) {
+        return undefined;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      if (depth > 0 || (operand && !atStatementStart())) return undefined;
+      symbol("}");
+      // The block must end the argument: `{ … }.Invoke()` would be an expression on the block.
+      const after = source[index];
+      if (
+        after !== undefined &&
+        !isBlank(after) &&
+        after !== "\n" &&
+        after !== "\r" &&
+        !WORD_END.has(after)
+      )
+        return undefined;
+      const patterns = patternOperands(tokens, statementEnds);
+      for (const [at, token] of tokens.entries()) {
+        if (!literals.has(at)) continue;
+        token.bindable =
+          !patterns.has(at) &&
+          isDataNeighbour(tokens[at - 1]!, statementEnds.has(at - 1)) &&
+          isDataNeighbour(tokens[at + 1]!, statementEnds.has(at));
+      }
+      return { tokens, end: index };
+    }
+    if (char === "'" || char === '"') {
+      if (!operand) return undefined;
+      const quoted =
+        char === "'" ? readSingleQuoted(source, index) : readDoubleQuoted(source, index);
+      if (quoted.end === undefined || !endsCleanly(quoted.end)) return undefined;
+      const raw = source.slice(index, quoted.end);
+      if (quoted.exact && (char === "'" || !/[$`]/u.test(raw))) literals.add(tokens.length);
+      tokens.push({
+        kind: "string",
+        start: index,
+        end: quoted.end,
+        raw,
+        ...(quoted.exact ? { value: quoted.value } : {}),
+        bindable: false,
+      });
+      index = quoted.end;
+      operand = false;
+      continue;
+    }
+    if (char === "$") {
+      if (!operand) return undefined;
+      const variable = VARIABLE.exec(source.slice(index))?.[0];
+      if (variable === undefined) return undefined;
+      const members = /^(?:\.[A-Za-z_][A-Za-z0-9_]*)*/u.exec(
+        source.slice(index + variable.length),
+      )![0];
+      const end = index + variable.length + members.length;
+      if (!endsCleanly(end)) return undefined;
+      tokens.push({
+        kind: "word",
+        start: index,
+        end,
+        raw: source.slice(index, end),
+        bindable: false,
+      });
+      index = end;
+      operand = false;
+      continue;
+    }
+    if (/[0-9]/u.test(char)) {
+      if (!operand) return undefined;
+      const raw = /^[0-9][A-Za-z0-9_.]*/u.exec(source.slice(index))![0];
+      const end = index + raw.length;
+      if (!endsCleanly(end)) return undefined;
+      const plain = PLAIN_DECIMAL.test(raw) && String(Number(raw)) === raw;
+      if (!plain && !NUMBER_FORM.test(raw)) return undefined;
+      // A bound negative number must not run into an operator before it (`$x-5` → `$x--3`).
+      const before = source[index - 1];
+      if (plain && (isBlank(before) || "\n{(,".includes(before!))) literals.add(tokens.length);
+      tokens.push({
+        kind: "number",
+        start: index,
+        end,
+        raw,
+        ...(plain ? { value: Number(raw) } : {}),
+        bindable: false,
+      });
+      index = end;
+      operand = false;
+      continue;
+    }
+    if (char === "-" && next !== undefined && /[A-Za-z]/u.test(next)) {
+      const raw = /^-[A-Za-z]+/u.exec(source.slice(index))![0];
+      if (raw.toLowerCase() === "-not") {
+        if (!operand) return undefined;
+      } else if (DATA_OPERATOR.test(raw) || PATTERN_OPERATOR.test(raw)) {
+        if (operand) return undefined;
+        operand = true;
+      } else {
+        return undefined;
+      }
+      symbol(raw);
+      continue;
+    }
+    if (char === "-" || char === "+") {
+      if (next === char || next === "=") return undefined;
+      // Unary before an operand, binary after one; an operand follows either way.
+      operand = true;
+      symbol(char);
+      continue;
+    }
+    if (char === "*" || char === "/" || char === "%" || char === ",") {
+      if (operand || next === "=" || next === ">") return undefined;
+      operand = true;
+      symbol(char);
+      continue;
+    }
+    if (char === "!") {
+      if (!operand || next === "=") return undefined;
+      symbol(char);
+      continue;
+    }
+    if (char === "(") {
+      if (!operand) return undefined;
+      depth += 1;
+      symbol(char);
+      continue;
+    }
+    if (char === ")") {
+      if (operand || depth === 0 || !endsCleanly(index + 1)) return undefined;
+      depth -= 1;
+      symbol(char);
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a token beside a script-block literal leaves it plain data: a statement boundary, a
+ * paren, a block edge, `,`, an arithmetic or negation symbol, or a comparison, membership or logical
+ * operator.
+ */
+function isDataNeighbour(token: ProgramToken, statementBoundary: boolean): boolean {
+  if (statementBoundary) return true;
+  return (
+    token.kind === "operator" && (DATA_SYMBOLS.has(token.raw) || DATA_OPERATOR.test(token.raw))
+  );
+}
+
+/** Operators at or below comparison precedence, which end a pattern operator's operand. */
+const OPERAND_END =
+  /^-(?:[ci]?(?:eq|ne|gt|ge|lt|le|contains|notcontains|in|notin|like|notlike|match|notmatch|replace|split)|and|or|xor|join|is|isnot|as)$/iu;
+
+/**
+ * The indices of every token in an operand of a pattern, format, type or bitwise operator in a
+ * script block's tokens. Such an operand reaches, at its own paren depth, to the nearest operator at
+ * comparison precedence or below, the statement's end or an unmatched paren — a superset of what
+ * PowerShell reads as the operand (`$x -replace 'e','a'` and `$x -like 'a' + 'b'` both taint `'a'`).
+ */
+function patternOperands(
+  tokens: readonly ProgramToken[],
+  statementEnds: ReadonlySet<number>,
+): Set<number> {
+  const tainted = new Set<number>();
+  const ends = (token: ProgramToken): boolean =>
+    token.kind === "operator" && OPERAND_END.test(token.raw);
+  for (const [at, token] of tokens.entries()) {
+    if (token.kind !== "operator" || !PATTERN_OPERATOR.test(token.raw)) continue;
+    let depth = 0;
+    for (let left = at - 1; left >= 1; left -= 1) {
+      const each = tokens[left]!;
+      if (depth === 0 && (statementEnds.has(left) || ends(each))) break;
+      if (each.raw === ")" && each.kind === "operator") depth += 1;
+      else if (each.raw === "(" && each.kind === "operator") {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+      tainted.add(left);
+    }
+    depth = 0;
+    for (let right = at + 1; right < tokens.length - 1; right += 1) {
+      const each = tokens[right]!;
+      if (depth === 0 && ends(each)) break;
+      if (each.raw === "(" && each.kind === "operator") depth += 1;
+      else if (each.raw === ")" && each.kind === "operator") {
+        if (depth === 0) break;
+        depth -= 1;
+      }
+      tainted.add(right);
+      if (depth === 0 && statementEnds.has(right)) break;
+    }
+  }
+  return tainted;
+}
+
+/**
+ * The name a PowerShell token's value is given: the property or variable it is compared with
+ * (`$_.region -eq 'emea'`, `'emea' -eq $PSItem.region` and Where-Object's `region -eq emea` →
+ * `region`), the parameter it follows (`-OutFile x` → `OutFile`), or the variable it is assigned to
+ * (`$region = 'emea'` → `region`). Undefined for anything else; never a comparison operator.
  */
 export function powershellValueName(
   tokens: readonly ProgramToken[],
   index: number,
 ): string | undefined {
   const previous = tokens[index - 1];
+  if (previous !== undefined && COMPARISON_OPERATOR.test(previous.raw)) {
+    // Where-Object's simplified syntax (`Where-Object region -eq emea`): `-eq` is a switch.
+    const where = /^(?:(?:microsoft\.powershell\.core\\)?where-object|where|\?)$/iu.test(
+      tokens[index - 3]?.raw ?? "",
+    );
+    const name = comparedName(tokens[index - 2], where);
+    if (name !== undefined || where || previous.kind === "operator") return name;
+  }
+  const following = tokens[index + 1];
+  if (following !== undefined && COMPARISON_OPERATOR.test(following.raw)) {
+    const name = comparedName(tokens[index + 2], false);
+    if (name !== undefined) return name;
+  }
   if (previous?.kind === "word") {
     const parameter = /^-([A-Za-z][A-Za-z0-9_]{0,40})$/u.exec(previous.raw)?.[1];
     if (parameter !== undefined) return parameter;
@@ -528,23 +875,50 @@ export function powershellValueName(
 }
 
 /**
+ * The name of the other operand of a comparison: the last property of a variable's member access
+ * (`$_.region`), a named variable (`$region`), or — for Where-Object's simplified syntax, where the
+ * property comes first — a bare property name.
+ */
+function comparedName(token: ProgramToken | undefined, bareAllowed: boolean): string | undefined {
+  if (token === undefined || token.kind !== "word") return undefined;
+  const variable =
+    /^\$(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z_][A-Za-z0-9_]*)*)$/u.exec(
+      token.raw,
+    );
+  if (variable !== null) {
+    const [, name, members] = variable;
+    const last = members!.split(".").at(-1);
+    const chosen = last !== undefined && last.length > 0 ? last : name!;
+    if (/^(?:_|psitem)$/iu.test(chosen) || chosen.length > 41) return undefined;
+    return chosen;
+  }
+  if (!bareAllowed) return undefined;
+  return /^[A-Za-z_][A-Za-z0-9_]{0,40}$/u.exec(token.raw)?.[0];
+}
+
+/**
  * A value PowerShell reads back as the same text as a bare argument word: no parameter (`-`), home
  * (`~`), variable, quote, escape or operator character. A number form other than a plain decimal
  * (`0x10`, `1kb`, `1e3`) is quoted too.
  */
 const SAFE_BARE_WORD = /^[A-Za-z0-9_./\\][A-Za-z0-9_./\\:+=-]*$/u;
 
+/** A number a script block reads back as the same number: a plain, possibly negative, decimal. */
+const EXPRESSION_NUMBER = /^-?\d+(?:\.\d+)?$/u;
+
 /**
  * Renders a bound value in place of a recorded PowerShell token, as data: bare when the recorded
  * token was a bare word and the value reads back as the same text, otherwise single-quoted (`'`
- * doubled). A value PowerShell cannot pass through to a native program intact — empty, containing a
- * double quote, a line break or another control character but tab, a cmd.exe metacharacter
- * (`& | < > ^ % !`, which a command resolving to a batch file would parse again), or blanks with a
- * trailing backslash — is refused rather than approximated, in both editions.
+ * doubled). A number in a script block stays a bare number when the value is a plain decimal, and
+ * is otherwise a single-quoted string; a string in a script block is always single-quoted. A value
+ * PowerShell cannot pass through to a native program intact — empty, containing a double quote, a
+ * line break or another control character but tab, a cmd.exe metacharacter (`& | < > ^ % !`, which
+ * a command resolving to a batch file would parse again), or blanks with a trailing backslash — is
+ * refused rather than approximated, in both editions and inside script blocks too.
  */
 export function renderPowerShellTokenValue(token: ProgramToken, text: string): string {
   if (!token.bindable) throw new Error("the recorded program token is not safely bindable");
-  if (token.kind !== "word" && token.kind !== "string") {
+  if (token.kind !== "word" && token.kind !== "string" && token.kind !== "number") {
     throw new Error("this program token cannot carry a bound value");
   }
   if (text.length === 0) throw new Error("a PowerShell argument value cannot be empty");
@@ -561,6 +935,7 @@ export function renderPowerShellTokenValue(token: ProgramToken, text: string): s
   if (/[\s]/u.test(text) && text.endsWith("\\")) {
     throw new Error("a PowerShell argument value with blanks cannot end in a backslash");
   }
+  if (token.kind === "number" && EXPRESSION_NUMBER.test(text)) return text;
   if (
     token.kind === "word" &&
     SAFE_BARE_WORD.test(text) &&

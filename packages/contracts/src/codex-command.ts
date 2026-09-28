@@ -66,6 +66,16 @@ export const CodexCommandMetadataSchema = z.discriminatedUnion("kind", [
       kind: z.literal("patch-call"),
     })
     .strict(),
+  /**
+   * A code-mode cell that only reads the tool list and runs `tools.exec_command`: transport, not a
+   * step. The native `CommandExecution` items of the commands it ran are the calls.
+   */
+  z
+    .object({
+      version: z.literal(1),
+      kind: z.literal("carrier-call"),
+    })
+    .strict(),
 ]);
 export type CodexCommandMetadata = z.infer<typeof CodexCommandMetadataSchema>;
 

@@ -18,8 +18,15 @@ export interface SingleCommandOutput {
   workdir?: string;
 }
 
-/** Only the audited two-statement expression is eligible; this does not execute JavaScript. */
-export function extractSingleCommandOutput(source: string): SingleCommandOutput | undefined {
+/**
+ * Only the audited two-statement expression is eligible; this does not execute JavaScript. With
+ * `shellOptions`, a literal `shell` name and `login` flag are accepted too: they choose the shell
+ * the command runs in (which only the native command item then proves), not what the cell prints.
+ */
+export function extractSingleCommandOutput(
+  source: string,
+  { shellOptions = false }: { shellOptions?: boolean } = {},
+): SingleCommandOutput | undefined {
   if (source.length > 32_768) return undefined;
   try {
     const ast = parseCode(source);
@@ -74,6 +81,10 @@ export function extractSingleCommandOutput(source: string): SingleCommandOutput 
           property.value.value < 0
         )
           return undefined;
+      } else if (shellOptions && key === "shell") {
+        if (property.value.type !== "StringLiteral") return undefined;
+      } else if (shellOptions && key === "login") {
+        if (property.value.type !== "BooleanLiteral") return undefined;
       } else return undefined;
     }
     if (cmd === undefined) return undefined;
@@ -474,4 +485,51 @@ export function settlesBeforeCompletion(source: string): boolean {
   };
   visit(program, []);
   return proven;
+}
+
+/** Every `tools.<name>` member and whether `ALL_TOOLS` is read (not a property key) in a cell. */
+function harnessReferences(
+  node: AstNode,
+  found: { tools: string[]; toolList: boolean },
+  parent?: AstNode,
+): void {
+  if (
+    node.type === "Identifier" &&
+    node.name === "ALL_TOOLS" &&
+    !(parent?.type === "MemberExpression" && parent.property === node && !parent.computed) &&
+    !(parent?.type === "ObjectProperty" && parent.key === node && !parent.computed)
+  )
+    found.toolList = true;
+  const member = memberName(node);
+  if (member !== undefined && isNamed(member.object, "tools")) found.tools.push(member.property);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "loc" || key.endsWith("Comments") || key === "extra") continue;
+    if (Array.isArray(value)) {
+      for (const child of value) if (isAstNode(child)) harnessReferences(child, found, node);
+    } else if (isAstNode(value)) harnessReferences(value, found, node);
+  }
+}
+
+/**
+ * A cell that is transport, not a step: it reads the harness's tool list (`ALL_TOOLS`) and/or runs
+ * `tools.exec_command`, and does nothing else a replay could repeat. Codex records every command
+ * such a cell runs as its own native `CommandExecution` item, and those items are the calls; the
+ * cell only printed what they and the tool list returned. Every command must settle before the
+ * cell completes (`settlesBeforeCompletion`), and any other `tools.*` call (an MCP tool,
+ * `apply_patch`, `write_stdin`, …) has effects no native command item records, so it is not
+ * transport. A cell that touches neither the tool list nor a command (pure JavaScript) is not
+ * transport either: its source is the computation.
+ */
+export function isNativeCommandCarrierCell(source: string): boolean {
+  if (!settlesBeforeCompletion(source)) return false;
+  let program: AstNode;
+  try {
+    program = parseCode(source).program as unknown as AstNode;
+  } catch {
+    return false;
+  }
+  const found = { tools: [] as string[], toolList: false };
+  harnessReferences(program, found);
+  if (found.tools.some((name) => name !== "exec_command")) return false;
+  return found.tools.length > 0 || found.toolList;
 }

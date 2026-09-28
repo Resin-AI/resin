@@ -3,6 +3,7 @@ import {
   type CodexCommandAssociation,
   RESIN_CODEX_COMMAND_METADATA_KEY,
   shellDialectOfExecutable,
+  windowsShellInvocation,
 } from "@resin/contracts";
 import type {
   CausalRef,
@@ -41,6 +42,7 @@ import {
   extractSingleCommandOutput,
   hasUnresolvedCodeModeEffects,
   isApplyPatchOnlyCell,
+  isNativeCommandCarrierCell,
   settlesBeforeCompletion,
 } from "./code-command.js";
 import { codexFileEdits } from "./file-change.js";
@@ -534,6 +536,14 @@ function hasNativeTruncationFlag(value: CodexTranscriptPayload | undefined): boo
     value?.output_truncated === true ||
     value?.outputTruncated === true
   );
+}
+
+/**
+ * Whether a code-mode tool result was cut short: Codex then prefixes `Warning: truncated output`
+ * and replaces the middle with `…N tokens truncated…`, so the text is not the command's output.
+ */
+function isTruncatedCodeModeOutput(text: string): boolean {
+  return text.startsWith("Warning: truncated output") || /…\d+ tokens truncated…/u.test(text);
 }
 
 /**
@@ -1146,6 +1156,24 @@ export class CodexSessionDecoder {
    * that reply. Any other reply, or losing track of one, makes the session unsafe for good.
    */
   private settlingCells = new Set<string>();
+  /**
+   * Open carrier cells (see `isNativeCommandCarrierCell`), with the native commands that started
+   * while each was open and, for a cell that prints exactly one command's output
+   * (`text(r.output)`), that command and directory.
+   */
+  private carrierCells = new Map<
+    string,
+    { observedStarted: number; commands: number; prints?: SingleCommandOutput }
+  >();
+  /**
+   * A native command item Codex recorded without output while the one open carrier cell that
+   * printed its output was still running, held until the next record: when that is the cell's
+   * completed reply, the printed output is the command's output (Codex's code-mode race leaves the
+   * item empty although the command printed; the cell received its output).
+   */
+  private heldCommand?: { cellCallId: string; events: NormalizedSessionEvent[] };
+  /** The reply of a carrier cell the current record carried. */
+  private carrierReply?: { callId: string; status: string; printed: string[] };
   private nativeUsageSeen = new Set<string>();
   private nativeContexts = new Map<string, CodexNativeThreadContext>();
   private currentNativeContext?: CodexNativeThreadContext;
@@ -1283,6 +1311,37 @@ export class CodexSessionDecoder {
   }
 
   decodeRecord(raw: string | CodexTranscriptPayload): NormalizedSessionEvent[] {
+    const held = this.heldCommand;
+    this.heldCommand = undefined;
+    this.carrierReply = undefined;
+    const events = this.decodeOneRecord(raw);
+    if (held === undefined) return events;
+    const printed = this.recoveredOutput(held.cellCallId);
+    if (printed !== undefined)
+      for (const event of held.events) if (event.type === "command_exec") event.stdout = printed;
+    return [...held.events, ...events];
+  }
+
+  /** The output a held command's carrier cell printed for it, when this record is its reply. */
+  private recoveredOutput(cellCallId: string): string | undefined {
+    const reply = this.carrierReply;
+    const printed = reply?.printed.length === 1 ? reply.printed[0] : undefined;
+    return reply?.callId === cellCallId &&
+      reply.status === "completed" &&
+      printed !== undefined &&
+      !isTruncatedCodeModeOutput(printed)
+      ? printed
+      : undefined;
+  }
+
+  /** Events still held for the next record (see `heldCommand`), released unchanged. */
+  flush(): NormalizedSessionEvent[] {
+    const held = this.heldCommand;
+    this.heldCommand = undefined;
+    return held?.events ?? [];
+  }
+
+  private decodeOneRecord(raw: string | CodexTranscriptPayload): NormalizedSessionEvent[] {
     let payload: CodexTranscriptPayload;
     const rawStr = asString(raw);
     if (rawStr !== undefined) {
@@ -1332,6 +1391,7 @@ export class CodexSessionDecoder {
         if (!trimmed) continue;
         events.push(...this.decodeRecord(trimmed));
       }
+      events.push(...this.flush());
       return events;
     }
 
@@ -1340,6 +1400,7 @@ export class CodexSessionDecoder {
       for (const item of transcript) {
         events.push(...this.decodeRecord(item));
       }
+      events.push(...this.flush());
       return events;
     }
 
@@ -1652,6 +1713,26 @@ export class CodexSessionDecoder {
       return [];
     }
     if (!this.rememberNativeItem(item, threadId, outputSource)) return [];
+    if (
+      source === "response_item" &&
+      itemType === "custom_tool_call_output" &&
+      outputCallId !== undefined &&
+      this.carrierCells.delete(outputCallId)
+    ) {
+      const parts = asArray(item.output);
+      const envelope = asString(asObject(parts?.[0])?.text);
+      const texts = parts
+        ?.slice(1)
+        .map((part) =>
+          asObject(part)?.type === "input_text" ? asString(asObject(part)?.text) : undefined,
+        );
+      if (texts?.every((text): text is string => text !== undefined))
+        this.carrierReply = {
+          callId: outputCallId,
+          status: envelope?.startsWith("Script completed") ? "completed" : "other",
+          printed: texts,
+        };
+    }
     if (
       source === "response_item" &&
       (itemType === "function_call_output" || itemType === "custom_tool_call_output") &&
@@ -2397,9 +2478,19 @@ export class CodexSessionDecoder {
             });
         }
         const nativeInput = native.arguments ?? native.input;
-        const extracted =
+        const audited =
           native.name === "exec" && typeof nativeInput === "string"
             ? extractSingleCommandOutput(nativeInput)
+            : undefined;
+        // In a Windows session the cell's command runs in the session's shell (PowerShell or cmd),
+        // which only the native item's argv proves; that item, not the cell, is the call there.
+        const extracted =
+          audited !== undefined &&
+          !codexShellDialectUnproven(
+            audited.workdir === undefined ? {} : { workdir: audited.workdir },
+            this.currentCwd,
+          )
+            ? audited
             : undefined;
         const canonical = extracted
           ? { cmd: extracted.cmd, workdir: extracted.workdir ?? this.currentCwd }
@@ -2456,18 +2547,45 @@ export class CodexSessionDecoder {
                   form: "single-command-output",
                 },
               };
-        const patchCell =
+        const cellSource =
           native.name === "exec" &&
           typeof nativeInput === "string" &&
-          !extracted &&
-          isApplyPatchOnlyCell(nativeInput);
-        if (patchCell)
+          !(extracted && callId && this.wrappers.has(callId))
+            ? nativeInput
+            : undefined;
+        // A cell whose effects are native items (the edits of one patch, or the commands it ran
+        // with the tool list it read) is transport; the native items, not the cell, are the calls.
+        const cellKind =
+          cellSource === undefined
+            ? undefined
+            : isApplyPatchOnlyCell(cellSource)
+              ? ("patch-call" as const)
+              : isNativeCommandCarrierCell(cellSource)
+                ? ("carrier-call" as const)
+                : undefined;
+        if (cellKind !== undefined)
           for (const event of decoded)
             if (event.type === "tool_call")
               event.metadata = {
                 ...event.metadata,
-                [RESIN_CODEX_COMMAND_METADATA_KEY]: { version: 1, kind: "patch-call" },
+                [RESIN_CODEX_COMMAND_METADATA_KEY]: { version: 1, kind: cellKind },
               };
+        const observedStarted = Date.parse(asString(p.timestamp) ?? "");
+        if (
+          cellKind === "carrier-call" &&
+          callId &&
+          cellSource &&
+          Number.isFinite(observedStarted)
+        ) {
+          if (this.carrierCells.size >= 128)
+            this.carrierCells.delete(this.carrierCells.keys().next().value!);
+          const prints = extractSingleCommandOutput(cellSource, { shellOptions: true });
+          this.carrierCells.set(callId, {
+            observedStarted,
+            commands: 0,
+            ...(prints === undefined ? {} : { prints }),
+          });
+        }
         return decoded;
       }
       if (nativeType === "function_call_output" || nativeType === "custom_tool_call_output") {
@@ -2486,6 +2604,15 @@ export class CodexSessionDecoder {
           : envelope?.startsWith("Script failed")
             ? "failed"
             : "yielded";
+        if (callId && this.carrierCells.delete(callId) && parts !== undefined) {
+          const texts = parts
+            .slice(1)
+            .map((part) =>
+              asObject(part)?.type === "input_text" ? asString(asObject(part)?.text) : undefined,
+            );
+          if (texts.every((text): text is string => text !== undefined))
+            this.carrierReply = { callId, status, printed: texts };
+        }
         const resultEvents = this.normalizePayload(
           {
             ...base,
@@ -2677,6 +2804,46 @@ export class CodexSessionDecoder {
                   ...(association ? { association } : {}),
                 },
               };
+        if (
+          nativeId &&
+          !tracked &&
+          startedAtMs !== undefined &&
+          Number.isSafeInteger(startedAtMs)
+        ) {
+          for (const cell of this.carrierCells.values())
+            if (cell.observedStarted <= startedAtMs) cell.commands += 1;
+          const [cellCallId, cell] =
+            this.carrierCells.size === 1 ? [...this.carrierCells][0]! : [undefined, undefined];
+          const program =
+            argv.length === 3 && argv[0] === "/bin/bash" && argv[1] === "-lc"
+              ? argv[2]
+              : windowsShellInvocation(argv[0] ?? "", argv.slice(1))?.program;
+          let directory: string | undefined;
+          try {
+            directory = cwd?.startsWith("file:") ? recordedFileUrlPath(cwd) : cwd;
+          } catch {
+            directory = undefined;
+          }
+          // Codex's code-mode race: the item can complete before its output is attached, while the
+          // cell that awaited the command received and printed it. Only the one open cell that
+          // prints exactly this command's output, and ran no other command, can supply it.
+          if (
+            cellCallId !== undefined &&
+            cell?.prints !== undefined &&
+            cell.commands === 1 &&
+            cell.observedStarted <= startedAtMs &&
+            association === undefined &&
+            exitCode === 0 &&
+            (asString(item?.stdout) ?? "") === "" &&
+            (asString(item?.aggregated_output) ?? "") === "" &&
+            (asString(item?.formatted_output) ?? "") === "" &&
+            program === cell.prints.cmd &&
+            (cell.prints.workdir === undefined || directory === cell.prints.workdir)
+          ) {
+            this.heldCommand = { cellCallId, events: decoded };
+            return [];
+          }
+        }
         return decoded;
       }
       return this.nativeUnknown(p);
