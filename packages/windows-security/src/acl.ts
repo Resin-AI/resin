@@ -69,6 +69,25 @@ export interface OwnerOnlyOptions {
   requireProtected?: boolean;
 }
 
+/**
+ * Owners that do not widen access beyond the current user. An elevated administrator's token
+ * makes BUILTIN\Administrators the default owner of every object it creates, and services
+ * running as LocalSystem own theirs. Neither SID can be assigned as owner by a standard user,
+ * and an administrator can take ownership of anything anyway, so accepting them keeps "only the
+ * current user" meaningful. Any other principal as owner could re-grant itself access.
+ */
+const TRUSTED_NON_USER_OWNERS: ReadonlySet<string> = new Set([
+  "S-1-5-32-544", // BUILTIN\Administrators
+  "S-1-5-18", // NT AUTHORITY\SYSTEM
+]);
+
+/** Whether `owner` is the current user or an owner that cannot widen access beyond them. */
+export function isAcceptableOwner(owner: string | null, userSid: string): boolean {
+  if (owner === null) return false;
+  const normalized = owner.toUpperCase();
+  return normalized === userSid.toUpperCase() || TRUSTED_NON_USER_OWNERS.has(normalized);
+}
+
 /** Problems that make `acl` broader than "only `userSid`", empty when it is owner-only. */
 export function ownerOnlyProblems(
   acl: AclDescription,
@@ -79,7 +98,7 @@ export function ownerOnlyProblems(
   const me = userSid.toUpperCase();
   if (acl.owner === null) {
     problems.push("has no owner");
-  } else if (acl.owner.toUpperCase() !== me) {
+  } else if (!isAcceptableOwner(acl.owner, userSid)) {
     problems.push(`is owned by ${acl.owner}, not the current user ${userSid}`);
   }
   if (!acl.daclPresent) {
@@ -108,14 +127,15 @@ export interface OwnerOnlyCheck {
   ok: boolean;
   problems: string[];
   /**
-   * Whether the current user owns the object. POSIX callers refuse foreign-owned paths instead
-   * of repairing them; this lets Windows callers make the same distinction.
+   * Whether the current user (or an owner that cannot widen access beyond them, such as
+   * BUILTIN\Administrators for an elevated run) owns the object. POSIX callers refuse
+   * foreign-owned paths instead of repairing them; this lets Windows callers do the same.
    */
   ownedByCurrentUser: boolean;
 }
 
 function isOwner(acl: AclDescription, sid: string): boolean {
-  return acl.owner !== null && acl.owner.toUpperCase() === sid.toUpperCase();
+  return isAcceptableOwner(acl.owner, sid);
 }
 
 /**
