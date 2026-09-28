@@ -208,19 +208,45 @@ describe("catalog retirement boundaries", () => {
     expect(Object.keys(lockManager.read().tools)).toEqual(["kept"]);
   });
 
-  it("leaves a lock another workspace recorded untouched", async () => {
-    const lockPath = path.join(root, "shared-project", ".resin", "resin.lock");
-    const cloudA = new FakeCatalogCloud(catalogSnapshot("va", both()));
-    const a = gateway(cloudA, { locked: true, lockPath });
-    await a.coordinator.sync();
+  it("hides pre-existing unrecorded entries without rewriting the lock", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", both()));
+    const { lockManager, coordinator } = gateway(cloud, { locked: true });
+    await coordinator.sync();
+    if (!lockManager) throw new Error("no lock");
+    // Receipts from before this release never named their lock.
+    fs.rmSync(path.join(root, "access"), { recursive: true, force: true });
+    const before = fs.readFileSync(lockManager.lockPath);
 
-    // The same project opened under workspace B, whose catalog never published these tools.
+    cloud.setSnapshot(catalogSnapshot("v2", keptOnly()));
+    const fresh = gateway(cloud, { locked: true, lockPath: lockManager.lockPath });
+    await fresh.coordinator.sync();
+
+    expect(await fresh.listed()).toEqual(["kept"]);
+    expect(await fresh.registry.getTool("dropped", workspaceA)).toBeUndefined();
+    expect(fresh.registry.retiredToolMessage("dropped", workspaceA)).toMatch(/no longer available/);
+    expect(fs.readFileSync(lockManager.lockPath).equals(before)).toBe(true);
+  });
+
+  it("hides another workspace's lock entries and shows them again under that workspace", async () => {
+    const lockPath = path.join(root, "shared-project", ".resin", "resin.lock");
+    const registry = new ToolRegistry({ autoHydrate: false });
+    const cloudA = new FakeCatalogCloud(catalogSnapshot("va", both()));
+    const a = gateway(cloudA, { locked: true, lockPath, registry });
+    await a.coordinator.sync();
+    const before = fs.readFileSync(lockPath);
+
+    // The same project opened under workspace B, whose catalog never published "dropped".
     const cloudB = new FakeCatalogCloud(catalogSnapshot("vb", keptOnly()), identityB.workspaceId);
-    const b = gateway(cloudB, { locked: true, lockPath, identity: identityB });
+    const b = gateway(cloudB, { locked: true, lockPath, registry, identity: identityB });
     await b.coordinator.sync();
 
-    expect(Object.keys(b.lockManager?.read().tools ?? {}).sort()).toEqual(["dropped", "kept"]);
-    expect(b.registry.retiredToolMessage("dropped", identityB.workspaceId)).toBeUndefined();
+    expect(await b.listed()).toEqual(["kept"]);
+    expect(await registry.getTool("dropped", identityB.workspaceId)).toBeUndefined();
+    expect(fs.readFileSync(lockPath).equals(before)).toBe(true);
+
+    await a.coordinator.sync({ fresh: true });
+    expect(await a.listed()).toEqual(["dropped", "kept"]);
+    expect(await registry.getTool("dropped", workspaceA)).toBeDefined();
   });
 
   it("scopes retirement to one workspace of a shared registry and spares system tools", async () => {
