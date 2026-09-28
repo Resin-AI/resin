@@ -582,7 +582,9 @@ function Invoke-ResinHelper {
         $ErrorActionPreference = 'Continue'
         & $Command @Arguments 2>&1 | ForEach-Object {
             if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                Write-Host $_.ToString()
+                # The wrapped exception's message is the exact stderr line (empty for a blank line);
+                # ToString() on an empty record would print the exception type name instead.
+                Write-Host $_.Exception.Message
             } else {
                 $_
             }

@@ -603,12 +603,15 @@ describe("install.ps1 execution and behavioral security tests", () => {
       const ok = await runWithHelper(
         [
           'process.stderr.write("\\u2714 Verified Resin v9.9.9 for test\\n");',
+          'process.stderr.write("\\n");',
           'process.stderr.write("progress line two\\n");',
           'process.stdout.write(JSON.stringify({ success: true, version: "9.9.9", resinHome: process.cwd() }) + "\\n");',
         ].join("\n"),
       );
       expect(ok.status, ok.log).toBe(0);
       expect(ok.log).toContain("progress line two");
+      // A blank stderr line stays blank instead of printing the wrapped exception's type name.
+      expect(ok.log).not.toContain("RemoteException");
       expect(ok.log).not.toContain("Resin installation failed");
 
       const failing = await runWithHelper('process.stderr.write("boom\\n"); process.exit(3);');
