@@ -696,21 +696,30 @@ export class WorkflowValidationWorker {
       );
       return undefined;
     }
-    // Every recorded call the plan names, from both demonstrations: what this answer is about.
-    const callIds = [
+    // Every recorded call the plan names, from both demonstrations, and every private reference
+    // it resolves: what this answer is about.
+    const references = new Set<string>();
+    JSON.stringify(request.plan, (_key, value) => {
+      if (typeof value === "string" && value.startsWith("private:")) references.add(value);
+      return value;
+    });
+    const keys = [
       ...request.plan.steps.flatMap((step) =>
         step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
-          ? [step.callId]
+          ? [`call:${step.callId}`]
           : [],
       ),
-      ...(request.plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
+      ...(request.plan.heldOut?.calls ?? []).flatMap((entry) =>
+        entry.callIds.map((callId) => `call:${callId}`),
+      ),
+      ...[...references].map((reference) => `reference:${reference}`),
     ];
     if (
       this.askLedger !== undefined &&
-      !this.askLedger.admit({ requestId: request.requestId, planDigest, callIds })
+      !this.askLedger.admit({ requestId: request.requestId, planDigest, keys })
     ) {
       this.log(
-        `workflow validation: refused ask '${request.requestId}': a recorded call it checks reached its daily check limit`,
+        `workflow validation: refused ask '${request.requestId}': a recorded call or private value it checks reached its daily check limit, or the local check ledger is unavailable`,
       );
       return undefined;
     }

@@ -62,6 +62,7 @@ import {
   WORKFLOW_CALL_EXIT_CODE_SLOT,
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
+  WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
   workflowCallArgumentSlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
@@ -495,6 +496,7 @@ export class WorkflowCallRecorder {
             { sessionId: event.sessionId, callId, toolName: "command_exec" },
             parameters,
             program,
+            origins,
           );
         }
         const carrier: WorkflowCallCarrier = {
@@ -705,6 +707,7 @@ export class WorkflowCallRecorder {
       { sessionId: event.sessionId, callId, toolName: "apply_patch" },
       parameters,
       program,
+      origins,
     );
     const carrier: WorkflowCallCarrier = {
       runtime: RESIN_PROCESS_RUNTIME,
@@ -1030,7 +1033,14 @@ export class WorkflowCallRecorder {
     if (discovered?.inputSchema !== undefined) carrier.inputSchema = discovered.inputSchema;
 
     const state = this.sessionState(event.sessionId);
-    const call = this.recordLocalCall(state, event, parameters, program);
+    const call = this.recordLocalCall(
+      state,
+      event,
+      parameters,
+      program,
+      origins,
+      isPlainObject(normalizedEvent.parameters) ? normalizedEvent.parameters : undefined,
+    );
     const relationships = this.relateLocalCall(state, call, event.sessionId);
     carrier.executionIndex = call.executionIndex;
     carrier.executionPosition = call.executionPosition;
@@ -1149,6 +1159,13 @@ export class WorkflowCallRecorder {
     parameters: Record<string, WorkflowJsonValue>,
     /** The program the record established for this call, when it established one. */
     program?: WorkflowRecordedProgram,
+    /**
+     * The argument origins this call's upload carried. Their private leaves and protected program
+     * tokens are the positions the cloud never saw; without them every string leaf counts as one.
+     */
+    uploaded?: WorkflowCallCarrier["origins"],
+    /** The redacted arguments the upload was built from, when this path has them. */
+    uploadedView?: Record<string, WorkflowJsonValue>,
   ): LocalCall {
     const startsExecution = state.executions.length === 0 || state.newExecutionPending;
     if (startsExecution) {
@@ -1231,6 +1248,28 @@ export class WorkflowCallRecorder {
       event.callId,
       WORKFLOW_CALL_IDENTITY_SLOT,
     );
+    if (uploaded !== undefined) {
+      this.localReference(
+        // SAFETY: positions are plain JSON: argument names and path segments.
+        uploadedPrivatePositions(uploaded, (reference, argument, path) => {
+          const stored = this.privateValues.get(reference);
+          if (typeof stored === "string" && containsRedactionPlaceholder(stored)) return true;
+          // Without the redacted view the upload was built from, a withheld leaf may hide a secret.
+          if (uploadedView === undefined) return true;
+          let leaf: unknown = uploadedView[argument];
+          for (const part of path) {
+            leaf =
+              leaf !== null && typeof leaf === "object"
+                ? (leaf as Record<string | number, unknown>)[part]
+                : undefined;
+          }
+          return typeof leaf !== "string" || containsRedactionPlaceholder(leaf);
+        }) as unknown as WorkflowJsonValue,
+        event.sessionId,
+        event.callId,
+        WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+      );
+    }
     // Where this call falls in the recorded order, kept from the first time it was recorded: a
     // redelivered or re-read call keeps its place rather than moving to the end.
     const order = workflowPrivateReference(
@@ -1848,4 +1887,59 @@ function extractResultValueOf(result: unknown): WorkflowJsonValue | undefined {
   if (Array.isArray(result)) return result as WorkflowJsonValue;
   if (typeof result === "object") return result as WorkflowJsonValue;
   return undefined;
+}
+
+/**
+ * The argument positions an upload kept private: every `private` leaf (the cloud received only a
+ * reference), every protected token of a projected program, and the whole of a program whose text
+ * the upload carried only by reference. `redacted` marks the positions secret redaction removed
+ * (protected tokens, placeholder-bearing leaves) from those merely sent by reference.
+ */
+function uploadedPrivatePositions(
+  origins: WorkflowCallCarrier["origins"],
+  /** Whether a private leaf held a secret the upload redacted. */
+  redactedLeaf: (reference: string, argument: string, path: WorkflowValuePath) => boolean,
+): Array<{ argument: string; path: WorkflowValuePath; redacted: boolean }> {
+  const positions: Array<{ argument: string; path: WorkflowValuePath; redacted: boolean }> = [];
+  const walk = (
+    argument: string,
+    origin: WorkflowCallCarrier["origins"][string],
+    path: WorkflowValuePath,
+  ): void => {
+    switch (origin.type) {
+      case "private":
+        positions.push({
+          argument,
+          path,
+          redacted: redactedLeaf(origin.reference, argument, path),
+        });
+        return;
+      case "object":
+        for (const [key, entry] of Object.entries(origin.entries))
+          walk(argument, entry, [...path, key]);
+        return;
+      case "array":
+        origin.items.forEach((item, index) => walk(argument, item, [...path, index]));
+        return;
+      case "program":
+        if (origin.source.type !== "literal") {
+          const source = origin.source;
+          positions.push({
+            argument,
+            path,
+            redacted:
+              source.type === "private" ? redactedLeaf(source.reference, argument, path) : true,
+          });
+          return;
+        }
+        for (const token of origin.protectedTokens ?? []) {
+          positions.push({ argument, path: [...path, "tokens", token], redacted: true });
+        }
+        return;
+      default:
+        return;
+    }
+  };
+  for (const [argument, origin] of Object.entries(origins)) walk(argument, origin, []);
+  return positions;
 }

@@ -46,12 +46,17 @@ export interface RecordedCall {
    */
   hiddenDependencies: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
   /**
-   * Argument positions whose recorded value is private: it was redacted before anything was
-   * uploaded, so the cloud never saw it. The plan must read each one from this device (a `private`
+   * Argument positions whose recorded value the upload kept private. Those secret redaction removed
+   * (`redacted`, the default) the cloud never saw in any form. The plan must read each one from this device (a `private`
    * reference, an input, or a recorded step's output); a value the plan supplies itself, or one a
    * model-written derivation computed, is never compared with it. `[]` covers the whole argument.
    */
-  privatePositions?: ReadonlyArray<{ argument: string; path: WorkflowValuePath }>;
+  privatePositions?: ReadonlyArray<{
+    argument: string;
+    path: WorkflowValuePath;
+    /** Removed by secret redaction, rather than only sent by reference. */
+    redacted?: boolean;
+  }>;
   /**
    * The workspace roots the two sides' working directories stand for: `recorded` is the root of the
    * session that made this call, `plan` the root of the session the plan's own call ran in. Given
@@ -318,6 +323,9 @@ function mismatch(
   // Checked before any comparison: a guessed or computed value at a private position is refused
   // whether or not it would have matched, so the verdict says nothing about the recorded value.
   for (const position of recorded.privatePositions ?? []) {
+    // A value only sent by reference was never secret-redacted; plans may state it (the check then
+    // proves the plan reproduces it). What secret redaction removed is never compared with one.
+    if (position.redacted === false) continue;
     if (!stepDeviceSourcesPosition(step, position.argument, position.path, rules)) {
       return "compares a private recorded value with a value this device did not supply";
     }

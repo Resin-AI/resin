@@ -1,96 +1,103 @@
 /**
- * A recorded backup job whose dump command carries a database password. Checked against its own
- * recording, the plan as recorded verifies; a cloud-edited plan that spells a guessed password
- * where the recording kept it private is missed the same way whether the guess is right or wrong,
- * and the failed answer does not single out which private step failed.
+ * A recorded backup job whose dump command carries a database password, captured through the real
+ * normalization pipeline (the upload redacts the password) and recorder. Checked against its own
+ * recording, the plan as recorded verifies. A cloud-edited plan that spells a guessed password where
+ * the upload kept it private is missed the same way whether the guess is right or wrong, and a
+ * derivation that reads the private step makes the whole ask unavailable without any check.
  */
-import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import {
-  type NormalizedSessionEvent,
-  NormalizedSessionEventSchema,
-  type RecordedWorkflow,
-} from "@resin/contracts";
+import { OmpRecordDecoder } from "@resin/adapter-omp";
+import type { NormalizedSessionEvent, RecordedWorkflow, WorkflowStep } from "@resin/contracts";
 import {
   InMemoryPrivateValueStore,
+  NormalizationPipeline,
+  type PrivateValueStore,
   type RecordableEvent,
   WorkflowCallRecorder,
   projectEventToMetadataOnly,
   recordCallsFromEvents,
 } from "@resin/observer";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
 import { localCallsFor } from "./recorded-sessions.js";
 
 const owner = "private-oracle-owner";
 const SESSION = "private-oracle-session";
 const PASSWORD = "Tr0ub4dorPw9x";
+const DUMP = `pg_dump --password ${PASSWORD} inventory > backups/inventory.sql`;
+const TIMESTAMP = "2026-09-26T00:00:00.000Z";
 
-const DBTOOL = `#!/bin/sh
-echo "dumped $# args"
-`;
+function record(sequence: number, message: unknown) {
+  return {
+    recordId: `rec_${sequence}`,
+    sessionId: SESSION,
+    harnessId: "omp",
+    sequenceNumber: sequence,
+    recordType: "transcript_line",
+    timestamp: TIMESTAMP,
+    rawPayload: JSON.stringify({ type: "message_end", message }),
+    cursor: { offset: sequence, line: sequence, sequence, timestamp: TIMESTAMP },
+    metadata: {},
+  };
+}
 
-const directories: string[] = [];
-afterEach(() => {
-  for (const directory of directories.splice(0))
-    rmSync(directory, { recursive: true, force: true });
-});
-
-function recordJob(store: InMemoryPrivateValueStore): RecordedWorkflow {
-  const directory = mkdtempSync(path.join(tmpdir(), "resin-private-oracle-"));
-  directories.push(directory);
-  writeFileSync(path.join(directory, "dbtool"), DBTOOL);
-  chmodSync(path.join(directory, "dbtool"), 0o755);
+async function recordJob(store: InMemoryPrivateValueStore): Promise<RecordedWorkflow> {
+  const pipeline = new NormalizationPipeline({
+    privateValueStore: store,
+    redactionConfig: { sensitiveEnvVars: [] },
+  });
+  pipeline.registerDecoder(new OmpRecordDecoder());
   const recorder = new WorkflowCallRecorder({ privateValues: store });
   const events: NormalizedSessionEvent[] = [];
   let sequence = 0;
-  const emit = (fields: Record<string, unknown>) =>
-    events.push(
-      projectEventToMetadataOnly(
-        recorder.observe(
-          NormalizedSessionEventSchema.parse({
-            schemaVersion: "1.0.0",
-            sessionId: SESSION,
-            eventId: `event-${sequence}`,
-            timestamp: "2026-09-26T00:00:00.000Z",
-            causalRef: { causalSequence: sequence++ },
-            redaction: { isRedacted: false, redactedFields: [], redactionStrategy: "mask" },
-            ...fields,
-          }),
-          { workspaceId: owner },
-        ),
-      ),
-    );
-  emit({ type: "message", role: "user", content: "Back up the inventory database" });
-  const run = (callId: string, command: string) => {
-    const printed = execFileSync("/bin/sh", ["-c", command], { cwd: directory, encoding: "utf8" });
-    emit({ type: "tool_call", callId, toolName: "bash", parameters: { command } });
-    emit({
-      type: "tool_result",
-      callId,
-      toolName: "bash",
-      result: printed,
-      isError: false,
-      executionDurationMs: 1,
-    });
+  const feed = async (message: unknown) => {
+    for (const outcome of await pipeline.processRecord(record(++sequence, message), {
+      sessionId: SESSION,
+      harnessId: "omp",
+      workspaceId: owner,
+    })) {
+      if (outcome.status === "success" && !outcome.isDuplicate) {
+        events.push(
+          projectEventToMetadataOnly(recorder.observe(outcome.event, { workspaceId: owner })),
+        );
+      }
+    }
   };
-  run("dump", `./dbtool dump --password ${PASSWORD} inventory`);
-  run("list", "ls");
-  return recordCallsFromEvents("inventory-backup", events as RecordableEvent[])!.workflow;
+  await feed({ role: "user", content: [{ type: "text", text: "Back up the inventory database" }] });
+  for (const [id, command, output] of [
+    ["dump", DUMP, "dumped 42 rows"],
+    ["check", "wc -l backups/inventory.sql", "42 backups/inventory.sql"],
+  ] as const) {
+    await feed({
+      role: "assistant",
+      content: [{ type: "toolCall", id, name: "bash", arguments: { command } }],
+    });
+    await feed({
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "bash",
+      content: [{ type: "text", text: output }],
+    });
+  }
+  const workflow = recordCallsFromEvents("inventory-backup", events as RecordableEvent[])!.workflow;
+  expect(JSON.stringify(workflow)).not.toContain(PASSWORD);
+  return workflow;
 }
 
-async function validate(plan: RecordedWorkflow, store: InMemoryPrivateValueStore) {
+async function validate(plan: RecordedWorkflow, store: PrivateValueStore) {
   return await createRecordingCheckValidator({
     workspaceId: owner,
     privateValues: store,
     localCalls: localCallsFor(store, owner, [SESSION]),
+    derivation: {
+      runtime: "resin.program",
+      call: async () => {
+        throw new Error("no derivation may run in these checks");
+      },
+    },
   })({ ...plan, candidates: [] });
 }
 
-/** The plan with the dump step's command spelled out as literal text holding `password`. */
-function guessing(plan: RecordedWorkflow, password: string): RecordedWorkflow {
+function withDumpCommand(plan: RecordedWorkflow, command: string): RecordedWorkflow {
   return {
     ...plan,
     steps: plan.steps.map((step) =>
@@ -101,13 +108,7 @@ function guessing(plan: RecordedWorkflow, password: string): RecordedWorkflow {
             arguments: step.arguments.map((argument) =>
               argument.name !== "command"
                 ? argument
-                : {
-                    ...argument,
-                    source: {
-                      kind: "literal" as const,
-                      value: `./dbtool dump --password ${password} inventory`,
-                    },
-                  },
+                : { ...argument, source: { kind: "literal" as const, value: command } },
             ),
           },
     ),
@@ -117,19 +118,91 @@ function guessing(plan: RecordedWorkflow, password: string): RecordedWorkflow {
 describe("a validation ask over a private recorded value", () => {
   it("verifies the plan as recorded", async () => {
     const store = new InMemoryPrivateValueStore();
-    const plan = recordJob(store);
-    expect(JSON.stringify(plan)).not.toContain(PASSWORD);
+    const plan = await recordJob(store);
     expect((await validate(plan, store)).verification?.status).toBe("verified");
   });
 
-  it("answers a right and a wrong password guess identically, without naming the private step", async () => {
+  it("answers a right and a wrong password guess identically", async () => {
     const store = new InMemoryPrivateValueStore();
-    const plan = recordJob(store);
-    const right = await validate(guessing(plan, PASSWORD), store);
-    const wrong = await validate(guessing(plan, "hunter22hunter"), store);
+    const plan = await recordJob(store);
+    const right = await validate(withDumpCommand(plan, DUMP), store);
+    const wrong = await validate(withDumpCommand(plan, DUMP.replace(PASSWORD, "hunter22")), store);
     expect(right.verification?.status).toBe("failed");
-    expect(right.verification).toEqual(wrong.verification);
+    expect(right).toEqual(wrong);
     const dump = plan.steps.find((step) => step.callId === "dump")!.id;
     expect(right.verification?.missed.map((entry) => entry.stepId)).toContain(dump);
+  });
+
+  it("answers any plan whose derivation reads the private step with the same unavailable answer", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = await recordJob(store);
+    const dump = plan.steps.find((step) => step.callId === "dump")!;
+    const derive = (code: string): RecordedWorkflow => ({
+      ...plan,
+      steps: [
+        ...plan.steps,
+        {
+          id: "derive",
+          origin: "derivation",
+          callable: {
+            runtime: "resin.program",
+            name: "derive",
+            program: { kind: "python", source: code, argument: "code" },
+          },
+          arguments: [
+            { name: "code", source: { kind: "literal", value: code } },
+            { name: "input", source: { kind: "result", stepId: dump.id, path: [] } },
+          ],
+          dependsOn: [dump.id],
+          failurePolicy: { onError: "abort", policy: "default" },
+        } as unknown as WorkflowStep,
+      ],
+    });
+    const one = await validate(derive("print(1 if 'Tr0' in input else 0)"), store);
+    const other = await validate(derive("print(0)"), store);
+    expect(one.unavailable).toMatch(/derivation step of this plan reads recorded data/);
+    expect(one.verification).toBeUndefined();
+    expect(one).toEqual(other);
+  });
+
+  it("treats a call recorded without its upload's private positions as private throughout", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = await recordJob(store);
+    // An older recording: the stored positions are absent.
+    const legacy: PrivateValueStore = {
+      get: (key) => {
+        const value = store.get(key);
+        return Array.isArray(value) &&
+          value.every((entry) => typeof entry === "object" && entry !== null && "path" in entry)
+          ? undefined
+          : value;
+      },
+      set: (...args) => store.set(...args),
+      origin: (key) => store.origin(key),
+      representation: (key) => store.representation(key),
+    };
+    const check = plan.steps.find((step) => step.callId === "check")!.id;
+    const literalCheck: RecordedWorkflow = {
+      ...plan,
+      steps: plan.steps.map((step) =>
+        step.id !== check
+          ? step
+          : {
+              ...step,
+              arguments: step.arguments.map((argument) =>
+                argument.name !== "command"
+                  ? argument
+                  : {
+                      ...argument,
+                      source: { kind: "literal" as const, value: "wc -l backups/inventory.sql" },
+                    },
+              ),
+            },
+      ),
+    };
+    expect((await validate(literalCheck, store)).verification?.status).toBe("verified");
+    const answer = await validate(literalCheck, legacy);
+    expect(answer.verification?.status).toBe("failed");
+    expect(answer.verification?.missed.map((entry) => entry.stepId)).toContain(check);
   });
 });

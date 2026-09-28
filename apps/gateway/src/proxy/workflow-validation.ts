@@ -100,6 +100,8 @@ const MISSED_DETAIL = "the recording check did not reproduce this recorded step"
 const NOT_CONFIRMED = "the binding was not confirmed by the recording check";
 const TYPE_DISAGREES =
   "the demonstrations' values for this input do not share one JSON type; the binding was not confirmed";
+const PRIVATE_DERIVATION =
+  "a derivation step of this plan reads recorded data this device redacted as secret; no recording check or parameter decision was performed";
 const UNAVAILABLE =
   "this device could not identify the demonstration's recorded calls; no parameter decision was performed";
 
@@ -387,13 +389,23 @@ function segmentCall(
   if (text === undefined || program === undefined) return undefined;
   // Token positions of the whole chain do not address the segment: a chain with any private
   // position keeps every segment's text private as a whole.
-  const privateText = call.privatePositions.some((entry) => entry.argument === program.argument);
+  const textPositions = call.privatePositions.filter(
+    (entry) => entry.argument === program.argument,
+  );
   return {
     ...call,
     arguments: { ...call.arguments, [program.argument]: text },
     privatePositions: [
       ...call.privatePositions.filter((entry) => entry.argument !== program.argument),
-      ...(privateText ? [{ argument: program.argument, path: [] }] : []),
+      ...(textPositions.length === 0
+        ? []
+        : [
+            {
+              argument: program.argument,
+              path: [],
+              redacted: textPositions.some((entry) => entry.redacted),
+            },
+          ]),
     ],
   };
 }
@@ -536,9 +548,71 @@ function readStepIds(value: unknown, into: Set<string>): Set<string> {
   return into;
 }
 
+/** Every input name a value source reads, however deeply templates nest it. */
+function readInputNames(value: unknown, into: Set<string>): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) readInputNames(item, into);
+  } else if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if ((record.type === "input" || record.kind === "input") && typeof record.name === "string") {
+      into.add(record.name);
+    }
+    for (const entry of Object.values(record)) readInputNames(entry, into);
+  }
+  return into;
+}
+
+/**
+ * Whether any derivation step reads secret-redacted recorded data, directly or through other steps:
+ * a recorded step with a redacted position taints its result, a step reading a tainted step is
+ * tainted in turn, and an input any tainted step reads is tainted.
+ */
+function derivationReadsPrivate(
+  plan: RecordedWorkflow,
+  demonstrations: readonly LocalDemonstration[],
+): boolean {
+  const tainted = new Set(
+    plan.steps
+      .filter((step) =>
+        demonstrations.some(
+          ({ recording }) =>
+            recording
+              .get(step.id)
+              ?.privatePositions?.some((position) => position.redacted === true) === true,
+        ),
+      )
+      .map((step) => step.id),
+  );
+  const taintedInputs = new Set<string>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const step of plan.steps) {
+      const reads = readStepIds(step.arguments, new Set());
+      const inputs = readInputNames(step.arguments, new Set());
+      const readsTaint =
+        [...reads].some((id) => tainted.has(id)) ||
+        [...inputs].some((name) => taintedInputs.has(name));
+      if (!tainted.has(step.id) && readsTaint) {
+        tainted.add(step.id);
+        grew = true;
+      }
+      if (tainted.has(step.id)) {
+        for (const name of inputs) {
+          if (!taintedInputs.has(name)) {
+            taintedInputs.add(name);
+            grew = true;
+          }
+        }
+      }
+    }
+  }
+  return plan.steps.some((step) => step.origin === "derivation" && tainted.has(step.id));
+}
+
 /**
  * Steps whose own outcome could answer a question about a private value: model-written derivation
- * steps (their code runs over recorded data), recorded steps with a private position, and steps
+ * steps (their code runs over recorded data), recorded steps with a redacted position, and steps
  * that read a derivation's output.
  */
 function sensitiveSteps(
@@ -551,7 +625,9 @@ function sensitiveSteps(
   const sensitive = new Set(derivations);
   for (const step of plan.steps) {
     const privateHere = demonstrations.some(
-      ({ recording }) => (recording.get(step.id)?.privatePositions?.length ?? 0) > 0,
+      ({ recording }) =>
+        recording.get(step.id)?.privatePositions?.some((position) => position.redacted === true) ===
+        true,
     );
     const readsDerivation = [...readStepIds(step.arguments, new Set())].some((id) =>
       derivations.has(id),
@@ -628,6 +704,28 @@ export function createRecordingCheckValidator(
       };
     }
     const baselineRun = runs.get("baseline")?.iterations?.[0];
+    // A derivation that reads private recorded data would turn the check into a computation over it:
+    // such an ask is never checked, and every such ask gets this same answer.
+    if (
+      derivationReadsPrivate(plan, [
+        ...(baselineRun === undefined ? [] : [baselineRun]),
+        ...(selected.iterations ?? []),
+      ])
+    ) {
+      return {
+        verdicts: candidates.map((candidate) => ({
+          candidate: {
+            stepId: candidate.stepId,
+            argument: candidate.argument,
+            path: candidate.path,
+            proposed: candidate.proposed,
+          },
+          confirmed: false,
+          reason: PRIVATE_DERIVATION,
+        })),
+        unavailable: PRIVATE_DERIVATION,
+      };
+    }
     const registry = (
       found: LocalDemonstration,
       checked: RecordedWorkflow,
