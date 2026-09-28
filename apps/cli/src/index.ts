@@ -3,6 +3,8 @@
  *
  * Command-line interface and single-command installer for Resin.
  */
+// Must stay first: suppresses the node:sqlite ExperimentalWarning before anything loads it.
+import "@resin/db/node-warning-filter";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";

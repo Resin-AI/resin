@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+// Must stay first: suppresses the node:sqlite ExperimentalWarning before anything loads it.
+import "@resin/db/node-warning-filter";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
