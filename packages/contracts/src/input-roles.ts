@@ -263,6 +263,18 @@ function commandSiteRole(command: CommandSite, value: string | undefined): strin
     if (operand !== undefined && before.some((word) => word === "-C" || word === "--directory")) {
       return "folder";
     }
+    // Creating an archive, an operand with no file extension is a directory it archives.
+    const creating = before.some(
+      (word) => word === "--create" || /^-[A-Za-z]*c[A-Za-z]*$/u.test(word),
+    );
+    if (
+      creating &&
+      operand !== undefined &&
+      value !== undefined &&
+      !/\.[A-Za-z0-9]{1,8}$/u.test(value)
+    ) {
+      return value.includes("/") ? "directory" : "folder";
+    }
     return undefined;
   }
   if (CHECKSUM_COMMANDS[name] === true && operand !== undefined) {
