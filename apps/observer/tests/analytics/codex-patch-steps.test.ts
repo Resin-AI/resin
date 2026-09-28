@@ -159,7 +159,8 @@ describe("Codex patch steps", () => {
 
     // No text of the diff reaches the record or its cloud projection.
     for (const text of [JSON.stringify(workflow), JSON.stringify(projected)]) {
-      expect(text).not.toContain("8083");
+      // As a standalone token: random event ids and digests may contain these digits.
+      expect(text).not.toMatch(/(?<![0-9A-Za-z])8083(?![0-9A-Za-z])/);
       expect(text).not.toContain("name: media");
       expect(text).not.toContain("path: /orders");
     }
