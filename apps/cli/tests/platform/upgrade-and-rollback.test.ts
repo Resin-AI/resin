@@ -159,6 +159,8 @@ function createEngineFixture(
     failStatusAfter?: number;
     homeDir?: string;
     customFetch?: typeof fetch;
+    removeVersion?: UpdateEngineOptions["removeVersion"];
+    logger?: UpdateEngineOptions["logger"];
   } = {},
 ) {
   const homeDir = options.homeDir ?? "/home/update-test";
@@ -278,7 +280,9 @@ function createEngineFixture(
     readActiveVersion: async () => activeVersion,
     removeVersion: async (versionDir) => {
       events.push(`remove:${path.basename(versionDir)}`);
+      await options.removeVersion?.(versionDir);
     },
+    logger: options.logger ?? (() => {}),
     serviceManager,
     sessionActivity: options.sessionActivity ?? (async () => false),
     healthProbe: options.useDefaultHealthProbe
@@ -2176,6 +2180,146 @@ describe("UpdateEngine staging, activation, and rollback", () => {
       expect(events).not.toContain("switch:1.1.0");
     } finally {
       await server.stop().catch(() => {});
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("UpdateEngine old release pruning", () => {
+  async function createVersionsHome(versions: string[]) {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-version-gc-"));
+    const resinHome = path.join(homeDir, ".resin");
+    for (const version of versions) {
+      await fs.mkdir(path.join(resinHome, "versions", version, "bin"), { recursive: true });
+      await fs.writeFile(path.join(resinHome, "versions", version, "version.json"), "{}");
+    }
+    await fs.writeFile(
+      path.join(resinHome, "version-state.json"),
+      JSON.stringify({
+        activeVersion: "1.0.0",
+        previousVersion: null,
+        updatedAt: "2026-08-27T00:00:00.000Z",
+        installedVersions: versions.map((version) => version.slice(1)),
+        provenanceByVersion: Object.fromEntries(
+          versions.map((version) => [version.slice(1), { channel: "stable" }]),
+        ),
+      }),
+    );
+    return { homeDir, resinHome };
+  }
+
+  const removeForReal = async (versionDir: string) => {
+    await fs.rm(versionDir, { recursive: true, force: true });
+  };
+
+  async function listVersions(resinHome: string): Promise<string[]> {
+    return (await fs.readdir(path.join(resinHome, "versions"))).sort();
+  }
+
+  it("keeps only the active, previous and rollback-target versions after a healthy upgrade", async () => {
+    const old = Array.from({ length: 12 }, (_, index) => `v0.1.${index}`);
+    const { homeDir, resinHome } = await createVersionsHome([
+      ...old,
+      "v0.9.0",
+      "v1.0.0",
+      "v1.0.0+resin-reinstall.54d5b0120836",
+      "v1.1.0",
+    ]);
+    try {
+      // The live `current` pointer names a suffixed reinstall directory; it must survive too.
+      await fs.symlink(
+        path.join(resinHome, "versions", "v1.0.0+resin-reinstall.54d5b0120836"),
+        path.join(resinHome, "current"),
+      );
+      const fixture = createEngineFixture({ homeDir, removeVersion: removeForReal });
+
+      const result = await fixture.engine.run({ mode: "background" });
+
+      expect(result).toMatchObject({ success: true, status: "activated", activeVersion: "1.1.0" });
+      expect(await listVersions(resinHome)).toEqual([
+        "v0.9.0",
+        "v1.0.0",
+        "v1.0.0+resin-reinstall.54d5b0120836",
+        "v1.1.0",
+      ]);
+      const state = JSON.parse(
+        await fs.readFile(path.join(resinHome, "version-state.json"), "utf8"),
+      );
+      expect([...state.installedVersions].sort()).toEqual([
+        "0.9.0",
+        "1.0.0",
+        "1.0.0+resin-reinstall.54d5b0120836",
+        "1.1.0",
+      ]);
+      expect(Object.keys(state.provenanceByVersion).sort()).toEqual([
+        "0.9.0",
+        "1.0.0",
+        "1.0.0+resin-reinstall.54d5b0120836",
+        "1.1.0",
+      ]);
+    } finally {
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes nothing when the upgrade fails its health gate and rolls back", async () => {
+    const versions = ["v0.5.0", "v0.6.0", "v0.9.0", "v1.0.0", "v1.1.0"];
+    const { homeDir, resinHome } = await createVersionsHome(versions);
+    try {
+      const fixture = createEngineFixture({
+        homeDir,
+        removeVersion: removeForReal,
+        healthProbe: async () => ({
+          serviceActive: false,
+          ipcResponsive: false,
+          mcpResponsive: false,
+          recoveryBreakerTripped: true,
+          message: "recovery breaker tripped after crash loop",
+        }),
+      });
+
+      const result = await fixture.engine.run({ mode: "manual" });
+
+      expect(result).toMatchObject({ success: false, status: "rolled-back" });
+      // Only the rejected candidate itself is discarded; no older release is pruned.
+      expect(fixture.events.filter((event) => event.startsWith("remove:"))).toEqual([
+        "remove:v1.1.0",
+      ]);
+      expect(await listVersions(resinHome)).toEqual(["v0.5.0", "v0.6.0", "v0.9.0", "v1.0.0"]);
+    } finally {
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs removal failures without failing the upgrade", async () => {
+    const { homeDir, resinHome } = await createVersionsHome([
+      "v0.5.0",
+      "v0.6.0",
+      "v0.9.0",
+      "v1.0.0",
+      "v1.1.0",
+    ]);
+    try {
+      const logs: string[] = [];
+      const fixture = createEngineFixture({
+        homeDir,
+        logger: (message) => logs.push(message),
+        removeVersion: async (versionDir) => {
+          if (path.basename(versionDir) === "v0.5.0") throw new Error("EBUSY: resource busy");
+          await removeForReal(versionDir);
+        },
+      });
+
+      const result = await fixture.engine.run({ mode: "manual" });
+
+      expect(result).toMatchObject({ success: true, status: "activated" });
+      expect(await listVersions(resinHome)).toEqual(["v0.5.0", "v0.9.0", "v1.0.0", "v1.1.0"]);
+      expect(logs.join("\n")).toContain("EBUSY: resource busy");
+      const state = JSON.parse(
+        await fs.readFile(path.join(resinHome, "version-state.json"), "utf8"),
+      );
+      expect([...state.installedVersions].sort()).toEqual(["0.5.0", "0.9.0", "1.0.0", "1.1.0"]);
+    } finally {
       await fs.rm(homeDir, { recursive: true, force: true });
     }
   });
