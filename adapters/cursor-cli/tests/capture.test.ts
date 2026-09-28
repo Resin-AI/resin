@@ -11,6 +11,7 @@ import {
   CursorHarnessAdapter,
   CursorRecordDecoder,
   CursorSessionEventSource,
+  cursorCatalogModel,
   cursorProjectSlug,
   inspectCursorHookPayload,
   normalizeCursorVersion,
@@ -171,7 +172,12 @@ describe("decoder", () => {
     });
     const usage = interactive.flatMap((e) => (e.providerUsage ? [e.providerUsage] : []));
     expect(usage).toEqual([
-      expect.objectContaining({ inputTokens: 9559, outputTokens: 194, cachedInputTokens: 9344 }),
+      expect.objectContaining({
+        model: null,
+        inputTokens: 9559,
+        outputTokens: 194,
+        cachedInputTokens: 9344,
+      }),
     ]);
     expect(interactive.at(-1)).toMatchObject({ type: "session_lifecycle", lifecycleType: "end" });
 
@@ -270,5 +276,19 @@ describe("cursor-agent installation probe", () => {
       version: UNKNOWN_HARNESS_VERSION,
       metadata: { rawVersion: null },
     });
+  });
+});
+
+describe("model identity", () => {
+  it.each([
+    ["cursor-grok-4.5-high", "grok-4.5"],
+    ["cursor-grok-4.5-high-fast", "grok-4.5"],
+    ["claude-opus-5-thinking-high", "claude-opus-5"],
+    ["gpt-5.3-codex-xhigh-fast", "gpt-5.3-codex"],
+    ["gemini-3.7-flash-low", "gemini-3.7-flash"],
+    ["composer-2.5", "composer-2.5"],
+    ["default", undefined],
+  ])("prices cursor-agent's %s as %s", (raw, model) => {
+    expect(cursorCatalogModel(raw)).toBe(model);
   });
 });

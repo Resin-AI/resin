@@ -59,6 +59,26 @@ function stringField(payload: Record<string, unknown>, key: string): string | un
 }
 
 /**
+ * The catalog model behind a cursor-agent model id. Hook payloads carry Cursor's picker ids
+ * (`cursor-grok-4.5-high-fast`, `claude-opus-5-thinking-high`, `gemini-3.7-flash-low`): a
+ * `cursor-` prefix and speed/effort/thinking suffixes around the model's own id (`grok-4.5`).
+ * `default` is the requested `auto` router, not a model, so it names none.
+ */
+export function cursorCatalogModel(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "default" || raw === "auto") return undefined;
+  let model = raw.replace(/^cursor-/, "");
+  for (;;) {
+    const next = model.replace(/-(?:fast|low|medium|high|xhigh|max|thinking)$/, "");
+    if (next === model) return model;
+    model = next;
+  }
+}
+
+function modelField(payload: Record<string, unknown>): string | undefined {
+  return cursorCatalogModel(stringField(payload, "model"));
+}
+
+/**
  * Turn usage as reported on `stop`. cursor-agent repeats the same numbers on the turn's
  * `afterAgentResponse` (same generation_id), which fires only for completed turns, so usage is
  * taken from `stop` alone to count each turn once. Never synthesizes totals.
@@ -72,7 +92,7 @@ function usageFrom(payload: Record<string, unknown>): ProviderReportedUsage | un
   }
   return {
     provider: "cursor",
-    model: stringField(payload, "model") ?? null,
+    model: modelField(payload) ?? null,
     accountingVersion: CURSOR_USAGE_ACCOUNTING_VERSION,
     availability: "partial",
     inputTokens: inputTokens ?? null,
@@ -184,7 +204,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             type: "message",
             role: "user",
             content: payload.prompt as string,
-            model: stringField(payload, "model"),
+            model: modelField(payload),
           },
         ];
       case "afterAgentThought":
@@ -194,7 +214,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             type: "model_reasoning",
             reasoningContent: payload.text as string,
             visibility: "visible",
-            model: stringField(payload, "model"),
+            model: modelField(payload),
             durationMs: nonNegativeInt(payload.duration_ms),
           },
         ];
@@ -205,7 +225,7 @@ export class CursorRecordDecoder implements HarnessRecordDecoder {
             type: "message",
             role: "assistant",
             content: payload.text as string,
-            model: stringField(payload, "model"),
+            model: modelField(payload),
           },
         ];
       case "postToolUse":
