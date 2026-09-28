@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, statSync, truncateSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -49,6 +49,20 @@ describe("upload redaction of credentials without a named vendor prefix", () => 
       "ddsend --app web api token 5f0c8d2e-3b4a-4c1d-9e8f-7a6b5c4d3e2f",
       "5f0c8d2e-3b4a-4c1d-9e8f-7a6b5c4d3e2f",
     ],
+    ["JSON api_key", '{"api_key":"q8Zr2Lk9Wm4x"}', "q8Zr2Lk9Wm4x"],
+    ["JSON password", '{"user": "ops", "password": "Hunter2Hunter2"}', "Hunter2Hunter2"],
+    [
+      "single-line .netrc entry",
+      "machine api.example.com login ops password n3tRcS3cret",
+      "n3tRcS3cret",
+    ],
+    [
+      "multi-line .netrc entry",
+      "machine api.example.com\n  login ops\n  password n3tRcS3cret\n",
+      "n3tRcS3cret",
+    ],
+    ["Cookie header", "curl -H 'Cookie: session=s3ss10nV4lue' https://x", "session=s3ss10nV4lue"],
+    ["Set-Cookie header", "Set-Cookie: sid=AbC9dEf8; Path=/; HttpOnly", "sid=AbC9dEf8"],
   ])("redacts a %s before upload", (_label, command, secret) => {
     const store = new InMemoryPrivateValueStore();
     const { data } = engine({
@@ -70,6 +84,10 @@ describe("upload redaction of credentials without a named vendor prefix", () => 
     "curl -u deploy:Tr0ub4 https://x",
     "http -a bob:pw1 example.org",
     'curl -H "X-Api-Key: abc123" https://x',
+    '{"api_key":"q8Zr2Lk9Wm4x"}',
+    '{\\"password\\": \\"Hunter2Hunter2\\"}',
+    "machine h login u password n3tRc",
+    "Cookie: session=s3ss10n",
   ])("fails closed if %s ever reaches the upload validator unredacted", (command) => {
     expect(() => assertNoProhibitedRawData({ command })).toThrow(RawDataExfiltrationError);
   });
@@ -85,6 +103,9 @@ describe("upload redaction of credentials without a named vendor prefix", () => 
     "docker pull alpine@sha256:3f9a1c07b2e84d65a0f1c2d3e4b5a6979c2f4e1a3f9a1c07b2e84d65a0f1c2d3",
     "const bytes = base64ToUint8Array(input) as HTMLInputElement2; Author: Jane",
     "request 123e4567-e89b-12d3-a456-426614174000 finished",
+    "ls build-3f9a1c07b2e84d65a0f1c2d3e4b5a6979c2f4e1a.log",
+    "du -sh /tmp/cache/3f9a1c07b2e84d65a0f1c2d3e4b5a697/x",
+    "by default the password is rotated monthly",
   ])("keeps ordinary digests and identifiers intact: %s", (text) => {
     expect(engine().redactString(text).redactedText).toBe(text);
   });
@@ -127,18 +148,40 @@ describe("placeholder tags", () => {
     expect(redacted).not.toContain(legacyTag);
     expect(resolvePrivateReference(store, "private:legacy")).toBe(`psql -p ${secret}`);
   });
+
+  it.each([
+    ["readable by others", (file: string) => chmodSync(file, 0o644)],
+    ["truncated", (file: string) => truncateSync(file, 7)],
+  ])("replace a key file that is %s and keep earlier placeholders resolvable", (_label, damage) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "resin-redaction-key-"));
+    const first = new FilePrivateValueStore(root);
+    const oldKey = Buffer.from(first.redactionKey());
+    const oldPlaceholder = engine({ fingerprintKey: oldKey })
+      .redactString(`psql postgres://app:${secret}@db/prod`)
+      .redactedText.match(/\[REDACTED_URL_CREDENTIAL:[0-9a-f]+\]/)?.[0];
+    expect(oldPlaceholder).toBeDefined();
+    first.set(oldPlaceholder!, secret, { workspaceId: "ws" });
+    first.set("private:old", `psql postgres://app:${oldPlaceholder}@db/prod`);
+    const keyFile = path.join(root, "private-values", "redaction-key");
+    damage(keyFile);
+
+    const reopened = new FilePrivateValueStore(root);
+    const newKey = Buffer.from(reopened.redactionKey());
+    expect(statSync(keyFile).mode & 0o777).toBe(0o600);
+    expect(newKey).toHaveLength(32);
+    expect(newKey).not.toEqual(oldKey);
+    expect(resolvePrivateReference(reopened, "private:old")).toBe(
+      `psql postgres://app:${secret}@db/prod`,
+    );
+  });
 });
 
 describe("session environment", () => {
   it("scrubs secret-named variables from the supplied session environment, not the daemon's", () => {
     const text = "export STRIPE_SECRET=abcdef123456 && ./deploy";
-    process.env.STRIPE_SECRET = "abcdef123456";
-    try {
-      const daemonOnly = new RedactionEngine({ environment: {}, scanContent: false });
-      expect(daemonOnly.redactString(text).redactedText).toBe(text);
-    } finally {
-      delete process.env.STRIPE_SECRET;
-    }
+    // An empty session environment scrubs nothing, whatever this process's environment holds.
+    const unrelated = new RedactionEngine({ environment: {}, scanContent: false });
+    expect(unrelated.redactString(text).redactedText).toBe(text);
     const session = new RedactionEngine({
       environment: { STRIPE_SECRET: "abcdef123456", HOME: "/home/dev" },
       scanContent: false,

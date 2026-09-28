@@ -449,6 +449,9 @@ export const SENSITIVE_PATTERN_REGEXES: readonly RegExp[] = Object.freeze([
   /\b(?:Proxy-)?Authorization\s*:\s*(?:Basic|Bearer|Token|Digest|Negotiate|NTLM|ApiKey|Key)\s+[^\s"'`,;\\[][^\s"'`,;\\]{2,}/i,
   /(?<![A-Za-z0-9_-])(?:(?:[A-Za-z0-9]+-)+[A-Za-z0-9]*(?:key|token|secret|auth|password)[A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[A-Za-z0-9]*(?:key|token|secret|auth|password)[A-Za-z0-9]*(?:-[A-Za-z0-9]+)+)\s*:\s*(?:(?:Basic|Bearer|Token)\s+)?[^\s"'`,;\\[][^\s"'`,;\\]{2,}/i,
   /\b(?:curl|wget|https?|httpie|xh)\b[^\n|;&]*?\s(?:-u\s*|--user(?:\s+|=)|-a\s+|--auth(?:\s+|=))["']?[^\s"':]*:[^\s"'`\\[]/,
+  /\\?["'](?:password|passwd|api_key|apikey|auth_token|client_secret|private_token)\\?["']\s*:\s*\\?["'][^"'\\[\s][^"'\\\s]{7,}/i,
+  /\b(?:machine\s+\S+|default)\s+(?:login\s+\S+\s+)?password\s+[^\s"'`\\[]|^[ \t]*password[ \t]+[^\s"'`\\[][^\s]*[ \t]*$/m,
+  /\b(?:Set-)?Cookie\s*:\s*[^\s"'`\\[]/i,
 ]);
 
 /**

@@ -131,7 +131,7 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
     name: "Generic Password or Credential Assignment",
     secretType: "CREDENTIAL",
     regex:
-      /(?:password|passwd|api_key|apikey|auth_token|client_secret|private_token)\s*[:=]\s*["']?([^"'\s\n\r]{8,})["']?/gi,
+      /(?:password|passwd|api_key|apikey|auth_token|client_secret|private_token)["']?\s*[:=]\s*["']?([^"'\s\n\r]{8,})["']?/gi,
     confidence: "medium",
   },
   {
@@ -211,6 +211,24 @@ export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
     regex:
       /\b(?:curl|wget|https?|httpie|xh)\b[^\n|;&]*?\s(?:-u\s*|--user(?:\s+|=)|-a\s+|--auth(?:\s+|=))["']?[^\s"':]*:([^\s"'`\\]+)/g,
     minLength: 1,
+    confidence: "high",
+  },
+  {
+    id: "netrc_password",
+    name: "Password in a .netrc Entry",
+    secretType: "CREDENTIAL",
+    // `machine h login u password V` on one line, or a `password V` line of a multi-line entry.
+    regex:
+      /\b(?:machine\s+\S+|default)\s+(?:login\s+\S+\s+)?password\s+([^\s"'`\\]+)|^[ \t]*password[ \t]+([^\s"'`\\]+)[ \t]*$/gm,
+    minLength: 1,
+    confidence: "high",
+  },
+  {
+    id: "cookie_header",
+    name: "HTTP Cookie Values",
+    secretType: "COOKIE",
+    regex: /\b(?:Set-)?Cookie\s*:\s*([^\n"'`\\]+)/gi,
+    minLength: 3,
     confidence: "high",
   },
   {
@@ -405,7 +423,10 @@ export class ContentScanner {
         if (!/[0-9]/.test(candidate) || !/[a-f]/i.test(candidate) || covered(start, end)) continue;
         const score = normalizedEntropy(candidate, 16);
         if (score < MIN_NORMALIZED_ENTROPY) continue;
-        if (isHashContext(text, start, end)) {
+        // A digest named by a path or file (`build-<sha>.log`, `/cache/<md5>/x`) is content-addressed.
+        const pathNeighbour =
+          /[/._-]/.test(text[start - 1] ?? "") || /[/._-]/.test(text[end] ?? "");
+        if (pathNeighbour || isHashContext(text, start, end)) {
           digests.push({ start, end });
           continue;
         }
