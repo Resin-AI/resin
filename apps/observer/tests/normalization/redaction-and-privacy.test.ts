@@ -171,6 +171,19 @@ describe("Privacy Redaction & Secret Scrubbing", () => {
     expect(data.longText.length).toBeLessThan(longString.length);
   });
 
+  it("never rescans a placeholder it wrote, whatever its keyed tag", () => {
+    // Device key 28 tags this secret with a tag the token scan used to flag inside the placeholder,
+    // nesting `[[REDACTED_HIGH_ENTROPY_SECRET:...]]` about once in 30 random keys.
+    for (const key of [28, ...Array.from({ length: 64 }, (_, index) => index)]) {
+      const redacted = new RedactionEngine({
+        sensitiveEnvVars: [],
+        customSecrets: ["InternalPassword123!"],
+        fingerprintKey: new Uint8Array(32).fill(key),
+      }).redactString("password: InternalPassword123!").redactedText;
+      expect(redacted).toMatch(/^password: \[REDACTED_SECRET:[0-9a-f]{16}\]$/);
+    }
+  });
+
   it("runs full privacy pipeline over a raw record containing secrets", async () => {
     const pipeline = new NormalizationPipeline({
       redactionConfig: {
