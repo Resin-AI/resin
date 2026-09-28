@@ -1889,3 +1889,141 @@ export function getActiveVersion(resinHome: string): string | null {
 
   return null;
 }
+
+export interface PruneInstalledVersionsOptions {
+  readonly resinHome: string;
+  /** Versions (with or without a leading "v") whose directories must survive. */
+  readonly retainVersions: readonly (string | null | undefined)[];
+  readonly removeDirectory?: (versionDir: string) => Promise<void>;
+  readonly logger?: (message: string) => void;
+}
+
+export interface PruneInstalledVersionsResult {
+  readonly removed: string[];
+  readonly failed: string[];
+}
+
+function versionDirectoryName(version: string | null | undefined): string | null {
+  const trimmed = version?.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+}
+
+function readPointerDirectoryName(pointerPath: string, versionsDir: string): string | null {
+  try {
+    if (!fs.lstatSync(pointerPath).isSymbolicLink()) return null;
+    const target = path.resolve(path.dirname(pointerPath), fs.readlinkSync(pointerPath));
+    return path.dirname(target) === versionsDir ? path.basename(target) : null;
+  } catch {
+    return null;
+  }
+}
+
+function readVersionFile(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Removes release directories under <resinHome>/versions that are no longer needed after a
+ * successful activation. The active version, the `current`/`previous` pointer targets, the
+ * versions recorded in version-state.json and every caller-supplied retained version survive.
+ * Removal failures are logged and never thrown; version-state.json forgets only removed versions.
+ */
+export async function pruneInstalledVersions(
+  options: PruneInstalledVersionsOptions,
+): Promise<PruneInstalledVersionsResult> {
+  const { resinHome } = options;
+  const log = options.logger ?? (() => {});
+  const removeDirectory =
+    options.removeDirectory ??
+    ((versionDir: string) => fsPromises.rm(versionDir, { recursive: true, force: true }));
+  const versionsDir = path.resolve(resinHome, "versions");
+  const versionStatePath = path.join(resinHome, "version-state.json");
+  const removed: string[] = [];
+  const failed: string[] = [];
+
+  const versionsStats = lstatIfExists(versionsDir, fs);
+  if (!versionsStats || versionsStats.isSymbolicLink() || !versionsStats.isDirectory()) {
+    return { removed, failed };
+  }
+
+  let state: Partial<VersionStateRecord> | null = null;
+  try {
+    // SAFETY: version-state.json is written by switchActiveVersion as a VersionStateRecord.
+    state = JSON.parse(fs.readFileSync(versionStatePath, "utf8")) as Partial<VersionStateRecord>;
+  } catch {}
+
+  const retained = new Set<string>();
+  for (const name of [
+    ...options.retainVersions.map(versionDirectoryName),
+    readPointerDirectoryName(path.join(resinHome, "current"), versionsDir),
+    readPointerDirectoryName(path.join(resinHome, "previous"), versionsDir),
+    versionDirectoryName(readVersionFile(path.join(resinHome, "current-version"))),
+    versionDirectoryName(readVersionFile(path.join(resinHome, "previous-version"))),
+    versionDirectoryName(state?.activeVersion),
+    versionDirectoryName(state?.previousVersion),
+    versionDirectoryName(getActiveVersion(resinHome)),
+  ]) {
+    if (name) retained.add(name);
+  }
+  if (retained.size === 0) {
+    log("Skipping release version pruning: no active version could be determined.");
+    return { removed, failed };
+  }
+
+  for (const entry of fs.readdirSync(versionsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("v") || retained.has(entry.name)) {
+      continue;
+    }
+    const versionDir = path.join(versionsDir, entry.name);
+    try {
+      await removeDirectory(versionDir);
+      removed.push(entry.name);
+    } catch (error) {
+      failed.push(entry.name);
+      log(
+        `Failed to remove old release directory '${versionDir}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  if (removed.length > 0 && state) {
+    const removedVersions = new Set(removed.map((name) => name.slice(1)));
+    const nextState = { ...state };
+    if (Array.isArray(state.installedVersions)) {
+      nextState.installedVersions = state.installedVersions.filter(
+        (version) => !removedVersions.has(version.replace(/^v/, "")),
+      );
+    }
+    if (state.provenanceByVersion) {
+      nextState.provenanceByVersion = Object.fromEntries(
+        Object.entries(state.provenanceByVersion).filter(
+          ([version]) => !removedVersions.has(version.replace(/^v/, "")),
+        ),
+      );
+    }
+    const tmpStatePath = path.join(
+      resinHome,
+      `.version-state.json.tmp-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`,
+    );
+    try {
+      await fsPromises.writeFile(tmpStatePath, JSON.stringify(nextState, null, 2), "utf8");
+      await fsPromises.chmod(tmpStatePath, 0o644);
+      await fsPromises.rename(tmpStatePath, versionStatePath);
+    } catch (error) {
+      await fsPromises.rm(tmpStatePath, { force: true }).catch(() => {});
+      log(
+        `Failed to update version-state.json after pruning: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  if (removed.length > 0) {
+    log(`Removed ${removed.length} old release version(s): ${removed.join(", ")}.`);
+  }
+  return { removed, failed };
+}
