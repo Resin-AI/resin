@@ -1759,6 +1759,7 @@ Options:
 
   const telemetry = createInstallTelemetry({
     resinHome: resinHome ?? process.env.RESIN_HOME ?? path.join(os.homedir(), ".resin"),
+    testMode: allowInsecureLoopback,
   });
   // Not awaited here: a slow network must never delay the install itself.
   const started = telemetry.ownedByShell
@@ -1781,16 +1782,20 @@ Options:
       allowInsecureHttpForTests: allowInsecureLoopback,
       allowOverrides: channelUrl !== undefined,
     });
+    // The result is the helper's contract with install.sh / install.ps1: write it and wait until
+    // it is flushed before anything else (telemetry included) runs.
+    await writeFully(process.stdout, `${JSON.stringify(result, null, 2)}\n`);
     await started;
     if (!telemetry.ownedByShell) {
-      await createInstallTelemetry({ resinHome: result.resinHome, version: result.version }).send(
-        "install_completed",
-        { step: "complete", exit_code: 0 },
-      );
+      await createInstallTelemetry({
+        resinHome: result.resinHome,
+        version: result.version,
+        testMode: allowInsecureLoopback,
+      }).send("install_completed", { step: "complete", exit_code: 0 });
     }
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
-    process.stderr.write(
+    await writeFully(
+      process.stderr,
       `Installation failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     await started;
@@ -1799,15 +1804,33 @@ Options:
       exit_code: 1,
       reason: installFailureReason(error),
     });
-    process.exit(1);
+    // exitCode, not process.exit(): exiting would cut off output still queued on a pipe.
+    process.exitCode = 1;
   }
+}
+
+/**
+ * Writes `text` and resolves once the stream has flushed it. Writes to pipes are asynchronous on
+ * some platforms (Windows, POSIX pipes), so output written just before an exit can be lost.
+ */
+export function writeFully(
+  stream: { write: (chunk: string, callback: (error?: Error | null) => void) => boolean },
+  text: string,
+): Promise<void> {
+  const flushed = Promise.withResolvers<void>();
+  try {
+    stream.write(text, () => flushed.resolve());
+  } catch {
+    flushed.resolve();
+  }
+  return flushed.promise;
 }
 
 if (process?.argv?.[1] && isMainModule(import.meta.url, process.argv[1])) {
   runCli().catch((err) => {
+    process.exitCode = 1;
     process.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}\n`,
     );
-    process.exit(1);
   });
 }
