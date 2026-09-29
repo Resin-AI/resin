@@ -13,6 +13,7 @@ import {
   TokenRotationResponseSchema,
 } from "@resin/protocol";
 import { z } from "zod";
+import { reportEvent } from "./error-reporting/facade.js";
 import { resolvePaths } from "./paths.js";
 import { ensurePrivateDirectory } from "./private-fs.js";
 
@@ -763,11 +764,16 @@ export class CloudCredentialStore {
           return adopted;
         }
         this.lastRefreshFailure = "revoked";
+        reportEvent("credential_refresh_failed", {
+          reason: "revoked",
+          http_status: response.status,
+        });
         await this.purge();
         return null;
       }
 
       this.lastRefreshFailure = "invalid";
+      reportEvent("credential_refresh_failed", { reason: "invalid", http_status: response.status });
       return null;
     }
 
@@ -776,12 +782,14 @@ export class CloudCredentialStore {
       responseJson = await response.json();
     } catch {
       this.lastRefreshFailure = "invalid";
+      reportEvent("credential_refresh_failed", { reason: "invalid_response" });
       return null;
     }
 
     const parseResult = TokenRotationResponseSchema.safeParse(responseJson);
     if (!parseResult.success) {
       this.lastRefreshFailure = "invalid";
+      reportEvent("credential_refresh_failed", { reason: "invalid_response" });
       return null;
     }
 
@@ -791,6 +799,7 @@ export class CloudCredentialStore {
       newClaims = parseJwtClaims(rotation.accessToken);
     } catch {
       this.lastRefreshFailure = "invalid";
+      reportEvent("credential_refresh_failed", { reason: "invalid_token" });
       return null;
     }
 
@@ -812,6 +821,7 @@ export class CloudCredentialStore {
         return adopted;
       }
       this.lastRefreshFailure = "revoked";
+      reportEvent("credential_refresh_failed", { reason: "binding_mismatch" });
       await this.purge();
       throw new Error("Rotated token claims do not match original tenant/device binding");
     }

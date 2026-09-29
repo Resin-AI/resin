@@ -11,6 +11,7 @@ import {
   type PersistCloudCredentialsInput,
   type StoredCloudCredentials,
 } from "@resin/observer/client";
+import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import {
   type AuthClaims,
   type AuthScope,
@@ -568,6 +569,17 @@ export class DeviceAuthClient {
         throw new Error("Device credentials could not be persisted to owner-only storage");
       }
 
+      const pairedUserId = tokenResponse.claims.userId ?? tokenResponse.claims.subject;
+      const reporter = getErrorReporter();
+      if (pairedUserId) {
+        reporter.identifyCloudUser({
+          userId: pairedUserId,
+          accountId: tokenResponse.claims.accountId,
+          workspaceId,
+        });
+      }
+      reporter.capture("pairing_completed", { os: process.platform, arch: process.arch });
+
       return {
         success: true,
         deviceId,
@@ -580,6 +592,12 @@ export class DeviceAuthClient {
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      getErrorReporter().capture("pairing_failed", {
+        os: process.platform,
+        arch: process.arch,
+        error_type: err instanceof Error ? err.name : typeof err,
+      });
+      reportHandledError(err, { failureClass: "pairing" });
       return {
         success: false,
         deviceId,
@@ -629,7 +647,8 @@ export class DeviceAuthClient {
         tokenFilePath: this.store.getTokenFilePath(),
         storedInSecretStore: true,
       };
-    } catch {
+    } catch (error) {
+      reportHandledError(error, { failureClass: "credential_persist" });
       return { storedInSecretStore: false };
     }
   }

@@ -10,6 +10,7 @@ import {
   type DaemonPaths,
   resolvePaths,
 } from "@resin/observer/client";
+import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 
 export const resolveDaemonPaths = resolvePaths;
 import type { HarnessId } from "@resin/contracts";
@@ -893,6 +894,14 @@ export class ResinInstaller {
           : "\nResin configuration complete. Daemon startup and readiness were not checked; run resin-daemon --foreground or manage the daemon externally.\n",
       );
 
+      reportEvent("init_completed", {
+        step: "complete",
+        os: process.platform,
+        arch: process.arch,
+        dry_run: dryRun,
+        setup_service: Boolean(options.setupService),
+      });
+
       return {
         success: true,
         dryRun,
@@ -915,6 +924,13 @@ export class ResinInstaller {
       if (activeStep !== "unknown") {
         this.journal.failStep(activeStep, error);
       }
+      reportEvent("init_failed", {
+        step: activeStep,
+        os: process.platform,
+        arch: process.arch,
+        dry_run: dryRun,
+      });
+      reportHandledError(err, { failureClass: "install", properties: { step: activeStep } });
 
       if (!dryRun) {
         this.log("\n❌ Installation failed. Rolling back installation transaction...");
@@ -923,6 +939,10 @@ export class ResinInstaller {
           this.log("✔ Installation rollback completed successfully.");
         } catch (rollbackErr: unknown) {
           this.log(`⚠️  Warning: Rollback encountered an error: ${String(rollbackErr)}`);
+          reportHandledError(rollbackErr, {
+            failureClass: "install_rollback",
+            properties: { step: activeStep },
+          });
         }
         try {
           const failedStateDir = path.join(customHome, ".resin", "state");

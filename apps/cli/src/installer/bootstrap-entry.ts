@@ -52,6 +52,7 @@ import {
   REVOKED_RELEASE_KEY_IDS,
   type TrustedReleaseKey,
 } from "./channel-verifier.js";
+import { createInstallTelemetry, installFailureReason } from "./install-telemetry.js";
 import {
   DEFAULT_PRODUCTION_CHANNEL_URL,
   fetchBytes,
@@ -1756,6 +1757,14 @@ Options:
     );
   }
 
+  const telemetry = createInstallTelemetry({
+    resinHome: resinHome ?? process.env.RESIN_HOME ?? path.join(os.homedir(), ".resin"),
+  });
+  // Not awaited here: a slow network must never delay the install itself.
+  const started = telemetry.ownedByShell
+    ? Promise.resolve()
+    : telemetry.send("install_started", { step: "helper" });
+
   try {
     const result = await bootstrapInstall({
       trustedKeysJson:
@@ -1772,11 +1781,24 @@ Options:
       allowInsecureHttpForTests: allowInsecureLoopback,
       allowOverrides: channelUrl !== undefined,
     });
+    await started;
+    if (!telemetry.ownedByShell) {
+      await createInstallTelemetry({ resinHome: result.resinHome, version: result.version }).send(
+        "install_completed",
+        { step: "complete", exit_code: 0 },
+      );
+    }
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     process.stderr.write(
       `Installation failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
+    await started;
+    await telemetry.send("install_failed", {
+      step: "helper",
+      exit_code: 1,
+      reason: installFailureReason(error),
+    });
     process.exit(1);
   }
 }

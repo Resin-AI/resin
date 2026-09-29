@@ -11,6 +11,7 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { z } from "zod";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
+import { feedbackCommand } from "../commands/feedback.js";
 import { type InitCommandOptions, initCommand } from "../commands/init.js";
 import { type BrowserLauncher, loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
@@ -19,6 +20,7 @@ import { serviceCommand } from "../commands/service.js";
 import { statusCommand } from "../commands/status.js";
 import { uninstallCommand } from "../commands/uninstall.js";
 import { upgradeCommand } from "../commands/upgrade.js";
+import { describeCommandPath, setupCliErrorReporting } from "../error-reporting.js";
 import {
   type HarnessHealthRunner,
   runHarnessHealthStartupCheck,
@@ -277,6 +279,7 @@ Commands:
   service      Show, start, stop, or restart the Resin background service.
   mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
   privacy      Inspect and manage device and cloud privacy controls.
+  feedback     Send a short message to the Resin team.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.
   doctor       Diagnose platform, filesystem, service, IPC, database, and harness state.
   repair       Automatically remediate detected issues and restore healthy service state.
@@ -351,10 +354,49 @@ function parseTopLevelArgv(argv: string[]) {
   return { isVersion: false, isHelp: false, command, commandArgs, globalFlags };
 }
 
+/**
+ * The CLI entry. Wraps command dispatch with error reporting: a thrown error is reported and
+ * rethrown unchanged, the exit code is returned unchanged, and a `cli_command_completed` usage
+ * event (command path, exit code, duration; never argument values) is flushed within ~2 s.
+ */
 export async function main(
   argv = process.argv.slice(2),
   options: MainOptions = {},
 ): Promise<number> {
+  const reporter = setupCliErrorReporting(argv, {
+    version: VERSION,
+    env: options.env,
+    home: options.home,
+    installCrashHandlers: true,
+  });
+  const commandPath = describeCommandPath(argv);
+  const startedAt = Date.now();
+  let exitCode = 1;
+  try {
+    exitCode = await dispatch(argv, options);
+    return exitCode;
+  } catch (error) {
+    await reporter?.captureExceptionImmediate(error, {
+      handled: false,
+      level: "fatal",
+      failureClass: "cli_command",
+      properties: { command: commandPath },
+    });
+    throw error;
+  } finally {
+    if (reporter && commandPath !== "mcp") {
+      reporter.capture("cli_command_completed", {
+        command: commandPath,
+        exit_code: exitCode,
+        success: exitCode === 0,
+        duration_ms: Date.now() - startedAt,
+      });
+    }
+    await reporter?.flush();
+  }
+}
+
+async function dispatch(argv: string[], options: MainOptions): Promise<number> {
   const parsed = parseTopLevelArgv(argv);
   const command = parsed.command;
   const args = parsed.commandArgs;
@@ -516,6 +558,12 @@ export async function main(
         env: options.env,
         customFetch: options.customFetch,
         stdinIsTTY: options.stdin?.isTTY,
+        stdout: { write: (chunk) => stdout.write(chunk) },
+        stderr: { write: (chunk) => stderr.write(chunk) },
+      });
+
+    case "feedback":
+      return feedbackCommand(args, {
         stdout: { write: (chunk) => stdout.write(chunk) },
         stderr: { write: (chunk) => stderr.write(chunk) },
       });

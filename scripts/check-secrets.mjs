@@ -155,6 +155,16 @@ const ALLOWED_MOCK_PATTERNS = [
 ];
 
 /**
+ * Public, write-only analytics keys that are meant to ship in clients. Only an exact assignment
+ * of the PostHog project key constant (placeholder or a real `phc_` key) is allowed, and only when
+ * it is the whole statement on the line, so nothing else can hide next to it. Personal (`phx_`)
+ * and secret (`phs_`) PostHog keys are never allowed.
+ */
+const ALLOWED_PUBLIC_KEY_LINES = [
+  /^\s*(?:export\s+)?(?:(?:const|let|var)\s+)?\$?RESIN_POSTHOG_PROJECT_API_KEY\s*=\s*"(?:__RESIN_POSTHOG_PROJECT_API_KEY__|phc_[A-Za-z0-9_-]{16,})";?\s*$/,
+];
+
+/**
  * Calculate Shannon entropy of a string.
  * @param {string} str
  * @returns {number}
@@ -286,7 +296,9 @@ export function scanContent(filePath, content, rules = SECRET_RULES) {
     }
 
     // Check if line matches known public mock placeholders
-    const isMock = ALLOWED_MOCK_PATTERNS.some((p) => p.test(line));
+    const isMock =
+      ALLOWED_MOCK_PATTERNS.some((p) => p.test(line)) ||
+      ALLOWED_PUBLIC_KEY_LINES.some((p) => p.test(line));
     if (isMock) {
       continue;
     }
