@@ -15,6 +15,7 @@ CLI cloud credentials always use `~/.resin/` under the active home (`--home` or 
 | `~/.resin/config/` | Daemon configuration and policy overrides | Persistent |
 | `~/.resin/data/` | Tool bundle artifacts, sandboxed execution caches | Persistent |
 | `~/.resin/state/` | Install journal, daemon lock/pid helpers, cloud token file | Local state |
+| `~/.resin/state/analytics-id` | Random `anon_<uuid>` used for error reports and usage events while the device is unpaired (mode `0600`) | Persistent; delete it to reset |
 | `~/.resin/logs/` | Daemon and CLI/installer logs | Local |
 | `~/.resin/bin/` | Installed binaries | Persistent |
 | `~/.resin/safety-attestation.json` | Local production safety attestation written by `repair` | Persistent |
@@ -61,6 +62,12 @@ Cloud tokens are not copied into harness MCP configs, `.resin/project.json`, `.r
 | `RESIN_SOCKET_PATH` | `string` | platform default | Override IPC socket. Also `resin status --socket`. |
 | `RESIN_RELEASE_MODE` | `string` | `production` outside tests | `production` verifies the signed channel; `local-test` is for fixtures. |
 | `RESIN_RELEASE_CHANNEL_URL` | `string` | signed production channel | Override the release channel URL. |
+| `RESIN_TELEMETRY_ENABLED` | `1`/`true` or other | device config (`telemetryEnabled`, default on) | Overrides metadata telemetry; any value other than `1`/`true` turns it off, which also turns error reporting off. |
+| `DO_NOT_TRACK` | any non-empty value except `0`/`false` | unset | Turns off error reports and usage events (CLI, daemon, MCP gateway, installers). |
+| `RESIN_ERROR_REPORTING` | `0`/`false`/`off` or `1`/`true`/`on` | unset (on) | `0` turns off error reports and usage events. `1` only re-enables them under a test runner, where they are off by default; it never overrides another opt-out. |
+| `RESIN_POSTHOG_HOST` | `string` | `https://resin.sh/ingest` | Error-report and usage-event endpoint. HTTPS, or HTTP on loopback only. |
+| `RESIN_POSTHOG_KEY` | `string` | built-in public project key | Overrides the PostHog project key (`phc_…`), e.g. for a private PostHog project. |
+| `RESIN_ENVIRONMENT` | `production`/`staging`/`development` | derived | Environment label attached to error reports and usage events. |
 
 `--gateway-url` is a `resin init` flag, not an environment variable. Default when omitted: `http://127.0.0.1:9400/mcp/sse`.
 
@@ -106,7 +113,14 @@ Each tool execution runs inside a **Capability Envelope**. Defaults can be adjus
 }
 ```
 
-Privacy defaults presented at `init`: local-only on, cloud sync off, telemetry off, redaction `mask`. Device approval cannot turn those on by itself.
+Privacy defaults presented at `init`: local-only on, cloud sync off, redaction `mask`, metadata telemetry on, and error reports and usage events on. Device approval cannot turn cloud sync or raw transcript upload on by itself.
+
+### Device privacy settings (`config.json`)
+
+| Key | Default | Set with | Effect |
+|-----|---------|----------|--------|
+| `telemetryEnabled` | `true` | `resin privacy telemetry enable\|disable` | Metadata telemetry. `false` also turns error reporting off. |
+| `errorReportingEnabled` | unset (on) | `resin privacy error-reporting enable\|disable` | Error reports and usage events sent to PostHog. See [Security & Privacy](security-and-privacy.md#7-error-reports-and-usage-events). |
 
 ---
 

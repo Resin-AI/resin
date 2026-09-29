@@ -11,6 +11,13 @@ import {
   resolvePaths,
 } from "@resin/observer";
 import {
+  type ErrorReportingConsentReason,
+  describeConsentReason,
+  readDeviceReportingConfig,
+  resolveErrorReportingConsent,
+  resolveReportingKey,
+} from "@resin/observer/error-reporting/core";
+import {
   DeviceAuthClient,
   type OneTimeDeviceAuthorization,
   validateCloudUrl,
@@ -26,7 +33,13 @@ export interface PrivacySettings {
   updatedAt: string;
 }
 
-export type PrivacyAction = "status" | "telemetry" | "export" | "delete" | "help";
+export type PrivacyAction =
+  | "status"
+  | "telemetry"
+  | "error-reporting"
+  | "export"
+  | "delete"
+  | "help";
 const PRIVACY_DELETE_SCOPE = "privacy:delete" as const;
 const PRIVACY_DELETE_TOKEN_ENV = "RESIN_PRIVACY_DELETE_TOKEN";
 const MAX_DELETE_AUTHORIZATION_LIFETIME_MS = 65 * 60 * 1000;
@@ -34,6 +47,7 @@ const MAX_DELETE_AUTHORIZATION_LIFETIME_MS = 65 * 60 * 1000;
 export interface PrivacyCommandFlags {
   action: PrivacyAction;
   telemetryAction?: "enable" | "disable";
+  errorReportingAction?: "enable" | "disable" | "status";
   confirm: boolean;
   json: boolean;
   home?: string;
@@ -48,6 +62,17 @@ export interface LocalPrivacyStatus {
   configurationState: LocalPrivacyConfigurationState;
 }
 
+/** Local crash/error reporting and usage events (PostHog); independent of cloud consent. */
+export interface ErrorReportingStatus {
+  /** Whether reports and usage events would be sent right now. */
+  enabled: boolean;
+  reason: ErrorReportingConsentReason;
+  /** The stored `errorReportingEnabled` choice, or null when never set (default: enabled). */
+  configured: boolean | null;
+  /** False when this build carries no reporting key, so nothing is ever sent. */
+  available: boolean;
+}
+
 export type PrivacyCloudErrorCode =
   | "CLOUD_UNREACHABLE"
   | "AUTHENTICATION_REQUIRED"
@@ -57,6 +82,7 @@ export type PrivacyCloudErrorCode =
 export interface PrivacyStatus {
   schemaVersion: 1;
   device: LocalPrivacyStatus;
+  errorReporting: ErrorReportingStatus;
   cloud: {
     paired: boolean;
     available: boolean;
@@ -262,6 +288,18 @@ export function parsePrivacyFlags(args: string[]): PrivacyCommandFlags {
     };
   }
 
+  if (action === "error-reporting") {
+    if (confirm) invalidArguments("--confirm is only valid with privacy delete.");
+    const subAction = positional[1];
+    if (
+      positional.length !== 2 ||
+      (subAction !== "enable" && subAction !== "disable" && subAction !== "status")
+    ) {
+      invalidArguments("Usage: resin privacy error-reporting enable|disable|status");
+    }
+    return { action, errorReportingAction: subAction, confirm, json, home };
+  }
+
   invalidArguments("Unknown privacy command.");
 }
 
@@ -272,12 +310,16 @@ export function printPrivacyHelp(
 Usage:
   resin privacy status [--json] [--home <path>]
   resin privacy telemetry enable|disable [--json] [--home <path>]
+  resin privacy error-reporting enable|disable|status [--json] [--home <path>]
   resin privacy export [--json] [--home <path>]
   resin privacy delete [--confirm] [--json] [--home <path>]
 
 Commands:
   status       Show device, cloud, and effective privacy posture.
   telemetry    Enable or disable metadata telemetry on this device.
+  error-reporting
+               Enable or disable crash/error reports and usage events (on by default).
+               Disabling telemetry also disables them.
   export       Request an idempotent cloud data export.
   delete       Request personal-data deletion, subject to active retention holds.
 
@@ -289,6 +331,8 @@ Options:
 
 Environment:
   RESIN_PRIVACY_DELETE_TOKEN  Short-lived privacy:delete token for non-interactive deletion.
+  DO_NOT_TRACK=1              Disable error reports and usage events.
+  RESIN_ERROR_REPORTING=0     Disable error reports and usage events.
 `;
   output.write(text.trimStart());
 }
@@ -454,6 +498,48 @@ export async function readLocalPrivacyStatus(
       configurationState,
     };
   }
+}
+
+export function readErrorReportingStatus(
+  options: Pick<PrivacyCommandOptions, "home" | "env"> = {},
+): ErrorReportingStatus {
+  const home = resolveHome(options.home);
+  const env = options.env ?? process.env;
+  const paths = resolvePaths({ home, env });
+  const config = readDeviceReportingConfig(paths.configFile);
+  const consent = resolveErrorReportingConsent({ env, config });
+  return {
+    enabled: consent.enabled && resolveReportingKey(env) !== undefined,
+    reason: consent.reason,
+    configured:
+      config.state === "configured" ? (config.config.errorReportingEnabled ?? null) : null,
+    available: resolveReportingKey(env) !== undefined,
+  };
+}
+
+/**
+ * Stores the device's error-reporting choice with the same atomic, owner-only write as the
+ * telemetry setting. Running processes pick the change up within a minute; no daemon reload is
+ * needed because reporters re-read the configuration themselves.
+ */
+export async function setDeviceErrorReporting(
+  enabled: boolean,
+  options: PrivacyCommandOptions = {},
+): Promise<ErrorReportingStatus> {
+  const home = resolveHome(options.home);
+  const env = options.env ?? process.env;
+  const paths = resolvePaths({ home, env });
+  const snapshot = await readConfigSnapshot(paths.configFile);
+  const updatedRecord = { ...snapshot.record, errorReportingEnabled: enabled };
+  await writePrivateFileAtomically(paths.configFile, `${JSON.stringify(updatedRecord, null, 2)}\n`);
+  return readErrorReportingStatus({ home, env });
+}
+
+export function formatErrorReportingStatus(status: ErrorReportingStatus): string {
+  if (!status.available) {
+    return `not configured in this build (nothing is sent); setting: ${describeConsentReason(status.reason)}`;
+  }
+  return describeConsentReason(status.reason);
 }
 
 async function defaultReloadDaemon(
@@ -833,6 +919,7 @@ export async function collectPrivacyStatus(
   return {
     schemaVersion: 1,
     device: local,
+    errorReporting: readErrorReportingStatus({ home, env: options.env }),
     cloud: {
       paired: credentials !== null,
       available: cloudAvailable,
@@ -1101,6 +1188,7 @@ export function formatPrivacyStatus(status: PrivacyStatus): string {
     `  Effective metadata telemetry: ${status.effective.metadataTelemetryEnabled ? "enabled" : "disabled"}`,
     `  Raw transcript upload consent: ${rawConsent === undefined ? "unavailable" : rawConsent ? "enabled" : "disabled"}`,
     `  Redaction strategy: ${status.effective.redactionStrategy}`,
+    `  Error reports and usage events: ${formatErrorReportingStatus(status.errorReporting)}`,
     `  Retention: ${retention === undefined ? "unavailable" : retention === null ? "account default" : `${retention} days`}`,
     `  Active holds: ${holds.length === 0 ? "none" : holds.map((hold) => hold.type).join(", ")}`,
   ];
@@ -1224,6 +1312,35 @@ export async function privacyCommand(
           stdout.write(
             `A local environment override keeps telemetry ${result.metadataTelemetryEnabled ? "enabled" : "disabled"}.\n`,
           );
+        }
+      }
+      return 0;
+    }
+
+    if (flags.action === "error-reporting") {
+      const status =
+        flags.errorReportingAction === "status"
+          ? readErrorReportingStatus(commandOptions)
+          : await setDeviceErrorReporting(flags.errorReportingAction === "enable", commandOptions);
+      if (flags.json) {
+        writeJson(stdout, {
+          schemaVersion: 1,
+          ok: true,
+          command: "error-reporting",
+          enabled: status.enabled,
+          reason: status.reason,
+          configured: status.configured,
+          available: status.available,
+        });
+      } else {
+        if (flags.errorReportingAction !== "status") {
+          stdout.write(
+            `Error reporting ${flags.errorReportingAction === "enable" ? "enabled" : "disabled"} on this device.\n`,
+          );
+        }
+        stdout.write(`Error reports and usage events: ${formatErrorReportingStatus(status)}\n`);
+        if (flags.errorReportingAction === "enable" && !status.enabled && status.available) {
+          stdout.write("Another setting keeps error reporting off (see the reason above).\n");
         }
       }
       return 0;

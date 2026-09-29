@@ -139,6 +139,12 @@ Those reports include platform, service, IPC, harness, and cloud *status* withou
 
 ---
 
+### Error reports
+
+When a command fails or a Resin process crashes, a sanitized error report is sent to the Resin team automatically unless you opted out (see [Security & Privacy](security-and-privacy.md#7-error-reports-and-usage-events)). It never contains prompts, source or argument values, so it is not a substitute for a support request: include `resin doctor --json` output when you contact `hello@resin.sh`, or send a short note with `resin feedback <message>`. Reporting is best-effort and never changes a command's result or exit code; if a slow network seems to delay command exit, set `RESIN_ERROR_REPORTING=0`.
+
+---
+
 ## Related Documentation
 
 - [Getting Started](getting-started.md)

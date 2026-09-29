@@ -6,6 +6,7 @@ import {
   redactConfig,
   validateConfigUpdate,
 } from "./config.js";
+import { reportHandledError } from "./error-reporting/facade.js";
 import {
   type DaemonModule,
   type Logger,
@@ -242,6 +243,10 @@ export class DaemonSupervisor {
         const errorMsg = err instanceof Error ? err.message : String(err);
         this.logger.error(`Failed to start module '${moduleId}': ${errorMsg}`);
         this.moduleStates.set(moduleId, "failed");
+        reportHandledError(err, {
+          failureClass: "supervisor_module_start",
+          properties: { module_id: moduleId, critical: Boolean(mod.critical) },
+        });
 
         if (mod.critical) {
           this.state = "failed";
@@ -257,6 +262,10 @@ export class DaemonSupervisor {
               const rollbackMsg =
                 rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
               this.logger.error(`Error rolling back module '${rollbackId}': ${rollbackMsg}`);
+              reportHandledError(rollbackErr, {
+                failureClass: "supervisor_module_rollback",
+                properties: { module_id: rollbackId },
+              });
             }
           }
           throw new Error(`Critical module '${moduleId}' failed to start: ${errorMsg}`);
@@ -321,6 +330,10 @@ export class DaemonSupervisor {
             const errorMsg = err instanceof Error ? err.message : String(err);
             this.logger.error(`Error stopping module '${moduleId}': ${errorMsg}`);
             this.moduleStates.set(moduleId, "failed");
+            reportHandledError(err, {
+              failureClass: "supervisor_module_stop",
+              properties: { module_id: moduleId },
+            });
           }
         }
       }
@@ -331,6 +344,7 @@ export class DaemonSupervisor {
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       this.logger.error(`Daemon shutdown timed out or encountered errors: ${errorMsg}`);
+      reportHandledError(err, { failureClass: "supervisor_shutdown" });
     } finally {
       this.state = "stopped";
       this.logger.info("Daemon supervisor stopped");
@@ -505,6 +519,10 @@ export class DaemonSupervisor {
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           errors.push(`Module '${id}' failed to reload config: ${errorMsg}`);
+          reportHandledError(err, {
+            failureClass: "supervisor_module_reload",
+            properties: { module_id: id },
+          });
         }
       }
     }

@@ -76,7 +76,7 @@ Validation executes nothing recorded. Each plan step's resolved call must equal 
 
 ## 3. Install Privacy Plan And Device Approval
 
-Interactive `npx resin init` presents the signed-release install plus the workspace capability/privacy plan and requires explicit yes/no confirmation **before** pairing or mutating harness files. If the user denies consent, installation terminates immediately without side effects. In non-interactive environments, `--auto-approve` or a valid pre-approved `--capabilities-file` is required. Defaults: local-only on, cloud sync off, telemetry off, redaction `mask`.
+Interactive `npx resin init` presents the signed-release install plus the workspace capability/privacy plan and requires explicit yes/no confirmation **before** pairing or mutating harness files. If the user denies consent, installation terminates immediately without side effects. In non-interactive environments, `--auto-approve` or a valid pre-approved `--capabilities-file` is required. Defaults: local-only on, cloud sync off, redaction `mask`, metadata telemetry on (turn it off with `resin privacy telemetry disable`), and error reports and usage events on (see [Error Reports and Usage Events](#7-error-reports-and-usage-events)).
 
 RFC 8628 device approval then shows the selected Resin identity and workspace in the Console. Approving one identity cannot bind credentials to another account or workspace. Device approval cannot silently enable raw transcript or source upload.
 
@@ -126,6 +126,25 @@ AI coding harnesses generate rich session transcripts. Resin guarantees:
 - If cloud synchronization is enabled for candidate evolution, sanitized evidence may include engine-redacted JavaScript, TypeScript, and Python program views with non-secret code and literals. Their original source stays in the local private store; redaction-sensitive token positions cannot be parameterized, and execution never falls back to the public view. Raw prompts and tool outputs are not uploaded.
 
 When the cloud is unreachable or after logout, the local MCP gateway continues to serve `search_tools`, `get_tool_schema`, `invoke_tool`, and `manage_tools`.
+
+---
+
+## 7. Error Reports and Usage Events
+
+To find and fix failures, the CLI, daemon, MCP gateway and installers send error reports and a few usage events to PostHog through Resin's own proxy (`https://resin.sh/ingest`). This is **on by default**. Reports contain the error type, a sanitized message and stack frames (file, line, column), and events contain command names (never argument values), exit codes, durations, and your Resin version, OS, architecture and Node.js version. Paths are rewritten (`~`, `<project>`, `<user>`), and tokens, keys, passwords, e-mail addresses and URL query strings are removed before anything leaves your machine. Prompts, transcripts, tool inputs and outputs, source code, request bodies and environment values are never sent. The full field list is in the [Privacy Inventory](../security/privacy-inventory.md#51-error-reports-and-usage-events-posthog).
+
+Events are tied to your Resin cloud user id when the device is paired, otherwise to a random id stored in `~/.resin/state/analytics-id`.
+
+Turn it off with any one of:
+
+```bash
+resin privacy error-reporting disable   # stored in the device configuration
+export DO_NOT_TRACK=1                   # also respected by the installers
+export RESIN_ERROR_REPORTING=0
+resin privacy telemetry disable         # turning telemetry off turns error reporting off too
+```
+
+Check the current state with `resin privacy error-reporting status` or `resin privacy status`. `resin feedback <message>` sends a message you write to the Resin team; it follows the same opt-out.
 
 ---
 

@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 import { z } from "zod";
 import type { VerificationReport } from "../service/verification.js";
 import {
@@ -252,8 +253,16 @@ export async function upgradeCommand(
     } else {
       stderr.write(`\nUpgrade failed: ${result.error ?? result.status}\n`);
     }
+    if (!result.success) {
+      reportEvent("upgrade_failed", {
+        status: result.status,
+        target_version: result.targetVersion,
+        active_version: result.activeVersion,
+      });
+    }
     return result.success ? 0 : 1;
   } catch (error) {
+    reportHandledError(error, { failureClass: "upgrade" });
     const message = error instanceof Error ? error.message : String(error);
     if (flags.json) {
       stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);

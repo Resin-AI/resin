@@ -3,7 +3,7 @@
 # Portable POSIX sh script for Linux, macOS, and Windows WSL2.
 #
 # Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
-# Pinned SHA-256: afa936ba31bafd50fe6d5c6c59339470fa8eaf54fa926ae0fa697996521bd266
+# Pinned SHA-256: fa4badc2112645e584a4c3afeb9e5e90c487865d27b6a726a29e38ae11622f75
 #
 # Inspect-First Workflow:
 #   sh install.sh --download-only ./install-helper.mjs
@@ -16,8 +16,92 @@ umask 077
 
 # Constants
 PINNED_HELPER_URL="https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
-PINNED_HELPER_SHA256="afa936ba31bafd50fe6d5c6c59339470fa8eaf54fa926ae0fa697996521bd266"
+PINNED_HELPER_SHA256="fa4badc2112645e584a4c3afeb9e5e90c487865d27b6a726a29e38ae11622f75"
 REQUIRED_NODE_MAJOR=22
+
+# Install telemetry: best-effort install_started / install_completed / install_failed events
+# (step, OS, architecture, exit code, a fixed reason code; no paths, arguments or output).
+# Disabled by DO_NOT_TRACK, RESIN_ERROR_REPORTING=0, RESIN_TELEMETRY_ENABLED=0, a device config
+# with errorReportingEnabled/telemetryEnabled false, test mode, or a missing curl. Sends run in
+# the background with a 3 s cap and can never fail the install.
+# The key must equal RESIN_POSTHOG_PROJECT_API_KEY in
+# apps/observer/src/error-reporting/facade.ts (the single source of truth; a unit test checks).
+RESIN_POSTHOG_PROJECT_API_KEY="phc_xkn83r4yVHBSfLrdrQVgB856j2DS4BUJNi6Ds6fDA9uW"
+INSTALL_STEP="arguments"
+INSTALL_TELEMETRY_ACTIVE="0"
+INSTALL_SUCCEEDED="0"
+INSTALL_ANALYTICS_ID=""
+
+telemetry_key() {
+  printf '%s' "${RESIN_POSTHOG_KEY:-$RESIN_POSTHOG_PROJECT_API_KEY}"
+}
+
+telemetry_enabled() {
+  case "$(telemetry_key)" in
+    phc_????????????????*) ;;
+    *) return 1 ;;
+  esac
+  case "${DO_NOT_TRACK:-}" in
+    ""|0|false) ;;
+    *) return 1 ;;
+  esac
+  case "${RESIN_ERROR_REPORTING:-}" in
+    0|false|FALSE|off|OFF|no|disabled) return 1 ;;
+  esac
+  if [ -n "${RESIN_TELEMETRY_ENABLED+x}" ] && [ "${RESIN_TELEMETRY_ENABLED}" != "1" ] && [ "${RESIN_TELEMETRY_ENABLED}" != "true" ]; then
+    return 1
+  fi
+  if [ "${RESIN_INSTALL_TEST_ONLY:-0}" = "1" ] || [ "${RESIN_INSTALL_TEST_ONLY:-}" = "true" ]; then
+    [ "${RESIN_ERROR_REPORTING:-}" = "1" ] || return 1
+  fi
+  _resin_config="${RESIN_HOME:-${HOME:-}/.resin}/config/config.json"
+  if [ -f "$_resin_config" ] && grep -Eq '"(errorReportingEnabled|telemetryEnabled)"[[:space:]]*:[[:space:]]*false' "$_resin_config" 2>/dev/null; then
+    return 1
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
+  return 0
+}
+
+telemetry_host() {
+  case "${RESIN_POSTHOG_HOST:-}" in
+    https://*) printf '%s' "${RESIN_POSTHOG_HOST%/}" ;;
+    *) printf '%s' "https://resin.sh/ingest" ;;
+  esac
+}
+
+# The install's anonymous id: reuse <RESIN_HOME>/state/analytics-id, else mint anon_<uuid> and pass
+# it to the helper, which persists it so later CLI events join the install.
+telemetry_analytics_id() {
+  _id_file="${RESIN_HOME:-${HOME:-}/.resin}/state/analytics-id"
+  if [ -r "$_id_file" ]; then
+    _id="$(head -n 1 "$_id_file" 2>/dev/null | tr -d '\r\n' || true)"
+    case "$_id" in
+      anon_????????-????-????-????-????????????) printf '%s' "$_id"; return 0 ;;
+    esac
+  fi
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    _uuid="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+  elif command -v uuidgen >/dev/null 2>&1; then
+    _uuid="$(uuidgen 2>/dev/null | tr 'A-F' 'a-f' || true)"
+  else
+    _uuid="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | sed 's/^\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)$/\1-\2-\3-\4-\5/' || true)"
+  fi
+  case "$_uuid" in
+    ????????-????-????-????-????????????) printf 'anon_%s' "$_uuid" ;;
+  esac
+}
+
+# send_install_event <event> <step> <exit_code> <reason_code>; all arguments are fixed tokens.
+send_install_event() {
+  telemetry_enabled || return 0
+  [ -n "$INSTALL_ANALYTICS_ID" ] || return 0
+  _os="$(uname -s 2>/dev/null | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_' || true)"
+  _arch="$(uname -m 2>/dev/null | tr -cd 'A-Za-z0-9_' || true)"
+  _body="$(printf '{"api_key":"%s","event":"%s","distinct_id":"%s","properties":{"resin_surface":"installer","installer":"install.sh","environment":"production","step":"%s","exit_code":%s,"reason":"%s","os":"%s","arch":"%s","$geoip_disable":true,"$lib":"resin-install-sh"}}' \
+    "$(telemetry_key)" "$1" "$INSTALL_ANALYTICS_ID" "$2" "$3" "$4" "$_os" "$_arch")"
+  ( curl -fsS --max-time 3 -X POST -H 'Content-Type: application/json' --data "$_body" "$(telemetry_host)/i/v0/e/" >/dev/null 2>&1 & ) >/dev/null 2>&1 || true
+  return 0
+}
 
 # Temporary directory management
 TMP_DIR=""
@@ -25,6 +109,15 @@ cleanup() {
   EXIT_CODE=$?
   if [ -n "${TMP_DIR:-}" ] && [ -d "${TMP_DIR:-}" ]; then
     rm -rf "$TMP_DIR" 2>/dev/null || true
+  fi
+  if [ "$INSTALL_TELEMETRY_ACTIVE" = "1" ]; then
+    INSTALL_TELEMETRY_ACTIVE="0"
+    if [ "$EXIT_CODE" -eq 0 ] && [ "$INSTALL_SUCCEEDED" = "1" ]; then
+      send_install_event install_completed complete 0 none || true
+    elif [ "$EXIT_CODE" -ne 0 ] && [ "$INSTALL_STEP" != "helper" ]; then
+      # The helper reports its own failures with a precise reason.
+      send_install_event install_failed "$INSTALL_STEP" "$EXIT_CODE" "${INSTALL_STEP}_failed" || true
+    fi
   fi
   exit "$EXIT_CODE"
 }
@@ -125,7 +218,7 @@ Inspect-First Workflow:
 
   Or manually download and verify using curl:
     curl -fsSL https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs -o install-helper.mjs
-    # Verify SHA-256: afa936ba31bafd50fe6d5c6c59339470fa8eaf54fa926ae0fa697996521bd266
+    # Verify SHA-256: fa4badc2112645e584a4c3afeb9e5e90c487865d27b6a726a29e38ae11622f75
     node ./install-helper.mjs
 
 Options:
@@ -258,10 +351,26 @@ while [ "$I" -le "$ARGC" ]; do
   I=$((I + 1))
 done
 
-# Execute preflight checks before any temporary allocation or network activity
+# Install telemetry starts once arguments are valid (never for --help or --download-only)
+if [ -z "$DOWNLOAD_ONLY" ] && telemetry_enabled; then
+  INSTALL_ANALYTICS_ID="$(telemetry_analytics_id || true)"
+  if [ -n "$INSTALL_ANALYTICS_ID" ]; then
+    INSTALL_TELEMETRY_ACTIVE="1"
+    RESIN_INSTALL_ANALYTICS_ID="$INSTALL_ANALYTICS_ID"
+    RESIN_INSTALL_TELEMETRY_OWNER="bootstrap"
+    export RESIN_INSTALL_ANALYTICS_ID RESIN_INSTALL_TELEMETRY_OWNER
+    send_install_event install_started bootstrap 0 none || true
+  fi
+fi
+
+# Execute preflight checks before any temporary allocation or download
+INSTALL_STEP="preflight_os"
 check_os
+INSTALL_STEP="preflight_arch"
 check_arch
+INSTALL_STEP="preflight_node"
 check_node
+INSTALL_STEP="helper_download"
 
 # Determine target URL and expected checksum
 IS_TEST_MODE="0"
@@ -605,6 +714,7 @@ fi
 
 # Execute the verified standalone installer helper with forwarded arguments
 # Require one valid JSON success result instead of blind zero-exit acceptance
+INSTALL_STEP="helper"
 HELPER_STDOUT="$(node "$HELPER_DEST_PATH" "$@")"
 HELPER_EXIT_CODE=$?
 
@@ -628,9 +738,11 @@ try {
   process.exit(1);
 }
 '; then
+  INSTALL_STEP="helper_result"
   echo "Error: Installer helper completed with exit code 0 but did not emit a valid JSON success result." >&2
   exit 1
 fi
+INSTALL_SUCCEEDED="1"
 
 if [ "$JSON_OUTPUT" = "1" ]; then
   printf '%s\n' "$HELPER_STDOUT"

@@ -61,6 +61,27 @@ describe("check-secrets", () => {
     });
   });
 
+  describe("public PostHog project key allowance", () => {
+    it("allows only a bare assignment of the public project key constant", () => {
+      for (const line of [
+        'export const RESIN_POSTHOG_PROJECT_API_KEY = "__RESIN_POSTHOG_PROJECT_API_KEY__";',
+        'RESIN_POSTHOG_PROJECT_API_KEY="phc_abcdefghijklmnopqrstuvwxyz0123"',
+        '$RESIN_POSTHOG_PROJECT_API_KEY = "phc_abcdefghijklmnopqrstuvwxyz0123"',
+      ]) {
+        expect(scanContent("src/app.ts", line)).toEqual([]);
+      }
+      expect(
+        scanContent(
+          "src/app.ts",
+          'RESIN_POSTHOG_PROJECT_API_KEY = "phc_abcdefghijklmnopqrstuvwxyz0123"; api_key = "realSecretValue123456789"',
+        ),
+      ).toHaveLength(1);
+      expect(
+        scanContent("src/app.ts", 'const api_key = "phx_abcdefghijklmnopqrstuvwxyz0123";'),
+      ).toHaveLength(1);
+    });
+  });
+
   describe("scanContent detection", () => {
     it("detects private key blocks", () => {
       const content = `

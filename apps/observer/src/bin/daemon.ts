@@ -27,6 +27,12 @@ import {
   FileControlPlaneApplyAdapter,
 } from "../control-plane.js";
 import { registeredDaemonModuleProviders } from "../daemon-extensions.js";
+import {
+  bridgeErrorLogs,
+  configureErrorReporting,
+  getErrorReporter,
+  installCrashHandlers,
+} from "../error-reporting/index.js";
 import { IpcClient } from "../ipc/client.js";
 import { IpcServer } from "../ipc/server.js";
 import type { DaemonModule, Logger, ModuleContext } from "../lifecycle.js";
@@ -1066,7 +1072,7 @@ async function runForeground(options: {
     });
   }
 
-  const logger = new DefaultLogger(config.logLevel);
+  const logger = bridgeErrorLogs(new DefaultLogger(config.logLevel));
   const lock = new DaemonLock({
     lockPath: paths.lockFilePath,
     socketPath: paths.socketPath,
@@ -1274,6 +1280,9 @@ async function runForeground(options: {
   notificationObserver.unref();
   await ipcServer.start();
   sendStartupMessage({ type: "ready", pid: process.pid });
+  getErrorReporter().capture("daemon_started", {
+    paired: Boolean(deviceCredentials.credentials),
+  });
 
   let cleanupPromise: Promise<void> | null = null;
   const cleanup = (reason: string): Promise<void> => {
@@ -1281,6 +1290,9 @@ async function runForeground(options: {
     clearInterval(notificationObserver);
     cleanupPromise = (async () => {
       logger.info("Cleaning up daemon resources...");
+      const reporter = getErrorReporter();
+      reporter.capture("daemon_stopped", { reason });
+      await reporter.flush();
       try {
         await supervisor.stop({ reason });
       } catch {
@@ -1476,6 +1488,11 @@ async function main(entryFile: string): Promise<void> {
   }
 }
 
+function readHomeArgument(argv: readonly string[]): string | undefined {
+  const index = argv.indexOf("--home");
+  return index >= 0 ? argv[index + 1] : undefined;
+}
+
 /**
  * Runs the daemon command line. The only caller is the packaged entry, `@resin/gateway`'s
  * `bin/daemon`, which registers its daemon modules first: there is one daemon, and it includes them.
@@ -1490,7 +1507,18 @@ export async function runDaemonCli(options: {
   version: string;
 }): Promise<void> {
   VERSION = options.version;
-  await main(options.entryFile).catch((err) => {
+  const reporter = configureErrorReporting({
+    surface: "daemon",
+    version: options.version,
+    home: readHomeArgument(process.argv.slice(2)),
+  });
+  installCrashHandlers(reporter);
+  await main(options.entryFile).catch(async (err) => {
+    await reporter.captureExceptionImmediate(err, {
+      handled: false,
+      level: "fatal",
+      failureClass: "daemon_startup",
+    });
     const message = sanitizeStartupError(err);
     sendStartupMessage({
       type: "startup-error",

@@ -6,6 +6,11 @@ import fs from "node:fs";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { LocalDatabaseConnection } from "@resin/db";
+import {
+  configureErrorReporting,
+  getErrorReporter,
+  installCrashHandlers,
+} from "@resin/observer/error-reporting";
 import { z } from "zod";
 import { McpStdioShim } from "../shim/stdio-bridge.js";
 
@@ -130,6 +135,7 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   try {
     const status = await shim.start();
     if (status.mode === "failed") {
+      await getErrorReporter().captureImmediate("mcp_shim_start_failed");
       process.exit(1);
     }
     if (status.mode === "standalone_inprocess") {
@@ -140,6 +146,11 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
       });
     }
   } catch (err) {
+    await getErrorReporter().captureExceptionImmediate(err, {
+      handled: false,
+      level: "fatal",
+      failureClass: "mcp_shim_start",
+    });
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`Fatal MCP Shim error: ${message}\n`);
     process.exit(1);
@@ -152,7 +163,15 @@ const isDirectExecution =
   process.argv[1]?.endsWith("mcp-shim.mjs");
 
 if (isDirectExecution || process.env.NODE_ENV !== "test") {
-  main().catch((err) => {
+  // The shim's stdout is MCP protocol traffic; the reporter never writes to stdout.
+  const reporter = configureErrorReporting({ surface: "mcp_shim", version: VERSION });
+  installCrashHandlers(reporter);
+  main().catch(async (err) => {
+    await reporter.captureExceptionImmediate(err, {
+      handled: false,
+      level: "fatal",
+      failureClass: "mcp_shim",
+    });
     process.stderr.write(`Unhandled error: ${err}\n`);
     process.exit(1);
   });

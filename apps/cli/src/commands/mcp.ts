@@ -5,6 +5,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { LocalDatabaseConnection } from "@resin/db";
 import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
+import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
 import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-runtime-registry.js";
@@ -256,6 +257,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     const status = await shim.start();
     if (status && typeof status === "object" && "mode" in status && status.mode === "failed") {
       unregisterGateway();
+      getErrorReporter().capture("mcp_shim_start_failed");
       return 1;
     }
     if (
@@ -276,6 +278,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     return 0;
   } catch (err) {
     unregisterGateway();
+    reportHandledError(err, { failureClass: "mcp_shim_start" });
     const message = err instanceof Error ? err.message : String(err);
     stderr.write(`Fatal MCP error: ${message}\n`);
     return 1;

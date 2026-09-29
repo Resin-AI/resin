@@ -186,3 +186,4 @@ Embedded SQLite with Write-Ahead Logging (WAL mode) and OS-standard identity-par
 - [ADR 0009: Non-Functional Requirements](../adr/0009-nfr-and-performance-targets.md)
 - [ADR 0010: ADR Governance](../adr/0010-adr-governance.md)
 - [ADR 0014: Supported Harnesses & Platforms, Including Native Windows](../adr/0014-native-windows-support.md)
+- [ADR 0015: Client Error Reporting and Usage Events](../adr/0015-client-error-reporting.md)

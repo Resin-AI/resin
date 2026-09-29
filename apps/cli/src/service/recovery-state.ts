@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { SecretRedactor } from "@resin/crypto";
+import { getErrorReporter } from "@resin/observer/error-reporting/core";
 import { z } from "zod";
 
 export const RECOVERY_STATE_VERSION = 1 as const;
@@ -449,6 +450,26 @@ export class RecoveryStateTracker {
         forensicRecord.delayMs = delayMs;
       }
       await this.appendForensicCrash(forensicRecord);
+      const crashProperties = {
+        recovery_status: nextState.status,
+        crash_count: crashCount,
+        restart_scheduled: shouldRestart,
+        exit_code: exitCode,
+      };
+      if (input.error !== undefined) {
+        getErrorReporter().captureException(input.error, {
+          handled: false,
+          level: "error",
+          errorCode: category,
+          failureClass: "runtime_crash",
+          properties: crashProperties,
+        });
+      } else {
+        getErrorReporter().capture("runtime_crash_recorded", {
+          ...crashProperties,
+          resin_failure_class: category,
+        });
+      }
 
       const decision: RestartDecision = {
         shouldRestart,

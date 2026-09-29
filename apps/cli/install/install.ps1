@@ -1,7 +1,7 @@
 # Resin Standalone Bootstrap Installer for Windows / PowerShell
 # Cryptographically verified, standalone bootstrap installer.
 # Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
-# Helper SHA-256: afa936ba31bafd50fe6d5c6c59339470fa8eaf54fa926ae0fa697996521bd266
+# Helper SHA-256: fa4badc2112645e584a4c3afeb9e5e90c487865d27b6a726a29e38ae11622f75
 #
 # Native Windows (Windows PowerShell 5.1 or PowerShell 7+, Node.js >= 22):
 #   irm https://resin.sh/install.ps1 | iex
@@ -51,8 +51,105 @@ $ErrorActionPreference = 'Stop'
 
 # Pinned security constants
 $PINNED_HELPER_URL = "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
-$PINNED_HELPER_SHA256 = "afa936ba31bafd50fe6d5c6c59339470fa8eaf54fa926ae0fa697996521bd266"
+$PINNED_HELPER_SHA256 = "fa4badc2112645e584a4c3afeb9e5e90c487865d27b6a726a29e38ae11622f75"
 $MIN_NODE_VERSION = 22
+
+# Install telemetry: best-effort install_started / install_completed / install_failed events
+# (step, OS, architecture, exit code, a fixed reason code; no paths, arguments or output).
+# Disabled by DO_NOT_TRACK, RESIN_ERROR_REPORTING=0, RESIN_TELEMETRY_ENABLED=0, a device config
+# with errorReportingEnabled/telemetryEnabled false, or test mode. Each send has a 3 s cap and
+# can never fail the install.
+# The key must equal RESIN_POSTHOG_PROJECT_API_KEY in
+# apps/observer/src/error-reporting/facade.ts (the single source of truth; a unit test checks).
+$RESIN_POSTHOG_PROJECT_API_KEY = "phc_xkn83r4yVHBSfLrdrQVgB856j2DS4BUJNi6Ds6fDA9uW"
+$script:ResinInstallStep = 'arguments'
+$script:ResinAnalyticsId = $null
+
+function Get-ResinTelemetryKey {
+    if (-not [string]::IsNullOrWhiteSpace($env:RESIN_POSTHOG_KEY)) { return $env:RESIN_POSTHOG_KEY.Trim() }
+    return $RESIN_POSTHOG_PROJECT_API_KEY
+}
+
+function Get-ResinHomeDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($ResinHome)) { return $ResinHome }
+    if (-not [string]::IsNullOrWhiteSpace($env:RESIN_HOME)) { return $env:RESIN_HOME }
+    return [System.IO.Path]::Combine([Environment]::GetFolderPath('UserProfile'), '.resin')
+}
+
+function Test-ResinTelemetryEnabled {
+    try {
+        if ((Get-ResinTelemetryKey) -notmatch '^phc_[A-Za-z0-9_-]{16,}$') { return $false }
+        $dnt = "$env:DO_NOT_TRACK".Trim().ToLowerInvariant()
+        if ($dnt -ne '' -and $dnt -ne '0' -and $dnt -ne 'false') { return $false }
+        $reporting = "$env:RESIN_ERROR_REPORTING".Trim().ToLowerInvariant()
+        if (@('0', 'false', 'off', 'no', 'disabled') -contains $reporting) { return $false }
+        if ($null -ne $env:RESIN_TELEMETRY_ENABLED -and $env:RESIN_TELEMETRY_ENABLED -ne '1' -and $env:RESIN_TELEMETRY_ENABLED -ne 'true') { return $false }
+        if ($env:RESIN_INSTALL_TEST_ONLY -eq '1' -and $reporting -ne '1') { return $false }
+        $configFile = [System.IO.Path]::Combine((Get-ResinHomeDirectory), 'config', 'config.json')
+        if (Test-Path -LiteralPath $configFile) {
+            $config = [System.IO.File]::ReadAllText($configFile)
+            if ($config -match '"(errorReportingEnabled|telemetryEnabled)"\s*:\s*false') { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Reuses <RESIN_HOME>\state\analytics-id, else mints anon_<uuid>; the helper persists it so later
+# CLI events join the install.
+function Get-ResinAnalyticsId {
+    try {
+        $idFile = [System.IO.Path]::Combine((Get-ResinHomeDirectory), 'state', 'analytics-id')
+        if (Test-Path -LiteralPath $idFile) {
+            $existing = ([System.IO.File]::ReadAllText($idFile)).Trim()
+            if ($existing -match '^anon_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $existing }
+        }
+    } catch {}
+    return "anon_$([System.Guid]::NewGuid().ToString('D').ToLowerInvariant())"
+}
+
+# Send-ResinInstallEvent: all values are fixed tokens; failures are ignored.
+function Send-ResinInstallEvent {
+    param(
+        [Parameter(Mandatory=$true)][string]$EventName,
+        [Parameter(Mandatory=$true)][string]$Step,
+        [int]$ExitCode = 0,
+        [string]$Reason = 'none'
+    )
+    if ($null -eq $script:ResinAnalyticsId) { return }
+    try {
+        $arch = "$env:PROCESSOR_ARCHITEW6432"
+        if ([string]::IsNullOrWhiteSpace($arch)) { $arch = "$env:PROCESSOR_ARCHITECTURE" }
+        $hostUrl = 'https://resin.sh/ingest'
+        if ("$env:RESIN_POSTHOG_HOST" -match '^https://') { $hostUrl = $env:RESIN_POSTHOG_HOST.TrimEnd('/') }
+        $body = @{
+            api_key = (Get-ResinTelemetryKey)
+            event = $EventName
+            distinct_id = $script:ResinAnalyticsId
+            properties = @{
+                resin_surface = 'installer'
+                installer = 'install.ps1'
+                environment = 'production'
+                step = $Step
+                exit_code = $ExitCode
+                reason = $Reason
+                os = 'win32'
+                arch = ($arch.ToLowerInvariant() -replace '[^a-z0-9_]', '')
+                powershell_version = "$($PSVersionTable.PSVersion.Major)"
+                '$geoip_disable' = $true
+                '$lib' = 'resin-install-ps1'
+            }
+        } | ConvertTo-Json -Depth 4 -Compress
+        $previousProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $null = Invoke-WebRequest -Uri "$hostUrl/i/v0/e/" -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        } finally {
+            $ProgressPreference = $previousProgress
+        }
+    } catch {}
+}
 
 function Show-ResinHelp {
     Write-Host @"
@@ -578,6 +675,7 @@ function Invoke-ResinHelper {
     # into error records, which the script-wide 'Stop' preference would make terminating, so the
     # call runs under 'Continue': stderr lines are shown as host output (so `*>` logs keep them)
     # and only stdout (the success JSON) is captured. The exit code decides success.
+    $script:ResinInstallStep = 'helper'
     $helperOutput = & {
         $ErrorActionPreference = 'Continue'
         & $Command @Arguments 2>&1 | ForEach-Object {
@@ -595,6 +693,7 @@ function Invoke-ResinHelper {
         throw "Installer helper failed with exit code $exitCode."
     }
 
+    $script:ResinInstallStep = 'helper_result'
     $stdoutStr = if ($helperOutput -is [array]) { ($helperOutput -join "`n").Trim() } else { "$helperOutput".Trim() }
     if ([string]::IsNullOrWhiteSpace($stdoutStr)) {
         Write-Error "Installer helper exited with code 0 but emitted no output. Expected success JSON payload."
@@ -642,6 +741,7 @@ function Invoke-ResinInstall {
     }
 
     $helperUri = [System.Uri]::new($helperUrl)
+    $script:ResinInstallStep = 'helper_download'
 
     # Scheme verification
     if (-not $isTestMode -and $helperUri.Scheme -ne 'https') {
@@ -721,6 +821,7 @@ function Invoke-ResinInstall {
     }
 
     # Execution flow: Preflight checks
+    $script:ResinInstallStep = 'preflight'
     if ($useWslInstall) {
         # Check WSL2 availability
         $wslCmd = Get-Command wsl.exe -ErrorAction SilentlyContinue
@@ -780,6 +881,7 @@ function Invoke-ResinInstall {
     }
 
     # Create secure temporary directory (fail-closed ACL / permission enforcement)
+    $script:ResinInstallStep = 'staging'
     $tempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "resin-install-$([System.Guid]::NewGuid().ToString('N'))")
     $null = [System.IO.Directory]::CreateDirectory($tempDir)
 
@@ -925,12 +1027,42 @@ if ($Help) {
 # Errors end this script without closing the caller's window when run through 'irm | iex';
 # a script file run (powershell -File install.ps1) exits with a non-zero code instead.
 $resinInstallRunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
+$resinTelemetryEnv = @{
+    RESIN_INSTALL_ANALYTICS_ID = $env:RESIN_INSTALL_ANALYTICS_ID
+    RESIN_INSTALL_TELEMETRY_OWNER = $env:RESIN_INSTALL_TELEMETRY_OWNER
+    WSLENV = $env:WSLENV
+}
+if ([string]::IsNullOrWhiteSpace($DownloadOnly) -and (Test-ResinTelemetryEnabled)) {
+    $script:ResinAnalyticsId = Get-ResinAnalyticsId
+    # The helper persists this id and leaves start/completion events to this script. WSLENV carries
+    # these (and the opt-outs) into a -UseWsl helper run.
+    $env:RESIN_INSTALL_ANALYTICS_ID = $script:ResinAnalyticsId
+    $env:RESIN_INSTALL_TELEMETRY_OWNER = 'bootstrap'
+    $env:WSLENV = (@('RESIN_INSTALL_ANALYTICS_ID/u', 'RESIN_INSTALL_TELEMETRY_OWNER/u', 'DO_NOT_TRACK/u', 'RESIN_ERROR_REPORTING/u', $env:WSLENV) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join ':'
+    Send-ResinInstallEvent -EventName 'install_started' -Step 'bootstrap'
+}
 try {
     Invoke-ResinInstall
+    if ($null -ne $script:ResinAnalyticsId) {
+        Send-ResinInstallEvent -EventName 'install_completed' -Step 'complete'
+    }
 } catch {
+    if ($null -ne $script:ResinAnalyticsId -and $script:ResinInstallStep -ne 'helper') {
+        # The helper reports its own failures with a precise reason.
+        Send-ResinInstallEvent -EventName 'install_failed' -Step $script:ResinInstallStep -ExitCode 1 -Reason "$($script:ResinInstallStep)_failed"
+    }
     if ($resinInstallRunAsFile) {
         [Console]::Error.WriteLine("Resin installation failed: $($_.Exception.Message)")
         exit 1
     }
     throw
+} finally {
+    # 'irm | iex' runs in the caller's session: leave its environment as it was.
+    foreach ($name in $resinTelemetryEnv.Keys) {
+        if ($null -eq $resinTelemetryEnv[$name]) {
+            Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:$name" -Value $resinTelemetryEnv[$name]
+        }
+    }
 }

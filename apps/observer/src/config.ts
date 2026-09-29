@@ -27,6 +27,8 @@ export const DaemonConfigSchema = z.object({
   socketPath: z.string().optional(),
   cloudUrl: z.string().url().default("https://api.resin.sh"),
   telemetryEnabled: z.boolean().default(true),
+  /** Crash/error reports and usage events (PostHog). Unset means enabled; see error-reporting. */
+  errorReportingEnabled: z.boolean().optional(),
   storageDir: z.string().optional(),
   heartbeatIntervalMs: z.number().int().positive().default(3000),
   lockStaleThresholdMs: z.number().int().positive().default(15000),

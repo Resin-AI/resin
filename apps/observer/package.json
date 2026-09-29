@@ -41,6 +41,16 @@
       "types": "./dist/bin/daemon.d.ts",
       "import": "./dist/bin/daemon.js",
       "default": "./dist/bin/daemon.js"
+    },
+    "./error-reporting": {
+      "types": "./dist/error-reporting/index.d.ts",
+      "import": "./dist/error-reporting/index.js",
+      "default": "./dist/error-reporting/index.js"
+    },
+    "./error-reporting/core": {
+      "types": "./dist/error-reporting/core.d.ts",
+      "import": "./dist/error-reporting/core.js",
+      "default": "./dist/error-reporting/core.js"
     }
   },
   "scripts": {
@@ -66,6 +76,7 @@
     "@resin/harness-contracts": "workspace:*",
     "@resin/protocol": "workspace:*",
     "@resin/windows-security": "workspace:*",
+    "posthog-node": "^5.54.1",
     "typescript": "5.9.3",
     "zod": "^3.25.76"
   },

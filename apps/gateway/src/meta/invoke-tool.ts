@@ -12,6 +12,7 @@ import {
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
+import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
 import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
@@ -288,6 +289,16 @@ export function createInvokeToolHandler(
       result?: CallToolResult,
       errorMessage?: string,
     ) => {
+      if (status !== "success") {
+        // Only ids, status and timing: never inputs, outputs or the error text.
+        reportEvent("tool_invocation_failed", {
+          tool_id: recordedToolId,
+          tool_version: recordedToolVersion,
+          status,
+          duration_ms: Math.max(0, Date.now() - startTime),
+          meta_tool: isMetaTool,
+        });
+      }
       const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
       if (isMetaTool) {
         if (isRecordedDiscoveryTool) {
@@ -364,6 +375,7 @@ export function createInvokeToolHandler(
         Promise.resolve()
           .then(() => onInvocationRecorded(record))
           .catch((err) => {
+            reportHandledError(err, { failureClass: "tool_invocation_record" });
             try {
               process.stderr.write(
                 `[invoke-tool] Failed to record invocation: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
@@ -373,6 +385,7 @@ export function createInvokeToolHandler(
             }
           });
       } catch (err) {
+        reportHandledError(err, { failureClass: "tool_invocation_record" });
         try {
           process.stderr.write(
             `[invoke-tool] Failed to construct invocation record: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
