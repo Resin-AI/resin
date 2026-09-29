@@ -20,8 +20,11 @@ concurrency:
 permissions:
   contents: read
 
+# Tests, qualification and smoke runs start real Resin binaries; they never send error reports
+# or usage events (see docs/adr/0015-client-error-reporting.md).
 env:
   TURBO_TELEMETRY_DISABLED: "1"
+  DO_NOT_TRACK: "1"
 
 jobs:
   static:

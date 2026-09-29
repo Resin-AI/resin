@@ -12,6 +12,11 @@ concurrency:
   group: internal-workflow-${{ github.ref }}
   cancel-in-progress: true
 
+# Tests, qualification and smoke runs start real Resin binaries; they never send error reports
+# or usage events (see docs/adr/0015-client-error-reporting.md).
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   capture-replay:
     runs-on: ubuntu-latest

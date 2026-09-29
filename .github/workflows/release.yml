@@ -37,6 +37,11 @@ concurrency:
   group: release-${{ inputs.environment || 'production' }}
   cancel-in-progress: false
 
+# Tests, qualification and smoke runs start real Resin binaries; they never send error reports
+# or usage events (see docs/adr/0015-client-error-reporting.md).
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   release:
     name: Public Release Publication
