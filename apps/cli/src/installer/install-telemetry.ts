@@ -35,6 +35,8 @@ export interface InstallTelemetryOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly resinHome: string;
   readonly version?: string;
+  /** A test install (`--allow-insecure-loopback`); silent unless `RESIN_ERROR_REPORTING=1`. */
+  readonly testMode?: boolean;
   /** Defaults to an unref'd `node:https` transport, so a dead host cannot hold the process. */
   readonly transport?: ReportingTransport;
 }
@@ -55,12 +57,16 @@ export function installFailureReason(error: unknown): string {
 export function createInstallTelemetry(options: InstallTelemetryOptions): InstallTelemetry {
   const env = options.env ?? process.env;
   const ownedByShell = env[INSTALL_TELEMETRY_OWNER_ENV] === "bootstrap";
+  // Test installs (install.sh / install.ps1 test mode, --allow-insecure-loopback) stay silent
+  // unless RESIN_ERROR_REPORTING=1 forces reporting, matching the shell installers.
+  const silencedForTest = Boolean(options.testMode) && env.RESIN_ERROR_REPORTING?.trim() !== "1";
   const transport = options.transport ?? createUnrefTransport(SEND_TIMEOUT_MS);
   const stateDir = path.join(options.resinHome, "state");
   const configFile = path.join(options.resinHome, "config", "config.json");
 
   const send = async (event: InstallEvent, properties: EventProperties = {}): Promise<void> => {
     try {
+      if (silencedForTest) return;
       const apiKey = resolveReportingKey(env);
       if (!apiKey) return;
       const consent = resolveErrorReportingConsent({
@@ -95,12 +101,28 @@ export function createInstallTelemetry(options: InstallTelemetryOptions): Instal
           $lib: "resin-install-helper",
         },
       });
-      await transport(`${resolveReportingHost(env)}/i/v0/e/`, {
+      const request = transport(`${resolveReportingHost(env)}/i/v0/e/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      }).catch(() => undefined);
+      }).then(
+        () => undefined,
+        () => undefined,
+      );
+      // The transport's sockets are unref'd, so while a request is pending nothing else may keep
+      // the event loop alive: without this referenced timer the process can exit (code 0) in the
+      // middle of `await send(...)`, before the caller writes its result. The timer bounds the wait
+      // and keeps the process alive for exactly that long; `finally` then drops the request.
+      let timer: NodeJS.Timeout | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SEND_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([request, deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       // Install telemetry never affects the install.
     } finally {

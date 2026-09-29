@@ -18137,11 +18137,13 @@ function installFailureReason(error) {
 function createInstallTelemetry(options) {
   const env = options.env ?? process8.env;
   const ownedByShell = env[INSTALL_TELEMETRY_OWNER_ENV] === "bootstrap";
+  const silencedForTest = Boolean(options.testMode) && env.RESIN_ERROR_REPORTING?.trim() !== "1";
   const transport = options.transport ?? createUnrefTransport(SEND_TIMEOUT_MS);
   const stateDir = path39.join(options.resinHome, "state");
   const configFile = path39.join(options.resinHome, "config", "config.json");
   const send = async (event, properties = {}) => {
     try {
+      if (silencedForTest) return;
       const apiKey = resolveReportingKey(env);
       if (!apiKey) return;
       const consent = resolveErrorReportingConsent({
@@ -18174,12 +18176,24 @@ function createInstallTelemetry(options) {
           $lib: "resin-install-helper"
         }
       });
-      await transport(`${resolveReportingHost(env)}/i/v0/e/`, {
+      const request = transport(`${resolveReportingHost(env)}/i/v0/e/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
-      }).catch(() => void 0);
+      }).then(
+        () => void 0,
+        () => void 0
+      );
+      let timer;
+      const deadline = new Promise((resolve6) => {
+        timer = setTimeout(resolve6, SEND_TIMEOUT_MS);
+      });
+      try {
+        await Promise.race([request, deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
     } finally {
       if (isCancellableTransport(transport)) transport.cancelPending();
@@ -20482,7 +20496,8 @@ Options:
     );
   }
   const telemetry = createInstallTelemetry({
-    resinHome: resinHome ?? process9.env.RESIN_HOME ?? path40.join(os9.homedir(), ".resin")
+    resinHome: resinHome ?? process9.env.RESIN_HOME ?? path40.join(os9.homedir(), ".resin"),
+    testMode: allowInsecureLoopback
   });
   const started = telemetry.ownedByShell ? Promise.resolve() : telemetry.send("install_started", { step: "helper" });
   try {
@@ -20500,17 +20515,19 @@ Options:
       allowInsecureHttpForTests: allowInsecureLoopback,
       allowOverrides: channelUrl !== void 0
     });
+    await writeFully(process9.stdout, `${JSON.stringify(result, null, 2)}
+`);
     await started;
     if (!telemetry.ownedByShell) {
-      await createInstallTelemetry({ resinHome: result.resinHome, version: result.version }).send(
-        "install_completed",
-        { step: "complete", exit_code: 0 }
-      );
+      await createInstallTelemetry({
+        resinHome: result.resinHome,
+        version: result.version,
+        testMode: allowInsecureLoopback
+      }).send("install_completed", { step: "complete", exit_code: 0 });
     }
-    process9.stdout.write(`${JSON.stringify(result, null, 2)}
-`);
   } catch (error) {
-    process9.stderr.write(
+    await writeFully(
+      process9.stderr,
       `Installation failed: ${error instanceof Error ? error.message : String(error)}
 `
     );
@@ -20520,16 +20537,25 @@ Options:
       exit_code: 1,
       reason: installFailureReason(error)
     });
-    process9.exit(1);
+    process9.exitCode = 1;
   }
+}
+function writeFully(stream, text) {
+  return new Promise((resolve6) => {
+    try {
+      stream.write(text, () => resolve6());
+    } catch {
+      resolve6();
+    }
+  });
 }
 if (process9?.argv?.[1] && isMainModule(import.meta.url, process9.argv[1])) {
   runCli().catch((err) => {
+    process9.exitCode = 1;
     process9.stderr.write(
       `Fatal error: ${err instanceof Error ? err.stack || err.message : String(err)}
 `
     );
-    process9.exit(1);
   });
 }
 export {
@@ -20552,7 +20578,8 @@ export {
   resolveTrustedReleaseKeys,
   runCli,
   secureWindowsResinHome,
-  validateChannelUrl
+  validateChannelUrl,
+  writeFully
 };
 /*! Bundled license information:
 
