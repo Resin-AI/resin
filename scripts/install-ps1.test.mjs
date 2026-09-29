@@ -306,6 +306,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -365,6 +366,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -416,6 +418,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -458,6 +461,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -499,6 +503,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -541,6 +546,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
             {
               timeout: 15000,
               env: {
+                DO_NOT_TRACK: "1",
                 ...process.env,
                 RESIN_INSTALL_TEST_ONLY: "1",
                 RESIN_INSTALL_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
@@ -589,6 +595,7 @@ describe("install.ps1 execution and behavioral security tests", () => {
         {
           timeout: 30000,
           env: {
+            DO_NOT_TRACK: "1",
             ...process.env,
             RESIN_INSTALL_TEST_ONLY: "1",
             RESIN_INSTALL_HELPER_PATH: helperPath,

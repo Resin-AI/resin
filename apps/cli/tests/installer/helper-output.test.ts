@@ -65,6 +65,8 @@ describe.skipIf(!fs.existsSync(telemetryDist))(
           RESIN_POSTHOG_KEY: TEST_KEY,
           RESIN_POSTHOG_HOST: `http://127.0.0.1:${port}`,
           RESIN_ERROR_REPORTING: "1",
+          // Clear the suite-wide opt-out: this test exercises sending, against a loopback host.
+          DO_NOT_TRACK: "",
         },
       });
       let stdout = "";

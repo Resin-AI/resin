@@ -16,6 +16,12 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+// Qualification and smoke runs start real Resin binaries: they must never send error reports or
+// usage events to production. An explicit DO_NOT_TRACK / RESIN_ERROR_REPORTING is respected.
+if (process.env.DO_NOT_TRACK === undefined && process.env.RESIN_ERROR_REPORTING === undefined) {
+  process.env.DO_NOT_TRACK = "1";
+}
+
 /**
  * @typedef {Object} BinarySpec
  * @property {string} packageName - NPM package name

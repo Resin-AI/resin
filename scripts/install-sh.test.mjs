@@ -18,6 +18,7 @@ function runInstallSh(args = [], options = {}) {
     const proc = child_process.spawn("sh", [INSTALL_SH_PATH, ...args], {
       cwd: options.cwd || process.cwd(),
       env: {
+        DO_NOT_TRACK: "1",
         PATH: process.env.PATH,
         TMPDIR: options.tmpDir || process.env.TMPDIR,
         ...options.env,
@@ -53,6 +54,7 @@ function runInstallShViaStdin(args = [], options = {}) {
     const proc = child_process.spawn("sh", ["-s", "--", ...args], {
       cwd: options.cwd || process.cwd(),
       env: {
+        DO_NOT_TRACK: "1",
         PATH: process.env.PATH,
         TMPDIR: options.tmpDir || process.env.TMPDIR,
         ...options.env,
@@ -176,6 +178,7 @@ describe.skipIf(process.platform === "win32")("install.sh bootstrap script", () 
 
     const res1 = await runInstallSh(["--download-only", downloadTarget1], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_HOME: resinHome1,
@@ -202,6 +205,7 @@ describe.skipIf(process.platform === "win32")("install.sh bootstrap script", () 
 
     const res2 = await runInstallSh([`--download-only=${downloadTarget2}`], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_HOME: resinHome2,
@@ -232,6 +236,7 @@ describe.skipIf(process.platform === "win32")("install.sh bootstrap script", () 
 
     const res = await runInstallSh(["--download-only", downloadTarget], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_HOME: resinHome,
@@ -266,6 +271,7 @@ describe.skipIf(process.platform === "win32")("install.sh bootstrap script", () 
 
     const res = await runInstallSh(["--download-only", downloadTarget], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/redirect`,
         RESIN_HOME: resinHome,
@@ -321,6 +327,7 @@ exec "$RESIN_TEST_REAL_NODE" --require "$RESIN_TEST_DNS_FIXTURE" "$@"
       );
       const res = await runInstallSh(["--download-only", downloadTarget], {
         env: {
+          DO_NOT_TRACK: "1",
           PATH: `${fakeBinDir}:${process.env.PATH}`,
           RESIN_INSTALL_TEST_ONLY: "0",
           RESIN_TEST_DNS_ADDRESS: address,
@@ -352,6 +359,7 @@ exec "$RESIN_TEST_REAL_NODE" --require "$RESIN_TEST_DNS_FIXTURE" "$@"
     // 1. Missing node binary
     const resNoNode = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         PATH: fakeBinDir,
       },
     });
@@ -376,6 +384,7 @@ exit 0
 
     const resOldNode = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         PATH: `${fakeBinDir}:${process.env.PATH}`,
       },
     });
@@ -407,6 +416,7 @@ echo "MINGW64"
 
     const resWin = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         PATH: `${fakeBinDir}:/bin:/usr/bin`,
       },
     });
@@ -445,6 +455,7 @@ echo "Linux"
 
     const res32 = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         PATH: `${fakeBinDir}:/bin:/usr/bin`,
       },
     });
@@ -469,6 +480,7 @@ echo "Linux"
     const downloadTarget1 = path.join(tempDir, "oversized-cl.mjs");
     const res1 = await runInstallSh(["--download-only", downloadTarget1], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
       },
@@ -494,6 +506,7 @@ echo "Linux"
     const downloadTarget2 = path.join(tempDir, "invalid-cl.mjs");
     const res2 = await runInstallSh(["--download-only", downloadTarget2], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
       },
@@ -527,6 +540,7 @@ echo "Linux"
     const downloadTarget = path.join(tempDir, "oversized-body.mjs");
     const res = await runInstallSh(["--download-only", downloadTarget], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
       },
@@ -555,6 +569,7 @@ echo "Linux"
     const downloadTarget = path.join(tempDir, "aborted.mjs");
     const res = await runInstallSh(["--download-only", downloadTarget], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
       },
@@ -594,6 +609,7 @@ process.exit(0);
     // Use a different expected hash so digest check fails
     const res = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256:
@@ -625,6 +641,7 @@ process.exit(0);
 
     const res = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: emptySha,
@@ -659,6 +676,7 @@ process.exit(0);
 
     const res1 = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: textSha,
@@ -692,6 +710,7 @@ process.exit(0);
 
     const res2 = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: failJsonSha,
@@ -729,6 +748,7 @@ process.exit(0);
 
     const res = await runInstallSh([], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: successSha,
@@ -741,6 +761,7 @@ process.exit(0);
 
     const jsonRes = await runInstallSh(["--json"], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: successSha,
@@ -782,6 +803,7 @@ process.exit(0);
     await runInstallSh([], {
       tmpDir: customTmp,
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: successSha,
@@ -815,6 +837,7 @@ process.exit(0);
 
     const res = await runInstallSh(["--verbose", "--json", "--no-path-update"], {
       env: {
+        DO_NOT_TRACK: "1",
         RESIN_INSTALL_TEST_ONLY: "1",
         RESIN_HELPER_URL: `http://127.0.0.1:${serverPort}/install-helper-v1.mjs`,
         RESIN_TEST_HELPER_SHA256: forwardSha,

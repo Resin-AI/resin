@@ -10,6 +10,12 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { V1_SUPPORT_MATRIX } from "../apps/cli/dist/platform/platform.js";
 
+// Qualification and smoke runs start real Resin binaries: they must never send error reports or
+// usage events to production. An explicit DO_NOT_TRACK / RESIN_ERROR_REPORTING is respected.
+if (process.env.DO_NOT_TRACK === undefined && process.env.RESIN_ERROR_REPORTING === undefined) {
+  process.env.DO_NOT_TRACK = "1";
+}
+
 export { V1_SUPPORT_MATRIX };
 
 export const REQUIRED_QUALIFICATION_LANES = V1_SUPPORT_MATRIX.qualificationLanes;
