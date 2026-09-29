@@ -114,12 +114,10 @@ export function createInstallTelemetry(options: InstallTelemetryOptions): Instal
       // the event loop alive: without this referenced timer the process can exit (code 0) in the
       // middle of `await send(...)`, before the caller writes its result. The timer bounds the wait
       // and keeps the process alive for exactly that long; `finally` then drops the request.
-      let timer: NodeJS.Timeout | undefined;
-      const deadline = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, SEND_TIMEOUT_MS);
-      });
+      const deadline = Promise.withResolvers<void>();
+      const timer = setTimeout(deadline.resolve, SEND_TIMEOUT_MS);
       try {
-        await Promise.race([request, deadline]);
+        await Promise.race([request, deadline.promise]);
       } finally {
         clearTimeout(timer);
       }

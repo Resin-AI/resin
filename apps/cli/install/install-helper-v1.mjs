@@ -18185,12 +18185,10 @@ function createInstallTelemetry(options) {
         () => void 0,
         () => void 0
       );
-      let timer;
-      const deadline = new Promise((resolve6) => {
-        timer = setTimeout(resolve6, SEND_TIMEOUT_MS);
-      });
+      const deadline = Promise.withResolvers();
+      const timer = setTimeout(deadline.resolve, SEND_TIMEOUT_MS);
       try {
-        await Promise.race([request, deadline]);
+        await Promise.race([request, deadline.promise]);
       } finally {
         clearTimeout(timer);
       }
@@ -20541,13 +20539,13 @@ Options:
   }
 }
 function writeFully(stream, text) {
-  return new Promise((resolve6) => {
-    try {
-      stream.write(text, () => resolve6());
-    } catch {
-      resolve6();
-    }
-  });
+  const flushed = Promise.withResolvers();
+  try {
+    stream.write(text, () => flushed.resolve());
+  } catch {
+    flushed.resolve();
+  }
+  return flushed.promise;
 }
 if (process9?.argv?.[1] && isMainModule(import.meta.url, process9.argv[1])) {
   runCli().catch((err) => {

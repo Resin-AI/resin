@@ -1817,13 +1817,13 @@ export function writeFully(
   stream: { write: (chunk: string, callback: (error?: Error | null) => void) => boolean },
   text: string,
 ): Promise<void> {
-  return new Promise<void>((resolve) => {
-    try {
-      stream.write(text, () => resolve());
-    } catch {
-      resolve();
-    }
-  });
+  const flushed = Promise.withResolvers<void>();
+  try {
+    stream.write(text, () => flushed.resolve());
+  } catch {
+    flushed.resolve();
+  }
+  return flushed.promise;
 }
 
 if (process?.argv?.[1] && isMainModule(import.meta.url, process.argv[1])) {
