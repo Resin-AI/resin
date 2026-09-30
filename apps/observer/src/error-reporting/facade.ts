@@ -19,7 +19,11 @@ export const RESIN_POSTHOG_DEFAULT_HOST = "https://resin.sh/ingest";
 
 const PROJECT_KEY_PATTERN = /^phc_[A-Za-z0-9_-]{16,}$/;
 
-export type ResinSurface = "cli" | "daemon" | "gateway" | "mcp_shim" | "installer";
+/**
+ * The process that reports. `updater` is the automatic updater: the service supervisor's update
+ * timer and the out-of-service update worker (`resin upgrade` reports as `cli`).
+ */
+export type ResinSurface = "cli" | "daemon" | "gateway" | "mcp_shim" | "installer" | "updater";
 export type ResinEnvironment = "production" | "staging" | "development";
 export type ExceptionLevel = "fatal" | "error" | "warning";
 export type EventPropertyValue = string | number | boolean | null | undefined;

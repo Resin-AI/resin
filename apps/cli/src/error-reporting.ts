@@ -1,6 +1,6 @@
 import process from "node:process";
 import {
-  type ErrorReporter,
+  ErrorReporter,
   type ResinSurface,
   configureErrorReporting,
   installCrashHandlers,
@@ -77,6 +77,50 @@ export function setupCliErrorReporting(
     });
     if (options.installCrashHandlers) installCrashHandlers(reporter);
     return reporter;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface UpdaterReportingOptions {
+  readonly version: string;
+  readonly resinHome?: string;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * A reporter for the service supervisor's update timer only. It is not installed process-wide,
+ * so the supervisor's other code paths report exactly as before. Never throws.
+ */
+export function createUpdaterErrorReporter(
+  options: UpdaterReportingOptions,
+): ErrorReporter | undefined {
+  try {
+    return new ErrorReporter({
+      surface: "updater",
+      version: options.version,
+      env: options.env ?? process.env,
+      resinHome: options.resinHome,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Configures the process-wide reporter for the out-of-service update worker, whose only job is
+ * the update. Crash handlers stay off: a crash must not wait on reporting mid-cutover. Never throws.
+ */
+export function setupUpdaterErrorReporting(
+  options: UpdaterReportingOptions,
+): ErrorReporter | undefined {
+  try {
+    return configureErrorReporting({
+      surface: "updater",
+      version: options.version,
+      env: options.env ?? process.env,
+      resinHome: options.resinHome,
+    });
   } catch {
     return undefined;
   }

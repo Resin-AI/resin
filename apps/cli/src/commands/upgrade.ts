@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
+import { reportHandledError } from "@resin/observer/error-reporting/core";
 import { z } from "zod";
 import type { VerificationReport } from "../service/verification.js";
 import {
@@ -12,6 +12,7 @@ import {
   type UpdateEngineRunRequest,
   type UpdateRunStatus,
 } from "../updates/engine.js";
+import { type UpdateTelemetry, createUpdateTelemetry } from "../updates/update-telemetry.js";
 
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 export const CURRENT_VERSION = "0.1.0";
@@ -85,6 +86,9 @@ export class UpgradeOrchestrator {
   private readonly resinHome: string;
   private readonly fsBridge: ConfigFsBridge;
   private readonly engine: UpgradeEngineRunner;
+  private readonly telemetry: UpdateTelemetry | undefined;
+  /** Engine errors already reported as `update_failed`. */
+  private readonly reportedErrors = new WeakSet<object>();
 
   constructor(
     options: {
@@ -93,6 +97,8 @@ export class UpgradeOrchestrator {
       fsBridge?: ConfigFsBridge;
       customFetch?: typeof fetch;
       engine?: UpgradeEngineRunner;
+      /** Update telemetry for manual runs (`trigger: manual`); none when omitted. */
+      telemetry?: UpdateTelemetry;
       engineOptions?: Omit<
         UpdateEngineOptions,
         "homeDir" | "resinHome" | "fsBridge" | "customFetch" | "currentVersionFallback"
@@ -112,6 +118,12 @@ export class UpgradeOrchestrator {
         customFetch: options.customFetch,
         currentVersionFallback: CURRENT_VERSION,
       });
+    this.telemetry = options.telemetry;
+  }
+
+  /** True when `error` was thrown by the engine and already reported as `update_failed`. */
+  hasReportedFailure(error: unknown): boolean {
+    return error instanceof Object && this.reportedErrors.has(error);
   }
 
   async runUpgrade(flags: UpgradeCommandFlags = {}): Promise<UpgradeCommandResult> {
@@ -142,7 +154,21 @@ export class UpgradeOrchestrator {
       rollback: flags.rollback,
       signal: flags.signal,
     };
-    const result = await this.engine.run(runRequest);
+    const startedAtMs = Date.now();
+    let result: UpdateEngineResult;
+    try {
+      result = await this.engine.run(runRequest);
+    } catch (error) {
+      this.telemetry?.recordThrown(error, { trigger: "manual", currentVersion });
+      if (this.telemetry && error instanceof Object) this.reportedErrors.add(error);
+      throw error;
+    }
+    this.telemetry?.recordRun(result, {
+      trigger: "manual",
+      startedAtMs,
+      reportCheck: true,
+      explicitRollback: flags.rollback === true,
+    });
     return this.mapEngineResult(result);
   }
 
@@ -185,6 +211,8 @@ export async function upgradeCommand(
     fsBridge?: ConfigFsBridge;
     customFetch?: typeof fetch;
     engine?: UpgradeEngineRunner;
+    /** Defaults to update telemetry through the process-wide (`cli`) reporter. */
+    telemetry?: UpdateTelemetry;
     signal?: AbortSignal;
     verbosity?: VerbosityLevel;
     verbose?: boolean;
@@ -221,12 +249,15 @@ export async function upgradeCommand(
     });
   const isQuiet = verbosity === "quiet";
   const customHome = flags.home ? path.resolve(flags.home) : os.homedir();
+  const resinHome = path.join(customHome, ".resin");
+  const telemetry = options.telemetry ?? createUpdateTelemetry({ resinHome });
   const orchestrator = new UpgradeOrchestrator({
     homeDir: customHome,
-    resinHome: path.join(customHome, ".resin"),
+    resinHome,
     fsBridge: options.fsBridge,
     customFetch: options.customFetch,
     engine: options.engine,
+    telemetry,
   });
   try {
     const upgradeFlags: UpgradeCommandFlags = { ...flags };
@@ -253,16 +284,11 @@ export async function upgradeCommand(
     } else {
       stderr.write(`\nUpgrade failed: ${result.error ?? result.status}\n`);
     }
-    if (!result.success) {
-      reportEvent("upgrade_failed", {
-        status: result.status,
-        target_version: result.targetVersion,
-        active_version: result.activeVersion,
-      });
-    }
     return result.success ? 0 : 1;
   } catch (error) {
-    reportHandledError(error, { failureClass: "upgrade" });
+    if (!orchestrator.hasReportedFailure(error)) {
+      reportHandledError(error, { failureClass: "upgrade" });
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (flags.json) {
       stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
@@ -270,5 +296,8 @@ export async function upgradeCommand(
       stderr.write(`\nFatal error during upgrade: ${message}\n`);
     }
     return 1;
+  } finally {
+    // Queue the update events before the CLI entry flushes the reporter; bounded.
+    await telemetry.settled();
   }
 }

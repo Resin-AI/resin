@@ -10,7 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CLI_VERSION } from "./bin/cli.js";
 import { CURRENT_VERSION } from "./commands/upgrade.js";
+import { createUpdaterErrorReporter, setupUpdaterErrorReporting } from "./error-reporting.js";
 import { requestDaemonGracefulShutdown } from "./service/daemon-shutdown.js";
 import {
   SERVICE_SUPERVISOR_COMMAND,
@@ -24,6 +26,7 @@ import {
   runUpdateWorkerCommand,
   startAutoUpdateAutomation,
 } from "./updates/auto-update.js";
+import { createUpdateTelemetry } from "./updates/update-telemetry.js";
 
 // Legacy helper compatibility
 export interface CliArgs {
@@ -80,10 +83,24 @@ export async function runServiceSupervisorCommand(argv: string[]): Promise<numbe
   const supervisorOptions: ServiceSupervisorOptions = {
     command,
     args: argv.slice(separatorIndex + 2),
-    autoUpdateFactory: ({ resinHome: serviceResinHome }) =>
-      isManagedReleaseInstall(serviceResinHome)
-        ? startAutoUpdateAutomation({ resinHome: serviceResinHome })
-        : undefined,
+    autoUpdateFactory: ({ resinHome: serviceResinHome }) => {
+      if (!isManagedReleaseInstall(serviceResinHome)) return undefined;
+      // The update timer reports through its own `updater` reporter; nothing else here does.
+      const reporter = createUpdaterErrorReporter({
+        version: CLI_VERSION,
+        resinHome: serviceResinHome,
+      });
+      return startAutoUpdateAutomation({
+        resinHome: serviceResinHome,
+        telemetry: reporter
+          ? createUpdateTelemetry({
+              resinHome: serviceResinHome,
+              reporter: () => reporter,
+              eager: true,
+            })
+          : undefined,
+      });
+    },
   };
   if (resinHome !== undefined) {
     supervisorOptions.resinHome = resinHome;
@@ -173,7 +190,12 @@ if (process.argv[2] === SERVICE_SUPERVISOR_COMMAND && isDirectServiceSupervisorE
 }
 
 if (process.argv[2] === UPDATE_WORKER_COMMAND && isDirectServiceSupervisorEntry()) {
-  void runUpdateWorkerCommand(process.argv.slice(2), { currentVersionFallback: CURRENT_VERSION })
+  void runUpdateWorkerCommand(process.argv.slice(2), {
+    currentVersionFallback: CURRENT_VERSION,
+    setupReporting: (resinHome) => {
+      setupUpdaterErrorReporting({ version: CLI_VERSION, resinHome });
+    },
+  })
     .then((exitCode) => {
       process.exitCode = exitCode;
     })

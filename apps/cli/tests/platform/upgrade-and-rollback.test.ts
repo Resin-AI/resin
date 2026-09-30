@@ -8,12 +8,16 @@ import { type DaemonSupervisor, IpcServer } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import type { ResolvedProductionRelease } from "../../src/installer/release-client.js";
 import { detectPlatform, resolvePlatformPaths } from "../../src/platform/index.js";
+import { runUpdateWorker } from "../../src/updates/auto-update.js";
 import {
   UpdateEngine,
   type UpdateEngineOptions,
+  activeWorkBlocker,
   readUpdateStatusSnapshot,
+  updateFailureStageOf,
 } from "../../src/updates/engine.js";
 import { UpdateLockUnavailableError } from "../../src/updates/update-lock.js";
+import { createFakeReporter, createTestTelemetry } from "../support/update-telemetry-fakes.js";
 
 function createMockFsBridge(initialFiles: Record<string, string> = {}) {
   const files = new Map<string, string>(Object.entries(initialFiles));
@@ -164,6 +168,9 @@ function createEngineFixture(
     initialFiles?: Record<string, string>;
     failJournalWrites?: () => boolean;
     failFirstStart?: boolean;
+    /** Fails this many service starts in a row (the candidate, then the rollback restart). */
+    failStartAttempts?: number;
+    downloadAsset?: UpdateEngineOptions["downloadAsset"];
     onSnapshot?: UpdateEngineOptions["onSnapshot"];
     useDefaultHealthProbe?: boolean;
     failStatusAfter?: number;
@@ -204,6 +211,7 @@ function createEngineFixture(
   const events: string[] = [];
   let activeVersion = currentVersion;
   const downloadAsset = vi.fn(async (request) => {
+    if (options.downloadAsset) return options.downloadAsset(request);
     events.push(`download:${request.asset.filename}`);
     return {
       path: path.join(resinHome, "downloads", request.asset.filename),
@@ -254,6 +262,9 @@ function createEngineFixture(
       startAttempts += 1;
       events.push("start");
       if (options.failFirstStart && startAttempts === 1) {
+        throw new Error("service manager start failed");
+      }
+      if (options.failStartAttempts !== undefined && startAttempts <= options.failStartAttempts) {
         throw new Error("service manager start failed");
       }
     },
@@ -1462,6 +1473,7 @@ describe("UpdateEngine staging, activation, and rollback", () => {
         success: true,
         status: "activation-deferred",
         deferralReason: "active-sessions",
+        deferralCode: "active_sessions",
         pendingVersion: "1.1.0",
         staged: true,
       });
@@ -2337,5 +2349,226 @@ describe("UpdateEngine old release pruning", () => {
     } finally {
       await fs.rm(homeDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("UpdateEngine telemetry detail", () => {
+  it("reports the signed release date and the channel check duration on activation", async () => {
+    const fixture = createEngineFixture({
+      resolveRelease: async () => {
+        const release = signedRelease("1.1.0");
+        return {
+          ...release,
+          manifest: { ...release.manifest, releaseDate: "2026-08-27T06:00:00Z" },
+        };
+      },
+    });
+
+    const result = await fixture.engine.run({ mode: "background" });
+
+    expect(result).toMatchObject({
+      status: "activated",
+      releaseDate: "2026-08-27T06:00:00.000Z",
+      checkDurationMs: 0,
+    });
+    expect(result.failure).toBeUndefined();
+  });
+
+  it("classifies a failed download without quarantining the release", async () => {
+    const fixture = createEngineFixture({
+      downloadAsset: async () => {
+        throw new TypeError("unexpected end of stream from https://dist.resin.sh/1.1.0");
+      },
+    });
+
+    const result = await fixture.engine.run({ mode: "background" });
+
+    expect(result.status).toBe("failed");
+    expect(result.failure).toMatchObject({
+      stage: "download",
+      errorCode: "TypeError",
+      rollback: "not_attempted",
+    });
+    expect(result.quarantined).toBe(false);
+  });
+
+  it("classifies checksum and channel-signature failures as verify", async () => {
+    const checksum = createEngineFixture({
+      downloadAsset: async (request) => ({
+        path: `/downloads/${request.asset.filename}`,
+        sha256: "e".repeat(64),
+        sizeBytes: 10,
+        verified: true,
+      }),
+    });
+    const signature = createEngineFixture({
+      resolveRelease: async () => {
+        throw new Error("Ed25519 channel signature verification failed");
+      },
+    });
+
+    const staged = await checksum.engine.run({ mode: "background" });
+    const resolved = await signature.engine.run({ mode: "background" });
+
+    expect(staged.failure).toMatchObject({ stage: "verify", errorCode: "UpdateVerificationError" });
+    expect(staged.quarantined).toBe(true);
+    expect(resolved.failure).toMatchObject({ stage: "verify", errorCode: "verify_failed" });
+  });
+
+  it("classifies an install failure as stage", async () => {
+    const fixture = createEngineFixture();
+    fixture.installRelease.mockRejectedValueOnce(
+      Object.assign(new Error("no space left on device"), { code: "ENOSPC" }),
+    );
+
+    const result = await fixture.engine.run({ mode: "background" });
+
+    expect(result.failure).toMatchObject({ stage: "stage", errorCode: "ENOSPC" });
+  });
+
+  it("classifies restart and health-gate failures and whether rollback succeeded", async () => {
+    const restart = createEngineFixture({ failFirstStart: true });
+    const unhealthy = createEngineFixture({
+      healthProbe: async () => ({
+        serviceActive: false,
+        ipcResponsive: false,
+        mcpResponsive: false,
+        recoveryBreakerTripped: true,
+        message: "crash loop",
+      }),
+    });
+    const rollbackFails = createEngineFixture({ failStartAttempts: 2 });
+
+    const restarted = await restart.engine.run({ mode: "background" });
+    const gated = await unhealthy.engine.run({ mode: "background" });
+    const stuck = await rollbackFails.engine.run({ mode: "background" });
+
+    expect(restarted).toMatchObject({ status: "rolled-back", rolledBack: true });
+    expect(restarted.failure).toMatchObject({ stage: "restart", rollback: "succeeded" });
+    expect(gated).toMatchObject({ status: "rolled-back", quarantined: true });
+    expect(gated.failure).toMatchObject({
+      stage: "health_check",
+      errorCode: "CandidateHealthError",
+      rollback: "succeeded",
+    });
+    expect(stuck).toMatchObject({ status: "failed", rolledBack: false });
+    expect(stuck.failure).toMatchObject({ stage: "restart", rollback: "failed" });
+  });
+
+  it("classifies an explicit rollback failure as the rollback stage", async () => {
+    const fixture = createEngineFixture({ failFirstStart: true });
+
+    const result = await fixture.engine.run({ mode: "manual", rollback: true });
+
+    expect(result.success).toBe(false);
+    expect(result.failure).toMatchObject({ stage: "rollback" });
+  });
+
+  it("tags an error thrown while taking the lock with the lock stage", async () => {
+    const failure = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    const fixture = createEngineFixture({
+      acquireLock: async () => {
+        throw failure;
+      },
+    });
+
+    await expect(fixture.engine.run({ mode: "background" })).rejects.toBe(failure);
+    expect(updateFailureStageOf(failure)).toBe("lock");
+  });
+
+  it("reports a refused lock as a locked deferral", async () => {
+    const fixture = createEngineFixture({
+      acquireLock: async (options) => {
+        throw new UpdateLockUnavailableError(options.lockPath!, null, 0);
+      },
+    });
+
+    const result = await fixture.engine.run({ mode: "background" });
+
+    expect(result).toMatchObject({ status: "locked", deferralCode: "locked" });
+  });
+
+  it("names what blocked activation", async () => {
+    const counters = createEngineFixture({
+      sessionActivity: async () => ({ state: "active", blocker: "active_tool_executions" }),
+    });
+    const legacy = createEngineFixture({ sessionActivity: async () => true });
+    const unknown = createEngineFixture({
+      sessionActivity: async () => {
+        throw new Error("daemon unreachable");
+      },
+    });
+    const noService = createEngineFixture({ failStatusAfter: 1 });
+
+    const results = await Promise.all(
+      [counters, legacy, unknown, noService].map((fixture) =>
+        fixture.engine.run({ mode: "background" }),
+      ),
+    );
+
+    expect(results.map((result) => result.deferralCode)).toEqual([
+      "active_tool_executions",
+      "active_sessions",
+      "activity_unknown",
+      "service_unavailable",
+    ]);
+  });
+
+  it("classifies daemon work counters in drain-gate order", () => {
+    const health = (details: Record<string, number>) => ({
+      status: "fully-ready" as const,
+      uptimeSeconds: 1,
+      startedAt: 0,
+      version: "1.0.0",
+      modules: { session: { status: "healthy" as const, details, lastCheckTime: 0 } },
+      timestamp: 0,
+    });
+
+    expect(activeWorkBlocker(health({ activeSessions: 0, activeToolExecutions: 1 }))).toBe(
+      "active_tool_executions",
+    );
+    expect(activeWorkBlocker(health({ activeExecutions: 2, inFlightRequests: 1 }))).toBe(
+      "active_executions",
+    );
+    expect(activeWorkBlocker(health({ inFlightRequests: 3 }))).toBe("in_flight_requests");
+  });
+
+  it("sends update_failed from a real worker run whose candidate fails the health gate", async () => {
+    const reporter = createFakeReporter();
+    const fixture = createEngineFixture({
+      healthProbe: async () => ({
+        serviceActive: false,
+        ipcResponsive: false,
+        mcpResponsive: false,
+        recoveryBreakerTripped: true,
+        message: "crash loop at /home/alice/.resin",
+      }),
+    });
+
+    await runUpdateWorker({
+      resinHome: fixture.resinHome,
+      engine: fixture.engine,
+      publishNotification: async () => undefined,
+      report: () => undefined,
+      telemetry: createTestTelemetry(reporter),
+    });
+
+    expect(reporter.eventsNamed("update_failed")).toEqual([
+      {
+        trigger: "auto",
+        stage: "health_check",
+        error_code: "CandidateHealthError",
+        from_version: "1.0.0",
+        target_version: "1.1.0",
+        channel: "stable",
+        rolled_back: true,
+        rollback_outcome: "succeeded",
+        quarantined: true,
+      },
+    ]);
+    expect(reporter.exceptions).toEqual([
+      expect.objectContaining({ failureClass: "update_failed", errorCode: "CandidateHealthError" }),
+    ]);
+    expect(JSON.stringify(reporter.events)).not.toContain("alice");
   });
 });

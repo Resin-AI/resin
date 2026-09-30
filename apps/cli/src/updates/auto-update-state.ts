@@ -9,6 +9,11 @@ import type { UpdateSchedulerState } from "./scheduler.js";
 
 export const AUTO_UPDATE_STATE_FILE_NAME = "auto-update-state.json";
 export const AUTO_UPDATE_NOTICE_FILE_NAME = "auto-update-notice.json";
+/**
+ * Rate-limit bookkeeping for update telemetry. Kept apart from the auto-update state because the
+ * worker and `resin upgrade` write it too, while the supervisor owns the auto-update state.
+ */
+export const UPDATE_TELEMETRY_STATE_FILE_NAME = "update-telemetry.json";
 const AUTO_UPDATE_NOTIFICATION_COOLDOWN_MS = 4 * 60 * 60 * 1_000;
 const MAX_STATE_ERROR_LENGTH = 300;
 
@@ -76,6 +81,60 @@ const AutoUpdateNoticeSchema = z
 
 /** A one-time notice that the resident service installed a new version. */
 export type AutoUpdateNotice = z.infer<typeof AutoUpdateNoticeSchema>;
+
+const UpdateTelemetryStateSchema = z.object({
+  schemaVersion: z.literal(1),
+  /** Last send per rate-limited check outcome, and how many were suppressed since. */
+  checks: z.record(
+    z.string(),
+    z.object({
+      lastSentAtMs: z.number().int().nonnegative(),
+      suppressed: z.number().int().nonnegative(),
+    }),
+  ),
+  /** The run of consecutive deferrals for one target version. */
+  deferral: z
+    .object({
+      targetVersion: z.string().nullable(),
+      firstDeferredAtMs: z.number().int().nonnegative(),
+      lastSentAtMs: z.number().int().nonnegative(),
+      count: z.number().int().positive(),
+    })
+    .nullable(),
+});
+
+export type UpdateTelemetryState = z.infer<typeof UpdateTelemetryStateSchema>;
+
+export function createUpdateTelemetryState(): UpdateTelemetryState {
+  return { schemaVersion: 1, checks: {}, deferral: null };
+}
+
+export function resolveUpdateTelemetryStatePath(resinHome: string): string {
+  return path.join(resinHome, "updates", UPDATE_TELEMETRY_STATE_FILE_NAME);
+}
+
+/** Returns null when the state is missing or unreadable: it only rate-limits telemetry. */
+export async function readUpdateTelemetryState(
+  resinHome: string,
+): Promise<UpdateTelemetryState | null> {
+  try {
+    const raw = await fs.readFile(resolveUpdateTelemetryStatePath(resinHome), "utf8");
+    const parsed = UpdateTelemetryStateSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeUpdateTelemetryState(
+  resinHome: string,
+  state: UpdateTelemetryState,
+): Promise<void> {
+  await writePrivateJson(
+    resolveUpdateTelemetryStatePath(resinHome),
+    UpdateTelemetryStateSchema.parse(state),
+  );
+}
 
 export function createAutoUpdateState(): AutoUpdateState {
   return {

@@ -87,6 +87,45 @@ export type UpdateRunStatus =
 
 export type UpdateDeferralReason = "active-sessions" | "session-activity-unavailable" | "offline";
 
+/**
+ * What kept a staged release from activating, in the fixed vocabulary update telemetry reports.
+ * The first four name the daemon work counter that was non-zero.
+ */
+export type UpdateActivityBlocker =
+  | "active_sessions"
+  | "active_tool_executions"
+  | "active_executions"
+  | "in_flight_requests"
+  | "activity_unknown"
+  | "service_unavailable";
+
+/** Why an update was postponed: an activity blocker, the maintenance window or the shared lock. */
+export type UpdateDeferralCode = UpdateActivityBlocker | "maintenance_window" | "locked";
+
+/** The update step that failed, in the fixed vocabulary update telemetry reports. */
+export type UpdateFailureStage =
+  | "preflight"
+  | "lock"
+  | "download"
+  | "verify"
+  | "stage"
+  | "activate"
+  | "restart"
+  | "health_check"
+  | "rollback";
+
+/** Whether a failed activation was rolled back; `not_attempted` when nothing was switched. */
+export type UpdateRollbackOutcome = "not_attempted" | "succeeded" | "failed";
+
+export interface UpdateFailureDetail {
+  readonly stage: UpdateFailureStage;
+  /** A fixed error code or class name; never message text. */
+  readonly errorCode: string;
+  readonly rollback: UpdateRollbackOutcome;
+  /** The original error, for sanitized error tracking only. Never serialized. */
+  readonly cause?: unknown;
+}
+
 export interface UpdateQuarantineEntry {
   readonly version: string;
   readonly channel: UpdateChannel;
@@ -119,6 +158,8 @@ export interface UpdateSessionActivity {
   readonly state: "active" | "inactive" | "unknown";
   readonly activeCount?: number;
   readonly reason?: string;
+  /** The telemetry deferral code; derived from `state` when omitted. */
+  readonly blocker?: UpdateActivityBlocker;
 }
 
 export interface UpdateHealthProbeResult {
@@ -169,6 +210,14 @@ export interface UpdateEngineResult {
   readonly rolledBack?: boolean;
   readonly quarantined?: boolean;
   readonly deferralReason?: UpdateDeferralReason;
+  /** Fixed telemetry code for a deferral (`activation-deferred` or `locked`). */
+  readonly deferralCode?: UpdateDeferralCode;
+  /** Set on `failed` and failed `rolled-back` runs: where and how the run failed. */
+  readonly failure?: UpdateFailureDetail;
+  /** Release date from the signed release metadata, when an activation knows it. */
+  readonly releaseDate?: string;
+  /** Time spent resolving and authenticating the signed channel, when the run did. */
+  readonly checkDurationMs?: number;
   readonly error?: string;
   readonly backupPath?: string;
   readonly verificationReport?: VerificationReport;
@@ -534,6 +583,72 @@ function isVerificationError(cause: unknown): boolean {
   );
 }
 
+const FAILURE_CODE_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
+const failureStages = new WeakMap<object, UpdateFailureStage>();
+
+/**
+ * A fixed, low-cardinality code for a failure: the error's `code` (e.g. `ECONNRESET`), else its
+ * class name (e.g. `CandidateHealthError`), else `<stage>_failed`. Never message text.
+ */
+export function updateFailureCode(cause: unknown, stage: string): string {
+  if (cause instanceof Object) {
+    const code: unknown = "code" in cause ? cause.code : undefined;
+    if (typeof code === "string" && FAILURE_CODE_PATTERN.test(code)) return code;
+    const name: unknown = "name" in cause ? cause.name : undefined;
+    if (typeof name === "string" && name !== "Error" && FAILURE_CODE_PATTERN.test(name)) {
+      return name;
+    }
+  }
+  return `${stage}_failed`;
+}
+
+/** The stage an update run was in when it threw `error`, if the engine threw it. */
+export function updateFailureStageOf(error: unknown): UpdateFailureStage | undefined {
+  return error instanceof Object ? failureStages.get(error) : undefined;
+}
+
+function tagFailureStage(error: unknown, stage: UpdateFailureStage): void {
+  if (error instanceof Object && !failureStages.has(error)) failureStages.set(error, stage);
+}
+
+/** The release date from the signed manifest (or signed channel entry), as ISO, if valid. */
+function signedReleaseDate(
+  release: ResolvedProductionRelease,
+  channel: UpdateChannel,
+): string | undefined {
+  try {
+    const candidates: unknown[] = [
+      release.manifest?.releaseDate,
+      release.channel?.channels?.[channel]?.releaseDate,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string") continue;
+      const parsed = Date.parse(candidate);
+      if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+    }
+  } catch {
+    // Telemetry detail only; an unexpected shape means the date is unknown.
+  }
+  return undefined;
+}
+
+const ACTIVE_WORK_BLOCKERS: ReadonlyArray<readonly [string, UpdateActivityBlocker]> = [
+  ["activeSessions", "active_sessions"],
+  ["activeToolExecutions", "active_tool_executions"],
+  ["activeExecutions", "active_executions"],
+  ["inFlightRequests", "in_flight_requests"],
+];
+
+/** The first daemon work counter that is non-zero, in the order the drain gate checks them. */
+export function activeWorkBlocker(health: DaemonHealthReport): UpdateActivityBlocker {
+  for (const [key, blocker] of ACTIVE_WORK_BLOCKERS) {
+    for (const moduleHealth of Object.values(health.modules)) {
+      if (isPositiveFiniteNumber(moduleHealth.details?.[key])) return blocker;
+    }
+  }
+  return "active_sessions";
+}
+
 function cloneSnapshot(snapshot: UpdateStatusSnapshot): UpdateStatusSnapshot {
   return {
     ...snapshot,
@@ -605,6 +720,9 @@ export class UpdateEngine {
   private readonly clock: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly onSnapshot?: UpdateEngineOptions["onSnapshot"];
+  /** The step the current run is in; runs are serialized by the update lock. */
+  private stage: UpdateFailureStage = "preflight";
+  private checkDurationMs: number | undefined;
 
   constructor(options: UpdateEngineOptions = {}) {
     this.homeDir = options.homeDir ?? os.homedir();
@@ -674,6 +792,8 @@ export class UpdateEngine {
   async run(request: UpdateEngineRunRequest = {}): Promise<UpdateEngineResult> {
     const mode = request.mode ?? "manual";
     const lockPath = this.lockOptions.lockPath ?? resolveUpdateLockPath(this.resinHome);
+    this.stage = "lock";
+    this.checkDurationMs = undefined;
     let lock: UpdateLockHandle;
     try {
       lock = await this.acquireLock({
@@ -683,7 +803,10 @@ export class UpdateEngine {
         label: mode === "manual" ? "manual-upgrade" : "background-update",
       });
     } catch (error) {
-      if (!(error instanceof UpdateLockUnavailableError)) throw error;
+      if (!(error instanceof UpdateLockUnavailableError)) {
+        tagFailureStage(error, "lock");
+        throw error;
+      }
       const version = await this.readCurrentVersion();
       const channel = this.requestedChannelOrDefault(request.channel);
       const snapshot = await this.readSnapshot(version, channel).catch(() =>
@@ -695,13 +818,18 @@ export class UpdateEngine {
         status: "locked",
         success: false,
         currentVersion: version,
+        deferralCode: "locked",
         error: "Another manual or background update operation holds the shared update lock.",
         steps: ["preflight", "lock_refused"],
       });
     }
 
+    this.stage = request.rollback ? "rollback" : "preflight";
     try {
       return await this.runLocked(request);
+    } catch (error) {
+      tagFailureStage(error, this.stage);
+      throw error;
     } finally {
       await lock.release();
     }
@@ -815,6 +943,7 @@ export class UpdateEngine {
           success: false,
           currentVersion,
           error: `Update journal recovery failed: ${safeDiagnostic(recoveryError)}`,
+          failureCause: recoveryError,
           steps: ["preflight", "journal_recovery_failed"],
         });
       }
@@ -876,6 +1005,8 @@ export class UpdateEngine {
     let targetVersion: string | undefined;
     let release: ResolvedProductionRelease;
 
+    this.stage = "download";
+    const checkStartedAt = this.clock();
     try {
       release = await this.resolveRelease({
         platform: this.platformInfo,
@@ -890,7 +1021,9 @@ export class UpdateEngine {
       this.assertTrustedRelease(release);
       targetVersion = normalizeVersion(release.version);
       steps.push("signed_release_resolved");
+      this.checkDurationMs = Math.max(0, this.clock() - checkStartedAt);
     } catch (error) {
+      this.checkDurationMs = Math.max(0, this.clock() - checkStartedAt);
       if (isOfflineError(error)) {
         snapshot = await this.tryRecordSnapshot(snapshot, {
           lastResult: "offline",
@@ -907,6 +1040,7 @@ export class UpdateEngine {
           steps: [...steps, "offline_deferred"],
         });
       }
+      if (isVerificationError(error)) this.stage = "verify";
       return this.finishFailure(request, snapshot, currentVersion, targetVersion, error, [
         ...steps,
         "release_rejected",
@@ -918,6 +1052,7 @@ export class UpdateEngine {
       request.targetVersion &&
       normalizeVersion(request.targetVersion) !== normalizeVersion(targetVersion)
     ) {
+      this.stage = "verify";
       return this.finishFailure(
         request,
         snapshot,
@@ -1019,6 +1154,7 @@ export class UpdateEngine {
       });
       this.assertVerifiedDownload(denoDownload, release.denoAsset.sha256, "Deno runtime");
       steps.push("artifacts_verified");
+      this.stage = "stage";
       installed = await this.installRelease({
         version: installVersion,
         tarballPathOrBuffer: releaseDownload.path,
@@ -1069,6 +1205,7 @@ export class UpdateEngine {
         });
       }
       if (isVerificationError(error)) {
+        this.stage = "verify";
         snapshot = await this.tryQuarantine(snapshot, targetVersion, policy.channel, error);
       }
       return this.finishFailure(request, snapshot, currentVersion, targetVersion, error, [
@@ -1077,6 +1214,7 @@ export class UpdateEngine {
       ]);
     }
 
+    this.stage = "activate";
     const lease = await this.acquireActivationLease(request.signal, request.mode ?? "manual");
     const activity = lease.activity;
     if (activity.state !== "inactive") {
@@ -1101,6 +1239,9 @@ export class UpdateEngine {
         pendingVersion: targetVersion,
         staged: true,
         deferralReason,
+        deferralCode:
+          activity.blocker ??
+          (activity.state === "active" ? "active_sessions" : "activity_unknown"),
         error: message,
         steps: [...steps, "activation_deferred"],
       });
@@ -1191,6 +1332,9 @@ export class UpdateEngine {
         targetVersion,
         pendingVersion: targetVersion,
         deferralReason,
+        deferralCode:
+          activity.blocker ??
+          (activity.state === "active" ? "active_sessions" : "activity_unknown"),
         steps: [...steps, "activation_deferred"],
       });
     }
@@ -1251,8 +1395,13 @@ export class UpdateEngine {
     let rollbackTarget = metadata.version;
     let verificationReport: VerificationReport | undefined;
     let reinstallSwap: ReinstallSwapState | undefined;
+    const mark = (stage: UpdateFailureStage): void => {
+      // An explicit rollback reports every failure as the `rollback` stage.
+      if (!explicitRollback) this.stage = stage;
+    };
 
     try {
+      mark("activate");
       backup = await this.createBackup(metadata);
       steps.push("backup_created");
       if (lease.serviceState.installed || lease.serviceState.active || lease.drainInitiated) {
@@ -1312,10 +1461,12 @@ export class UpdateEngine {
         }
       }
 
+      mark("restart");
       await this.serviceManager.start();
       candidateStarted = true;
       serviceStopped = false;
       steps.push("restart_service");
+      mark("health_check");
       const probation = await this.runProbation(targetVersion, request.signal);
       verificationReport = probation.report;
       steps.push("health_gate");
@@ -1326,6 +1477,7 @@ export class UpdateEngine {
         }
         throw new CandidateHealthError(message);
       }
+      mark("activate");
 
       if (!lease.serviceState.active) {
         await this.serviceManager.stop();
@@ -1377,6 +1529,7 @@ export class UpdateEngine {
         rolledBack: explicitRollback || undefined,
         backupPath: backup.path,
         verificationReport,
+        releaseDate: release ? signedReleaseDate(release, policy.channel) : undefined,
         steps: [...steps, "complete"],
       });
     } catch (error) {
@@ -1388,6 +1541,7 @@ export class UpdateEngine {
         serviceStopped,
         configConflict: false,
       };
+      const rollbackAttempted = shouldRollback && backup !== undefined;
       if (shouldRollback && backup) {
         rollbackOutcome = await this.rollbackActivation({
           backup,
@@ -1484,6 +1638,12 @@ export class UpdateEngine {
         error: failureMessage,
         backupPath: backup?.path,
         verificationReport,
+        failureCause: error,
+        rollbackOutcome: rollbackAttempted
+          ? rollbackOutcome.rolledBack
+            ? "succeeded"
+            : "failed"
+          : "not_attempted",
         steps,
       });
     }
@@ -1625,6 +1785,7 @@ export class UpdateEngine {
         activity: {
           state: "unknown",
           reason: `service state unavailable: ${safeDiagnostic(error)}`,
+          blocker: "service_unavailable",
         },
         serviceState: {
           installed: false,
@@ -1708,6 +1869,7 @@ export class UpdateEngine {
             state: "active",
             activeCount: initialActiveCount,
             reason: "background updates activate only while the daemon is idle",
+            blocker: activeWorkBlocker(initialHealth),
           },
           serviceState,
           drainInitiated: false,
@@ -1740,6 +1902,7 @@ export class UpdateEngine {
       let elapsedMs = 0;
       let ipcDisconnected = false;
       let lastReportedActiveCount = this.countActiveWork(initialHealth);
+      let lastReportedHealth = initialHealth;
 
       while (true) {
         this.throwIfAborted(signal);
@@ -1750,12 +1913,14 @@ export class UpdateEngine {
                   state: "active",
                   activeCount: 1,
                   reason: "daemon drain timed out with service still active",
+                  blocker: "activity_unknown",
                 }
               : lastReportedActiveCount > 0
                 ? {
                     state: "active",
                     activeCount: lastReportedActiveCount,
                     reason: "daemon drain timed out with work still active",
+                    blocker: activeWorkBlocker(lastReportedHealth),
                   }
                 : {
                     state: "unknown",
@@ -1778,6 +1943,7 @@ export class UpdateEngine {
             );
             const activeCount = this.countActiveWork(health);
             lastReportedActiveCount = activeCount;
+            lastReportedHealth = health;
             if (activeCount === 0 && health.status === "stopped") {
               return {
                 activity: { state: "inactive", activeCount: 0 },
@@ -1810,6 +1976,7 @@ export class UpdateEngine {
               activity: {
                 state: "unknown",
                 reason: `service state unavailable after drain: ${safeDiagnostic(statusError)}`,
+                blocker: "service_unavailable",
               },
               serviceState,
               drainInitiated: true,
@@ -3001,6 +3168,7 @@ export class UpdateEngine {
       targetVersion,
       error: message,
       quarantined: targetVersion ? this.isQuarantined(next, targetVersion) : false,
+      failureCause: cause,
       steps,
     });
   }
@@ -3019,11 +3187,26 @@ export class UpdateEngine {
     readonly rolledBack?: boolean;
     readonly quarantined?: boolean;
     readonly deferralReason?: UpdateDeferralReason;
+    readonly deferralCode?: UpdateDeferralCode;
     readonly error?: string;
     readonly backupPath?: string;
     readonly verificationReport?: VerificationReport;
+    readonly releaseDate?: string;
+    /** The error behind a failed run; becomes `failure` with the current stage. */
+    readonly failureCause?: unknown;
+    readonly rollbackOutcome?: UpdateRollbackOutcome;
     readonly steps: string[];
   }): UpdateEngineResult {
+    const failed =
+      !options.success && (options.status === "failed" || options.status === "rolled-back");
+    const failure: UpdateFailureDetail | undefined = failed
+      ? {
+          stage: this.stage,
+          errorCode: updateFailureCode(options.failureCause, this.stage),
+          rollback: options.rollbackOutcome ?? "not_attempted",
+          cause: options.failureCause,
+        }
+      : undefined;
     return {
       success: options.success,
       mode: options.request.mode ?? "manual",
@@ -3039,6 +3222,10 @@ export class UpdateEngine {
       rolledBack: options.rolledBack,
       quarantined: options.quarantined,
       deferralReason: options.deferralReason,
+      ...(options.deferralCode === undefined ? {} : { deferralCode: options.deferralCode }),
+      ...(failure === undefined ? {} : { failure }),
+      ...(options.releaseDate === undefined ? {} : { releaseDate: options.releaseDate }),
+      ...(this.checkDurationMs === undefined ? {} : { checkDurationMs: this.checkDurationMs }),
       error: options.error,
       backupPath: options.backupPath,
       verificationReport: options.verificationReport,

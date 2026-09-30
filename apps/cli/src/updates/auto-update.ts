@@ -18,11 +18,13 @@ import {
   writeAutoUpdateState,
 } from "./auto-update-state.js";
 import {
+  type UpdateCheckResult,
   UpdateEngine,
   type UpdateEngineOptions,
   type UpdateEngineResult,
   type UpdateStatusSnapshot,
   readUpdateStatusSnapshot,
+  updateFailureCode,
 } from "./engine.js";
 import { type UpdatePolicy, parseUpdatePolicy } from "./policy.js";
 import {
@@ -30,8 +32,15 @@ import {
   type UpdateCheckOutcome,
   UpdateScheduler,
   type UpdateSchedulerDecision,
+  type UpdateSchedulerState,
   isWithinUpdateMaintenanceWindow,
 } from "./scheduler.js";
+import {
+  type UpdateCheckTrigger,
+  type UpdateTelemetry,
+  checkOutcomeFor,
+  createUpdateTelemetry,
+} from "./update-telemetry.js";
 
 export const UPDATE_WORKER_COMMAND = "__update-worker";
 export const DEFAULT_AUTO_UPDATE_STARTUP_DELAY_MS = 60_000;
@@ -41,8 +50,9 @@ export const DEFAULT_AUTO_UPDATE_ACTIVATION_RETRY_MS = 15 * 60_000;
 const UPDATE_WORKER_ENTRY_PATH = fileURLToPath(new URL("../index.js", import.meta.url));
 
 /**
- * Environment forwarded to the out-of-service update worker. Only path, runtime
- * and public release-trust settings are passed; credentials never are.
+ * Environment forwarded to the out-of-service update worker. Only path, runtime,
+ * public release-trust and error-reporting consent settings are passed (the PostHog
+ * project key is public and write-only); credentials never are.
  */
 const FORWARDED_WORKER_ENVIRONMENT = [
   "HOME",
@@ -63,6 +73,12 @@ const FORWARDED_WORKER_ENVIRONMENT = [
   "RESIN_RELEASE_CHANNEL_URL",
   "RESIN_ALLOW_INSECURE_LOOPBACK_RELEASES",
   "RESIN_TRUSTED_RELEASE_PUBLIC_KEYS",
+  "DO_NOT_TRACK",
+  "RESIN_ERROR_REPORTING",
+  "RESIN_TELEMETRY_ENABLED",
+  "RESIN_ENVIRONMENT",
+  "RESIN_POSTHOG_KEY",
+  "RESIN_POSTHOG_HOST",
 ] as const;
 
 type UpdateChecker = Pick<UpdateEngine, "checkForUpdate" | "readPolicy">;
@@ -88,6 +104,8 @@ export interface AutoUpdateAutomationOptions {
   readonly policyRefreshMs?: number;
   readonly activationRetryMs?: number;
   readonly report?: (message: string) => void;
+  /** Update telemetry; defaults to the process-wide reporter (a no-op unless configured). */
+  readonly telemetry?: UpdateTelemetry;
 }
 
 /**
@@ -145,6 +163,7 @@ export function startAutoUpdateAutomation(
   const readState = options.readState ?? (() => readAutoUpdateState({ resinHome }));
   const writeState =
     options.writeState ?? ((state: AutoUpdateState) => writeAutoUpdateState(resinHome, state));
+  const telemetry = options.telemetry ?? createUpdateTelemetry({ resinHome, clock });
 
   let stopped = false;
   let state: AutoUpdateState = createAutoUpdateState();
@@ -152,6 +171,20 @@ export function startAutoUpdateAutomation(
   let policyKey = JSON.stringify(policy);
   let scheduler: UpdateScheduler | undefined;
   const timers = new Set<SchedulerTimerHandle>();
+  /** The first check (or skipped check) after the service starts reports trigger `startup`. */
+  let startupReported = false;
+  const nextTrigger = (
+    decision: Extract<UpdateSchedulerDecision, { kind: "check" }> | undefined,
+  ): UpdateCheckTrigger => {
+    const trigger: UpdateCheckTrigger =
+      decision?.reason === "offline-retry"
+        ? "offline_retry"
+        : startupReported
+          ? "scheduled"
+          : "startup";
+    startupReported = true;
+    return trigger;
+  };
 
   const arm = (callback: () => void, delayMs: number): void => {
     const handle = scheduleTimer(() => {
@@ -205,7 +238,7 @@ export function startAutoUpdateAutomation(
 
   const tryLaunchWorker = async (
     reason: string,
-  ): Promise<{ launched: true } | { launched: false; error: string }> => {
+  ): Promise<{ launched: true } | { launched: false; error: string; cause: unknown }> => {
     try {
       await launchWorker();
       report(`started background update worker (${reason})`);
@@ -213,15 +246,57 @@ export function startAutoUpdateAutomation(
     } catch (error) {
       const message = describe(error);
       report(`could not start background update worker: ${message}`);
-      return { launched: false, error: message };
+      return { launched: false, error: message, cause: error };
     }
   };
 
+  const reportLaunchFailure = (
+    cause: unknown,
+    currentVersion: string | undefined,
+    targetVersion: string | undefined,
+  ): void => {
+    telemetry.failed({
+      trigger: "auto",
+      stage: "launch",
+      errorCode: updateFailureCode(cause, "launch"),
+      fromVersion: currentVersion,
+      targetVersion,
+      channel: policy.channel,
+      rollback: "not_attempted",
+      quarantined: false,
+      cause,
+      rateLimited: true,
+    });
+  };
+
   const onCheck = async (
-    _decision: Extract<UpdateSchedulerDecision, { kind: "check" }>,
+    decision: Extract<UpdateSchedulerDecision, { kind: "check" }>,
     signal: AbortSignal,
   ): Promise<UpdateCheckOutcome> => {
-    const result = await getChecker().checkForUpdate({ signal });
+    const trigger = nextTrigger(decision);
+    const startedAt = clock();
+    let result: UpdateCheckResult;
+    try {
+      result = await getChecker().checkForUpdate({ signal });
+    } catch (error) {
+      if (!stopped) {
+        telemetry.checkCompleted({
+          trigger,
+          outcome: "failed",
+          channel: policy.channel,
+          durationMs: clock() - startedAt,
+        });
+      }
+      throw error;
+    }
+    telemetry.checkCompleted({
+      trigger,
+      outcome: checkOutcomeFor(result.status),
+      currentVersion: result.currentVersion,
+      availableVersion: result.targetVersion,
+      channel: result.channel,
+      durationMs: clock() - startedAt,
+    });
     if (result.policy) applyPolicy(result.policy);
     switch (result.status) {
       case "disabled":
@@ -241,6 +316,7 @@ export function startAutoUpdateAutomation(
           `v${result.currentVersion} -> v${result.targetVersion}`,
         );
         if (!launch.launched) {
+          reportLaunchFailure(launch.cause, result.currentVersion, result.targetVersion);
           recordCheck("worker-launch-failed", result.targetVersion, launch.error);
           return "offline";
         }
@@ -256,7 +332,25 @@ export function startAutoUpdateAutomation(
     }
   };
 
+  /** A check that was due but did not run: automatic updates are off or outside the window. */
+  const reportSkippedCheck = (decision: UpdateSchedulerDecision): void => {
+    let outcome: "skipped_disabled" | "skipped_window" | undefined;
+    if (decision.kind === "disabled") {
+      outcome = "skipped_disabled";
+    } else if (
+      decision.kind === "wait" &&
+      decision.reason === "maintenance-window" &&
+      scheduler !== undefined &&
+      isCheckDue(scheduler.state, policy, decision.decidedAtMs)
+    ) {
+      outcome = "skipped_window";
+    }
+    if (outcome === undefined) return;
+    telemetry.checkCompleted({ trigger: nextTrigger(undefined), outcome, channel: policy.channel });
+  };
+
   const onDecision = (decision: UpdateSchedulerDecision): void => {
+    reportSkippedCheck(decision);
     const nextCheckAt =
       decision.kind === "disabled" ? null : new Date(decision.wakeAtMs).toISOString();
     const schedulerChanged =
@@ -294,21 +388,27 @@ export function startAutoUpdateAutomation(
     void (async () => {
       const journal = await readJournal();
       const pending = journal?.lastResult === "activation-deferred" ? journal.pendingVersion : null;
+      if (pending === null || pending === undefined || !policy.autoUpdate) return;
       if (
-        pending !== null &&
-        pending !== undefined &&
-        policy.autoUpdate &&
-        (policy.maintenanceWindow === null ||
-          isWithinUpdateMaintenanceWindow(clock(), policy.maintenanceWindow))
+        policy.maintenanceWindow !== null &&
+        !isWithinUpdateMaintenanceWindow(clock(), policy.maintenanceWindow)
       ) {
-        const launch = await tryLaunchWorker(`retry deferred activation of v${pending}`);
-        recordCheck(
-          launch.launched ? "activation-retry" : "worker-launch-failed",
-          pending,
-          launch.launched ? undefined : launch.error,
-          launch.launched ? { lastWorkerLaunchAt: new Date(clock()).toISOString() } : {},
-        );
+        telemetry.deferred({
+          trigger: "auto",
+          reason: "maintenance_window",
+          currentVersion: journal?.currentVersion,
+          targetVersion: pending,
+        });
+        return;
       }
+      const launch = await tryLaunchWorker(`retry deferred activation of v${pending}`);
+      if (!launch.launched) reportLaunchFailure(launch.cause, journal?.currentVersion, pending);
+      recordCheck(
+        launch.launched ? "activation-retry" : "worker-launch-failed",
+        pending,
+        launch.launched ? undefined : launch.error,
+        launch.launched ? { lastWorkerLaunchAt: new Date(clock()).toISOString() } : {},
+      );
     })()
       .catch((error: unknown) => {
         report(`deferred activation retry failed: ${describe(error)}`);
@@ -488,10 +588,34 @@ export interface UpdateWorkerOptions {
   readonly writeNotice?: typeof writeAutoUpdateNotice;
   readonly report?: (message: string) => void;
   readonly clock?: () => number;
+  /** Update telemetry; defaults to the process-wide reporter the worker entry configures. */
+  readonly telemetry?: UpdateTelemetry;
+  /** Bound on the exit flush; defaults to the reporter's own bound. */
+  readonly telemetryFlushTimeoutMs?: number;
 }
 
-/** Runs one background update to completion outside the resident service. */
+/**
+ * Runs one background update to completion outside the resident service, then flushes update
+ * telemetry within the reporter's bound. Telemetry is recorded only after the engine finished,
+ * so it can never delay or fail the update itself.
+ */
 export async function runUpdateWorker(options: UpdateWorkerOptions): Promise<UpdateEngineResult> {
+  const clock = options.clock ?? Date.now;
+  const startedAtMs = clock();
+  const telemetry =
+    options.telemetry ?? createUpdateTelemetry({ resinHome: options.resinHome, clock });
+  try {
+    return await runUpdateWorkerSteps(options, telemetry, startedAtMs);
+  } finally {
+    await telemetry.flush(options.telemetryFlushTimeoutMs);
+  }
+}
+
+async function runUpdateWorkerSteps(
+  options: UpdateWorkerOptions,
+  telemetry: UpdateTelemetry,
+  startedAtMs: number,
+): Promise<UpdateEngineResult> {
   const report =
     options.report ??
     ((message: string): void => {
@@ -504,7 +628,14 @@ export async function runUpdateWorker(options: UpdateWorkerOptions): Promise<Upd
       resinHome: options.resinHome,
       currentVersionFallback: options.currentVersionFallback,
     });
-  const result = await engine.run({ mode: "background" });
+  let result: UpdateEngineResult;
+  try {
+    result = await engine.run({ mode: "background" });
+  } catch (error) {
+    telemetry.recordThrown(error, { trigger: "auto" });
+    throw error;
+  }
+  telemetry.recordRun(result, { trigger: "auto", startedAtMs });
   report(describeWorkerResult(result));
 
   const publish =
@@ -531,7 +662,10 @@ export async function runUpdateWorker(options: UpdateWorkerOptions): Promise<Upd
 
 export async function runUpdateWorkerCommand(
   argv: readonly string[],
-  options: Omit<UpdateWorkerOptions, "resinHome"> = {},
+  options: Omit<UpdateWorkerOptions, "resinHome"> & {
+    /** Configures the process-wide reporter once the worker knows its Resin home. */
+    readonly setupReporting?: (resinHome: string) => void;
+  } = {},
 ): Promise<number> {
   if (argv[0] !== UPDATE_WORKER_COMMAND) {
     throw new Error("Invalid update worker invocation");
@@ -539,7 +673,14 @@ export async function runUpdateWorkerCommand(
   if (argv.length !== 3 || argv[1] !== "--resin-home" || !argv[2]) {
     throw new Error("Update worker requires exactly `--resin-home <path>`");
   }
-  const result = await runUpdateWorker({ ...options, resinHome: path.resolve(argv[2]) });
+  const resinHome = path.resolve(argv[2]);
+  const { setupReporting, ...workerOptions } = options;
+  try {
+    setupReporting?.(resinHome);
+  } catch {
+    // Reporting never affects the update.
+  }
+  const result = await runUpdateWorker({ ...workerOptions, resinHome });
   return result.success ? 0 : 1;
 }
 
@@ -572,6 +713,15 @@ function describeWorkerResult(result: UpdateEngineResult): string {
     default:
       return `background update ${result.status}${target}${result.error ? `: ${result.error}` : ""}`;
   }
+}
+
+/** True when the scheduler's next check (interval or offline retry) is already due. */
+function isCheckDue(state: UpdateSchedulerState, policy: UpdatePolicy, nowMs: number): boolean {
+  const intervalDueAtMs =
+    state.lastSuccessfulCheckAtMs === null
+      ? nowMs
+      : state.lastSuccessfulCheckAtMs + policy.checkIntervalMinutes * 60_000;
+  return Math.max(intervalDueAtMs, state.offlineRetryAtMs ?? 0) <= nowMs;
 }
 
 function realpathOrSelf(filePath: string): string {
