@@ -1,5 +1,10 @@
+import { once } from "node:events";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import stream from "node:stream";
-import { describe, expect, it } from "vitest";
+import { getErrorReporter } from "@resin/observer/error-reporting/core";
+import { describe, expect, it, vi } from "vitest";
 import { mcpCommand, parseMcpArgs, printMcpHelp } from "../src/commands/mcp.js";
 
 describe("resin mcp command", () => {
@@ -105,4 +110,100 @@ describe("resin mcp command", () => {
     expect(socketPath).toBe("");
     expect(maxStartupAttempts).toBe(0);
   });
+
+  it("ends a standalone session when the shim stops before stdin ends", async () => {
+    const stdin = new stream.PassThrough();
+    let stopped = false;
+    await expect(
+      mcpCommand([], {
+        stdin,
+        stdout: new stream.PassThrough(),
+        stderr: new stream.PassThrough(),
+        shimFactory: () => ({
+          start: async () => ({ mode: "standalone_inprocess" }),
+          closed: async () => "harness_closed",
+          stop: async () => {
+            stopped = true;
+          },
+        }),
+      }),
+    ).resolves.toBe(0);
+    expect(stopped).toBe(true);
+  });
+
+  it.each([
+    ["harness_closed", 0],
+    ["daemon_closed", 0],
+    ["stream_error", 1],
+  ] as const)("exits a daemon session that ended with %s with code %i", async (reason, code) => {
+    await expect(
+      mcpCommand(["--no-standalone"], {
+        stderr: new stream.PassThrough(),
+        shimFactory: () => ({
+          start: async () => ({ mode: "daemon_ipc" }),
+          closed: async () => reason,
+          stop: async () => {},
+        }),
+      }),
+    ).resolves.toBe(code);
+  });
+
+  it("exits 0 without crashing when the harness closes stdout mid-session", async () => {
+    const capture = vi.spyOn(getErrorReporter(), "captureException");
+    const daemon = await listen("resin-cli-daemon");
+    const harness = await listen("resin-cli-harness");
+    // The harness's stdout pipe: the shim only writes to it, as to `process.stdout` on a pipe.
+    const stdout = net.connect({ path: harness.socketPath, allowHalfOpen: true });
+    stdout.pause();
+    await once(stdout, "connect");
+    const harnessEnd = await harness.connection(0);
+    try {
+      const session = mcpCommand(["--socket", daemon.socketPath, "--no-standalone"], {
+        stdin: new stream.PassThrough(),
+        stdout,
+        stderr: new stream.PassThrough(),
+      });
+      // The reachability probe is the first daemon connection; the bridge is the second.
+      const daemonEnd = await daemon.connection(1);
+      harnessEnd.destroy();
+      await once(harnessEnd, "close");
+      daemonEnd.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [] } })}\n`);
+
+      // The shim hangs up on the daemon and the session ends cleanly instead of an EPIPE crash.
+      await once(daemonEnd, "close");
+      await expect(session).resolves.toBe(0);
+      expect(capture).not.toHaveBeenCalled();
+    } finally {
+      capture.mockRestore();
+      stdout.destroy();
+      daemon.server.close();
+      harness.server.close();
+    }
+  });
 });
+
+interface Peer {
+  readonly server: net.Server;
+  readonly socketPath: string;
+  /** The server-side end of the `index`-th accepted connection. */
+  connection(index: number): Promise<net.Socket>;
+}
+
+async function listen(prefix: string): Promise<Peer> {
+  const name = `${prefix}-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const socketPath =
+    process.platform === "win32" ? `\\\\.\\pipe\\${name}` : path.join(os.tmpdir(), `${name}.sock`);
+  const accepted: Array<PromiseWithResolvers<net.Socket>> = [];
+  const slot = (index: number) => {
+    while (accepted.length <= index) accepted.push(Promise.withResolvers<net.Socket>());
+    return accepted[index] as PromiseWithResolvers<net.Socket>;
+  };
+  let count = 0;
+  const server = net.createServer((socket) => {
+    socket.on("error", () => {});
+    slot(count++).resolve(socket);
+  });
+  server.listen(socketPath);
+  await once(server, "listening");
+  return { server, socketPath, connection: (index) => slot(index).promise };
+}

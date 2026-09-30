@@ -4,7 +4,13 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { LocalDatabaseConnection } from "@resin/db";
-import { McpStdioShim, type McpStdioShimOptions, type ShimStatus } from "@resin/gateway";
+import {
+  McpStdioShim,
+  type McpStdioShimOptions,
+  type ShimCloseReason,
+  type ShimStatus,
+  shimExitCode,
+} from "@resin/gateway";
 import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
@@ -151,6 +157,8 @@ Options:
 export interface McpShimRunner {
   start: () => Promise<ShimStatus | { mode: string }>;
   stop: () => Promise<void>;
+  /** Settles when a running shim stopped on its own; see `McpStdioShim.closed`. */
+  closed?: () => Promise<ShimCloseReason>;
 }
 
 /**
@@ -267,13 +275,25 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
       status.mode === "standalone_inprocess"
     ) {
       const stdinStream = (options.stdin ?? process.stdin) as NodeJS.ReadableStream;
-      await new Promise<void>((resolve) => {
-        stdinStream.on("end", resolve);
-        stdinStream.on("close", resolve);
-        if ("resume" in stdinStream && typeof stdinStream.resume === "function") {
-          stdinStream.resume();
-        }
+      const { promise: stdinEnded, resolve } = Promise.withResolvers<ShimCloseReason>();
+      const ended = () => resolve("harness_closed");
+      stdinStream.once("end", ended);
+      stdinStream.once("close", ended);
+      if ("resume" in stdinStream && typeof stdinStream.resume === "function") {
+        stdinStream.resume();
+      }
+      // The shim can also stop first: the harness closed stdout, or a stream failed.
+      const reason = await Promise.race(shim.closed ? [stdinEnded, shim.closed()] : [stdinEnded]);
+      stdinStream.off("end", ended);
+      stdinStream.off("close", ended);
+      await shim.stop().catch(() => {
+        // The session is over either way, as on a signal.
       });
+      return shimExitCode(reason);
+    }
+    if (shim.closed) {
+      // Bridged to the daemon: the session lasts until the harness or the daemon hangs up.
+      return shimExitCode(await shim.closed());
     }
     return 0;
   } catch (err) {

@@ -12,7 +12,12 @@ import {
   installCrashHandlers,
 } from "@resin/observer/error-reporting";
 import { z } from "zod";
-import { McpStdioShim } from "../shim/stdio-bridge.js";
+import {
+  McpStdioShim,
+  type ShimCloseReason,
+  type ShimStatus,
+  shimExitCode,
+} from "../shim/stdio-bridge.js";
 
 function resolveVersion(): string {
   const candidates = [
@@ -105,12 +110,16 @@ function parseArgs(args: string[]) {
   };
 }
 
-async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+/**
+ * Runs the shim until its session ends. Resolves with the exit code, or undefined when there was
+ * no session (`--help`) and the process should end on its own.
+ */
+async function main(argv: string[] = process.argv.slice(2)): Promise<number | undefined> {
   const args = parseArgs(argv);
 
   if (args.showHelp) {
     printHelp();
-    return;
+    return undefined;
   }
   const shim = new McpStdioShim({
     standaloneFallback: args.standaloneFallback,
@@ -132,19 +141,9 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  let status: ShimStatus;
   try {
-    const status = await shim.start();
-    if (status.mode === "failed") {
-      await getErrorReporter().captureImmediate("mcp_shim_start_failed");
-      process.exit(1);
-    }
-    if (status.mode === "standalone_inprocess") {
-      await new Promise<void>((resolve) => {
-        process.stdin.on("end", resolve);
-        process.stdin.on("close", resolve);
-        process.stdin.resume();
-      });
-    }
+    status = await shim.start();
   } catch (err) {
     await getErrorReporter().captureExceptionImmediate(err, {
       handled: false,
@@ -153,8 +152,38 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
     });
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`Fatal MCP Shim error: ${message}\n`);
-    process.exit(1);
+    return 1;
   }
+  if (status.mode === "failed") {
+    await getErrorReporter().captureImmediate("mcp_shim_start_failed");
+    return 1;
+  }
+  const reason = await waitForSessionEnd(shim, status, process.stdin);
+  // A stream failure was reported as a handled error; send it before the process exits.
+  await getErrorReporter().flush();
+  return shimExitCode(reason);
+}
+
+/**
+ * Waits until the harness ends the session (stdin ends) or the shim stops on its own: the harness
+ * or daemon hung up, or a stream failed. Always leaves the shim stopped.
+ */
+async function waitForSessionEnd(
+  shim: McpStdioShim,
+  status: ShimStatus,
+  stdin: NodeJS.ReadableStream,
+): Promise<ShimCloseReason> {
+  if (status.mode !== "standalone_inprocess") return shim.closed();
+  const { promise: stdinEnded, resolve } = Promise.withResolvers<ShimCloseReason>();
+  const ended = () => resolve("harness_closed");
+  stdin.once("end", ended);
+  stdin.once("close", ended);
+  stdin.resume();
+  const reason = await Promise.race([stdinEnded, shim.closed()]);
+  stdin.off("end", ended);
+  stdin.off("close", ended);
+  await shim.stop();
+  return reason;
 }
 
 const isDirectExecution =
@@ -166,15 +195,19 @@ if (isDirectExecution || process.env.NODE_ENV !== "test") {
   // The shim's stdout is MCP protocol traffic; the reporter never writes to stdout.
   const reporter = configureErrorReporting({ surface: "mcp_shim", version: VERSION });
   installCrashHandlers(reporter);
-  main().catch(async (err) => {
-    await reporter.captureExceptionImmediate(err, {
-      handled: false,
-      level: "fatal",
-      failureClass: "mcp_shim",
+  main()
+    .then((exitCode) => {
+      if (exitCode !== undefined) process.exit(exitCode);
+    })
+    .catch(async (err) => {
+      await reporter.captureExceptionImmediate(err, {
+        handled: false,
+        level: "fatal",
+        failureClass: "mcp_shim",
+      });
+      process.stderr.write(`Unhandled error: ${err}\n`);
+      process.exit(1);
     });
-    process.stderr.write(`Unhandled error: ${err}\n`);
-    process.exit(1);
-  });
 }
 
 export { main, parseArgs, printHelp, resolveVersion, VERSION };
