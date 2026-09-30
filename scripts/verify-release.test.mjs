@@ -205,8 +205,8 @@ describe("Release Packaging & Verification Suite", () => {
   });
 
   describe("Production release trust boundary", () => {
-    it("fails closed without production signing credentials", () => {
-      expect(() =>
+    it("fails closed without production signing credentials", async () => {
+      await expect(
         packageRelease({
           rootDir,
           distDir: path.join(tempReleaseDir, "no-credentials"),
@@ -217,7 +217,7 @@ describe("Release Packaging & Verification Suite", () => {
           workflowRunAttempt: "1",
           testOnly: false,
         }),
-      ).toThrow(/private key|required|RESIN_RELEASE/i);
+      ).rejects.toThrow(/private key|required|RESIN_RELEASE/i);
     });
 
     it("rejects asset mutation, changed commit binding, unknown key, missing signature, and stale evidence", async () => {
@@ -230,7 +230,7 @@ describe("Release Packaging & Verification Suite", () => {
           'import { pathToFileURL } from "node:url";',
           "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
           "const { packageRelease } = await import(pathToFileURL(modulePath));",
-          "const packaged = packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+          "const packaged = await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
           "fs.writeFileSync(outputPath, JSON.stringify({ trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
         ].join("\n");
         await execFileAsync(
@@ -553,8 +553,8 @@ describe("Release Packaging & Verification Suite", () => {
   });
 
   describe("Full End-to-End Package & Verify Cycle", () => {
-    it("packages and validates full release in isolated target directory", () => {
-      const result = packageRelease({
+    it("packages and validates full release in isolated target directory", async () => {
+      const result = await packageRelease({
         rootDir,
         distDir: tempReleaseDir,
         skipBuild: true,

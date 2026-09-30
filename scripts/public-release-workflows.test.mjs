@@ -50,6 +50,7 @@ describe("Public Release Workflows Contract", () => {
       const qualificationJobs = [
         "platform-qualification",
         "windows-qualification",
+        "windows-suites",
         "system-qualification",
       ];
       for (const [jobId, job] of Object.entries(candidate.doc.jobs)) {
@@ -210,10 +211,12 @@ describe("Public Release Workflows Contract", () => {
         "platform-qualification",
         "system-qualification",
         "windows-qualification",
+        "windows-suites",
       ]);
       expect(buildJob.needs).toEqual([
         "platform-qualification",
         "windows-qualification",
+        "windows-suites",
         "system-qualification",
       ]);
       const uploads = buildJob.steps.filter((s) => s.uses?.startsWith("actions/upload-artifact"));
@@ -1872,7 +1875,6 @@ with patch("subprocess.run", side_effect=publish):
         "Build native Windows prebuilds for this architecture",
         "Package signed test-domain release candidate",
         "Qualify the packaged artifact natively (launchers, named pipe, ACLs, capture)",
-        "Run native Windows qualification suites",
         "Install with install.ps1 (Windows PowerShell 5.1)",
         "resin init registers the Scheduled Task service; crash restart and stop/start",
         "resin status reports healthy",
@@ -1886,22 +1888,52 @@ with patch("subprocess.run", side_effect=publish):
         JSON.stringify(indexes),
       ).toBe(true);
       expect([...indexes].sort((a, b) => a - b)).toEqual(indexes);
-      const install = job.steps.find((s) => s.name === order[4]);
+      const install = job.steps.find((s) => s.name === order[3]);
       expect(install.shell).toBe("powershell");
       expect(install.run).toContain("./apps/cli/install/install.ps1");
       const qualify = job.steps.find((s) => s.name === order[2]);
       expect(qualify.run).toContain("--mode=native");
-      const service = job.steps.find((s) => s.name === order[5]);
+      const service = job.steps.find((s) => s.name === order[4]);
       expect(service.run).toContain("--windows-service");
-      const suites = job.env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
-      expect(suites.length).toBeGreaterThan(10);
       const evidenceUpload = job.steps.find((s) => s.name === "Upload qualification evidence");
       expect(evidenceUpload.with.name).toBe("platform-qualification-${{ matrix.lane }}");
     });
 
+    it("runs the Windows suites natively on both architectures beside the qualification lane", () => {
+      const job = candidate.doc.jobs["windows-suites"];
+      expect(job["runs-on"]).toBe("${{ matrix.runner }}");
+      expect(job.defaults?.run?.shell).toBe("pwsh");
+      expect(job.strategy.matrix.include.map((entry) => [entry.arch, entry.runner])).toEqual([
+        ["x64", "windows-latest"],
+        ["arm64", "windows-11-arm"],
+      ]);
+      const setupNode = job.steps.find((s) => s.uses?.startsWith("actions/setup-node"));
+      expect(setupNode.with.architecture).toBe("${{ matrix.arch }}");
+      const names = job.steps.map((s) => s.name);
+      const order = [
+        "Verify checkout identity",
+        "Build native Windows prebuilds for this architecture",
+        "Build exact candidate",
+        "Run native Windows qualification suites",
+      ];
+      const indexes = order.map((name) => names.indexOf(name));
+      expect(
+        indexes.every((index) => index > -1),
+        JSON.stringify(indexes),
+      ).toBe(true);
+      expect([...indexes].sort((a, b) => a - b)).toEqual(indexes);
+      // The suites share machine state (Scheduled Task, daemon pipe, private-file ACLs): one file
+      // at a time, as they ran inside the qualification lane.
+      expect(job.steps.find((s) => s.name === order[3]).run).toContain(
+        "vitest run --no-file-parallelism @suites",
+      );
+      const suites = job.env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
+      expect(suites.length).toBeGreaterThan(10);
+    });
+
     it("lists only Windows qualification suites that exist", () => {
       const suites =
-        candidate.doc.jobs["windows-qualification"].env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
+        candidate.doc.jobs["windows-suites"].env.WINDOWS_SUITES.split(/\s+/).filter(Boolean);
       const missing = suites.filter((suite) => !fs.existsSync(path.join(ROOT_DIR, suite)));
       expect(missing).toEqual([]);
     });

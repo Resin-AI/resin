@@ -29,7 +29,7 @@ describe("standalone platform release artifact", () => {
       [
         "--input-type=module",
         "-e",
-        `const { packageRelease } = await import(${JSON.stringify(packageRelease)});\npackageRelease(${JSON.stringify(options)});`,
+        `const { packageRelease } = await import(${JSON.stringify(packageRelease)});\nawait packageRelease(${JSON.stringify(options)});`,
       ],
       { cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
     );
