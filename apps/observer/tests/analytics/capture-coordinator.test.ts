@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { NormalizedSessionEvent, ProviderReportedUsage } from "@resin/contracts";
 import type { RawHarnessRecord } from "@resin/harness-contracts";
 import { ProtocolError } from "@resin/protocol";
+import { ACTIVE_SESSION_IDLE_MS } from "../../src/analytics/capture-coordinator.js";
 import { ResourceForbiddenError } from "../../src/auth-recovery.js";
 import {
   CloudObservationClient,
@@ -261,6 +262,30 @@ describe("TrajectoryCaptureCoordinator", () => {
     // State cleanup
     expect(coordinator.getActiveSessionCount()).toBe(0);
     expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
+  });
+
+  it("stops counting a session that never ended as active once it is idle, and counts it again when it records", async () => {
+    const coordinator = new TrajectoryCaptureCoordinator({
+      pipeline: new NormalizationPipeline(),
+      observationClient: createMockObservationClient({}),
+      attributionResolver: vi.fn(async (sess) => createValidAttributionContext(sess.sessionId)),
+    });
+    const session = createMockHarnessSession();
+    const recordedAt = Date.now();
+    await coordinator.handleRecords(session, [createPromptRecord(session.sessionId, 1)], vi.fn());
+    expect(coordinator.getActiveSessionCount(recordedAt)).toBe(1);
+
+    // No terminal record ever arrives (a killed process, a subagent): once it has recorded nothing
+    // for the idle window it is not active work, though capture still tracks it.
+    expect(coordinator.getActiveSessionCount(recordedAt + ACTIVE_SESSION_IDLE_MS + 60_000)).toBe(0);
+    expect(coordinator.hasActiveSession(session.sessionId)).toBe(true);
+
+    await coordinator.handleRecords(
+      session,
+      [createCompletionRecord(session.sessionId, 2)],
+      vi.fn(),
+    );
+    expect(coordinator.getActiveSessionCount()).toBe(1);
   });
 
   it("stamps the resolved harness version into session metadata unless the adapter reports one", async () => {
