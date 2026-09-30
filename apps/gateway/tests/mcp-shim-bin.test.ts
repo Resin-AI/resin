@@ -1,14 +1,22 @@
 import process from "node:process";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as StdioBridge from "../src/shim/stdio-bridge.js";
 
-const captured = vi.hoisted(() => ({ options: {} as Record<string, unknown> }));
-vi.mock("../src/shim/stdio-bridge.js", () => ({
+const captured = vi.hoisted(() => ({
+  options: {} as Record<string, unknown>,
+  closeReason: "harness_closed" as string,
+}));
+vi.mock("../src/shim/stdio-bridge.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof StdioBridge>()),
   McpStdioShim: class {
     constructor(options: Record<string, unknown>) {
       captured.options = options;
     }
     async start() {
       return { mode: "daemon_ipc" };
+    }
+    async closed() {
+      return captured.closeReason;
     }
     async stop() {}
   },
@@ -66,6 +74,27 @@ describe("mcp-shim startup flag", () => {
       await main(["--cwd", "/custom/project/path"]);
       expect(captured.options.cwd).toBe("/custom/project/path");
     } finally {
+      for (const listener of process.listeners("SIGINT")) {
+        if (!beforeInt.includes(listener)) process.removeListener("SIGINT", listener);
+      }
+      for (const listener of process.listeners("SIGTERM")) {
+        if (!beforeTerm.includes(listener)) process.removeListener("SIGTERM", listener);
+      }
+    }
+  });
+
+  it.each([
+    ["harness_closed", 0],
+    ["daemon_closed", 0],
+    ["stream_error", 1],
+  ])("exits when the session ends (%s) with code %i", async (reason, code) => {
+    const beforeInt = process.listeners("SIGINT");
+    const beforeTerm = process.listeners("SIGTERM");
+    captured.closeReason = reason;
+    try {
+      await expect(main([])).resolves.toBe(code);
+    } finally {
+      captured.closeReason = "harness_closed";
       for (const listener of process.listeners("SIGINT")) {
         if (!beforeInt.includes(listener)) process.removeListener("SIGINT", listener);
       }

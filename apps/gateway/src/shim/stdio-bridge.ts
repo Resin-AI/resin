@@ -17,6 +17,7 @@ import {
   openDaemonConnection,
   resolvePaths,
 } from "@resin/observer";
+import { reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
@@ -77,6 +78,40 @@ export interface ShimStatus {
   daemonReachable: boolean;
   error?: string;
 }
+
+/**
+ * Why a running shim stopped. `harness_closed` and `daemon_closed` are a peer ending the session;
+ * `stream_error` is an unexpected failure on one of the shim's streams; `stopped` is a caller.
+ */
+export type ShimCloseReason = "stopped" | "harness_closed" | "daemon_closed" | "stream_error";
+
+/** The process exit code for a session that ended for `reason`: only a stream failure is one. */
+export function shimExitCode(reason: ShimCloseReason): number {
+  return reason === "stream_error" ? 1 : 0;
+}
+
+/**
+ * Error codes a stream raises when the other end went away: a harness that ended its session, a
+ * daemon that closed the IPC socket, or a write racing the shim's own teardown. None is a fault.
+ */
+const PEER_CLOSED_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EPIPE",
+  "ECONNRESET",
+  "ECONNABORTED",
+  // Windows named pipes report a vanished peer as EOF.
+  "EOF",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "ERR_STREAM_WRITE_AFTER_END",
+]);
+
+/** True when `error` only says the stream's peer closed; see {@link PEER_CLOSED_ERROR_CODES}. */
+export function isPeerClosedError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return typeof error.code === "string" && PEER_CLOSED_ERROR_CODES.has(error.code);
+}
+
+type StreamSide = "harness" | "daemon";
 
 /**
  * Checks if the daemon IPC socket is active and accepting connections.
@@ -160,6 +195,10 @@ export class McpStdioShim {
   private activeSocket?: Duplex;
   private isRunning = false;
   private surface?: ToolSearchSurface;
+  private closeSignal = withResolvers<ShimCloseReason>();
+  private closeSettled = false;
+  /** Streams that already carry this shim's error listener; each gets exactly one. */
+  private readonly guardedStreams = new WeakSet<object>();
 
   constructor(options: McpStdioShimOptions = {}) {
     this.options = options;
@@ -176,11 +215,24 @@ export class McpStdioShim {
   }
 
   /**
+   * Settles once a running shim has stopped and released its resources, with why it stopped. The
+   * host process exits on it: a harness or daemon hanging up is a clean end (exit 0), a
+   * `stream_error` is not (exit 1).
+   */
+  closed(): Promise<ShimCloseReason> {
+    return this.closeSignal.promise;
+  }
+
+  /**
    * Starts the stdio shim.
    */
   async start(): Promise<ShimStatus> {
     if (this.isRunning) {
       throw new Error("Shim is already running");
+    }
+    if (this.closeSettled) {
+      this.closeSignal = withResolvers<ShimCloseReason>();
+      this.closeSettled = false;
     }
     // 1. Check if daemon is reachable
     let daemonReachable = this.socketPath
@@ -242,10 +294,10 @@ export class McpStdioShim {
     // before any MCP traffic flows.
     openDaemonConnection(this.socketPath).then((socket) => {
       this.activeSocket = socket;
-      // Failures surface as "close", which stops the shim.
-      socket.on("error", () => {});
+      this.guardStream(socket, "daemon");
+      // A daemon that restarts or exits closes the socket, and the session ends with it.
       socket.once("close", () => {
-        this.stop();
+        this.endSession("daemon_closed");
       });
       this.isRunning = true;
       const transport = this.prepareTransport();
@@ -263,9 +315,45 @@ export class McpStdioShim {
       this.options.enableToolSearch === true,
       this.options.fullCatalog === true,
     );
+    // `pipe()` forwards no errors: every stream in the chain needs its own listener, or a write
+    // after the harness closed stdout (EPIPE) is an uncaught exception that kills the process.
+    this.guardStream(this.stdin, "harness");
+    this.guardStream(this.stdout, "harness");
+    this.guardStream(this.stderr, undefined);
+    this.guardStream(this.surface.input, "harness");
+    this.guardStream(this.surface.output, "harness");
     this.surface.output.pipe(this.stdout, { end: false });
     this.stdin.pipe(this.surface.input);
     return this.surface;
+  }
+
+  /**
+   * Handles `stream`'s errors for as long as the process lives, since a write already in flight can
+   * fail after the shim stopped. A peer that closed ends the session quietly; anything else is
+   * reported as a handled error and ends the session too. `side` undefined (stderr) never ends it.
+   */
+  private guardStream(
+    stream: NodeJS.ReadableStream | NodeJS.WritableStream,
+    side: StreamSide | undefined,
+  ): void {
+    if (this.guardedStreams.has(stream)) return;
+    this.guardedStreams.add(stream);
+    stream.on("error", (error: unknown) => {
+      const peerClosed = isPeerClosedError(error);
+      if (!peerClosed) {
+        reportHandledError(error, {
+          failureClass: "mcp_shim_stream",
+          properties: { stream_side: side ?? "diagnostics" },
+        });
+      }
+      if (side === undefined || !this.isRunning) return;
+      const reason: ShimCloseReason = !peerClosed
+        ? "stream_error"
+        : side === "daemon"
+          ? "daemon_closed"
+          : "harness_closed";
+      this.endSession(reason);
+    });
   }
 
   private async startStandaloneGateway(): Promise<void> {
@@ -467,11 +555,36 @@ export class McpStdioShim {
    * Stops the shim and releases resources.
    */
   async stop(): Promise<void> {
+    await this.shutdown("stopped");
+  }
+
+  /** Ends the session from an event handler, where a failing teardown has no caller to reach. */
+  private endSession(reason: ShimCloseReason): void {
+    this.shutdown(reason).catch((error: unknown) => {
+      reportHandledError(error, { failureClass: "mcp_shim_shutdown" });
+    });
+  }
+
+  private async shutdown(reason: ShimCloseReason): Promise<void> {
     if (!this.isRunning) return;
     this.isRunning = false;
+    try {
+      await this.releaseResources();
+    } finally {
+      this.closeSettled = true;
+      this.closeSignal.resolve(reason);
+    }
+  }
+
+  private async releaseResources(): Promise<void> {
     if (this.surface) {
       this.stdin.unpipe(this.surface.input);
       this.surface.output.unpipe(this.stdout);
+      if (this.activeSocket) {
+        // Detach the daemon first: data it already sent must not reach a destroyed surface.
+        this.surface.input.unpipe(this.activeSocket);
+        this.activeSocket.unpipe(this.surface.output);
+      }
       this.surface.input.destroy();
       this.surface.output.destroy();
       this.surface = undefined;
@@ -479,6 +592,8 @@ export class McpStdioShim {
       this.stdin.unpipe(this.activeSocket);
       this.activeSocket.unpipe(this.stdout);
     }
+    // Nothing reads the harness's stdin any more; a flowing stdin would keep the process alive.
+    this.stdin.pause();
 
     if (this.activeSocket) {
       this.activeSocket.destroy();
