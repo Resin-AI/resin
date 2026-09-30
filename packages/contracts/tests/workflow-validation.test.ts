@@ -40,6 +40,27 @@ it("accepts hash-only program identities while retaining conservative absence", 
   expect(WorkflowValidationDecisionSchema.safeParse(decision(undefined)).success).toBe(true);
 });
 
+it("keeps a word-list proposal's shape, which is part of the candidate it reports on", () => {
+  const candidate = {
+    stepId: "step4",
+    argument: "cmd",
+    path: ["tokens", 3, "through", 5],
+    proposed: {
+      kind: "input" as const,
+      name: "labels",
+      type: "array" as const,
+      list: { minItems: 1 as const, optionItems: true as const },
+    },
+  };
+  const { proposed: _proposed, ...position } = candidate;
+  const parsed = WorkflowValidationDecisionSchema.parse({
+    ...decision(),
+    verdicts: [{ candidate, confirmed: true, confirmedType: "array" }],
+    accepted: [position],
+  });
+  expect(parsed.verdicts[0]!.candidate).toEqual(candidate);
+});
+
 it("rejects non-SHA256 identity fields", () => {
   expect(
     WorkflowValidationDecisionSchema.safeParse(
