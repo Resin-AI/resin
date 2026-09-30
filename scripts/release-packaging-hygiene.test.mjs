@@ -288,7 +288,7 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
           "-e",
           [
             `const { createPlatformReleaseTarballs } = await import(${JSON.stringify(packageRelease)});`,
-            `const result = createPlatformReleaseTarballs(${JSON.stringify(rootDir)}, ${JSON.stringify(outputDir)}, { testOnly: true, windowsPrebuildsDir: ${JSON.stringify(prebuildsDir)} });`,
+            `const result = await createPlatformReleaseTarballs(${JSON.stringify(rootDir)}, ${JSON.stringify(outputDir)}, { testOnly: true, windowsPrebuildsDir: ${JSON.stringify(prebuildsDir)} });`,
             `(await import("node:fs")).writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify(result));`,
           ].join("\n"),
         ],

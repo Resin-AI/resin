@@ -319,7 +319,7 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
         'import { pathToFileURL } from "node:url";',
         "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
         "const { packageRelease } = await import(pathToFileURL(modulePath));",
-        "const packaged = packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+        "const packaged = await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
         "fs.writeFileSync(outputPath, JSON.stringify({ success: packaged.success, trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
       ].join("\n");
       await execFileAsync(

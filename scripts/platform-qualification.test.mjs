@@ -49,7 +49,7 @@ describe("real host platform qualification", () => {
           'import { pathToFileURL } from "node:url";',
           "const [, , modulePath, rootDir, distDir] = process.argv;",
           "const { packageRelease } = await import(pathToFileURL(modulePath).href);",
-          "packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+          "await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
         ].join("\n"),
         "resin-platform-qualification-package",
         path.join(rootDir, "scripts", "package-release.mjs"),

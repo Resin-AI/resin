@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { getGitCommitSha, writeReleaseEvidence } from "./generate-release-evidence.mjs";
 import {
@@ -562,6 +563,34 @@ export function createDeterministicTar(entries) {
 
 export function gzipDeterministic(tarBuffer) {
   return zlib.gzipSync(tarBuffer, { mtime: 0, level: 9 });
+}
+
+const gzipAsync = promisify(zlib.gzip);
+
+/** {@link gzipDeterministic} on the libuv thread pool: the same bytes, without blocking. */
+export function gzipDeterministicAsync(tarBuffer) {
+  return gzipAsync(tarBuffer, { mtime: 0, level: 9 });
+}
+
+/**
+ * Platform tarballs compressed at once. Level-9 gzip of each platform's full tree is most of
+ * packaging's time; zlib's async API runs it on the libuv thread pool (four threads by
+ * default), so platforms compress in parallel. More at once would only queue there while
+ * holding more uncompressed tars in memory.
+ */
+const PLATFORM_COMPRESSION_CONCURRENCY = 4;
+
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 export function buildWorkspacePackages(rootDir = process.cwd()) {
@@ -1126,7 +1155,7 @@ function windowsPlatformEntries(baseEntries, platform, windowsPrebuilds, options
   return entries;
 }
 
-export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) {
+export async function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) {
   fs.mkdirSync(outputDir, { recursive: true });
   const publicPackages = options.publicPackages || resolvePublicReleasePackages(rootDir);
   const rootPkgJson = JSON.parse(fs.readFileSync(path.resolve(rootDir, "package.json"), "utf8"));
@@ -1223,7 +1252,7 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
       })
     : new Map();
 
-  for (const platform of PLATFORMS) {
+  const platformJobs = PLATFORMS.map((platform) => {
     const platformSpecificEntries =
       platform.os === "win32"
         ? windowsPlatformEntries(portableBaseEntries, platform, windowsPrebuilds, options)
@@ -1269,7 +1298,17 @@ export function createPlatformReleaseTarballs(rootDir, outputDir, options = {}) 
       },
     ];
     assertNoForbiddenReleaseArtifacts(platformEntries, `platform ${platform.id} release entries`);
-    const gzBuffer = gzipDeterministic(createDeterministicTar(platformEntries));
+    return { platform, platformEntries };
+  });
+  // zlib is deterministic, so compressing in parallel writes exactly the bytes a serial run did;
+  // tarballs and asset records still follow PLATFORMS order.
+  const compressed = await mapWithConcurrency(
+    platformJobs,
+    PLATFORM_COMPRESSION_CONCURRENCY,
+    ({ platformEntries }) => gzipDeterministicAsync(createDeterministicTar(platformEntries)),
+  );
+  for (const [index, { platform }] of platformJobs.entries()) {
+    const gzBuffer = compressed[index];
     const tarballPath = path.join(outputDir, platform.filename);
     fs.writeFileSync(tarballPath, gzBuffer);
     assetResults[platform.id] = {
@@ -1763,7 +1802,7 @@ export function generateChannelMetadata(manifestSha256, options = {}) {
   };
 }
 
-export function packageRelease(options = {}) {
+export async function packageRelease(options = {}) {
   const rootDir = options.rootDir || process.cwd();
   const skipBuild = options.skipBuild ?? process.env.RESIN_RELEASE_SKIP_BUILD === "1";
   const testOnly = options.testOnly ?? process.env.RESIN_RELEASE_TEST_ONLY === "1";
@@ -1812,7 +1851,7 @@ export function packageRelease(options = {}) {
       publicPackages,
       allowedGeneratedFilesByPackage,
     });
-    assetDigests = createPlatformReleaseTarballs(rootDir, distDir, {
+    assetDigests = await createPlatformReleaseTarballs(rootDir, distDir, {
       publicPackages,
       allowedGeneratedFilesByPackage,
       testOnly,
@@ -2021,7 +2060,7 @@ if (
   try {
     const testOnly =
       process.argv.slice(2).includes("--test-only") || process.env.RESIN_RELEASE_TEST_ONLY === "1";
-    packageRelease({ testOnly });
+    await packageRelease({ testOnly });
   } catch (err) {
     console.error("❌ Release packaging failed:", err);
     process.exit(1);

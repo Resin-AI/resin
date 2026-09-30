@@ -129,9 +129,10 @@ jobs:
   # PowerShell (pwsh, or Windows PowerShell 5.1 where the step says so), never Git Bash.
   # The lane builds its own-arch native prebuilds, packages the test-signed candidate,
   # qualifies the extracted artifact (named-pipe daemon, Scheduled Task lifecycle, crash
-  # restart), runs the Windows suites, installs through install.ps1, proves a second local
-  # user can reach neither the daemon pipe nor the private files, then uninstalls and checks
-  # nothing is left. The signing job packages the prebuilds uploaded here.
+  # restart), installs through install.ps1, proves a second local user can reach neither
+  # the daemon pipe nor the private files, then uninstalls and checks nothing is left. The
+  # Windows suites run beside it in windows-suites. The signing job packages the prebuilds
+  # uploaded here.
   windows-qualification:
     name: ${{ matrix.check_name }}
     strategy:
@@ -161,41 +162,6 @@ jobs:
       ARCH: ${{ matrix.arch }}
       RELEASE_DIR: dist/release/v1.0.3
       PROBE_USER: resinprobe
-      # Windows-specific suites that must pass natively (IPC/pipe and private-file ACLs,
-      # Scheduled Task service, PowerShell learn/replay, capture, scrubbing, installer).
-      WINDOWS_SUITES: >-
-        packages/windows-security/tests/portable.test.ts
-        packages/windows-security/tests/windows.test.ts
-        packages/crypto/tests/vault.test.ts
-        apps/observer/tests/paths.test.ts
-        apps/observer/tests/ipc.test.ts
-        apps/observer/tests/lock.test.ts
-        apps/observer/tests/config.test.ts
-        apps/observer/tests/cloud-credentials.test.ts
-        apps/observer/tests/cloud-auth-recovery.test.ts
-        apps/observer/tests/recovery-healing.test.ts
-        apps/observer/tests/analytics/immutable-private-store.test.ts
-        apps/observer/tests/analytics/shell-dialect-capture.test.ts
-        apps/observer/tests/normalization/upload-redaction-gaps.test.ts
-        apps/observer/tests/normalization/windows-identity-redaction.test.ts
-        apps/cli/tests/service/windows-task.test.ts
-        apps/cli/tests/service/windows-task.win32.test.ts
-        apps/cli/tests/service/windows-supervisor.test.ts
-        apps/cli/tests/installer/harness-mcp-launch.test.ts
-        apps/cli/tests/installer/harness-uninstall-windows.test.ts
-        apps/cli/tests/installer/windows-activation.test.ts
-        apps/gateway/tests/proxy/powershell-learn-replay.test.ts
-        apps/gateway/tests/proxy/local-artifact-trust.test.ts
-        packages/runtime/tests/workflow/shell-dialect-runner.test.ts
-        packages/contracts/tests/powershell-tokens.test.ts
-        packages/contracts/tests/harness-introspection-windows-home.test.ts
-        packages/harness-contracts/tests/windows-host.test.ts
-        adapters/claude-code/tests/windows-capture.test.ts
-        adapters/codex-cli/tests/windows-capture.test.ts
-        adapters/omp/tests/windows-capture.test.ts
-        scripts/harness-fixtures/scrub.test.mjs
-        scripts/install-ps1.test.mjs
-        scripts/windows-lane.test.mjs
     steps:
       - name: Checkout exact release candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -253,14 +219,6 @@ jobs:
         run: |
           node scripts/platform-qualification.mjs --lane=$env:LANE --mode=native `
             --release-dir=$env:RELEASE_DIR --output-dir=dist/qualification
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run native Windows qualification suites
-        run: |
-          $suites = $env:WINDOWS_SUITES -split '\s+' | Where-Object { $_ }
-          $missing = $suites | Where-Object { -not (Test-Path $_) }
-          if ($missing) { throw "Windows qualification suites missing: $($missing -join ', ')" }
-          pnpm exec vitest run --no-file-parallelism @suites
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Fetch the pinned Deno runtime for the candidate
@@ -447,6 +405,126 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # The Windows-specific suites are source-level tests of the exact commit, so they run in a
+  # lane of their own beside the one that qualifies the packaged artifact instead of inside
+  # it, and neither waits on the other (serially they take about five minutes on
+  # windows-11-arm). The signing job needs both lanes on both architectures.
+  windows-suites:
+    name: ${{ matrix.check_name }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            check_name: Windows suites x64
+            runner: windows-latest
+          - arch: arm64
+            check_name: Windows suites arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RESIN_RELEASE_TEST_ONLY: "1"
+      RELEASE_SHA: ${{ inputs.commit_sha }}
+      TURBO_TELEMETRY_DISABLED: "1"
+      ARCH: ${{ matrix.arch }}
+      # Windows-specific suites that must pass natively (IPC/pipe and private-file ACLs,
+      # Scheduled Task service, PowerShell learn/replay, capture, scrubbing, installer).
+      WINDOWS_SUITES: >-
+        packages/windows-security/tests/portable.test.ts
+        packages/windows-security/tests/windows.test.ts
+        packages/crypto/tests/vault.test.ts
+        apps/observer/tests/paths.test.ts
+        apps/observer/tests/ipc.test.ts
+        apps/observer/tests/lock.test.ts
+        apps/observer/tests/config.test.ts
+        apps/observer/tests/cloud-credentials.test.ts
+        apps/observer/tests/cloud-auth-recovery.test.ts
+        apps/observer/tests/recovery-healing.test.ts
+        apps/observer/tests/analytics/immutable-private-store.test.ts
+        apps/observer/tests/analytics/shell-dialect-capture.test.ts
+        apps/observer/tests/normalization/upload-redaction-gaps.test.ts
+        apps/observer/tests/normalization/windows-identity-redaction.test.ts
+        apps/cli/tests/service/windows-task.test.ts
+        apps/cli/tests/service/windows-task.win32.test.ts
+        apps/cli/tests/service/windows-supervisor.test.ts
+        apps/cli/tests/installer/harness-mcp-launch.test.ts
+        apps/cli/tests/installer/harness-uninstall-windows.test.ts
+        apps/cli/tests/installer/windows-activation.test.ts
+        apps/gateway/tests/proxy/powershell-learn-replay.test.ts
+        apps/gateway/tests/proxy/local-artifact-trust.test.ts
+        packages/runtime/tests/workflow/shell-dialect-runner.test.ts
+        packages/contracts/tests/powershell-tokens.test.ts
+        packages/contracts/tests/harness-introspection-windows-home.test.ts
+        packages/harness-contracts/tests/windows-host.test.ts
+        adapters/claude-code/tests/windows-capture.test.ts
+        adapters/codex-cli/tests/windows-capture.test.ts
+        adapters/omp/tests/windows-capture.test.ts
+        scripts/harness-fixtures/scrub.test.mjs
+        scripts/install-ps1.test.mjs
+        scripts/windows-lane.test.mjs
+    steps:
+      - name: Checkout exact release candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw "Invalid commit SHA: $env:RELEASE_SHA" }
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:RELEASE_SHA) { throw "Checked out $head, expected $env:RELEASE_SHA" }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Locate turbo cache
+        run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
+
+      - name: Restore turbo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-turbo-release-
+            ${{ runner.os }}-turbo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native Windows prebuilds for this architecture
+        run: |
+          node packages/windows-security/scripts/build-native.mjs --arch $env:ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build exact candidate
+        run: pnpm build
+
+      - name: Run native Windows qualification suites
+        run: |
+          $suites = $env:WINDOWS_SUITES -split '\s+' | Where-Object { $_ }
+          $missing = $suites | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "Windows qualification suites missing: $($missing -join ', ')" }
+          pnpm exec vitest run --no-file-parallelism @suites
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   system-qualification:
     name: Clean Checkout Public Core System Gate
     runs-on: ubuntu-latest
@@ -529,7 +607,7 @@ jobs:
 
   build-and-sign:
     name: Build and Sign Candidate
-    needs: [platform-qualification, windows-qualification, system-qualification]
+    needs: [platform-qualification, windows-qualification, windows-suites, system-qualification]
     runs-on: resin-ovh-linux-x64
     environment: production
     permissions:
