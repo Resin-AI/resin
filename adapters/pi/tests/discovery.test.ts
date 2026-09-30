@@ -5,6 +5,7 @@ import { UNKNOWN_HARNESS_VERSION } from "@resin/harness-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiHarnessAdapter } from "../src/adapter.js";
 import { piWorkspaceId, probePiInstallation } from "../src/discovery.js";
+import { piInstallHarness } from "../src/install.js";
 import { encodePiSessionDirName } from "../src/paths.js";
 
 const RECORDED = path.join(import.meta.dirname, "fixtures", "recorded", "0.87.1");
@@ -107,6 +108,11 @@ describe("PiHarnessAdapter discovery", () => {
       parentSessionPath: parent,
       sessionFormatVersion: 3,
     });
+    // Pi has no subagent record: a fork is a separate user session, never an agent session, so
+    // the observer's captureUserSessionsOnly filter cannot drop it.
+    expect(sessionsA.map((session) => session.metadata.sessionKind)).toEqual(
+      sessionsA.map(() => "user"),
+    );
     expect(sessionsA.every((session) => session.status === "idle")).toBe(true);
 
     const b = workspaces.find((workspace) => workspace.rootPath === projectB)!;
@@ -163,6 +169,30 @@ describe("PiHarnessAdapter discovery", () => {
     });
     const [workspace] = await adapter.listWorkspaces();
     expect((await adapter.resolveActiveSession(workspace!))?.transcriptPath).toBe(file);
+  });
+
+  it("states that Pi writes no subagent record, and reports a fork as a linked user session", async () => {
+    expect(piInstallHarness.knownLimits.join("\n")).toMatch(
+      /Pi writes no subagent record.*--no-session/s,
+    );
+    expect(new PiHarnessAdapter({ home }).getCapabilities().fidelity.subagentVisibility).toBe(
+      "none",
+    );
+
+    const dir = path.join(home, ".pi", "agent", "sessions", encodePiSessionDirName(projectA));
+    const parent = await placeFixture(
+      "rpc-branch-model-bash-abort-compaction.jsonl",
+      dir,
+      PARENT,
+      projectA,
+    );
+    await placeFixture("rpc-fork.jsonl", dir, FORK, projectA, parent);
+    const adapter = new PiHarnessAdapter({ home, env: { HOME: home } });
+    const [workspace] = await adapter.listWorkspaces();
+    const sessions = await adapter.listSessions(workspace!);
+    // A subagent extension's `--no-session` child leaves no file: only the two user sessions exist.
+    expect(sessions).toHaveLength(2);
+    for (const session of sessions) expect(session.metadata.sessionKind).toBe("user");
   });
 });
 

@@ -20,7 +20,7 @@ Human output uses boxed sections. Typical states:
 | IPC & Subsystems | `CONNECTED` (latency, daemon version, uptime) or `DISCONNECTED` |
 | Cloud Authentication | `AUTHENTICATED`, `LOCAL ONLY (Cloud Unconfigured)` (derived from install journal), `NOT AUTHENTICATED` (reason). Authenticated rows may show `EXPIRED`. |
 | Production Safety Gate | `PASS (open)`, `BLOCKED (fail-closed)`, `OVERRIDE (unsafe dev mode)` |
-| Tools & MCP Catalog | `System Tools: 4` (`search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`) |
+| Tools & MCP Catalog | `System Tools: 4` (`search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`). `Custom Tools` counts the learned tools in the latest catalog the MCP gateway served for the workspace of the current directory (from the local state store), with the time of that catalog; it reads `unknown (<reason>)`, never `0`, when no catalog has been served for that workspace or the store cannot be read. |
 | Agent Harness Connections | Installed/Not Installed and Configured (MCP Attached)/Not Configured |
 
 JSON mode:

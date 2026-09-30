@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IntermediateSessionEvent } from "@resin/harness-contracts";
@@ -71,8 +73,9 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
     expect(byId.get(VERIFY_OBSERVER_ID)).toMatchObject({
       parentSessionId: FULL_ID,
       childKind: "observer",
-      childAgentId: "verify-reminder",
+      childAgentName: "verify-reminder",
     });
+    expect(byId.get(EXPLORER_ID)).toMatchObject({ childAgentName: "explorer" });
 
     const adapter = new MuseHarnessAdapter({
       sessionRoot: path.join(RECORDED, "full", "sessions"),
@@ -80,9 +83,93 @@ describe("muse 1.4.0 recorded session: tools, MCP, subagents, observers", () => 
     const [workspace] = await adapter.listWorkspaces();
     expect(workspace?.rootPath).toBe("/workspace/project");
     const sessions = await adapter.listSessions(workspace!);
-    expect(sessions.map((session) => session.metadata.parentSessionId ?? null).sort()).toEqual(
-      [FULL_ID, FULL_ID, null].sort(),
+    const meta = new Map(sessions.map((session) => [session.sessionId, session.metadata]));
+    expect(meta.get(FULL_ID)).toMatchObject({ sessionKind: "user" });
+    expect(meta.get(FULL_ID)?.parentSessionId).toBeUndefined();
+    expect(meta.get(EXPLORER_ID)).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: FULL_ID,
+      agentName: "explorer",
+      agentKind: "subagent",
+      agentId: "01a0e32c-51a2-7eb2-bb4a-9d7fe3898afc",
+    });
+    expect(meta.get(VERIFY_OBSERVER_ID)).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: FULL_ID,
+      agentName: "verify-reminder",
+      agentKind: "observer",
+    });
+  });
+
+  it("counts a subagent's tool calls once, in the child log and not in the lead's", async () => {
+    const lead = await decodeLog(logPath("full", FULL_ID), FULL_ID);
+    const child = await decodeLog(logPath("full", FULL_ID, EXPLORER_ID), EXPLORER_ID);
+    const childCalls = ofType(child, "tool_call");
+    expect(childCalls.map((call) => call.toolName)).toEqual(["bash"]);
+    expect(ofType(child, "tool_result").map((result) => result.callId)).toEqual(
+      childCalls.map((call) => call.callId),
     );
+    const leadIds = new Set(
+      [...ofType(lead, "tool_call"), ...ofType(lead, "tool_result")].map((event) => event.callId),
+    );
+    for (const call of childCalls) expect(leadIds.has(call.callId)).toBe(false);
+    // The lead only records the delegation and the wait, plus its own steps.
+    expect(
+      ofType(lead, "tool_call").filter((call) => call.toolName === "subagent_spawn"),
+    ).toHaveLength(1);
+    // The aggregate usage muse embeds in the lead (runtime_observed) is not counted on the lead.
+    expect(usageEvents(lead)).toHaveLength(9);
+  });
+
+  it("links a subagent's own child to the subagent, not to the lead", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "muse-nested-"));
+    try {
+      const dir = path.join(root, "2026", "09", "27", "lead-1");
+      const record = (payloadType: string, body: Record<string, unknown>) =>
+        `${JSON.stringify({ payload_type: payloadType, payload: { record: body } })}\n`;
+      await fs.mkdir(path.join(dir, "subagent", "child-1", "subagent", "grand-1"), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(dir, "session.jsonl"),
+        record("subagent.control.resume_context_recorded", {
+          subagent_id: "sa-1",
+          role: "explorer",
+        }) +
+          record("subagent.control.child_session_bound", {
+            child_session_id: "child-1",
+            subagent_id: "sa-1",
+          }),
+      );
+      await fs.writeFile(
+        path.join(dir, "subagent", "child-1", "session.jsonl"),
+        record("subagent.control.resume_context_recorded", {
+          subagent_id: "sa-2",
+          role: "worker",
+        }) +
+          record("subagent.control.child_session_bound", {
+            child_session_id: "grand-1",
+            subagent_id: "sa-2",
+          }),
+      );
+      await fs.writeFile(
+        path.join(dir, "subagent", "child-1", "subagent", "grand-1", "session.jsonl"),
+        "",
+      );
+      const logs = await discoverMuseSessionLogs(root);
+      const byId = new Map(logs.map((log) => [log.sessionId, log]));
+      expect(byId.get("child-1")).toMatchObject({
+        parentSessionId: "lead-1",
+        childAgentName: "explorer",
+      });
+      expect(byId.get("grand-1")).toMatchObject({
+        parentSessionId: "child-1",
+        childAgentName: "worker",
+      });
+      expect(byId.get("lead-1")?.parentSessionId).toBeNull();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("decodes built-in, MCP, and delegation calls joined to their results", async () => {

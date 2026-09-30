@@ -107,12 +107,16 @@ describe("OpportunityTrackingModule", () => {
     store.close();
   });
 
-  it("attaches to the capture stream and enqueues proven patterns into the local outbox", async () => {
+  it("attaches to the capture stream and reports each proven pattern once", async () => {
     const coordinator = new TrajectoryCaptureCoordinator({
       pipeline: new NormalizationPipeline({}),
     });
     const sinkSpy = vi.spyOn(coordinator, "setSessionEventSink");
-    const module = new OpportunityTrackingModule({ store });
+    const proven: unknown[] = [];
+    const module = new OpportunityTrackingModule({
+      store,
+      onPatternProven: (pattern) => proven.push(pattern),
+    });
     const context = {
       config: { opportunityTracking: {} } as never,
       paths: {} as never,
@@ -143,9 +147,8 @@ describe("OpportunityTrackingModule", () => {
       });
     }
 
-    const pending = await store.opportunities.listPendingPatterns();
-    expect(pending).toHaveLength(1);
-    const payload = ProvenPatternDtoSchema.parse(pending[0].payload);
+    expect(proven).toHaveLength(1);
+    const payload = ProvenPatternDtoSchema.parse(proven[0]);
     expect(payload.workspaceId).toBe(WORKSPACE_ID);
     expect(payload.localVerdicts.trigger.triggerType).toBe("normal_frequency");
     const diagnostics = await module.getDiagnostics();

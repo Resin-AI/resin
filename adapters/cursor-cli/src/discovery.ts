@@ -34,6 +34,29 @@ export interface CursorProbeOptions extends CursorDiscoveryOptions {
   configPath?: string;
 }
 
+/** How a subagent hook describes one subagent (`subagent_id`, `subagent_type`, `task`). */
+interface CursorSubagentDescription {
+  readonly agentId?: string;
+  readonly agentType?: string;
+  readonly task?: string;
+}
+
+/** A child conversation named by its parent's hooks. */
+export interface CursorSubagentRef extends CursorSubagentDescription {
+  readonly childConversationId: string;
+}
+
+/** The parent conversation a child's own hooks name. */
+export interface CursorParentRef extends CursorSubagentDescription {
+  readonly parentConversationId: string;
+}
+
+function optionalString<K extends string>(key: K, value: unknown): { [P in K]?: string } {
+  return typeof value === "string" && value.length > 0
+    ? ({ [key]: value } as { [P in K]?: string })
+    : {};
+}
+
 /** Summary of one conversation's spool file. */
 export interface CursorSpoolSummary {
   readonly conversationId: string;
@@ -45,8 +68,10 @@ export interface CursorSpoolSummary {
   readonly updatedAt: string;
   readonly status: SessionStatus;
   readonly isBackgroundAgent: boolean;
-  /** Subagent conversation ids started by this conversation (`subagentStart.subagent_id`). */
-  readonly subagentIds: readonly string[];
+  /** Subagent conversations this conversation's hooks name as its children. */
+  readonly subagents: readonly CursorSubagentRef[];
+  /** The parent a subagent hook in this conversation names via `parent_conversation_id`. */
+  readonly declaredParent: CursorParentRef | null;
   readonly model: string | null;
 }
 
@@ -158,7 +183,8 @@ export async function summarizeCursorSpool(
   let lastStop: string | null = null;
   let isBackgroundAgent = false;
   let model: string | null = null;
-  const subagentIds: string[] = [];
+  const subagents: CursorSubagentRef[] = [];
+  let declaredParent: CursorParentRef | null = null;
   for (const line of content.split("\n")) {
     const payload = parseSpoolLine(line);
     if (payload === null) continue;
@@ -190,10 +216,37 @@ export async function summarizeCursorSpool(
         lastStop = typeof payload.status === "string" ? payload.status : null;
         break;
       case "subagentStart":
-        if (typeof payload.subagent_id === "string" && !subagentIds.includes(payload.subagent_id)) {
-          subagentIds.push(payload.subagent_id);
+      case "subagentStop": {
+        // cursor-agent builds both payloads with `subagent_id`, `subagent_type` and
+        // `parent_conversation_id`; subagentStop adds `child_conversation_id` when it knows the
+        // child's conversation. A hook whose `parent_conversation_id` is another conversation ran
+        // in the child; otherwise it ran in the parent and names its child.
+        const own = conversationId ?? "";
+        const description: CursorSubagentDescription = {
+          ...optionalString("agentId", payload.subagent_id),
+          ...optionalString("agentType", payload.subagent_type),
+          ...optionalString("task", payload.task),
+        };
+        const declared = payload.parent_conversation_id;
+        if (typeof declared === "string" && declared.length > 0 && declared !== own) {
+          declaredParent ??= { parentConversationId: declared, ...description };
+          break;
+        }
+        const childId =
+          typeof payload.child_conversation_id === "string" && payload.child_conversation_id
+            ? payload.child_conversation_id
+            : payload.hook_event_name === "subagentStart"
+              ? payload.subagent_id
+              : undefined;
+        if (typeof childId === "string" && childId.length > 0 && childId !== own) {
+          const index = subagents.findIndex((ref) => ref.childConversationId === childId);
+          const previous = index >= 0 ? subagents[index] : undefined;
+          const merged = { ...description, ...previous, childConversationId: childId };
+          if (index >= 0) subagents[index] = merged;
+          else subagents.push(merged);
         }
         break;
+      }
     }
   }
   if (conversationId === null) return null;
@@ -213,7 +266,8 @@ export async function summarizeCursorSpool(
     updatedAt: updatedAt ?? fallback,
     status,
     isBackgroundAgent,
-    subagentIds,
+    subagents,
+    declaredParent,
     model,
   };
 }
@@ -238,7 +292,9 @@ export interface CursorDiscoveryCatalog {
 
 /**
  * Builds the catalog from Resin's hook spool: one session per conversation, bound to the cwd the
- * hooks recorded. Subagent conversations link to their parent via `subagentStart`. Conversations
+ * hooks recorded. Subagent conversations link to their parent through `subagentStart` /
+ * `subagentStop` (`parent_conversation_id`, `child_conversation_id`, `subagent_id`); a subagent
+ * whose parent no hook names is a plain session. Conversations
  * cursor-agent persisted under `~/.cursor/projects/<slug>/agent-transcripts/` without a spool
  * file are returned as {@link CursorUncapturedSession}s so callers can report them.
  */
@@ -254,9 +310,21 @@ export async function buildCursorDiscoveryCatalog(
     )
   ).filter((summary): summary is CursorSpoolSummary => summary !== null);
 
-  const parentOf = new Map<string, string>();
+  // Each child conversation's link to its immediate parent. A parent's hooks naming the child win
+  // over the child's own `parent_conversation_id`; both name the same conversation.
+  const links = new Map<string, CursorParentRef>();
   for (const summary of summaries) {
-    for (const child of summary.subagentIds) parentOf.set(child, summary.conversationId);
+    for (const { childConversationId, ...description } of summary.subagents) {
+      if (childConversationId === summary.conversationId) continue;
+      links.set(childConversationId, {
+        parentConversationId: summary.conversationId,
+        ...description,
+      });
+    }
+  }
+  for (const summary of summaries) {
+    const declared = summary.declaredParent;
+    if (declared && !links.has(summary.conversationId)) links.set(summary.conversationId, declared);
   }
   const byId = new Map(summaries.map((summary) => [summary.conversationId, summary]));
 
@@ -265,11 +333,17 @@ export async function buildCursorDiscoveryCatalog(
   for (const summary of summaries) {
     // Subagents inherit the parent's recorded root when their own payloads lack one.
     let root = summary.workspaceRoot;
-    for (let parent = parentOf.get(summary.conversationId); root === null && parent; ) {
+    const seen = new Set([summary.conversationId]);
+    for (
+      let parent = links.get(summary.conversationId)?.parentConversationId;
+      root === null && parent && !seen.has(parent);
+      parent = links.get(parent)?.parentConversationId
+    ) {
+      seen.add(parent);
       root = byId.get(parent)?.workspaceRoot ?? null;
-      parent = parentOf.get(parent);
     }
     if (root === null) continue;
+    const link = links.get(summary.conversationId);
     const workspaceId = cursorWorkspaceId(root);
     if (!workspaces.has(workspaceId)) {
       workspaces.set(workspaceId, {
@@ -293,8 +367,17 @@ export async function buildCursorDiscoveryCatalog(
       updatedAt: summary.updatedAt,
       metadata: {
         cwd: root,
-        parentSessionId: parentOf.get(summary.conversationId) ?? null,
-        isSubagent: parentOf.has(summary.conversationId),
+        // A linked subagent is its own agent session under the parent that started it.
+        ...(link
+          ? {
+              sessionKind: "agent",
+              parentSessionId: link.parentConversationId,
+              ...(link.agentId ? { agentId: link.agentId } : {}),
+              ...(link.agentType ? { agentName: link.agentType, agentKind: link.agentType } : {}),
+              ...(link.task ? { agentTask: link.task } : {}),
+            }
+          : { parentSessionId: null }),
+        isSubagent: link !== undefined,
         isBackgroundAgent: summary.isBackgroundAgent,
         cursorTranscriptPath: summary.transcriptPath,
         model: summary.model,

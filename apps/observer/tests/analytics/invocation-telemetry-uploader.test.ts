@@ -338,7 +338,7 @@ describe("InvocationTelemetryUploader", () => {
 
     vi.useRealTimers();
   });
-  it("sends a batch for a workspace the cloud forbids exactly once, keeps the rows' status, and logs one summary", async () => {
+  it("backs off a workspace the cloud forbids: rows stay pending, no dead letter, no warning, healthy workspaces still upload", async () => {
     for (let i = 1; i <= 3; i++) {
       await store.audit.recordInvocation(
         makeInvocation({
@@ -378,30 +378,88 @@ describe("InvocationTelemetryUploader", () => {
           },
         ),
     } as unknown as CloudObservationClient;
+    let nowMs = Date.parse("2026-08-27T12:00:00.000Z");
     const uploader = new InvocationTelemetryUploader({
       auditRepository: store.audit,
       cloudClient: mockCloudClient,
       logger: mockLogger,
+      now: () => nowMs,
     });
 
     expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+    // Within the backoff the refused workspace is not sent again and nothing is logged as a warning.
     expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
     expect(sentWorkspaces).toEqual(["ws_forbidden", "ws_healthy"]);
-    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
+    expect(store.audit.listPendingInvocationUploads(10).map((r) => r.invocationId)).toEqual([
+      "inv_forbidden_1",
+      "inv_forbidden_2",
+      "inv_forbidden_3",
+    ]);
     expect((await store.audit.getInvocation("inv_forbidden_2"))?.status).toBe("success");
-    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      "Invocation telemetry refused by cloud; dead-lettered without retry",
-      {
-        batches: 1,
-        records: 3,
-        errors: ["Cloud request forbidden for workspace ws_forbidden"],
-      },
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledTimes(1);
+    expect(
+      store.conn.all(
+        "SELECT 1 FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';",
+      ),
+    ).toEqual([]);
+
+    // A later healthy record is not starved by the refused backlog.
+    await store.audit.recordInvocation(
+      makeInvocation({
+        invocationId: "inv_healthy_2",
+        workspaceId: "ws_healthy",
+        startedAt: "2026-08-27T10:00:10.000Z",
+      }),
     );
-    const deadLetters = store.conn.all<{ status: string }>(
-      "SELECT status FROM dead_letters WHERE original_event_type = 'invocation_telemetry_batch';",
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+
+    // After the backoff elapses the workspace is tried once more, and a second refusal backs off longer.
+    nowMs += 15 * 60_000;
+    await uploader.flushOnce();
+    expect(sentWorkspaces.filter((w) => w === "ws_forbidden")).toHaveLength(2);
+    nowMs += 15 * 60_000;
+    await uploader.flushOnce();
+    expect(sentWorkspaces.filter((w) => w === "ws_forbidden")).toHaveLength(2);
+    nowMs += 15 * 60_000;
+    await uploader.flushOnce();
+    expect(sentWorkspaces.filter((w) => w === "ws_forbidden")).toHaveLength(3);
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+    expect(mockLogger.info).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads a workspace's backlog once the cloud starts accepting it", async () => {
+    await store.audit.recordInvocation(
+      makeInvocation({ invocationId: "inv_later_1", workspaceId: "ws_later" }),
     );
-    expect(deadLetters).toEqual([{ status: "exhausted" }]);
+    let accepting = false;
+    const sendTelemetryBatch = vi
+      .fn()
+      .mockImplementation(async (input: SendTelemetryBatchInput) => {
+        if (!accepting) {
+          throw new ResourceForbiddenError("Cloud request forbidden for workspace ws_later", {
+            workspaceId: "ws_later",
+          });
+        }
+        return {
+          batchId: "tb_later",
+          status: "accepted",
+          processedCount: input.invocations.length,
+        };
+      });
+    let nowMs = Date.parse("2026-08-27T12:00:00.000Z");
+    const uploader = new InvocationTelemetryUploader({
+      auditRepository: store.audit,
+      cloudClient: { sendTelemetryBatch } as unknown as CloudObservationClient,
+      logger: mockLogger,
+      now: () => nowMs,
+    });
+
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 0 });
+    accepting = true;
+    nowMs += 15 * 60_000;
+    expect(await uploader.flushOnce()).toEqual({ uploaded: 1 });
+    expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);
   });
 
   it("sends error details within the cloud's limits and dead-letters a batch the cloud permanently rejects", async () => {

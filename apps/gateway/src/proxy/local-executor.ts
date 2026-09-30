@@ -145,10 +145,59 @@ export interface LocalArtifactExecutorOptions {
   privateValueOwnerWorkspaceId?: string;
 }
 
-/** Enough of a recorded program for an agent to recognize it; the full text still executes. */
+/** Longest program preview a recorded step shows; the full text still executes. */
 const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 /** Added lines of a recorded edit shown in its description; the whole edit still applies. */
 const RECORDED_PATCH_PREVIEW_LINES = 12;
+/**
+ * Characters of recorded steps one tool description may carry. Tool listings leave the recorded
+ * steps out; get_tool_schema and search_tools return them, and each result stays in the agent's
+ * context for the rest of the session, so a long recording is still capped.
+ */
+const RECORDED_STEPS_BUDGET_CHARS = 2000;
+/** Preview sizes tried in turn, largest first, until the recorded steps fit their budget. */
+const RECORDED_PREVIEW_STEPS = [RECORDED_PROGRAM_PREVIEW_CHARS, 400, 250, 160, 100];
+
+export interface RecordedStep {
+  /** The step's first line: its number and what it does. */
+  head: string;
+  /** The program text or added lines the step shows under its head, trimmed to fit the budget. */
+  body?: string;
+}
+
+/**
+ * Renders recorded steps within `budget` characters: previews shrink together (each step keeps its
+ * head and the start of its body) until they fit, and when even the smallest preview does not, the
+ * steps that no longer fit are counted instead of shown.
+ */
+export function renderRecordedSteps(
+  steps: readonly RecordedStep[],
+  budget: number = RECORDED_STEPS_BUDGET_CHARS,
+): string {
+  const render = (step: RecordedStep, limit: number): string => {
+    if (step.body === undefined) return step.head;
+    const shown = step.body.length > limit ? `${step.body.slice(0, limit)}\n[...]` : step.body;
+    return `${step.head}\n${shown}`;
+  };
+  const join = (parts: readonly string[]): string => parts.join("\n");
+  for (const limit of RECORDED_PREVIEW_STEPS) {
+    const parts = steps.map((step) => render(step, limit));
+    if (join(parts).length <= budget) return join(parts);
+  }
+  const smallest = RECORDED_PREVIEW_STEPS[RECORDED_PREVIEW_STEPS.length - 1]!;
+  const parts = steps.map((step) => render(step, smallest));
+  const kept: string[] = [];
+  let size = 0;
+  for (const part of parts) {
+    if (kept.length > 0 && size + part.length + 1 > budget) break;
+    kept.push(part);
+    size += part.length + 1;
+  }
+  const omitted = parts.length - kept.length;
+  return omitted === 0
+    ? join(kept)
+    : `${join(kept)}\n[${omitted} more step${omitted === 1 ? "" : "s"} not shown]`;
+}
 
 function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
   try {
@@ -517,6 +566,20 @@ export class LocalArtifactExecutor {
         ? embeddedPrograms(recorded)
         : [];
       const bound = template.holes.flatMap((hole) => {
+        if (hole.through !== undefined) {
+          // A word list: its whole run of recorded words shows as one `{input}`.
+          const first = tokens[hole.token];
+          const last = tokens[hole.through];
+          if (first === undefined || last === undefined || hole.binding.type !== "input") return [];
+          const words = tokens.slice(hole.token, hole.through + 1).map((each) => each.value);
+          const run = {
+            ...first,
+            end: last.end,
+            raw: recorded.slice(first.start, last.end),
+            value: JSON.stringify(words),
+          };
+          return [{ token: run, name: hole.binding.name, span: undefined, parameter: true }];
+        }
         const token =
           hole.embedded === undefined
             ? tokens[hole.token]
@@ -595,7 +658,7 @@ export class LocalArtifactExecutor {
         ),
       };
     };
-    const steps: string[] = [];
+    const steps: RecordedStep[] = [];
     const parameters = new Set<string>();
     for (const [index, step] of plan.steps.entries()) {
       // A derivation is model-written code: describe what it computes, never the code itself.
@@ -632,9 +695,9 @@ export class LocalArtifactExecutor {
           }
         }
         if (computed.size > 0 && read.size > 0) {
-          steps.push(
-            `Step ${index + 1} computes ${[...computed].join(", ")} from ${[...read].join(", ")}`,
-          );
+          steps.push({
+            head: `Step ${index + 1} computes ${[...computed].join(", ")} from ${[...read].join(", ")}`,
+          });
         }
         continue;
       }
@@ -665,29 +728,27 @@ export class LocalArtifactExecutor {
           .slice(0, RECORDED_PATCH_PREVIEW_LINES)
           .map((line) => line.slice(1))
           .join("\n");
-        steps.push(
-          `Step ${index + 1}${toggle} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}${
-            added.length > 0
-              ? `\n${preview}${added.length > RECORDED_PATCH_PREVIEW_LINES ? "\n[...]" : ""}`
-              : ""
-          }`,
-        );
+        steps.push({
+          head: `Step ${index + 1}${toggle} edits ${shownFile}${deleted ? " (deletes it)" : added.length > 0 ? ", adding:" : ""}`,
+          ...(added.length > 0
+            ? {
+                body: `${preview}${added.length > RECORDED_PATCH_PREVIEW_LINES ? "\n[...]" : ""}`,
+              }
+            : {}),
+        });
         continue;
       }
-      const shown =
-        programText.length > RECORDED_PROGRAM_PREVIEW_CHARS
-          ? `${programText.slice(0, RECORDED_PROGRAM_PREVIEW_CHARS)}\n[...]`
-          : programText;
-      steps.push(
-        `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:\n${shown}`,
-      );
+      steps.push({
+        head: `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:`,
+        body: programText,
+      });
     }
     if (steps.length === 0) return undefined;
     const inputs =
       parameters.size === 0
         ? ""
         : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${[...parameters].join("; ")}`;
-    const description = `Recorded on this machine:\n${steps.join("\n")}${inputs}`;
+    const description = `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}`;
     this.recordedWorkflowDescriptions.set(key, description);
     return description;
   }

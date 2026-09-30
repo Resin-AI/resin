@@ -136,6 +136,23 @@ export class CopilotRecordDecoder implements HarnessRecordDecoder {
   decode(record: RawHarnessRecord): IntermediateSessionEvent[] {
     const event = parseEvent(record.rawPayload);
     if (!event) return [];
+    // The subagent's own session ends where its completion line is: its terminal lifecycle event.
+    if (record.metadata?.subagentEnd === true) {
+      return [
+        {
+          sessionId: record.sessionId,
+          timestamp: event.timestamp ?? record.timestamp,
+          schemaVersion: COPILOT_DECODER_VERSION,
+          eventId: `${event.id ?? `line-${record.sequenceNumber}`}-end`,
+          causalRef: { causalSequence: record.sequenceNumber, stepIndex: 0 },
+          type: "session_lifecycle",
+          lifecycleType: event.type === "subagent.failed" ? "crash" : "end",
+          exitReason: asString(event.data.error) ?? event.type,
+          harnessName: COPILOT_HARNESS_ID,
+          metadata: { copilotEventType: event.type },
+        },
+      ];
+    }
     // One line can yield several events (tool result + command/file edit); stepIndex keeps
     // their (sequence, step) identity unique for the observer's deduplicator.
     return this.decodeEvent(event, record.sessionId, record.sequenceNumber, record.timestamp).map(

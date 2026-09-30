@@ -24,6 +24,8 @@ Every harness below is registered by `resin init` and removed by `resin uninstal
 
 Each harness definition lists the exact versions Resin recorded real sessions with (`testedVersions`). `resin status` compares the installed version against that list and shows it as tested, `(untested)`, or unknown (when the harness does not report a version). Untested and unknown versions are still registered and observed; a record whose shape changed is kept as an unrecognized record rather than decoded by guesswork.
 
+While the daemon captures your own sessions it also keeps small local counters per harness and installed version (events decoded versus passed through as unrecognized records, tool calls paired with their results, sessions that decoded cleanly or dead-lettered a record). They live in the local state store and never leave the device. `resin status` prefers this evidence over the fixture list: a version whose sessions decode cleanly shows `verified on N local sessions` (at least 5 sessions and 100 events, with no problem threshold exceeded), and a version that does not shows `decode problems: <what>` (more than 25% of events unrecognized, more than 10% of tool calls unpaired with their result, or more than 20% of sessions failing to decode). With too few sessions, or before the daemon has recorded any, the fixture classification above applies.
+
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
 ## 1. Claude Code CLI Integration
@@ -61,7 +63,7 @@ resin: /home/you/.resin/bin/resin mcp - ✔ Connected
 
 ### Session Observation
 
-Resin follows session transcripts in `~/.claude/projects/<encoded-project>/<session-id>.jsonl` and the subagent transcripts Claude writes beside them (`<session-id>/subagents/agent-<id>.jsonl`). A subagent is attributed to its parent session's project, identified by the `sessionId` and `agentId` its transcript records. Shell commands, reads, edits, writes, MCP calls, subagent launches, compactions (`/compact`), interrupts, and per-response token usage are decoded.
+Resin follows session transcripts in `~/.claude/projects/<encoded-project>/<session-id>.jsonl` and the subagent transcripts Claude writes beside them (`<session-id>/subagents/agent-<id>.jsonl`, with a `.meta.json` naming the agent type, description and spawning tool call). A subagent is attributed to its parent session's project, identified by the `sessionId` and `agentId` its transcript records, and listed as its own agent session (`agent-<id>`) linked to its parent and named by its agent type; a subagent spawned by another subagent links to that subagent. Its tool calls and token usage are captured on the subagent only: the parent's `Agent` call is one step of the parent, and totals Claude reports about the subagent in the parent's tool result are not counted again. Shell commands, reads, edits, writes, MCP calls, subagent launches, compactions (`/compact`), interrupts, and per-response token usage are decoded.
 
 A successful `Edit` or `Write` becomes a patch step, the same representation as a Codex `apply_patch`: the diff Claude recorded as applied, confined to the session's working directory and stored only on this device. An edit Claude cannot restate exactly as a unified diff (for example a file without a final newline) is not learned.
 
@@ -118,7 +120,7 @@ On 0.156 and later, every model tool call is a code-mode `exec` cell (JavaScript
 - built-in web search (`web__run`) as a `web_search` tool call and its results;
 - token usage, compaction boundaries (`compacted`), and interrupted turns (`turn_aborted`, recorded as an interrupted session end).
 
-Codex runs subagents (`multi_agent`, on by default). The parent's `spawn_agent`/`wait` calls are recorded as subagent spawn and settle events that name the child thread; each child writes its own rollout whose `session_meta` names the parent thread and carries the same working directory, so it is captured as its own session bound to the parent's project. A record type Resin does not recognize is kept as an unrecognized record rather than dropped.
+Codex runs subagents (`multi_agent`, on by default). The parent's `spawn_agent`/`wait` calls are recorded as subagent spawn and settle events that name the child thread; each child writes its own rollout whose `session_meta` names the parent thread (`parent_thread_id`, the immediate parent for nested children) and the child's nickname and role. Resin lists each child as its own agent session, linked to the parent's session and named by its nickname, so its tool calls and token usage are captured once, on the child. A child forked from its parent's context starts with a copy of the parent's records (a second `session_meta`, turns, tool results, token counts); Resin drops that copy up to the child's own first turn (turn ids are UUIDv7, so a turn older than the child's thread id was inherited). A record type Resin does not recognize is kept as an unrecognized record rather than dropped.
 
 Codex has no native-tool invoker. Its built-in tools on 0.157 are `exec_command`/`write_stdin` (shell), `apply_patch` (every file create, edit and delete), `view_image`, `web__run`, the multi-agent tools, goals, and MCP resource reads; there is no separate read, write or edit tool. File reads happen through shell commands and file changes through `apply_patch`, so a learned tool covers Codex's built-in steps as shell commands and patch steps. Web search, image viewing and subagent steps are recorded but are not replayed by learned tools.
 
@@ -133,7 +135,7 @@ Only a confirmed completed native shell result can establish a successful local 
 ### Known Limits
 
 - No native-tool invoker: learned tools replay Codex built-in steps only as shell commands and `apply_patch` edits; web search and multi-agent steps are recorded but not replayable.
-- Multi-agent child threads are separate rollouts, bound to the parent's project through their own `session_meta` cwd.
+- Multi-agent child threads are separate rollouts: each is captured as its own agent session linked to the spawning thread's session (its own `session_meta` cwd binds it to a project), and the history a forked child replays from its parent is not captured again.
 - Compaction boundaries are captured, but Codex does not record the token count after compaction.
 
 ### What a learned tool can vary

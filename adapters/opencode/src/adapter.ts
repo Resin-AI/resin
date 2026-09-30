@@ -49,6 +49,29 @@ export function opencodeWorkspaceId(directory: string): string {
   return `opencode-${createHash("sha256").update(path.resolve(directory)).digest("hex").slice(0, 16)}`;
 }
 
+/** OpenCode names the subagent in the child title: `<task description> (@general subagent)`. */
+const SUBAGENT_TITLE = /\(@(\S+) subagent\)\s*$/;
+
+/**
+ * User-vs-agent classification of one OpenCode session. Child sessions (`parentID`, written by
+ * the `task` tool) are agent sessions linked to the session that spawned them; the subagent's
+ * name is the session's `agent` (SQLite 1.2+), else the title suffix (legacy JSON tree).
+ */
+export function opencodeSessionLineage(session: OpencodeSessionInfo): {
+  sessionKind: "user" | "agent";
+  parentSessionId?: string;
+  agentName?: string;
+} {
+  if (!session.parentID) return { sessionKind: "user" };
+  const fromAgent = typeof session.agent === "string" && session.agent ? session.agent : undefined;
+  const agentName = fromAgent ?? session.title?.match(SUBAGENT_TITLE)?.[1];
+  return {
+    sessionKind: "agent",
+    parentSessionId: session.parentID,
+    ...(agentName ? { agentName } : {}),
+  };
+}
+
 /** Harness adapter for OpenCode (sst/opencode), reading its SQLite store or legacy JSON tree. */
 export class OpencodeHarnessAdapter implements StrictHarnessAdapter {
   readonly id = OPENCODE_HARNESS_ID;
@@ -134,7 +157,7 @@ export class OpencodeHarnessAdapter implements StrictHarnessAdapter {
             store: store.kind,
             title: session.title,
             harnessVersion: session.version,
-            parentSessionId: session.parentID,
+            ...opencodeSessionLineage(session),
           },
         } satisfies HarnessSession;
       });

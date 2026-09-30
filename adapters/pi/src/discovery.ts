@@ -200,6 +200,8 @@ export function toPiSession(
     createdAt,
     updatedAt: transcript.updatedAt.toISOString(),
     metadata: {
+      // Pi records no subagents; a `parentSession` header marks a `/fork` or `/clone` the user made.
+      sessionKind: "user",
       cwd: transcript.header.cwd,
       sessionFormatVersion: transcript.header.version,
       ...(transcript.header.parentSession

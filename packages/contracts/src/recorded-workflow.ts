@@ -13,8 +13,10 @@
 import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
 import {
   type ProgramLanguage,
-  embeddedProgramIsProtected,
+  embeddedProgramProtectedTokens,
   embeddedPrograms,
+  isOptionLikeListItem,
+  programTokenListFits,
   programTokenPath,
   programTokenSpanFits,
   programTokenValueAt,
@@ -82,12 +84,15 @@ export type WorkflowValueTemplate =
        * `token` is a top-level token index. With `embedded`, the hole addresses token `embedded` of
        * the program embedded in the shell source whose anchor is `token` (a heredoc body or a
        * `-c`/`-e` code string). With `span`, the hole binds only UTF-16 offsets [start, end) of the
-       * addressed string token's decoded value, never all of it.
+       * addressed string token's decoded value, never all of it. With `through`, the hole is a word
+       * list: a list input replaces the run of top-level shell words `token`..`through`, each item
+       * one shell word (at most one list per program, and no other hole inside its run).
        */
       holes: Array<{
         token: number;
         embedded?: number;
         span?: { start: number; end: number };
+        through?: number;
         binding: WorkflowValueTemplate;
       }>;
       /** Whole original program source, kept in a local private resource. */
@@ -290,6 +295,11 @@ export type WorkflowBindingCandidate = {
          * `RecordedWorkflow.inputs[].recordedDefault`). Only a program-token position qualifies.
          */
         recordedDefault?: true;
+        /**
+         * A word list over the run `["tokens", first, "through", last]` addresses: promoted as an
+         * `array` input with this {@link WorkflowListInput} shape.
+         */
+        list?: WorkflowListInput;
       };
   reason:
     | "equal-to-earlier-result"
@@ -438,6 +448,11 @@ export type RecordedWorkflow = {
      * it never becomes part of the plan. Such an input is bound only by program-token holes.
      */
     recordedDefault?: true;
+    /**
+     * An `array` input that is a word list: bound only by list holes (`through`), each item one
+     * shell word. See {@link workflowListInputProblem} for what a caller may pass.
+     */
+    list?: WorkflowListInput;
   }>;
   steps: WorkflowStep[];
   /** Private resources the workflow needs locally, addressed by reference only. */
@@ -461,6 +476,38 @@ export type RecordedWorkflow = {
    */
   heldOut?: WorkflowHeldOutDemonstration;
 };
+
+/**
+ * The shape of a word-list input. `minItems` is 1, or 0 when a recording of the job ran the command
+ * with no items there. `optionItems` is set only when a recording passed an item that looks like an
+ * option (`-x`, `--flag`): otherwise such an item is refused, so a caller can never slip a flag
+ * into a command that the recording ran only on operands.
+ */
+export type WorkflowListInput = { minItems: 0 | 1; optionItems?: true };
+
+/**
+ * Why `value` is not a valid value of the word-list input `name`, or undefined when it is: an array
+ * of at least `minItems` non-empty strings, none option-like unless the list allows it.
+ */
+export function workflowListInputProblem(
+  name: string,
+  list: WorkflowListInput,
+  value: unknown,
+): string | undefined {
+  if (!Array.isArray(value)) return `workflow input '${name}' must be a list of words`;
+  if (value.length < list.minItems) {
+    return `workflow input '${name}' needs at least ${list.minItems} item`;
+  }
+  for (const item of value) {
+    if (typeof item !== "string" || item.length === 0) {
+      return `every item of workflow input '${name}' must be a non-empty string`;
+    }
+    if (list.optionItems !== true && isOptionLikeListItem(item)) {
+      return `workflow input '${name}' item '${item}' looks like an option, which the recording never passed there`;
+    }
+  }
+  return undefined;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -615,8 +662,13 @@ export function validateWorkflowProgramProjection(
   const programs = embeddedPrograms(sanitized);
   for (const hole of embeddedHoles) {
     const program = programs.find((each) => each.anchor === hole.token);
-    if (program && embeddedProgramIsProtected(program, shellTokens, [...protectedTokens])) {
-      errors.push(`${path} hole ${hole.token}.${hole.embedded} is inside a protected program`);
+    if (
+      program &&
+      embeddedProgramProtectedTokens(program, sanitized, shellTokens, [...protectedTokens]).has(
+        hole.embedded,
+      )
+    ) {
+      errors.push(`${path} hole ${hole.token}.${hole.embedded} is a protected token`);
     }
   }
 }
@@ -1240,6 +1292,7 @@ function validateDerivationStep(step: Record<string, unknown>, errors: string[])
         !isPlainObject(hole) ||
         hole.embedded !== undefined ||
         hole.span !== undefined ||
+        hole.through !== undefined ||
         !isPlainObject(hole.binding) ||
         hole.binding.type !== "input"
       ) {
@@ -1284,6 +1337,8 @@ export function validateRecordedWorkflow(value: unknown): {
   const inputNames = new Set<string>();
   const inputTypes = new Map<string, string>();
   const recordedDefaults = new Set<string>();
+  /** Word-list inputs: read only as the binding of a list hole. */
+  const listInputs = new Set<string>();
   for (const input of inputs ?? []) {
     if (!isPlainObject(input) || typeof input.name !== "string" || input.name.length === 0) {
       errors.push("every input needs a non-empty name");
@@ -1301,6 +1356,26 @@ export function validateRecordedWorkflow(value: unknown): {
       errors.push(`input ${input.name} needs a recorded type`);
     } else {
       inputTypes.set(input.name, input.type);
+      if (Object.hasOwn(input, "list")) {
+        const list = input.list;
+        if (
+          input.type !== "array" ||
+          !isPlainObject(list) ||
+          !hasOnlyKeys(list, ["minItems", "optionItems"]) ||
+          (list.minItems !== 0 && list.minItems !== 1) ||
+          (Object.hasOwn(list, "optionItems") && list.optionItems !== true)
+        ) {
+          errors.push(
+            `input ${input.name} list must be an array input with minItems 0 or 1 and optionItems true when present`,
+          );
+        } else {
+          listInputs.add(input.name);
+          const problem = Object.hasOwn(input, "default")
+            ? workflowListInputProblem(input.name, list as WorkflowListInput, input.default)
+            : undefined;
+          if (problem !== undefined) errors.push(problem);
+        }
+      }
       if (Object.hasOwn(input, "default")) {
         if (!isJsonValue(input.default)) {
           errors.push(`input ${input.name} default must be a JSON value`);
@@ -1452,6 +1527,10 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} argument ${argument.name} reads recorded-default input ${String(source.name)} outside a program token`,
         );
+      } else if (source.kind === "input" && listInputs.has(String(source.name))) {
+        errors.push(
+          `step ${step.id} argument ${argument.name} reads list input ${String(source.name)} outside a word-list hole`,
+        );
       }
       if (source.kind === "result") {
         const stepRef = String(source.stepId);
@@ -1480,7 +1559,12 @@ export function validateRecordedWorkflow(value: unknown): {
       }
       if (source.kind === "template") {
         const problems: string[] = [];
-        const walk = (template: unknown, where: string, holeBinding = false): void => {
+        /** `token`: the binding of a program hole; `list`: of a word-list hole. */
+        const walk = (
+          template: unknown,
+          where: string,
+          holeBinding: "none" | "token" | "list" = "none",
+        ): void => {
           if (!isPlainObject(template)) {
             problems.push(`${where} is not a template node`);
             return;
@@ -1492,9 +1576,15 @@ export function validateRecordedWorkflow(value: unknown): {
             case "input":
               if (typeof template.name !== "string" || !inputNames.has(template.name)) {
                 problems.push(`${where} reads unknown input ${String(template.name)}`);
-              } else if (recordedDefaults.has(template.name) && !holeBinding) {
+              } else if (recordedDefaults.has(template.name) && holeBinding === "none") {
                 problems.push(
                   `${where} reads recorded-default input ${template.name} outside a program token`,
+                );
+              } else if (listInputs.has(template.name) !== (holeBinding === "list")) {
+                problems.push(
+                  holeBinding === "list"
+                    ? `${where} word-list hole must bind a list input, not ${template.name}`
+                    : `${where} reads list input ${template.name} outside a word-list hole`,
                 );
               }
               return;
@@ -1591,6 +1681,13 @@ export function validateRecordedWorkflow(value: unknown): {
                 return;
               }
               const spansByToken = new Map<string, Array<{ start: number; end: number } | null>>();
+              const lists = template.holes.filter(
+                (hole): hole is Record<string, unknown> & { token: number; through: number } =>
+                  isPlainObject(hole) &&
+                  typeof hole.token === "number" &&
+                  typeof hole.through === "number",
+              );
+              if (lists.length > 1) problems.push(`${where} takes more than one word list`);
               for (const [index, hole] of template.holes.entries()) {
                 if (
                   !isPlainObject(hole) ||
@@ -1623,6 +1720,44 @@ export function validateRecordedWorkflow(value: unknown): {
                 ) {
                   problems.push(`${where} hole ${index} must name a span of its token value`);
                   continue;
+                }
+                if (hole.through !== undefined) {
+                  const through = hole.through;
+                  if (
+                    typeof through !== "number" ||
+                    !Number.isInteger(through) ||
+                    through < hole.token ||
+                    hole.embedded !== undefined ||
+                    hole.span !== undefined ||
+                    template.language !== "shell"
+                  ) {
+                    problems.push(
+                      `${where} hole ${index} word list must name a run of top-level shell tokens`,
+                    );
+                    continue;
+                  }
+                  if (
+                    isPlainObject(template.source) &&
+                    template.source.type === "literal" &&
+                    typeof template.source.value === "string" &&
+                    !programTokenListFits(
+                      tokenizeProgram("shell", template.source.value),
+                      hole.token,
+                      through,
+                    )
+                  ) {
+                    problems.push(`${where} hole ${index} word list does not cover a run of words`);
+                  }
+                  walk(hole.binding, `${where}<tokens ${hole.token}..${through}>`, "list");
+                  continue;
+                }
+                const holeToken = hole.token;
+                if (
+                  lists.some(
+                    (list) => list !== hole && list.token <= holeToken && holeToken <= list.through,
+                  )
+                ) {
+                  problems.push(`${where} hole ${index} sits inside a word list`);
                 }
                 const key = `${hole.token}.${String(hole.embedded ?? "")}`;
                 const span =
@@ -1667,7 +1802,7 @@ export function validateRecordedWorkflow(value: unknown): {
                   hole.embedded === undefined
                     ? `${where}<token ${hole.token}>`
                     : `${where}<token ${hole.token}.${hole.embedded}>`,
-                  true,
+                  "token",
                 );
               }
               return;

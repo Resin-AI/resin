@@ -500,6 +500,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_normalized_events_session_sequence
 `;
 
 /**
+ * Migration 006: Drop the pattern outbox.
+ *
+ * Migration 004 created `pattern_outbox` as a local queue for proven patterns awaiting upload,
+ * but nothing ever read it: the opportunity tracker wrote a row per dispatch and no uploader
+ * consumed them, so the table only grew. Cloud detection works from uploaded observations, not
+ * from this queue. Dropping the table also drops its three indexes; rows are unread data and are
+ * not migrated anywhere. Migration 004 stays as shipped so applied-migration checksums still match.
+ */
+export const MIGRATION_006_SQL = `
+DROP TABLE IF EXISTS pattern_outbox;
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -532,6 +545,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "005_normalized_events_causal_step_uniqueness",
     sql: MIGRATION_005_SQL,
     checksum: hashCanonicalContent(MIGRATION_005_SQL),
+  },
+  {
+    version: 6,
+    name: "006_drop_pattern_outbox",
+    sql: MIGRATION_006_SQL,
+    checksum: hashCanonicalContent(MIGRATION_006_SQL),
   },
 ];
 

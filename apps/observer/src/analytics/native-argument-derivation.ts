@@ -24,6 +24,7 @@
  */
 
 import {
+  type EmbeddedProgram,
   type ExtractLocator,
   type ProgramLanguage,
   type ProgramToken,
@@ -180,9 +181,66 @@ function scalarLeaves(
   }
 }
 
-/** Stable typed identity for exact primitive comparison. */
+/**
+ * Stable typed identity for exact primitive comparison. String leaves include whole tool outputs
+ * that every re-derivation of a growing recording reads again; a string caches its own hash, so a
+ * lookup costs far less than serializing the output again.
+ */
+const STRING_KEY_LIMIT = 16384;
+const STRING_KEY_CHARS_LIMIT = 32 * 1024 * 1024;
+const stringKeys = new Map<string, string>();
+let stringKeyChars = 0;
+
 function scalarKey(value: CandidateScalar): string {
-  return JSON.stringify([typeof value, value]);
+  if (typeof value !== "string") return JSON.stringify([typeof value, value]);
+  let key = stringKeys.get(value);
+  if (key === undefined) {
+    key = JSON.stringify(["string", value]);
+    if (
+      stringKeys.size >= STRING_KEY_LIMIT ||
+      stringKeyChars + key.length > STRING_KEY_CHARS_LIMIT
+    ) {
+      stringKeys.clear();
+      stringKeyChars = 0;
+    }
+    stringKeys.set(value, key);
+    stringKeyChars += key.length;
+  }
+  return key;
+}
+
+/**
+ * Program texts are re-read by every derivation of a growing recording (each new call re-derives the
+ * calls before it), so their tokenizations are shared. Tokenizing is pure, and nothing here mutates a
+ * token list, so a cached list is the list a fresh tokenization would return.
+ */
+const TOKEN_CACHE_LIMIT = 2048;
+const tokenCache = new Map<string, readonly ProgramToken[] | ProgramTokenizationError>();
+const embeddedCache = new Map<string, readonly EmbeddedProgram[]>();
+
+function remember<V>(cache: Map<string, V>, key: string, value: V): V {
+  if (cache.size >= TOKEN_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+  cache.set(key, value);
+  return value;
+}
+
+function cachedTokens(kind: ProgramLanguage, text: string): readonly ProgramToken[] {
+  const key = `${kind}\u0000${text}`;
+  let entry = tokenCache.get(key);
+  if (entry === undefined) {
+    try {
+      entry = remember(tokenCache, key, Object.freeze(tokenizeProgram(kind, text)));
+    } catch (error) {
+      if (!(error instanceof ProgramTokenizationError)) throw error;
+      entry = remember(tokenCache, key, error);
+    }
+  }
+  if (entry instanceof ProgramTokenizationError) throw entry;
+  return entry;
+}
+
+function cachedEmbeddedPrograms(text: string): readonly EmbeddedProgram[] {
+  return embeddedCache.get(text) ?? remember(embeddedCache, text, embeddedPrograms(text));
 }
 
 /**
@@ -212,17 +270,26 @@ function isProgramValue(
 }
 
 /** Operators after which a shell word is at command position again. */
-const SHELL_COMMAND_SEPARATORS = ["&&", "||", ";", "|", "|&", "(", "&", "\n"];
+const SHELL_COMMAND_SEPARATORS = ["&&", "||", ";", "|", "|&", "(", "&"];
 
 /**
  * Each shell token's place in its simple command: 0 at command position (leading assignments and
  * the program's name), 1 for the first argument (where a subcommand sits), 2 and on for the rest,
- * and undefined for an operator.
+ * and undefined for an operator. A line break (a heredoc body included) ends a command too.
  */
-function shellArgumentPositions(tokens: readonly ProgramToken[]): Array<number | undefined> {
+function shellArgumentPositions(
+  text: string,
+  tokens: readonly ProgramToken[],
+): Array<number | undefined> {
   let commandPosition = true;
   let argumentIndex = 0;
+  let previousEnd = 0;
   return tokens.map((token) => {
+    if (text.slice(previousEnd, token.start).includes("\n")) {
+      commandPosition = true;
+      argumentIndex = 0;
+    }
+    previousEnd = token.end;
     if (token.kind === "operator") {
       commandPosition = SHELL_COMMAND_SEPARATORS.includes(token.raw);
       if (commandPosition) argumentIndex = 0;
@@ -250,18 +317,17 @@ function sharedShellWords(calls: readonly DerivationCall[]): Set<string> {
       continue;
     const text = call.arguments[call.program.argument];
     if (typeof text !== "string") continue;
-    let tokens: ProgramToken[];
+    let tokens: readonly ProgramToken[];
     try {
-      tokens = tokenizeProgram(call.program.kind, text);
+      tokens = cachedTokens(call.program.kind, text);
     } catch (error) {
       if (error instanceof ProgramTokenizationError) continue;
       throw error;
     }
-    const bodyStart = heredocStart(call.program.kind, text);
-    const positions = shellArgumentPositions(tokens);
+    const positions = shellArgumentPositions(text, tokens);
     const words = new Set<string>();
+    // A heredoc body's words carry no value: they are the text a command reads, not its arguments.
     for (const [index, token] of tokens.entries()) {
-      if (token.start >= bodyStart) break;
       if ((positions[index] ?? 0) >= 2 && token.kind === "word" && typeof token.value === "string")
         words.add(token.value);
     }
@@ -278,7 +344,7 @@ function sharedEmbeddedStrings(calls: readonly DerivationCall[]): Set<string> {
     const text = call.arguments[call.program.argument];
     if (typeof text !== "string") continue;
     const values = new Set<string>();
-    for (const program of embeddedPrograms(text)) {
+    for (const program of cachedEmbeddedPrograms(text)) {
       for (const token of program.tokens) {
         if (token.bindable && token.kind === "string" && typeof token.value === "string") {
           values.add(token.value);
@@ -332,16 +398,6 @@ function programInputBaseName(
 }
 
 /**
- * The shell tokenizer does not establish heredoc-body syntax, so nothing from the first heredoc on
- * is offered: body text is another program's source, not this command's arguments.
- */
-function heredocStart(language: ProgramLanguage, text: string): number {
-  if (language !== "shell") return Number.POSITIVE_INFINITY;
-  const match = /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/.exec(text);
-  return match === null ? Number.POSITIVE_INFINITY : match.index;
-}
-
-/**
  * Derives, from a recorded call sequence, the dependencies and the candidate bindings it supports.
  * `requestWords` are the words of the instruction the calls answered: a bare word the request named
  * (`Cut a release of the alpha project` → `./release test alpha`) is what the work runs on, even at
@@ -373,12 +429,18 @@ export function deriveNativeCalls(
   const programInputNames = new Set<string>(givenInputNames.values());
   /** Values a file edit's added lines were offered as inputs for. */
   const patchInputValues = new Set<string>();
-  /** Every typed primitive leaf shown before each call's result arrived. */
-  const seenBeforeResult: Array<Set<string>> = [];
+  /**
+   * When each typed primitive leaf was first shown: stage 2i while call i's arguments were shown,
+   * 2i+1 once its result arrived. A leaf was shown before call i's result arrived exactly when its
+   * first stage is at most 2i, so one map answers what a per-call copy of everything seen did.
+   */
+  const firstShown = new Map<string, number>();
 
-  /** Typed primitive leaves each call's own result contributed. */
+  /** Typed primitive leaves each call's own result contributed, and those leaves themselves. */
   const resultValues: Array<Set<string>> = [];
-  const seen = new Set<string>();
+  const resultLeavesOf: Array<Array<{ path: WorkflowValuePath; value: CandidateScalar }>> = [];
+  /** The string leaves each call's arguments hold, read once per derivation when first needed. */
+  const mentionStrings: Array<string[] | undefined> = [];
   /** Candidates (result, extract, and input) each family has taken, in order of arrival. */
   const resultUsed: Record<CandidateFamily, number> = { harness: 0, program: 0 };
   const inputUsed: Record<CandidateFamily, number> = { harness: 0, program: 0 };
@@ -398,16 +460,23 @@ export function deriveNativeCalls(
     for (const [argument, value] of Object.entries(call.arguments)) {
       scalarLeaves(value, [argument], argumentLeaves);
     }
-    for (const leaf of argumentLeaves) seen.add(scalarKey(leaf.value));
-    seenBeforeResult.push(new Set(seen));
+    for (const leaf of argumentLeaves) {
+      const key = scalarKey(leaf.value);
+      if (!firstShown.has(key)) firstShown.set(key, 2 * index);
+    }
 
     const resultLeaves: Array<{
       path: WorkflowValuePath;
       value: CandidateScalar;
     }> = [];
     scalarLeaves(call.result, [], resultLeaves);
+    resultLeavesOf.push(resultLeaves);
     resultValues.push(new Set(resultLeaves.map((leaf) => scalarKey(leaf.value))));
-    for (const leaf of resultLeaves) seen.add(scalarKey(leaf.value));
+    for (const leaf of resultLeaves) {
+      const key = scalarKey(leaf.value);
+      if (!firstShown.has(key)) firstShown.set(key, 2 * index + 1);
+    }
+    const shown = { firstShown, resultValues, resultLeavesOf };
 
     // Declared-resource edges: the earlier call declared it wrote what this call declared it reads,
     // so the order is a fact of the record rather than an inference from the values involved.
@@ -432,7 +501,7 @@ export function deriveNativeCalls(
       const argumentName = leaf.path[0];
       if (call.program?.argument === argumentName) continue;
       if (typeof argumentName !== "string") continue;
-      const producers = producersOfValue(leaf.value, index, calls, resultValues, seenBeforeResult);
+      const producers = producersOfValue(leaf.value, index, calls, shown);
       if (producers.length === 0) continue;
       const first = producers[0]!;
       resultUsed[family] += 1;
@@ -487,9 +556,9 @@ export function deriveNativeCalls(
     if (call.program !== undefined && call.program.opaque !== true) {
       const text = call.arguments[call.program.argument];
       if (typeof text !== "string") continue;
-      let tokens: ProgramToken[];
+      let tokens: readonly ProgramToken[];
       try {
-        tokens = tokenizeProgram(call.program.kind, text);
+        tokens = cachedTokens(call.program.kind, text);
       } catch (error) {
         if (error instanceof ProgramTokenizationError) continue;
         throw error;
@@ -499,7 +568,7 @@ export function deriveNativeCalls(
         if (!token.bindable) continue;
         const value = token.value;
         if (typeof value !== "string" || value.length < MIN_CANDIDATE_STRING_LENGTH) continue;
-        const producers = producersOfValue(value, index, calls, resultValues, seenBeforeResult);
+        const producers = producersOfValue(value, index, calls, shown);
         if (producers.length === 0) continue;
         const first = producers[0]!;
         resultUsed[family] += 1;
@@ -527,13 +596,12 @@ export function deriveNativeCalls(
             .filter((entry) => entry.stepId === call.stepId && entry.path[0] === "tokens")
             .map((entry) => entry.path[1]),
         );
-        const bodyStart = heredocStart(call.program.kind, text);
+        // A heredoc body's words are unbindable: the tokenizer lexes the body as another text.
         for (const [tokenIndex, token] of tokens.entries()) {
           if (resultFull()) break;
-          if (token.start >= bodyStart) break;
           if (!token.bindable || typeof token.value !== "string" || bound.has(tokenIndex)) continue;
           if (requestWords.has(token.value)) continue;
-          const found = printedBy(token.value, index, calls);
+          const found = printedBy(token.value, index, calls, mentionStrings);
           if (found === undefined) continue;
           resultUsed[family] += 1;
           extracts.push({
@@ -550,19 +618,18 @@ export function deriveNativeCalls(
       // A value the program ran with can be offered as an optional input that defaults to exactly
       // what the recording ran. One recording cannot show that the value varies, but omitting the
       // input reproduces the recording, so the offer is safe to confirm by replaying it unchanged.
-      const bodyStart = heredocStart(call.program.kind, text);
       const offered = new Set<string>();
       // A shell word at command position — the first word of a simple command after any leading
       // assignments — names the program to run, never a value it runs with. A bare word past the
       // subcommand's position is a value when other calls ran with it too.
       const positions = isShellGrammar(call.program.kind)
-        ? shellArgumentPositions(tokens)
+        ? shellArgumentPositions(text, tokens)
         : undefined;
       // A script's record-field keys (`x['merchant']`) are its schema, never its data.
       const script = call.program.kind === "python" || call.program.kind === "javascript";
       const fieldKeys = script ? scriptRecordFieldKeys(text, tokens) : new Set<number>();
       for (const [tokenIndex, token] of tokens.entries()) {
-        if (inputFull() || token.start >= bodyStart) break;
+        if (inputFull()) break;
         const previous = tokenIndex > 0 ? tokens[tokenIndex - 1] : undefined;
         const position = positions?.[tokenIndex];
         if (positions !== undefined && (position === undefined || position === 0)) continue;
@@ -653,7 +720,7 @@ export function deriveNativeCalls(
       // when the request named it or other calls ran with it too: the script is written around the
       // task's inputs, and its address stays inside that program so top-level indexes never move.
       if (call.program.kind === "shell") {
-        for (const program of embeddedPrograms(text)) {
+        for (const program of cachedEmbeddedPrograms(text)) {
           const embeddedFields = scriptRecordFieldKeys(text, program.tokens);
           for (const [embeddedIndex, token] of program.tokens.entries()) {
             if (inputFull()) break;
@@ -703,7 +770,6 @@ export function deriveNativeCalls(
         path: WorkflowValuePath;
       }> = [];
       for (const [tokenIndex, token] of tokens.entries()) {
-        if (token.start >= bodyStart) break;
         const position = positions?.[tokenIndex];
         if (positions !== undefined && (position === undefined || position === 0)) continue;
         const patchValue =
@@ -723,7 +789,7 @@ export function deriveNativeCalls(
         });
       }
       if (call.program.kind === "shell") {
-        for (const program of embeddedPrograms(text)) {
+        for (const program of cachedEmbeddedPrograms(text)) {
           const embeddedFields = scriptRecordFieldKeys(text, program.tokens);
           for (const [embeddedIndex, token] of program.tokens.entries()) {
             if (embeddedFields.has(embeddedIndex)) continue;
@@ -889,11 +955,11 @@ function looksMinted(value: string): boolean {
   return value.length >= 4 && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
 }
 
-/** Whether some string leaf of a value contains `needle`. */
-function mentions(value: WorkflowJsonValue | undefined, needle: string): boolean {
+/** The string leaves of a value, in the order and within the bounds `scalarLeaves` reads them. */
+function stringLeaves(value: WorkflowJsonValue | undefined): string[] {
   const leaves: Array<{ path: WorkflowValuePath; value: CandidateScalar }> = [];
   scalarLeaves(value, [], leaves);
-  return leaves.some((leaf) => typeof leaf.value === "string" && leaf.value.includes(needle));
+  return leaves.flatMap((leaf) => (typeof leaf.value === "string" ? [leaf.value] : []));
 }
 
 /**
@@ -908,6 +974,7 @@ function printedBy(
   value: string,
   before: number,
   calls: readonly DerivationCall[],
+  mentionStrings: Array<string[] | undefined>,
 ): { producer: number; locator: ExtractLocator } | undefined {
   // A computed number is found as a whole run of digits, `.` and `-`, so a replay reads the new
   // number whatever its sign or precision; numbers coincide easily, so its locator must name it.
@@ -921,7 +988,8 @@ function printedBy(
   };
   let firstMention = before;
   for (let index = 0; index < before; index += 1) {
-    if (mentions(calls[index]!.arguments, value)) {
+    const strings = (mentionStrings[index] ??= stringLeaves(calls[index]!.arguments));
+    if (strings.some((leaf) => leaf.includes(value))) {
       firstMention = index;
       break;
     }
@@ -969,20 +1037,22 @@ function producersOfValue(
   value: CandidateScalar,
   before: number,
   calls: readonly DerivationCall[],
-  resultValues: ReadonlyArray<ReadonlySet<string>>,
-  seenBeforeResult: ReadonlyArray<ReadonlySet<string>>,
+  shown: {
+    firstShown: ReadonlyMap<string, number>;
+    resultValues: ReadonlyArray<ReadonlySet<string>>;
+    resultLeavesOf: ReadonlyArray<
+      ReadonlyArray<{ path: WorkflowValuePath; value: CandidateScalar }>
+    >;
+  },
 ): Array<{ stepId: string; path: WorkflowValuePath }> {
   const producers: Array<{ stepId: string; path: WorkflowValuePath }> = [];
   const key = scalarKey(value);
+  // Shown while some call's arguments were shown, or in an earlier result: never minted after it.
+  const first = shown.firstShown.get(key);
   for (let producerIndex = 0; producerIndex < before; producerIndex += 1) {
-    if (!resultValues[producerIndex]!.has(key)) continue;
-    if (seenBeforeResult[producerIndex]!.has(key)) continue;
-    const produceLeaves: Array<{
-      path: WorkflowValuePath;
-      value: CandidateScalar;
-    }> = [];
-    scalarLeaves(calls[producerIndex]!.result, [], produceLeaves);
-    for (const produced of produceLeaves) {
+    if (!shown.resultValues[producerIndex]!.has(key)) continue;
+    if (first !== undefined && first <= 2 * producerIndex) continue;
+    for (const produced of shown.resultLeavesOf[producerIndex]!) {
       if (produced.value !== value || typeof produced.value !== typeof value) continue;
       producers.push({ stepId: calls[producerIndex]!.stepId, path: produced.path });
     }

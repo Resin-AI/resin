@@ -824,6 +824,22 @@ describe("Repositories End-to-End Round-Trip & Operations", () => {
     expect(pendingLimit1).toHaveLength(1);
     expect(pendingLimit1[0].invocationId).toBe("inv_001_earlier");
 
+    // Excluded workspaces are skipped whole and stay pending; the limit applies after exclusion.
+    await store.audit.recordInvocation({
+      ...inv2,
+      invocationId: "inv_003_other_workspace",
+      workspaceId: "ws_other",
+      startedAt: "2026-08-17T14:06:00.000Z",
+    });
+    const excluding = store.audit.listPendingInvocationUploads(1, ["ws_telemetry_test"]);
+    expect(excluding.map((r) => r.invocationId)).toEqual(["inv_003_other_workspace"]);
+    expect(store.audit.listPendingInvocationUploads(10, ["ws_telemetry_test", "ws_other"])).toEqual(
+      [],
+    );
+    store.conn.run("DELETE FROM invocation_records WHERE invocation_id = ?;", [
+      "inv_003_other_workspace",
+    ]);
+
     // Mark first as uploaded
     const uploadedAt = "2026-08-17T14:10:00.000Z";
     store.audit.markInvocationsUploaded(["inv_001_earlier"], uploadedAt);

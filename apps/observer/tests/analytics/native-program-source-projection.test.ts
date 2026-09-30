@@ -362,6 +362,101 @@ text("sa\x66e-credential", token);`;
     expect(JSON.stringify(recipe?.workflow)).not.toContain(secret);
   });
 
+  it("projects paths inside the working directory as a command run there spells them", async () => {
+    // fin-saccr-rwa: one run read `inputs/*.csv` in /app, the other `/app/inputs/*.csv` in /app.
+    const projectedCommand = async (sessionId: string, command: string) => {
+      const store = new InMemoryPrivateValueStore();
+      const pipeline = new NormalizationPipeline({
+        privateValueStore: store,
+        redactionConfig: { sensitiveEnvVars: [] },
+      });
+      pipeline.registerDecoder(new CodexRecordDecoder());
+      const recorder = new WorkflowCallRecorder({ privateValues: store });
+      const timestamp = "2026-09-25T18:02:37.000Z";
+      const native = [
+        { type: "session_meta", payload: { session_id: sessionId, id: sessionId, cwd: "/app" } },
+        { type: "turn_context", payload: { turn_id: "turn", cwd: "/app", model: "gpt-6-sol" } },
+        {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              id: `exec-${sessionId}`,
+              command: ["/bin/bash", "-lc", command],
+              cwd: "file:///app",
+              status: "completed",
+              stdout: "ok\n",
+              stderr: "",
+              exit_code: 0,
+              duration: { secs: 0, nanos: 5_000_000 },
+            },
+            started_at_ms: 1_000,
+            completed_at_ms: 1_005,
+          },
+        },
+      ];
+      let carrier: WorkflowCallCarrier | undefined;
+      for (const [index, entry] of native.entries()) {
+        const ordinal = index + 1;
+        for (const result of await pipeline.processRecord(
+          {
+            recordId: `rec_${sessionId}_${ordinal}`,
+            sessionId,
+            harnessId: "codex-cli",
+            sequenceNumber: ordinal,
+            recordType: "transcript_line",
+            timestamp,
+            rawPayload: JSON.stringify({ timestamp, ordinal, ...entry }),
+            cursor: { offset: ordinal, line: ordinal, sequence: ordinal, timestamp },
+            metadata: {},
+          },
+          { sessionId, harnessId: "codex-cli", workspaceId: WORKSPACE },
+        )) {
+          if (result.status !== "success" || result.isDuplicate) continue;
+          const observed = recorder.observe(result.event, { workspaceId: WORKSPACE });
+          if (observed.type === "command_exec") {
+            carrier = readWorkflowCallCarrier(
+              observed.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+            );
+          }
+        }
+      }
+      const origin = carrier?.origins.cmd;
+      if (origin?.type !== "program" || origin.source.type !== "literal") {
+        throw new Error("expected a projected shell program origin");
+      }
+      if (origin.sourceReference === undefined) throw new Error("expected a source reference");
+      return {
+        source: origin.source.value,
+        protectedTokens: origin.protectedTokens,
+        original: resolvePrivateReference(store, origin.sourceReference),
+        profile: carrier?.origins.resinCodexShellProfile,
+        workdir: carrier?.origins.workdir?.type,
+      };
+    };
+    // A bindable path keeps its spelling: protecting it would stop it from ever becoming an input.
+    const loop = (glob: string) =>
+      `for f in ${glob}; do echo "### $f"; cat "$f" /app/extra.csv /appendix/notes.csv; done`;
+
+    const relative = await projectedCommand("saccr-relative", loop("inputs/*.csv"));
+    const absolute = await projectedCommand("saccr-absolute", loop("/app/inputs/*.csv"));
+
+    expect(absolute.source).toBe(relative.source);
+    expect(relative.source).toBe(loop("inputs/*.csv"));
+    expect(relative.protectedTokens).toEqual([]);
+    // The rewritten token differs from what ran, so it is protected; what replays is the original.
+    const globIndex = tokenizeProgram("shell", loop("/app/inputs/*.csv")).findIndex(
+      (token) => token.raw === "/app/inputs/*.csv",
+    );
+    expect(absolute.protectedTokens).toEqual([globIndex]);
+    expect(absolute.original).toBe(loop("/app/inputs/*.csv"));
+    // The recorder's own shell profile is public, so the cloud knows the step ran in bash; the
+    // working directory stays private.
+    expect(absolute.profile).toEqual({ type: "literal", value: "bash-login-native-v1" });
+    expect(absolute.workdir).toBe("private");
+  });
+
   it("keeps a bash tool's command private unless the OMP decoder proved its interface", async () => {
     const sessionId = "unproven-bash-stays-private";
     const command = "tar -czf out/alpha-release.tgz projects/alpha-release";

@@ -162,6 +162,14 @@ function classifyTranscriptSessionKindWithKeys(
     }
   }
 
+  // Any enclosing session directory (`<timestamp>_<uuid>`) makes this a subagent transcript,
+  // including children of subagents that sit one directory deeper.
+  for (let ancestor = dir; path.dirname(ancestor) !== ancestor; ancestor = path.dirname(ancestor)) {
+    if (isSessionDirectoryName(path.basename(ancestor))) {
+      return "agent";
+    }
+  }
+
   // Check structure relative to standard sessions directories:
   // e.g. <ompHome>/agent/sessions/<workspace-slug>/<session-dir>/<agent-name>.jsonl -> agent
   // e.g. <ompHome>/agent/sessions/<workspace-slug>/<session-file>.jsonl -> user
@@ -200,6 +208,69 @@ export function resolveRecordedPath(value: string): string {
   // On Windows a POSIX cwd was recorded by OMP under Linux/WSL; keep it off the current drive.
   if (process.platform === "win32" && value.startsWith("/")) return path.posix.resolve(value);
   return path.resolve(value);
+}
+
+const SESSION_DIR_UUID_REGEX =
+  /_([0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const MAX_LINK_TEXT_LENGTH = 128;
+
+function sessionIdFromSessionDirName(name: string): string | undefined {
+  return isSessionDirectoryName(name) ? SESSION_DIR_UUID_REGEX.exec(name)?.[1] : undefined;
+}
+
+/**
+ * Links a subagent transcript to the session that spawned it. OMP nests subagent transcripts under
+ * the parent's session directory: `<session>/<Agent>.jsonl` for a child of the top-level session and
+ * `<session>/<Parent>/<Parent>.<Child>.jsonl` for a child of a subagent. Newer transcripts also name
+ * the parent file in the session header (`parentSession`); older ones are linked by layout.
+ * Returns `parentSessionId` (the parent's sessionId as this adapter reports it) and `agentName`.
+ */
+export function ompSubagentLinkMetadata(
+  transcript: Pick<ParsedTranscript, "filePath" | "headerParentSession">,
+  sessionIdByPath: ReadonlyMap<string, string>,
+): { parentSessionId?: string; agentName?: string } {
+  const filePath = path.resolve(transcript.filePath);
+  const dir = path.dirname(filePath);
+  const dirName = path.basename(dir);
+  const stem = path.basename(filePath, ".jsonl");
+
+  const parentFromFile = (parentFile: string): string | undefined => {
+    const resolved = path.resolve(parentFile);
+    const known = sessionIdByPath.get(resolved);
+    if (known) return known;
+    return sessionIdFromSessionDirName(path.basename(resolved, ".jsonl"));
+  };
+
+  let parentSessionId: string | undefined;
+  if (transcript.headerParentSession) {
+    parentSessionId = parentFromFile(transcript.headerParentSession);
+  }
+  if (!parentSessionId) {
+    // `<session dir>/<Agent>.jsonl` -> parent is `<session dir>.jsonl`; `<Parent>/<Parent>.<Child>.jsonl`
+    // -> parent is `<Parent>.jsonl` beside its directory.
+    parentSessionId = parentFromFile(path.join(path.dirname(dir), `${dirName}.jsonl`));
+  }
+  if (!parentSessionId) {
+    // Deepest enclosing session directory is the nearest identifiable ancestor.
+    for (
+      let ancestor = dir;
+      path.dirname(ancestor) !== ancestor;
+      ancestor = path.dirname(ancestor)
+    ) {
+      parentSessionId = sessionIdFromSessionDirName(path.basename(ancestor));
+      if (parentSessionId) break;
+    }
+  }
+
+  const nestedPrefix = `${dirName}.`;
+  const agentName = (stem.startsWith(nestedPrefix) ? stem.slice(nestedPrefix.length) : stem).slice(
+    0,
+    MAX_LINK_TEXT_LENGTH,
+  );
+  return {
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(agentName ? { agentName } : {}),
+  };
 }
 
 /** Exact OMP versions qualified with recorded fixtures. */
@@ -661,6 +732,8 @@ export interface ParsedTranscript {
   hasExplicitLifecycle: boolean;
   inspectedBytes: number;
   sessionKind?: "user" | "agent";
+  /** Path of the transcript this one was spawned or forked from (session header `parentSession`). */
+  headerParentSession?: string | null;
 }
 
 /**
@@ -740,6 +813,7 @@ export async function inspectTranscriptFile(
     let updatedAt = new Date(0).toISOString();
     let headerSessionId: string | null = null;
     let headerCwd: string | null = null;
+    let headerParentSession: string | null = null;
     let explicitStatus: SessionStatus | null = null;
     let totalLinesCount = 0;
     let validJsonObjectCount = 0;
@@ -854,6 +928,9 @@ export async function inspectTranscriptFile(
               if (parsed.timestamp) {
                 createdAt = String(parsed.timestamp);
               }
+              if (typeof parsed.parentSession === "string" && parsed.parentSession) {
+                headerParentSession = parsed.parentSession;
+              }
             }
             foldActivity(parsed);
           }
@@ -884,6 +961,9 @@ export async function inspectTranscriptFile(
               }
               if (parsed.timestamp) {
                 createdAt = String(parsed.timestamp);
+              }
+              if (typeof parsed.parentSession === "string" && parsed.parentSession) {
+                headerParentSession = parsed.parentSession;
               }
             }
             foldActivity(parsed);
@@ -966,6 +1046,7 @@ export async function inspectTranscriptFile(
       hasExplicitLifecycle,
       inspectedBytes: totalBytesInspected,
       sessionKind,
+      headerParentSession,
     };
   } catch {
     return null;
@@ -1437,6 +1518,11 @@ export async function buildOmpDiscoveryCatalog(
   const globalSeenSessionIds = new Set<string>();
   const allDeduplicatedSessions: HarnessSession[] = [];
   const transcriptMatchIndex = createTranscriptMatchIndex(inspectedTranscripts);
+  const sessionIdByPath = new Map<string, string>();
+  for (const t of inspectedTranscripts) {
+    sessionIdByPath.set(path.resolve(t.filePath), t.sessionId);
+    sessionIdByPath.set(t.canonicalPath, t.sessionId);
+  }
 
   for (const workspace of allWorkspaces) {
     const realWsRoot = await resolveWorkspaceRoot(
@@ -1480,6 +1566,7 @@ export async function buildOmpDiscoveryCatalog(
           inspectedBytes: t.inspectedBytes,
           source: "omp-discovery",
           sessionKind,
+          ...(sessionKind === "agent" ? ompSubagentLinkMetadata(t, sessionIdByPath) : {}),
         },
       };
 
@@ -1561,6 +1648,7 @@ export async function buildOmpDiscoveryCatalog(
             inspectedBytes: t.inspectedBytes,
             source: "omp-discovery",
             sessionKind,
+            ...(sessionKind === "agent" ? ompSubagentLinkMetadata(t, sessionIdByPath) : {}),
           },
         };
         const existing = sessionMap.get(effectiveSessionId);

@@ -224,7 +224,7 @@ describe("literals inside an embedded program", () => {
     expect(embeddedValues(DABSTEP_COMMAND, carrier.candidates ?? [])).toEqual([]);
   });
 
-  it("offers nothing inside a heredoc that carries a secret", async () => {
+  it("offers the other literals of a heredoc that carries a secret, never the secret", async () => {
     const secret = "sk-live-embedded9QX";
     const command = DABSTEP_COMMAND.replace("import csv", `import csv\nKEY='${secret}'`);
     const { carrier, observed } = await recordCodexCommand(
@@ -233,7 +233,11 @@ describe("literals inside an embedded program", () => {
       command,
       [secret],
     );
-    expect(embeddedValues(command, carrier.candidates ?? [])).toEqual([]);
+    expect(embeddedValues(command, carrier.candidates ?? [])).toEqual([
+      "Belles_cookbook_store",
+      "12",
+    ]);
+    expect(JSON.stringify(carrier)).not.toContain(secret);
     expect(
       JSON.stringify(observed.map((entry) => projectEventToMetadataOnly(entry))),
     ).not.toContain(secret);

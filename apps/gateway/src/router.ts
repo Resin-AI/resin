@@ -13,12 +13,11 @@ import {
 } from "@resin/contracts";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import {
+  FOR_EACH_ARGUMENT,
   invalidForEachResult,
   offersForEach,
   planForEach,
   runForEach,
-  withForEachInput,
-  withForEachSentence,
 } from "./for-each.js";
 import {
   SessionDiscoveryTracker as DefaultSessionDiscoveryTracker,
@@ -156,6 +155,43 @@ function toMcpInputSchema(rawSchema?: JsonRpcParams | ToolParameterSchema): McpT
   return result;
 }
 
+/** Longest purpose a listed learned tool carries. */
+const LISTED_PURPOSE_CHARS = 160;
+
+/**
+ * A listed learned tool's description: the first sentence of its catalog description and the names
+ * of its inputs. The full description, recorded steps and input docs come from get_tool_schema.
+ */
+export function listedPurpose(description: string, inputs: readonly string[]): string {
+  const line = description.trim().split("\n")[0]!.trim();
+  const sentence = /^.*?[.!?](?=\s+[A-Z`]|$)/.exec(line)?.[0] ?? line;
+  const purpose =
+    sentence.length > LISTED_PURPOSE_CHARS
+      ? `${sentence.slice(0, LISTED_PURPOSE_CHARS - 1).trimEnd()}…`
+      : sentence;
+  if (inputs.length === 0) return purpose;
+  return `${purpose}${/[.!?…]$/.test(purpose) ? "" : "."} Inputs: ${inputs.join(", ")}.`;
+}
+
+/**
+ * A listed learned tool's input schema: each input's name, type and constraints, not its docs, and
+ * a bare `for_each` object when the tool takes one. A `for_each` call is validated where it runs,
+ * and get_tool_schema documents its shape.
+ */
+export function listedInputSchema(schema: McpToolInput): McpToolInput {
+  const properties: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(schema.properties ?? {})) {
+    if (!isParamsObject(property)) {
+      properties[name] = property;
+      continue;
+    }
+    const { description: _description, title: _title, examples: _examples, ...kept } = property;
+    properties[name] = kept;
+  }
+  if (offersForEach(schema)) properties[FOR_EACH_ARGUMENT] = { type: "object" };
+  return { ...schema, properties };
+}
+
 const READ_ONLY_DISCOVERY_ANNOTATIONS: Readonly<McpToolAnnotations> = Object.freeze({
   readOnlyHint: true,
   destructiveHint: false,
@@ -239,29 +275,19 @@ export class RegistryGatewayRouter implements GatewayRouter {
   async listCatalogNoticeTools(context: WorkspaceContext): Promise<CatalogNoticeTool[]> {
     const snapshot = await this.registry.resolveCatalog(context.workspaceId, context.sessionId);
     const mcpTools: CatalogNoticeTool[] = [];
-    // A tool learned for this workspace is listed with what it runs here, and marked so a
-    // facade that hides the rest of the catalog still offers it by name.
-    const learnedDetail = (
-      tool: CatalogEntry | RegistryTool,
-    ): { local?: string; _meta?: Record<string, unknown> } => {
-      if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) return {};
-      const local = this.registry.describeLocally(tool, context);
-      return {
-        ...(local === undefined ? {} : { local }),
-        _meta: { [RESIN_LEARNED_TOOL_META]: true },
-      };
-    };
-    // A learned tool with a text input also takes `for_each`, and its locally generated
-    // description says so; nothing else about a listed tool changes.
+    // A tool learned for this workspace is listed by its one-line purpose and input names, and
+    // marked so a facade that hides the rest of the catalog still offers it by name. Every listed
+    // tool is re-sent with each request, so its recorded steps, input docs and `for_each` usage are
+    // left to get_tool_schema.
     const listed = (tool: CatalogEntry | RegistryTool, catalog: string) => {
-      const { local, _meta } = learnedDetail(tool);
       const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
-      const forEach = _meta !== undefined && offersForEach(schema);
-      const detail = local !== undefined && forEach ? withForEachSentence(local) : local;
+      if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
+        return { description: catalog, inputSchema: schema, _meta: undefined };
+      }
       return {
-        description: detail === undefined ? catalog : catalog ? `${catalog}\n\n${detail}` : detail,
-        inputSchema: forEach ? withForEachInput(schema) : schema,
-        _meta,
+        description: listedPurpose(catalog, Object.keys(schema.properties ?? {})),
+        inputSchema: listedInputSchema(schema),
+        _meta: { [RESIN_LEARNED_TOOL_META]: true },
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;

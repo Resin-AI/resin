@@ -1,7 +1,6 @@
 import {
   type EpisodeSignature,
   type OpportunityHashOutcome,
-  type ProvenPatternDto,
   type WorkflowClusterMetrics,
   canonicalJson,
 } from "@resin/contracts";
@@ -60,20 +59,8 @@ export interface OpportunityHashCacheRecord {
 }
 
 /**
- * Queued local-to-cloud pattern awaiting upload.
- */
-export interface PatternOutboxRecord {
-  patternId: string;
-  idempotencyKey: string;
-  workspaceId?: string;
-  payload: ProvenPatternDto;
-  createdAt: string;
-  uploadedAt?: string;
-}
-
-/**
  * Repository managing the local opportunity engine's deterministic detection state:
- * episode signatures, workflow clusters, hash suppression cache, and the pattern outbox.
+ * episode signatures, workflow clusters, and the hash suppression cache.
  */
 export class OpportunityLocalRepository {
   constructor(private readonly conn: LocalDatabaseConnection) {}
@@ -384,98 +371,6 @@ export class OpportunityLocalRepository {
       sourceRevision: row.source_revision ?? undefined,
       syncedAt: row.synced_at,
       expiresAt: row.expires_at,
-    };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Pattern Outbox
-  // ---------------------------------------------------------------------------
-
-  async enqueuePattern(pattern: {
-    patternId: string;
-    idempotencyKey: string;
-    workspaceId?: string;
-    payload: ProvenPatternDto;
-    createdAt?: string;
-  }): Promise<string> {
-    const now = new Date().toISOString();
-    const result = this.conn.run(
-      `INSERT INTO pattern_outbox (
-        pattern_id, idempotency_key, workspace_id, payload_json, created_at, uploaded_at
-      ) VALUES (?, ?, ?, ?, ?, NULL)
-      ON CONFLICT(idempotency_key) DO NOTHING;`,
-      [
-        pattern.patternId,
-        pattern.idempotencyKey,
-        pattern.workspaceId ?? null,
-        canonicalJson(pattern.payload),
-        pattern.createdAt ?? now,
-      ],
-    );
-
-    if (result.changes > 0) {
-      return pattern.patternId;
-    }
-
-    // Duplicate dispatch for the same idempotency key: return the already-queued pattern id.
-    const existing = await this.getPatternByIdempotencyKey(pattern.idempotencyKey);
-    return existing?.patternId ?? pattern.patternId;
-  }
-
-  async listPendingPatterns(limit = 50): Promise<PatternOutboxRecord[]> {
-    const rows = this.conn.all<{
-      pattern_id: string;
-      idempotency_key: string;
-      workspace_id: string | null;
-      payload_json: string;
-      created_at: string;
-      uploaded_at: string | null;
-    }>(
-      `SELECT * FROM pattern_outbox
-       WHERE uploaded_at IS NULL
-       ORDER BY created_at ASC, pattern_id ASC
-       LIMIT ?;`,
-      [limit],
-    );
-
-    return rows.map((row) => this.mapPatternRow(row));
-  }
-
-  async markPatternUploaded(patternId: string, uploadedAt?: string): Promise<void> {
-    this.conn.run(
-      "UPDATE pattern_outbox SET uploaded_at = ? WHERE pattern_id = ? AND uploaded_at IS NULL;",
-      [uploadedAt ?? new Date().toISOString(), patternId],
-    );
-  }
-
-  async getPatternByIdempotencyKey(idempotencyKey: string): Promise<PatternOutboxRecord | null> {
-    const row = this.conn.get<{
-      pattern_id: string;
-      idempotency_key: string;
-      workspace_id: string | null;
-      payload_json: string;
-      created_at: string;
-      uploaded_at: string | null;
-    }>("SELECT * FROM pattern_outbox WHERE idempotency_key = ?;", [idempotencyKey]);
-
-    return row ? this.mapPatternRow(row) : null;
-  }
-
-  private mapPatternRow(row: {
-    pattern_id: string;
-    idempotency_key: string;
-    workspace_id: string | null;
-    payload_json: string;
-    created_at: string;
-    uploaded_at: string | null;
-  }): PatternOutboxRecord {
-    return {
-      patternId: row.pattern_id,
-      idempotencyKey: row.idempotency_key,
-      workspaceId: row.workspace_id ?? undefined,
-      payload: JSON.parse(row.payload_json) as ProvenPatternDto,
-      createdAt: row.created_at,
-      uploadedAt: row.uploaded_at ?? undefined,
     };
   }
 }

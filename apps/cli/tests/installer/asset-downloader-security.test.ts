@@ -322,6 +322,97 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     ).rejects.toThrow(/version\.json version mismatch|Integrity violation/i);
   });
 
+  describe("staged-tree reuse provenance identity", () => {
+    const tarball = createTestTarGz([
+      {
+        name: "bin/resin",
+        content: "#!/usr/bin/env node\nconsole.log('cli v1.0.0');\n",
+        mode: 0o755,
+      },
+      { name: "dist/index.js", content: "export const version = '1.0.0';\n", mode: 0o644 },
+    ]);
+    const releaseProvenance = (overrides: Partial<ReleaseProvenance> = {}): ReleaseProvenance => ({
+      version: "1.0.0",
+      channelUrl: "https://releases.example.test/channels/stable.json",
+      manifestUrl: "https://releases.example.test/1.0.0/manifest.json",
+      channelSha256: "a".repeat(64),
+      manifestSha256: "b".repeat(64),
+      releaseAssetUrl: "https://releases.example.test/1.0.0/resin.tar.gz",
+      releaseAssetSha256: sha256Hex(tarball),
+      releaseAssetSizeBytes: tarball.length,
+      repository: "example/resin",
+      commitSha: "c".repeat(40),
+      signingKeyIds: ["key-a", "key-b"],
+      deno: {
+        version: "2.9.5",
+        url: "https://releases.example.test/deno.zip",
+        sha256: "d".repeat(64),
+      },
+      ...overrides,
+    });
+    const stage = (provenance: ReleaseProvenance) =>
+      installReleaseVersion({
+        version: "1.0.0",
+        tarballPathOrBuffer: tarball,
+        resinHome,
+        provenance,
+      });
+    const stagingLeftovers = () =>
+      fs
+        .readdirSync(path.join(resinHome, "versions"))
+        .filter((name) => name.startsWith(".staging-"));
+
+    it("reuses a staged tree after the mutable channel index changes, on every deferral re-entry", async () => {
+      const staged = await stage(releaseProvenance());
+      const versionJsonPath = path.join(staged.versionDir, "version.json");
+      const stagedVersionJson = fs.readFileSync(versionJsonPath, "utf8");
+
+      // The channel index is republished (about hourly): channelSha256 and channelUrl change, the
+      // release itself does not. Repeated deferral retries must keep reusing the staged tree.
+      for (const channelSha256 of ["e".repeat(64), "f".repeat(64), "1".repeat(64)]) {
+        const reused = await stage(
+          releaseProvenance({
+            channelSha256,
+            channelUrl: "https://mirror.example.test/channels/stable.json",
+          }),
+        );
+        expect(reused.versionDir).toBe(staged.versionDir);
+        expect(stagingLeftovers()).toEqual([]);
+      }
+      expect(fs.readFileSync(versionJsonPath, "utf8")).toBe(stagedVersionJson);
+    });
+
+    it("still fails closed when a release-identity field of the staged provenance differs", async () => {
+      await stage(releaseProvenance());
+
+      const tampered: Array<[string, Partial<ReleaseProvenance>]> = [
+        ["release asset sha256", { releaseAssetSha256: "9".repeat(64) }],
+        ["manifest digest", { manifestSha256: "8".repeat(64) }],
+        ["signing key id", { signingKeyIds: ["key-a", "attacker-key"] }],
+        ["signing key set", { signingKeyIds: ["key-a"] }],
+        ["commit sha", { commitSha: "7".repeat(40) }],
+        ["release asset size", { releaseAssetSizeBytes: tarball.length + 1 }],
+        ["deno runtime sha256", { deno: { version: "2.9.5", url: "u", sha256: "6".repeat(64) } }],
+      ];
+      for (const [label, override] of tampered) {
+        await expect(stage(releaseProvenance(override)), label).rejects.toThrow(
+          /provenance mismatch/i,
+        );
+      }
+
+      // Tampering with the recorded provenance on disk is also rejected.
+      const versionJsonPath = path.join(resinHome, "versions", "v1.0.0", "version.json");
+      const recorded = JSON.parse(fs.readFileSync(versionJsonPath, "utf8"));
+      recorded.provenance.signingKeyIds = ["attacker-key"];
+      fs.writeFileSync(versionJsonPath, JSON.stringify(recorded), "utf8");
+      await expect(stage(releaseProvenance())).rejects.toThrow(/provenance mismatch/i);
+
+      delete recorded.provenance;
+      fs.writeFileSync(versionJsonPath, JSON.stringify(recorded), "utf8");
+      await expect(stage(releaseProvenance())).rejects.toThrow(/provenance mismatch/i);
+    });
+  });
+
   it("fails closed when extra unexpected files or directories exist in the installed tree", async () => {
     const v1Tar = createTestTarGz([
       {

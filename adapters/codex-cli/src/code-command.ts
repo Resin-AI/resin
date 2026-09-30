@@ -16,10 +16,14 @@ function parseCode(source: string) {
 export interface SingleCommandOutput {
   cmd: string;
   workdir?: string;
+  /** The cell prints the command's whole response (`text(r)`), not only its output. */
+  printsResponse?: true;
 }
 
 /**
- * Only the audited two-statement expression is eligible; this does not execute JavaScript. With
+ * Only the audited two-statement expression is eligible; this does not execute JavaScript. The cell
+ * prints either the command's output or its whole response (`text(r)`, which also shows a still
+ * running command's session ID); both print only what the one command returned. With
  * `shellOptions`, a literal `shell` name and `login` flag are accepted too: they choose the shell
  * the command runs in (which only the native command item then proves), not what the cell prints.
  */
@@ -97,16 +101,114 @@ export function extractSingleCommandOutput(
     )
       return undefined;
     const printed = expression.arguments[0];
+    const printsResponse = printed.type === "Identifier" && printed.name === binding.id.name;
     if (
-      printed.type !== "MemberExpression" ||
-      printed.computed ||
-      printed.object.type !== "Identifier" ||
-      printed.object.name !== binding.id.name ||
-      printed.property.type !== "Identifier" ||
-      printed.property.name !== "output"
+      !printsResponse &&
+      (printed.type !== "MemberExpression" ||
+        printed.computed ||
+        printed.object.type !== "Identifier" ||
+        printed.object.name !== binding.id.name ||
+        printed.property.type !== "Identifier" ||
+        printed.property.name !== "output")
     )
       return undefined;
-    return workdir === undefined ? { cmd } : { cmd, workdir };
+    const result: SingleCommandOutput = workdir === undefined ? { cmd } : { cmd, workdir };
+    if (printsResponse) result.printsResponse = true;
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface StdinWrite {
+  sessionId: string;
+  chars: string;
+}
+
+/**
+ * A cell whose only effect is one `tools.write_stdin` call with a literal session and literal input,
+ * printed whole or as its output: `const r=await tools.write_stdin({…});text(r)` or
+ * `text(await tools.write_stdin({…}))`. Empty `chars` is a pure poll of a running command.
+ */
+export function extractStdinWrite(source: string): StdinWrite | undefined {
+  if (source.length > 32_768) return undefined;
+  try {
+    const body = parseCode(source).program.body;
+    const [declaration, print] = body.length === 2 ? body : [undefined, body[0]];
+    if (body.length > 2 || print?.type !== "ExpressionStatement") return undefined;
+    const printCall = print.expression;
+    if (
+      printCall.type !== "CallExpression" ||
+      printCall.arguments.length !== 1 ||
+      printCall.callee.type !== "Identifier" ||
+      printCall.callee.name !== "text"
+    )
+      return undefined;
+    const printed = printCall.arguments[0]!;
+    if (declaration !== undefined) {
+      if (
+        declaration.type !== "VariableDeclaration" ||
+        !["const", "let"].includes(declaration.kind) ||
+        declaration.declarations.length !== 1
+      )
+        return undefined;
+      const binding = declaration.declarations[0]!.id;
+      if (binding.type !== "Identifier") return undefined;
+      const printsResponse = printed.type === "Identifier" && printed.name === binding.name;
+      const printsOutput =
+        printed.type === "MemberExpression" &&
+        !printed.computed &&
+        printed.object.type === "Identifier" &&
+        printed.object.name === binding.name &&
+        printed.property.type === "Identifier" &&
+        printed.property.name === "output";
+      if (!printsResponse && !printsOutput) return undefined;
+    }
+    const awaited =
+      declaration?.type === "VariableDeclaration" ? declaration.declarations[0]!.init : printed;
+    if (awaited?.type !== "AwaitExpression") return undefined;
+    const call = awaited.argument;
+    if (
+      call.type !== "CallExpression" ||
+      call.arguments.length !== 1 ||
+      call.callee.type !== "MemberExpression" ||
+      call.callee.computed ||
+      call.callee.object.type !== "Identifier" ||
+      call.callee.object.name !== "tools" ||
+      call.callee.property.type !== "Identifier" ||
+      call.callee.property.name !== "write_stdin"
+    )
+      return undefined;
+    const options = call.arguments[0]!;
+    if (options.type !== "ObjectExpression") return undefined;
+    let sessionId: string | undefined;
+    let chars: string | undefined;
+    const seen = new Set<string>();
+    for (const property of options.properties) {
+      if (property.type !== "ObjectProperty" || property.computed || property.shorthand)
+        return undefined;
+      const key =
+        property.key.type === "Identifier"
+          ? property.key.name
+          : property.key.type === "StringLiteral"
+            ? property.key.value
+            : undefined;
+      if (!key || seen.has(key)) return undefined;
+      seen.add(key);
+      const value = property.value;
+      if (key === "session_id") {
+        if (value.type === "NumericLiteral" && Number.isSafeInteger(value.value))
+          sessionId = String(value.value);
+        else if (value.type === "StringLiteral") sessionId = value.value;
+        else return undefined;
+      } else if (key === "chars") {
+        if (value.type !== "StringLiteral") return undefined;
+        chars = value.value;
+      } else if (key === "yield_time_ms" || key === "max_output_tokens") {
+        if (value.type !== "NumericLiteral" || !Number.isSafeInteger(value.value)) return undefined;
+      } else return undefined;
+    }
+    return sessionId === undefined || chars === undefined ? undefined : { sessionId, chars };
   } catch {
     return undefined;
   }
@@ -274,6 +376,48 @@ function containsType(node: AstNode, type: string): boolean {
   return false;
 }
 
+/** Code-mode tools that never start a native command (seen in recorded Codex 0.156.1 cells). */
+const COMMAND_FREE_TOOLS: Record<string, true> = {
+  apply_patch: true,
+  view_image: true,
+  web__run: true,
+};
+
+/**
+ * Whether every `tools` reference in the cell is a property read of a tool that cannot start a
+ * native command. Code evaluated from strings (`eval('tools.exec_command(…)')`) references nothing,
+ * so this only proves a cell command-free together with `settlesBeforeCompletion`'s grammar.
+ */
+export function callsOnlyCommandFreeTools(source: string): boolean {
+  if (source.length > 32_768) return false;
+  let program: AstNode;
+  try {
+    program = parseCode(source).program as unknown as AstNode;
+  } catch {
+    return false;
+  }
+  const visit = (node: AstNode, parent: AstNode | undefined): boolean => {
+    if (node.type === "Identifier" && node.name === "tools") {
+      const member = parent !== undefined ? memberName(parent) : undefined;
+      if (member !== undefined && parent!.object === node)
+        return Object.hasOwn(COMMAND_FREE_TOOLS, member.property);
+      // A non-computed property key named `tools` is not a reference.
+      return (
+        (parent?.type === "MemberExpression" && parent.property === node && !parent.computed) ||
+        (parent?.type === "ObjectProperty" && parent.key === node && !parent.computed)
+      );
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "loc" || key.endsWith("Comments") || key === "extra") continue;
+      if (Array.isArray(value)) {
+        for (const child of value) if (isAstNode(child) && !visit(child, node)) return false;
+      } else if (isAstNode(value) && !visit(value, node)) return false;
+    }
+    return true;
+  };
+  return visit(program, undefined);
+}
+
 /**
  * A cell whose every command call has settled once the cell reports `Script completed`, so none of
  * its commands can start afterwards. Each `tools.<name>(…)` call must be awaited directly, be an
@@ -285,7 +429,7 @@ function containsType(node: AstNode, type: string): boolean {
  * that awaited settlement, and synchronous callbacks that never mention `tools` passed to a pure
  * array method (`ALL_TOOLS.filter(t => …)`): with no `tools` reference, even a deferred callback
  * cannot start a command. Nothing can defer, alias `tools`, or construct objects, and the only calls
- * are `text`, `String`, `tools.*`, settlements, `Promise.resolve`, callback-free
+ * are `text`, `image`, `String`, `tools.*`, settlements, `Promise.resolve`, callback-free
  * `JSON.stringify`/`JSON.parse`, and the pure methods below. Anything else is not proven.
  */
 export function settlesBeforeCompletion(source: string): boolean {
@@ -446,7 +590,8 @@ export function settlesBeforeCompletion(source: string): boolean {
       }
       case "CallExpression": {
         const callee = node.callee;
-        if (isNamed(callee, "text") || isNamed(callee, "String")) break;
+        // Code-mode output functions: `image(r.image_url)` shows a `view_image` result, like `text`.
+        if (isNamed(callee, "text") || isNamed(callee, "image") || isNamed(callee, "String")) break;
         const member = memberName(callee);
         if (member !== undefined && isNamed(member.object, "tools")) break;
         if (isSettlement(node)) break;

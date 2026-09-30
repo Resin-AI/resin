@@ -958,6 +958,76 @@ describe("projectEventToMetadataOnly", () => {
     expect(projectedInvalid.metadata).toEqual({ scenarioId: "scn-invalid" });
     expect(NormalizedSessionEventSchema.safeParse(projectedInvalid).success).toBe(true);
   });
+
+  it("keeps validated harness, version and subagent link fields and drops everything else", () => {
+    const event: NormalizedMessageEvent = {
+      ...createBaseHeaders(4),
+      type: "message",
+      role: "assistant",
+      content: "SECRET_CONTENT",
+      metadata: {
+        scenarioId: "scn-child",
+        sessionKind: "agent",
+        harnessId: "claude-code",
+        harnessVersion: "2.1.4-beta.1",
+        parentSessionId: "parent-session-1",
+        agentId: "agent-7f3a",
+        agentKind: "Explore",
+        agentName: 'Explore: /home/alice/secret-repo "payroll"\nrm -rf /',
+        projectId: "dropped",
+        title: "dropped",
+      },
+    };
+    const projected = projectEventToMetadataOnly(event);
+    expect(projected.metadata).toEqual({
+      scenarioId: "scn-child",
+      sessionKind: "agent",
+      harnessId: "claude-code",
+      harnessVersion: "2.1.4-beta.1",
+      parentSessionId: "parent-session-1",
+      agentId: "agent-7f3a",
+      agentKind: "explore",
+      agentName: "Explore: home alice secret-repo payroll rm -rf",
+    });
+    expect(NormalizedSessionEventSchema.safeParse(projected).success).toBe(true);
+    // Projection is idempotent: re-projecting an already projected event changes nothing.
+    expect(projectEventToMetadataOnly(projected).metadata).toEqual(projected.metadata);
+  });
+
+  it("rejects malformed or oversized harness and link fields and caps the agent name", () => {
+    const event: NormalizedMessageEvent = {
+      ...createBaseHeaders(5),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: {
+        scenarioId: "scn-junk",
+        harnessId: "Claude Code; DROP TABLE",
+        harnessVersion: "v".repeat(65),
+        parentSessionId: "has whitespace",
+        agentId: "x".repeat(257),
+        agentKind: "kind with spaces",
+        agentName: `${"a".repeat(100)}`,
+      },
+    };
+    const projected = projectEventToMetadataOnly(event);
+    expect(projected.metadata).toEqual({ scenarioId: "scn-junk", agentName: "a".repeat(64) });
+
+    const nonStrings: NormalizedMessageEvent = {
+      ...createBaseHeaders(6),
+      type: "message",
+      role: "user",
+      content: "SECRET_CONTENT",
+      metadata: {
+        scenarioId: "scn-types",
+        harnessId: 7,
+        harnessVersion: { v: "1" },
+        parentSessionId: ["p"],
+        agentName: "!!!",
+      },
+    };
+    expect(projectEventToMetadataOnly(nonStrings).metadata).toEqual({ scenarioId: "scn-types" });
+  });
 });
 
 describe("extractParameterShape", () => {

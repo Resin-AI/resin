@@ -12,6 +12,7 @@ import {
   CursorRecordDecoder,
   CursorSessionEventSource,
   cursorCatalogModel,
+  cursorInstallHarness,
   cursorProjectSlug,
   inspectCursorHookPayload,
   normalizeCursorVersion,
@@ -71,16 +72,151 @@ describe("discovery", () => {
     expect(Object.keys(byId).sort()).toEqual(["child-1", "parent-1"]);
     expect(byId["parent-1"]!.status).toBe("completed");
     expect(byId["child-1"]!.metadata).toMatchObject({
+      sessionKind: "agent",
       parentSessionId: "parent-1",
+      agentId: "child-1",
+      agentName: "explore",
+      agentKind: "explore",
       isSubagent: true,
       cwd: workspace,
     });
+    expect(byId["parent-1"]!.metadata.sessionKind).toBeUndefined();
 
     const uncaptured = await adapter.listUncapturedSessions();
     expect(uncaptured.map((u) => [u.conversationId, u.parentConversationId, u.reason])).toEqual([
       ["old-2", null, "no-hook-capture"],
       ["child-9", "parent-1", "no-hook-capture"],
     ]);
+  });
+});
+
+/** One completed Shell hook for `conversationId`. */
+function shellHook(conversationId: string, command: string, toolUseId: string) {
+  return {
+    conversation_id: conversationId,
+    generation_id: `${conversationId}-gen`,
+    model: "default",
+    workspace_roots: ["/work/nested"],
+    hook_event_name: "postToolUse",
+    tool_name: "Shell",
+    tool_input: { command },
+    tool_output: JSON.stringify({ output: "ok\n", exitCode: 0 }),
+    duration: 5,
+    tool_use_id: toolUseId,
+  };
+}
+
+describe("subagent sessions", () => {
+  it("links nested subagents to their immediate parent from parent-side and child-side hooks", async () => {
+    const home = tempHome();
+    const base = { workspace_roots: ["/work/nested"], generation_id: "g" };
+    await capture(home, [
+      shellHook("root", "echo root", "root-1"),
+      // The root's hooks name `mid` (subagentStart) and settle it with its conversation id.
+      {
+        ...base,
+        conversation_id: "root",
+        hook_event_name: "subagentStart",
+        subagent_id: "agent-mid",
+        subagent_type: "general",
+        task: "outer job",
+        parent_conversation_id: "root",
+        tool_call_id: "call-task-root",
+      },
+      {
+        ...base,
+        conversation_id: "root",
+        hook_event_name: "subagentStop",
+        subagent_id: "agent-mid",
+        subagent_type: "general",
+        status: "completed",
+        parent_conversation_id: "root",
+        child_conversation_id: "mid",
+      },
+      shellHook("mid", "echo mid", "mid-1"),
+      // `leaf` never appears in a parent's hooks: its own subagentStart names `mid` as parent.
+      shellHook("leaf", "echo leaf", "leaf-1"),
+      {
+        ...base,
+        conversation_id: "leaf",
+        hook_event_name: "subagentStart",
+        subagent_id: "agent-leaf",
+        subagent_type: "explore",
+        parent_conversation_id: "mid",
+      },
+    ]);
+
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const sessions = await adapter.listSessions(workspace!);
+    const byId = Object.fromEntries(sessions.map((s) => [s.sessionId, s.metadata]));
+    expect(byId.root?.sessionKind).toBeUndefined();
+    expect(byId.root?.parentSessionId).toBeNull();
+    expect(byId.mid).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: "root",
+      agentId: "agent-mid",
+      agentName: "general",
+      agentKind: "general",
+    });
+    expect(byId.leaf).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: "mid",
+      agentId: "agent-leaf",
+      agentName: "explore",
+    });
+
+    // Every conversation's tool calls belong to its own capture only.
+    const decoder = new CursorRecordDecoder();
+    const commandsOf = async (id: string) =>
+      (await readAll(adapter, id))
+        .flatMap((record) => decoder.decode(record) ?? [])
+        .flatMap((event) =>
+          event.type === "tool_call" ? [(event.parameters as { command: string }).command] : [],
+        );
+    expect(await commandsOf("root")).toEqual(["echo root"]);
+    expect(await commandsOf("mid")).toEqual(["echo mid"]);
+    expect(await commandsOf("leaf")).toEqual(["echo leaf"]);
+  });
+
+  it("captures recorded 2026.09.26 Task subagents as their own unlinked sessions, as declared", async () => {
+    const home = tempHome();
+    await materializeRecordedHomes(CURSOR_TARGET_VERSION, () => home);
+    const adapter = new CursorHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const byId = new Map((await adapter.listSessions(workspace!)).map((s) => [s.sessionId, s]));
+    const parent = "5ce9d009-8df8-477b-8adc-31b2fffed38b";
+    const children = [
+      "74b830d3-8b3d-4b60-9bfa-94c5a4f50ebb",
+      "26cbf135-82a3-46a5-9695-2efeb8f58a76",
+      "f1e5a284-ee2e-4756-aa74-056d9baa4723",
+    ];
+    // No subagent hook was recorded, so nothing links a child to its parent: each is a plain
+    // session (captured by default), not an agent session the observer would skip as unlinked.
+    for (const id of [parent, ...children]) {
+      expect(byId.get(id)?.metadata.sessionKind).toBeUndefined();
+      expect(byId.get(id)?.metadata.parentSessionId).toBeNull();
+    }
+    expect(cursorInstallHarness.knownLimits.join("\n")).toMatch(
+      /subagent sessions carry no parent link and are not marked as agents/,
+    );
+
+    const decoder = new CursorRecordDecoder();
+    const callsOf = async (id: string) => {
+      const session = byId.get(id)!;
+      const records = await (await adapter.openEventSource(session)).readNext(1000);
+      return records
+        .flatMap((record) => decoder.decode(record) ?? [])
+        .filter((e) => e.type === "tool_call");
+    };
+    const parentCalls = await callsOf(parent);
+    const parentIds = new Set(parentCalls.map((c) => c.callId));
+    expect(parentCalls.map((c) => (c.parameters as { command: string }).command)).toEqual([
+      "wc -l README.md",
+    ]);
+    for (const id of children) {
+      for (const call of await callsOf(id)) expect(parentIds.has(call.callId)).toBe(false);
+    }
   });
 });
 

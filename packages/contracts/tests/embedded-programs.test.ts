@@ -1,11 +1,17 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { analyzeProgramSourceProjection } from "../src/program-source-projection.js";
 import {
   type EmbeddedProgram,
   applyProgramTokenValues,
   bindProgramToken,
+  embeddedProgramProtectedTokens,
   embeddedPrograms,
   programTokenPath,
+  projectedEmbeddedTokenIsBindable,
   tokenizeProgram,
 } from "../src/program-tokens.js";
 import { validateWorkflowProgramProjection } from "../src/recorded-workflow.js";
@@ -24,20 +30,24 @@ const MATRIX = {
     "python3 - <<'A'\nprint('first')\nA\nnode <<'B'\nconsole.log('second')\nB\necho done",
 } as const;
 
-/** `tokenizeProgram("shell")` as it was before embedded programs existed: raw text and bindability. */
-const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = {
+/**
+ * `tokenizeProgram("shell")`: raw text as it was before embedded programs existed (token indexes
+ * never move), and bindability. A heredoc body and its terminator are another text, so none of
+ * their words is ever bindable as a word of the command.
+ */
+const TOP_LEVEL: Record<keyof typeof MATRIX, Array<[string, boolean]>> = {
   quotedPythonHeredoc: [
     ["python3", false],
     ["-", true],
     ["<<", false],
     ["'PY'", false],
-    ["import", true],
-    ["csv", true],
+    ["import", false],
+    ["csv", false],
     ["rows=[r", false],
-    ["for", true],
-    ["r", true],
-    ["in", true],
-    ["csv.DictReader", true],
+    ["for", false],
+    ["r", false],
+    ["in", false],
+    ["csv.DictReader", false],
     ["(", false],
     ["open", false],
     ["(", false],
@@ -61,7 +71,7 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["python3", false],
     ["<<", false],
     ["PY", false],
-    ["print", true],
+    ["print", false],
     ["(", false],
     ["'alpha-7f3c'", false],
     [")", false],
@@ -72,7 +82,7 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["-", true],
     ["<<", false],
     ["JS", false],
-    ["console.log", true],
+    ["console.log", false],
     ["(", false],
     ["'alpha-7f3c'", false],
     [")", false],
@@ -96,16 +106,16 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["-", true],
     ["<<", false],
     ["'RB'", false],
-    ["puts", true],
-    ["'alpha-7f3c'", true],
-    ["RB", true],
+    ["puts", false],
+    ["'alpha-7f3c'", false],
+    ["RB", false],
   ],
   expandingDollar: [
     ["python3", false],
     ["-", true],
     ["<<", false],
     ["PY", false],
-    ["print", true],
+    ["print", false],
     ["(", false],
     ["'$HOME'", false],
     [")", false],
@@ -116,7 +126,7 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["-", true],
     ["<<", false],
     ["'PY'", false],
-    ["print", true],
+    ["print", false],
     ["(", false],
     ["'alpha-7f3c'", false],
     [")", false],
@@ -126,7 +136,7 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["-", true],
     ["<<", false],
     ["'A'", false],
-    ["print", true],
+    ["print", false],
     ["(", false],
     ["'first'", false],
     [")", false],
@@ -134,7 +144,7 @@ const TOP_LEVEL_BEFORE: Record<keyof typeof MATRIX, Array<[string, boolean]>> = 
     ["node", true],
     ["<<", false],
     ["'B'", false],
-    ["console.log", true],
+    ["console.log", false],
     ["(", false],
     ["'second'", false],
     [")", false],
@@ -172,12 +182,12 @@ function bindEmbedded(source: string, raw: string, value: string): string {
 }
 
 describe("embedded programs", () => {
-  it("leaves the top-level shell tokens exactly as they were", () => {
+  it("keeps top-level token boundaries and never binds a heredoc body word", () => {
     for (const [name, source] of Object.entries(MATRIX)) {
       expect(
         tokenizeProgram("shell", source).map((token) => [token.raw, token.bindable]),
         name,
-      ).toEqual(TOP_LEVEL_BEFORE[name as keyof typeof MATRIX]);
+      ).toEqual(TOP_LEVEL[name as keyof typeof MATRIX]);
     }
   });
 
@@ -358,7 +368,7 @@ describe("embedded programs", () => {
     ).toBe(`python3 -c 'print("beta")' next.txt`);
   });
 
-  it("binds embedded holes only where the program is embedded and carries no secret", () => {
+  it("binds embedded holes only where the program is embedded, never on a secret", () => {
     const source = { type: "literal" as const, value: MATRIX.pythonSingle };
     const program = only(MATRIX.pythonSingle);
     const index = tokenIndex(program, '"alpha-7f3c"');
@@ -395,31 +405,175 @@ describe("embedded programs", () => {
       protectedTokens: [protectedToken],
       holes: [],
     };
+    const hole = (raw: string) => ({
+      token: body.anchor,
+      embedded: tokenIndex(body, raw),
+      binding: { type: "input" as const, name: "t" },
+    });
+    // The literal beside the secret binds; the secret's own token never does.
+    expect(
+      bindProgramToken(
+        projected,
+        "shell",
+        body.anchor,
+        hole("'alpha-7f3c'").binding,
+        hole("'alpha-7f3c'").embedded,
+      ).type,
+    ).toBe("program");
     expect(() =>
       bindProgramToken(
         projected,
         "shell",
         body.anchor,
-        { type: "input", name: "t" },
-        tokenIndex(body, "'alpha-7f3c'"),
+        hole("'sk-[REDACTED]'").binding,
+        hole("'sk-[REDACTED]'").embedded,
       ),
     ).toThrow();
-    const errors: string[] = [];
-    validateWorkflowProgramProjection(
-      {
-        ...projected,
-        holes: [
-          {
-            token: body.anchor,
-            embedded: tokenIndex(body, "'alpha-7f3c'"),
-            binding: { type: "input", name: "t" },
-          },
-        ],
-      },
-      "step1.command",
-      errors,
+    const errorsFor = (raw: string) => {
+      const errors: string[] = [];
+      validateWorkflowProgramProjection(
+        { ...projected, holes: [hole(raw)] },
+        "step1.command",
+        errors,
+      );
+      return errors;
+    };
+    expect(errorsFor("'alpha-7f3c'")).toEqual([]);
+    expect(errorsFor("'sk-[REDACTED]'")).toHaveLength(1);
+  });
+
+  it("reads the words after a heredoc terminator as the command's own, whatever the body holds", () => {
+    // satb-audio-transcription: nested parentheses, quotes and a `<<` shift in the written body.
+    const source = `cat > /tmp/decode4.py <<'PY'
+ranked=sorted(inds,key=lambda i:-(y[codes[i,1]-36] if codes[i,1]>0 else 0))
+r[a]=((r[c]<<r[d])|(r[c]>>(8-r[d])))&255  # don't
+np.savez('/tmp/decoded4.npz',p=res)
+PY
+/tmp/chorale-venv/bin/python /tmp/decode4.py > /tmp/decode4.out && head -n 85 /tmp/decode4.out`;
+    const tokens = tokenizeProgram("shell", source);
+    const after = tokens.filter((token) => token.start > source.indexOf("\nPY\n"));
+    expect(
+      after.filter((token) => token.raw === "/tmp/decode4.out").map((t) => t.bindable),
+    ).toEqual([true, true]);
+    const body = tokens.filter(
+      (token) => token.start > source.indexOf("\n") && token.end <= source.indexOf("\nPY\n") + 3,
     );
-    expect(errors).toHaveLength(1);
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.every((token) => !token.bindable && token.value === undefined)).toBe(true);
+    // An arithmetic shift is no heredoc: the words after it stay readable.
+    const shift = tokenizeProgram("shell", "x=$(( 1 << 2 )); ls out.txt\nls more.txt");
+    expect(shift.find((token) => token.raw === "more.txt")?.bindable).toBe(true);
+    // A subshell holds ordinary commands.
+    const subshell = tokenizeProgram("shell", '(cd "$tmp" && bun dist/client-entry.js)');
+    expect(subshell.find((token) => token.raw === "dist/client-entry.js")?.bindable).toBe(true);
+  });
+
+  it("parses a script a heredoc writes as a program once a later command runs it, else keeps it data", () => {
+    // satb-audio-transcription: the body of `cat > f.py` is the python a later command runs.
+    const written = `cat > /tmp/decode3.py <<'PY'
+import numpy as np
+np.savez('/tmp/decoded3.npz',p=[1])
+PY
+/tmp/chorale-venv/bin/python /tmp/decode3.py`;
+    const program = only(written);
+    expect(program.language).toBe("python");
+    expect(program.tokens[tokenIndex(program, "'/tmp/decoded3.npz'")]!.bindable).toBe(true);
+    expect(bindEmbedded(written, "'/tmp/decoded3.npz'", "/tmp/other.npz")).toBe(
+      written.replace("'/tmp/decoded3.npz'", "'/tmp/other.npz'"),
+    );
+    for (const run of [
+      "python3 decode3.py",
+      "timeout 60 python3 -u /tmp/decode3.py",
+      "./decode3.py",
+    ]) {
+      expect(embeddedPrograms(written.replace(/\n[^\n]*$/, `\n${run}`)), run).toHaveLength(1);
+    }
+    for (const data of [
+      // Nothing runs it.
+      written.replace(/\n[^\n]*$/, "\ncat /tmp/decode3.py"),
+      // It is compiled, not run; or run as a module; or read as a script's argument.
+      written.replace(/\n[^\n]*$/, "\npython -m py_compile /tmp/decode3.py"),
+      written.replace(/\n[^\n]*$/, "\npython3 other.py /tmp/decode3.py"),
+      // Rewritten before it runs.
+      written.replace(
+        /\n[^\n]*$/,
+        "\ncat > /tmp/decode3.py <<'PY'\nprint(1)\nPY\npython3 /tmp/decode3.py",
+      ),
+      // Appended to, not written whole.
+      written.replace("cat >", "cat >>"),
+      // A JSON file is data even when a command reads it.
+      `cat > /tmp/cfg.json <<'EOF'\n{"a": "/tmp/x"}\nEOF\npython3 run.py /tmp/cfg.json`,
+    ]) {
+      expect(
+        embeddedPrograms(data).filter((each) => each.start === data.indexOf("\n") + 1),
+        data,
+      ).toEqual([]);
+    }
+  });
+
+  it.skipIf(!hasInterpreters)("runs a written script with the bound value", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resin-written-"));
+    try {
+      const script = join(dir, "s.py");
+      const source = `cat > ${script} <<'PY'\nprint('alpha-7f3c')\nPY\npython3 ${script}`;
+      const bound = bindEmbedded(source, "'alpha-7f3c'", "it's $HOME");
+      expect(spawnSync("bash", ["-c", bound], { encoding: "utf8" }).stdout).toBe("it's $HOME\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("protects only the secret inside a script, and runs the private original around it", () => {
+    // nextjs-performance: the endpoint list holds a secret; its other paths stay bindable.
+    const secretValue = "/internal/7ffcc398bd861a0cQzL";
+    const shape = (value: string) =>
+      `node - <<'NODE'\nconst endpoints=['/dispatch/summary?site=RNO1','${value}','/shipments/dock-windows?site=RNO1'];\nconsole.log(endpoints)\nNODE`;
+    const original = shape(secretValue);
+    const sanitized = shape("[REDACTED_HIGH_ENTROPY_SECRET:7ffcc398bd861a0c]");
+    const { protectedTokens } = analyzeProgramSourceProjection("shell", original, sanitized);
+    expect(protectedTokens).toHaveLength(1);
+    const program = only(sanitized);
+    const path = tokenIndex(program, "'/shipments/dock-windows?site=RNO1'");
+    const placeholder = tokenIndex(program, "'[REDACTED_HIGH_ENTROPY_SECRET:7ffcc398bd861a0c]'");
+    const secretTokens = embeddedProgramProtectedTokens(
+      program,
+      sanitized,
+      tokenizeProgram("shell", sanitized),
+      protectedTokens,
+    );
+    expect([...secretTokens]).toEqual([placeholder]);
+    expect(
+      projectedEmbeddedTokenIsBindable(original, sanitized, protectedTokens, program.anchor, path),
+    ).toBe(true);
+    expect(
+      projectedEmbeddedTokenIsBindable(
+        original,
+        sanitized,
+        protectedTokens,
+        program.anchor,
+        placeholder,
+      ),
+    ).toBe(false);
+    // Bound into the private original, the path changes and the secret is run as recorded.
+    const originalProgram = embeddedPrograms(original).find(
+      (each) => each.anchor === program.anchor,
+    )!;
+    const rendered = applyProgramTokenValues(
+      original,
+      tokenizeProgram("shell", original),
+      new Map(),
+      "shell",
+      new Map([[originalProgram.anchor, new Map([[path, "/shipments/carriers?site=RNO2"]])]]),
+    );
+    expect(rendered).toBe(
+      original.replace("/shipments/dock-windows?site=RNO1", "/shipments/carriers?site=RNO2"),
+    );
+    expect(rendered).toContain(secretValue);
+    // An original whose tokens a redaction shifted never takes an embedded value.
+    const shifted = original.replace(`'${secretValue}'`, "secretFrom(env)");
+    expect(
+      projectedEmbeddedTokenIsBindable(shifted, sanitized, protectedTokens, program.anchor, path),
+    ).toBe(false);
   });
 
   it("reads token paths", () => {

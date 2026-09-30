@@ -361,3 +361,132 @@ describe("stock Codex command reconciliation", () => {
     if (directResult.type === "tool_result") expect(directResult.isError).toBe(false);
   });
 });
+
+describe("polled long-running Codex commands", () => {
+  // Shapes from a recorded Codex 0.156.1 tesseract batch: the cell yields after `yield_time_ms` with
+  // the command still running, later cells poll its session, and the native `CommandExecution`
+  // (whose `process_id` is the session ID) completes during the last poll.
+  const script =
+    "python - <<'PY'\nimport subprocess\nprint(subprocess.run(['tesseract','a.png','stdout']))\nPY";
+  const running = (session: number) =>
+    JSON.stringify({ chunk_id: "d48946", wall_time_seconds: 30, session_id: session, output: "" });
+  function stdin(id: string, session: number, chars: string, time: number) {
+    const cell = call(id, "ignored", time);
+    cell.payload.input = `const r=await tools.write_stdin({session_id:${session},chars:${JSON.stringify(chars)},yield_time_ms:30000,max_output_tokens:18000});text(r)\n`;
+    return cell;
+  }
+  function exited(session: string, started: number, time: number, exit = 0) {
+    const event = command("n1", script, started, time, "file:///repo", exit);
+    return {
+      ...event,
+      payload: {
+        ...event.payload,
+        item: { ...event.payload.item, process_id: session, stdout: "page one\npage two\n" },
+      },
+    };
+  }
+  function start(decoder: CodexSessionDecoder, print: "text(r)" | "text(r.output)") {
+    const origin = call("origin", script, base);
+    origin.payload.input = origin.payload.input.replace("text(r.output);", `${print};`);
+    decoder.decodeRecord(origin);
+    return decoder.decodeRecord(reply("origin", base + 30_000, "completed", running(9824)))[0]!;
+  }
+
+  it("links the command's completion, seen only while polling, to the cell that started it", () => {
+    for (const print of ["text(r)", "text(r.output)"] as const) {
+      const decoder = new CodexSessionDecoder({ sessionId: "s" });
+      const result = start(decoder, print);
+      expect(readCodexCommandMetadata(result.metadata)).toMatchObject({
+        kind: "result",
+        status: "completed",
+      });
+      for (const [index, time] of [base + 31_000, base + 62_000].entries()) {
+        decoder.decodeRecord(stdin(`poll${index}`, 9824, "", time));
+        decoder.decodeRecord(reply(`poll${index}`, time + 30_000, "completed", running(9824)));
+      }
+      decoder.decodeRecord(stdin("last", 9824, "", base + 93_000));
+      const native = decoder.decodeRecord(exited("9824", base + 20, base + 110_000))[0]!;
+      decoder.decodeRecord(reply("last", base + 110_100, "completed", "{}"));
+      expect(readCodexCommandMetadata(native.metadata)).toMatchObject({
+        kind: "command",
+        nativeId: "n1",
+        association: {
+          callId: "origin",
+          nativeCommandId: "n1",
+          startedAtMs: base + 20,
+          callCompletedAtMs: base + 30_000,
+        },
+      });
+      expect(native).toMatchObject({ exitCode: 0, stdout: "page one\npage two\n" });
+    }
+  });
+
+  it("keeps a command that received input, or completed during another session's poll, unlinked", () => {
+    for (const [session, chars] of [
+      [9824, "\u0003"],
+      [9824, "y\n"],
+      [4012, ""],
+    ] as const) {
+      const decoder = new CodexSessionDecoder({ sessionId: "s" });
+      start(decoder, "text(r)");
+      if (chars !== "") {
+        decoder.decodeRecord(stdin("input", session, chars, base + 31_000));
+        decoder.decodeRecord(reply("input", base + 31_500, "completed", running(9824)));
+      }
+      decoder.decodeRecord(stdin("poll", chars === "" ? session : 9824, "", base + 32_000));
+      const native = decoder.decodeRecord(exited("9824", base + 20, base + 40_000, 130))[0]!;
+      expect(native.type).toBe("command_exec");
+      expect(readCodexCommandMetadata(native.metadata)).not.toHaveProperty("association");
+    }
+  });
+
+  it("leaves a command that never reports an exit unresolved", () => {
+    const decoder = new CodexSessionDecoder({ sessionId: "s" });
+    const events = [start(decoder, "text(r)")];
+    decoder.decodeRecord(stdin("poll", 9824, "", base + 31_000));
+    events.push(...decoder.decodeRecord(reply("poll", base + 61_000, "completed", running(9824))));
+    expect(events.filter((event) => event.type === "command_exec")).toEqual([]);
+    expect(readCodexCommandMetadata(events[0]!.metadata)).not.toHaveProperty("association");
+  });
+});
+
+describe("code-mode cells that cannot start a native command", () => {
+  // Recorded Codex 0.156.1 shapes: image inspection cells and a failed `apply_patch` verification.
+  const viewImage =
+    'const r=await tools.view_image({path:"/workspace/data/IMG-9103.png",detail:"original"});image(r.image_url)\n';
+  const viewImages =
+    'const ids=["9041","9042"];for(const id of ids){const r=await tools.view_image({path:`/workspace/data/IMG-${id}.png`,detail:"original"});text(id);image(r.image_url,"original");}\n';
+  const patch =
+    'text(await tools.apply_patch("*** Begin Patch\\n*** Update File: /app/a.py\\n@@\\n-x\\n+y\\n*** End Patch\\n"))';
+  function linksLaterWrapper(source: string, status: string, open = false) {
+    const decoder = new CodexSessionDecoder({ sessionId: "s" });
+    const cell = call("cell", "ignored", base);
+    cell.payload.input = source;
+    decoder.decodeRecord(cell);
+    if (!open) decoder.decodeRecord(reply("cell", base + 5, status, "Script error"));
+    decoder.decodeRecord(call("later", "echo ok", base + 10));
+    decoder.decodeRecord(command("n1", "echo ok", base + 20, base + 30));
+    return readCodexCommandMetadata(decoder.decodeRecord(reply("later", base + 40))[0]!.metadata);
+  }
+
+  it("still links later single-command cells after image and patch-only cells", () => {
+    for (const [source, status, open] of [
+      [viewImage, "completed", false],
+      [viewImage, "completed", true],
+      [viewImages, "completed", false],
+      [patch, "failed", false],
+    ] as const)
+      expect(linksLaterWrapper(source, status, open)).toMatchObject({
+        association: { callId: "later", nativeCommandId: "n1" },
+      });
+  });
+
+  it("stays unsafe when the cell could start a command", () => {
+    for (const source of [
+      'text(await tools.exec_command({cmd:"rm -rf app/__pycache__",workdir:"/app"}));',
+      `${viewImage}eval('tools.exec_command({cmd:"echo ok"})');`,
+      'const t=tools;const r=await t.view_image({path:"/a.png"});image(r.image_url)',
+    ])
+      expect(linksLaterWrapper(source, "failed")).not.toHaveProperty("association");
+  });
+});

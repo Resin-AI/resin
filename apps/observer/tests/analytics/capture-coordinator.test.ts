@@ -263,6 +263,33 @@ describe("TrajectoryCaptureCoordinator", () => {
     expect(coordinator.isSessionFinalized(session.sessionId)).toBe(true);
   });
 
+  it("stamps the resolved harness version into session metadata unless the adapter reports one", async () => {
+    const pipeline = new NormalizationPipeline();
+    const processBatch = vi.spyOn(pipeline, "processBatch");
+    const resolveHarnessVersion = vi.fn(async () => "18.4.3");
+    const coordinator = new TrajectoryCaptureCoordinator({
+      pipeline,
+      observationClient: createMockObservationClient({}),
+      attributionResolver: vi.fn(async (sess) => createValidAttributionContext(sess.sessionId)),
+      resolveHarnessVersion,
+    });
+
+    const plain = createMockHarnessSession();
+    await coordinator.handleRecords(plain, [createPromptRecord(plain.sessionId, 1)], vi.fn());
+    const reported = createMockHarnessSession();
+    reported.metadata = {
+      ...reported.metadata,
+      harnessVersion: "9.9.9",
+    } as typeof reported.metadata;
+    await coordinator.handleRecords(reported, [createPromptRecord(reported.sessionId, 1)], vi.fn());
+
+    const versions = processBatch.mock.calls.map(
+      ([, context]) => context?.customMetadata?.harnessVersion,
+    );
+    expect(versions).toEqual(["18.4.3", "9.9.9"]);
+    expect(resolveHarnessVersion).toHaveBeenCalledTimes(1);
+  });
+
   it("finalizes and submits when session status is terminal (completed / failed / interrupted)", async () => {
     const pipeline = new NormalizationPipeline();
     const submittedObservations: TrajectoryObservation[] = [];

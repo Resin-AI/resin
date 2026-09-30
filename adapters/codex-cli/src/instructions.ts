@@ -11,14 +11,17 @@ export const CODEX_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  * instructions mention them, and how it hides them depends on the session: Code Mode nests them
  * in `ALL_TOOLS` inside `exec`, while direct tool calling defers them behind `tool_search`. Codex
  * picks the mode per session from its features and profiles, so one global file names both.
+ *
+ * A nested tool's description in Code Mode is the server's instructions, a blank line, the tool's
+ * own description, then its `exec tool declaration`; the listing snippet prints only the tool's
+ * own one-line description, since what it prints stays in the transcript for every later request.
  */
 export const CODEX_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are MCP tools named \`mcp__resin__<name>\`; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Earlier runs in this workspace may have left learned tools: MCP tools named \`mcp__resin__<name>\`, each listed with its purpose and inputs.
 
-- In your first step, next to your own first look at the task, list them. With an \`exec\` tool (Code Mode), print them in that \`exec\` call: \`text(ALL_TOOLS.filter(t => t.name.startsWith("mcp__resin__") && !/__(search_tools|get_tool_schema|invoke_tool|manage_tools)$/.test(t.name)).map(t => t.name + "\\n" + t.description).join("\\n\\n"))\`. Without \`exec\`, they are deferred: call \`tool_search\` with your task's keywords to load them.
-- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together (in \`exec\`: \`const [a, b] = await Promise.all([tools.mcp__resin__x({}), tools.mcp__resin__y({})]); text(a.content[0].text); text(b.content[0].text);\`). Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.
+- In your first step, next to your own first look at the task, list them. With an \`exec\` tool (Code Mode), print them in that \`exec\` call: \`text(ALL_TOOLS.filter(t => t.name.startsWith("mcp__resin__") && !/__(search_tools|get_tool_schema|invoke_tool|manage_tools)$/.test(t.name)).map(t => t.name + ": " + t.description.split("\\n\\nexec tool declaration")[0].split("\\n\\n").pop()).join("\\n"))\`. Without \`exec\`, they are deferred: call \`tool_search\` with your task's keywords to load them. None listed: do the task.
+- A tool that does your task's next step is a procedure an earlier run already worked out: call it with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, and use its output instead of rerunning its commands. Omitted inputs reuse the recorded values; \`mcp__resin__get_tool_schema({name: "<name>"})\` shows its commands and input docs. Run several at once with \`Promise.all\` in \`exec\`.
 `;
 
 /** Resolves Codex's home directory: `$CODEX_HOME`, else `<home>/.codex`. */

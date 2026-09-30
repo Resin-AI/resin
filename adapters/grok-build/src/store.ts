@@ -110,7 +110,7 @@ export type GrokSessionCache = Map<
     updatesMtimeMs: number;
     checkedAt: number;
     summary: GrokSessionSummary | null;
-    subagentParents?: Map<string, string>;
+    subagentLinks?: Map<string, GrokSubagentLink>;
   }
 >;
 
@@ -176,23 +176,34 @@ export async function listGrokSessions(
   return sessions.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
 }
 
+/** A subagent child session as its parent's `subagents/<id>/meta.json` describes it. */
+export interface GrokSubagentLink {
+  readonly parentSessionId: string;
+  readonly subagentId?: string;
+  /** `subagent_type` (`explore`, `general`, …). */
+  readonly subagentType?: string;
+  readonly description?: string;
+}
+
 /**
- * Parent links of subagent child sessions, read from each parent's `subagents/<id>/meta.json`.
- * Child `summary.json` files do not name their parent.
+ * Subagent child sessions keyed by child session id, read from each parent's
+ * `subagents/<id>/meta.json`. Child `summary.json` files do not name their parent. Every session
+ * directory is read (a child is a session too), and each meta's `parent_session_id` names the
+ * child's immediate parent, so nested subagents link to their own parent.
  */
-export async function readGrokSubagentParents(
+export async function readGrokSubagentLinks(
   sessions: readonly GrokSessionEntry[],
   cache?: GrokSessionCache,
-): Promise<Map<string, string>> {
-  const parents = new Map<string, string>();
+): Promise<Map<string, GrokSubagentLink>> {
+  const links = new Map<string, GrokSubagentLink>();
   for (const session of sessions) {
     const cached = cache?.get(session.sessionDir);
-    if (cached?.subagentParents) {
-      for (const [child, parent] of cached.subagentParents) parents.set(child, parent);
+    if (cached?.subagentLinks) {
+      for (const [child, link] of cached.subagentLinks) links.set(child, link);
       continue;
     }
-    const own = new Map<string, string>();
-    if (cached) cached.subagentParents = own;
+    const own = new Map<string, GrokSubagentLink>();
+    if (cached) cached.subagentLinks = own;
     let children: string[];
     try {
       children = await fs.readdir(path.join(session.sessionDir, "subagents"));
@@ -204,12 +215,23 @@ export async function readGrokSubagentParents(
         await readJson(path.join(session.sessionDir, "subagents", child, "meta.json")),
       );
       const childSessionId = asString(meta?.child_session_id) ?? child;
-      const parent = asString(meta?.parent_session_id) ?? session.sessionId;
-      parents.set(childSessionId, parent);
-      own.set(childSessionId, parent);
+      const parentSessionId = asString(meta?.parent_session_id) ?? session.sessionId;
+      // A child never parents itself; ignore a malformed link rather than loop the tree.
+      if (childSessionId === parentSessionId) continue;
+      const subagentId = asString(meta?.subagent_id);
+      const subagentType = asString(meta?.subagent_type);
+      const description = asString(meta?.description);
+      const link: GrokSubagentLink = {
+        parentSessionId,
+        ...(subagentId ? { subagentId } : {}),
+        ...(subagentType ? { subagentType } : {}),
+        ...(description ? { description } : {}),
+      };
+      links.set(childSessionId, link);
+      own.set(childSessionId, link);
     }
   }
-  return parents;
+  return links;
 }
 
 interface PromptTurn {

@@ -1,4 +1,3 @@
-import { CURRENT_PATTERN_SCHEMA_VERSION, type ProvenPatternDto } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { createInMemoryStateStore } from "../src/store.js";
 
@@ -29,69 +28,8 @@ const signature = {
   estimatedCostUsd: 0.21,
 };
 
-const clusterSummary = {
-  clusterId: "clu_01",
-  structuralHash: "hash_abc",
-  episodeCount: 2,
-  distinctSessionIds: ["sess_01"],
-  scenarioIds: [],
-  distinctScenarioCount: 0,
-  completedOccurrences: 2,
-  firstSeenAt: T1,
-  lastSeenAt: T2,
-  evidenceEventIds: ["evt_01"],
-  metrics,
-};
-
-const pattern: ProvenPatternDto = {
-  schemaVersion: CURRENT_PATTERN_SCHEMA_VERSION,
-  patternId: "pat_01",
-  idempotencyKey: "idem_01",
-  accountId: "acct_01",
-  workspaceId: "ws_01",
-  engineVersion: "1.0.0",
-  signature,
-  cluster: clusterSummary,
-  localVerdicts: {
-    trigger: {
-      triggered: true,
-      triggerType: "normal_frequency",
-      reason: "recurring",
-      description: "seen twice",
-      evidenceEventIds: ["evt_01"],
-      metrics: {
-        occurrenceCount: 2,
-        durationMs: 900,
-        tokenCount: 600,
-        retryCount: 1,
-        estimatedCostUsd: 0.21,
-        stepCount: 2,
-      },
-    },
-    suppression: { suppressed: false, reason: "none", details: "clear" },
-    coverage: {
-      status: "net_new",
-      similarityScore: 0,
-      overlapRatio: 0,
-      reason: "no tool",
-    },
-    estimatedSavedWork: {
-      estimatedDurationSavedMs: 100,
-      estimatedTokensSaved: 50,
-      estimatedStepsSaved: 1,
-      savedDurationMs: 200,
-      savedTokens: 100,
-      estimatedCostSavedUsd: 0.05,
-      savedCostUsd: 0.1,
-      savedToolCalls: 3,
-      confidence: 0.8,
-    },
-  },
-  evidenceEventIds: ["evt_01"],
-};
-
 describe("OpportunityLocalRepository", () => {
-  it("round-trips signatures, clusters, hash cache, and the pattern outbox", async () => {
+  it("round-trips signatures, clusters, and the hash cache", async () => {
     const store = await createInMemoryStateStore();
     const repo = store.opportunities;
 
@@ -235,49 +173,6 @@ describe("OpportunityLocalRepository", () => {
 
     expect(await repo.pruneHashCache(T2)).toBe(1);
     expect(await repo.getHashCacheEntry("hash_expired")).toBeNull();
-
-    // pattern outbox
-    const firstId = await repo.enqueuePattern({
-      patternId: "pat_01",
-      idempotencyKey: "idem_01",
-      workspaceId: "ws_01",
-      payload: pattern,
-      createdAt: T1,
-    });
-    expect(firstId).toBe("pat_01");
-
-    const duplicateId = await repo.enqueuePattern({
-      patternId: "pat_01_dup",
-      idempotencyKey: "idem_01",
-      workspaceId: "ws_01",
-      payload: pattern,
-      createdAt: T2,
-    });
-    expect(duplicateId).toBe("pat_01");
-
-    await repo.enqueuePattern({
-      patternId: "pat_02",
-      idempotencyKey: "idem_02",
-      payload: pattern,
-      createdAt: T2,
-    });
-
-    const pending = await repo.listPendingPatterns(1);
-    expect(pending).toHaveLength(1);
-    expect(pending[0].patternId).toBe("pat_01");
-    expect(pending[0].payload).toEqual(pattern);
-    expect(pending[0].uploadedAt).toBeUndefined();
-
-    const fetched = await repo.getPatternByIdempotencyKey("idem_01");
-    expect(fetched?.payload).toEqual(pattern);
-    expect(fetched?.workspaceId).toBe("ws_01");
-    expect(await repo.getPatternByIdempotencyKey("missing")).toBeNull();
-
-    await repo.markPatternUploaded("pat_01", T2);
-    await repo.markPatternUploaded("pat_01", "2027-01-01T00:00:00.000Z");
-    const remaining = await repo.listPendingPatterns();
-    expect(remaining.map((p) => p.patternId)).toEqual(["pat_02"]);
-    expect((await repo.getPatternByIdempotencyKey("idem_01"))?.uploadedAt).toBe(T2);
 
     store.close();
   });

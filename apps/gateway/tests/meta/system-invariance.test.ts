@@ -215,7 +215,9 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
         expect.arrayContaining(["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"]),
       );
 
-      const projectTool = tools.find((tool) => tool.description === spoofedManifest.description);
+      const projectTool = tools.find((tool) =>
+        tool.description?.startsWith(spoofedManifest.description),
+      );
       expect(projectTool).toBeDefined();
       expect(projectTool?.annotations).toBeUndefined();
       const systemTools = tools.filter((tool) => tool !== projectTool);

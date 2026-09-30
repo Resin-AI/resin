@@ -28,10 +28,10 @@ export const cursorGuidance: HarnessGuidanceSurface = {
   },
   body: `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`); each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are MCP tools on the \`resin\` server (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`), each listed with its purpose and inputs; \`get_tool_schema\` with its name shows the commands it runs and each input's recorded value.
 
 - In your first step, next to your own first look at the task, list the \`resin\` server's tools and their descriptions.
-- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Their output is the commands' current output: use it instead of running those commands yourself.`,
 };
 
@@ -48,7 +48,7 @@ export const cursorInstallHarness: HarnessInstallDefinition = {
     "Token usage is per turn, from the `stop` hook (input, output, cache-read tokens). Headless `cursor-agent -p` runs fire no beforeSubmitPrompt, afterAgentResponse or stop hooks (verified with 2026.09.26), so their prompt, final answer and usage are not captured; their tool calls, edits and session end are.",
     "Tool calls are recorded at completion (postToolUse/postToolUseFailure); calls still running when a session is aborted are not recorded (the session ends with reason `error`). One model edit is reported as a Read and a Write sharing a tool_use_id, so call ids are `<tool_name>:<tool_use_id>`.",
     "afterFileEdit carries no tool_use_id and fires before its Write's postToolUse, so file edits are not linked to their call (no producedByCallId).",
-    "Task subagents run as separate conversations with no subagentStart/subagentStop hook and no postToolUse for the Task call (verified with 2026.09.26); they are captured as standalone sessions not linked to their parent.",
+    "Task subagents run as separate conversations and are captured as their own sessions. In the recorded 2026.09.26 runs cursor-agent fired no subagentStart/subagentStop hook and no postToolUse for the Task call, so those subagent sessions carry no parent link and are not marked as agents; when a subagentStart/subagentStop hook does arrive (`parent_conversation_id`, `child_conversation_id`, `subagent_id`, `subagent_type`), the child is linked as an agent session under its parent. Each conversation's tool calls and usage are counted in that conversation only.",
     "cursor-agent does not apply an MCP server's tools/list_changed mid-session (a tool added after list_changed stayed unavailable for the rest of the session); new Resin tools reach the next session.",
     "cursor-agent has no user-level rules directory: it loads `.cursor/rules` from the workspace and each of its ancestors (verified with 2026.09.26), so the guidance rule in ~/.cursor/rules reaches projects under your home directory only. Elsewhere agents get Resin's MCP server instructions but not this guidance.",
   ],

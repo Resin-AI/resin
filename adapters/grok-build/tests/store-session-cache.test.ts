@@ -6,7 +6,7 @@ import {
   GROK_SETTLED_RECHECK_MS,
   type GrokSessionCache,
   listGrokSessions,
-  readGrokSubagentParents,
+  readGrokSubagentLinks,
 } from "../src/store.js";
 
 const io = vi.hoisted(() => ({ reads: [] as string[] }));
@@ -59,13 +59,13 @@ describe("Grok session cache", () => {
     const scan = async () => {
       io.reads.length = 0;
       const entries = await listGrokSessions(projectDir, "/work", cache);
-      const parents = await readGrokSubagentParents(entries, cache);
+      const parents = await readGrokSubagentLinks(entries, cache);
       return { entries, parents, reads: [...io.reads] };
     };
 
     const first = await scan();
     expect(first.reads.filter((p) => p.endsWith("summary.json"))).toHaveLength(10);
-    expect(first.parents.get("child-2")).toBe("s2");
+    expect(first.parents.get("child-2")?.parentSessionId).toBe("s2");
 
     const second = await scan();
     expect(second.reads).toEqual([]);

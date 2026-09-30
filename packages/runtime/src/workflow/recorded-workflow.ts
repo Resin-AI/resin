@@ -11,23 +11,25 @@
 import {
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
-  embeddedProgramIsProtected,
-  embeddedPrograms,
   extractPrintedValue,
   parseExtractLocator,
   programNotLearnableReason,
   programTokenValueAt,
+  projectedEmbeddedTokenIsBindable,
   recordedProgramLanguage,
   segmentOriginal,
   tokenizeProgram,
   validateWorkflowProgramProjection,
+  workflowListInputProblem,
   workflowSinkStepIds,
 } from "@resin/contracts";
 import type {
   ProgramToken,
+  ProgramTokenListValue,
   ProgramTokenSpanValue,
   RecordedWorkflow,
   WorkflowJsonValue,
+  WorkflowListInput,
   WorkflowStep,
   WorkflowValuePath,
   WorkflowValueTemplate,
@@ -123,6 +125,11 @@ export class WorkflowBindingError extends Error {
     this.name = "WorkflowBindingError";
   }
 }
+
+/** Execution options with the word-list inputs the workflow declares, by name. */
+type ResolutionOptions = RecordedWorkflowExecutionOptions & {
+  listInputs: ReadonlyMap<string, WorkflowListInput>;
+};
 
 function matchesWorkflowInputType(
   value: unknown,
@@ -251,7 +258,7 @@ async function originalProgramText(
 async function recordedInputValue(
   workflow: RecordedWorkflow,
   input: RecordedWorkflow["inputs"][number],
-  options: RecordedWorkflowExecutionOptions,
+  options: ResolutionOptions,
   declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowJsonValue | undefined> {
   for (const step of workflow.steps) {
@@ -297,7 +304,7 @@ async function buildTemplate(
   template: WorkflowValueTemplate,
   step: WorkflowStep,
   argumentName: string,
-  options: RecordedWorkflowExecutionOptions,
+  options: ResolutionOptions,
   results: Map<string, WorkflowJsonValue>,
   declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowJsonValue> {
@@ -449,6 +456,7 @@ async function buildTemplate(
       const values = new Map<number, string | number | boolean | null>();
       const embedded = new Map<number, Map<number, string | number | boolean | null>>();
       const spans: ProgramTokenSpanValue[] = [];
+      const lists: ProgramTokenListValue[] = [];
       for (const hole of template.holes) {
         // An omitted recorded-default input leaves the token exactly as the recording ran it. A
         // derivation's tokens were never recorded; its omitted recorded-default inputs were
@@ -461,6 +469,29 @@ async function buildTemplate(
           continue;
         }
         const bound = await resolveLeaf(hole.binding);
+        if (hole.through !== undefined) {
+          // A word list: each item becomes one shell word in place of the recorded run.
+          const list =
+            hole.binding.type === "input" ? options.listInputs.get(hole.binding.name) : undefined;
+          if (hole.binding.type !== "input" || list === undefined) {
+            throw new WorkflowBindingError(
+              "a word-list hole must bind a word-list input",
+              step.id,
+              argumentName,
+            );
+          }
+          const problem = workflowListInputProblem(hole.binding.name, list, bound);
+          if (problem !== undefined) {
+            throw new WorkflowBindingError(problem, step.id, argumentName);
+          }
+          lists.push({
+            token: hole.token,
+            through: hole.through,
+            items: bound as string[],
+            ...(list.optionItems === true ? { optionItems: true } : {}),
+          });
+          continue;
+        }
         if (hole.span !== undefined) {
           if (typeof bound !== "string" && typeof bound !== "number") {
             throw new WorkflowBindingError(
@@ -493,26 +524,59 @@ async function buildTemplate(
         }
       }
       const shellTokens = tokens ?? tokenizeProgram(template.language, text);
-      const embeddedAnchors = new Set([
-        ...embedded.keys(),
-        ...spans.flatMap((span) => (span.embedded === undefined ? [] : [span.token])),
-      ]);
-      if (embeddedAnchors.size > 0 && template.protectedTokens !== undefined) {
-        const protectedTokens = template.protectedTokens;
-        for (const program of embeddedPrograms(text)) {
+      if (template.protectedTokens !== undefined) {
+        // A secret the recording redacted is never replaced by, or folded into, a caller's list.
+        const covered = template.protectedTokens;
+        if (
+          lists.some((list) =>
+            covered.some((index) => list.token <= index && index <= list.through),
+          )
+        ) {
+          throw new WorkflowBindingError(
+            "a word list covers a protected token",
+            step.id,
+            argumentName,
+          );
+        }
+        // A projected program runs from its private original: an embedded hole may replace only a
+        // token the sanitized projection showed verbatim, never one a secret sits in or touches.
+        const sanitized = template.source.type === "literal" ? template.source.value : undefined;
+        const addresses = [
+          ...[...embedded].flatMap(([anchor, each]) =>
+            [...each.keys()].map((index) => [anchor, index] as const),
+          ),
+          ...spans.flatMap((span) =>
+            span.embedded === undefined ? [] : [[span.token, span.embedded] as const],
+          ),
+        ];
+        for (const [anchor, index] of addresses) {
           if (
-            embeddedAnchors.has(program.anchor) &&
-            embeddedProgramIsProtected(program, shellTokens, protectedTokens)
+            typeof sanitized !== "string" ||
+            !projectedEmbeddedTokenIsBindable(
+              text,
+              sanitized,
+              template.protectedTokens,
+              anchor,
+              index,
+            )
           ) {
             throw new WorkflowBindingError(
-              "an embedded program hole is inside a protected program",
+              "an embedded program hole touches a protected token",
               step.id,
               argumentName,
             );
           }
         }
       }
-      return applyProgramTokenValues(text, shellTokens, values, template.language, embedded, spans);
+      return applyProgramTokenValues(
+        text,
+        shellTokens,
+        values,
+        template.language,
+        embedded,
+        spans,
+        lists,
+      );
     }
     default: {
       const exhaustive: never = template;
@@ -529,7 +593,7 @@ async function resolveArgument(
   step: WorkflowStep,
   argumentName: string,
   source: WorkflowStep["arguments"][number]["source"],
-  options: RecordedWorkflowExecutionOptions,
+  options: ResolutionOptions,
   results: Map<string, WorkflowJsonValue>,
   declaredPrivateReferences: ReadonlySet<string>,
 ): Promise<WorkflowJsonValue> {
@@ -616,12 +680,20 @@ export async function executeRecordedWorkflow(
   }
 
   const inputs: Record<string, WorkflowJsonValue> = Object.create(null);
+  const listInputs = new Map<string, WorkflowListInput>();
   for (const input of workflow.inputs) {
+    if (input.list !== undefined) listInputs.set(input.name, input.list);
+    const listProblem = (value: unknown): string | undefined =>
+      input.list === undefined
+        ? undefined
+        : workflowListInputProblem(input.name, input.list, value);
     if (Object.hasOwn(options.inputs, input.name)) {
       const value = options.inputs[input.name];
       if (!matchesWorkflowInputType(value, input.type)) {
         throw new TypeError(`workflow input '${input.name}' must be a ${input.type}`);
       }
+      const problem = listProblem(value);
+      if (problem !== undefined) throw new TypeError(problem);
       inputs[input.name] = value;
     } else if (Object.hasOwn(input, "default")) {
       if (!matchesWorkflowInputType(input.default, input.type)) {
@@ -629,12 +701,14 @@ export async function executeRecordedWorkflow(
           `workflow input '${input.name}' has a default incompatible with ${input.type}`,
         );
       }
+      const problem = listProblem(input.default);
+      if (problem !== undefined) throw new TypeError(`${problem} (its default)`);
       inputs[input.name] = copyWorkflowJsonValue(input.default);
     } else if (input.recordedDefault !== true) {
       throw new TypeError(`missing required workflow input '${input.name}'`);
     }
   }
-  const executionOptions = { ...options, inputs };
+  const executionOptions: ResolutionOptions = { ...options, inputs, listInputs };
   // A derivation reads an omitted recorded-default input as the value the recording used.
   const derivationInputs: Record<string, WorkflowJsonValue> = Object.create(null);
   Object.assign(derivationInputs, inputs);
@@ -667,7 +741,7 @@ export async function executeRecordedWorkflow(
     );
     if (recorded !== undefined) derivationInputs[input.name] = recorded;
   }
-  const derivationOptions = { ...options, inputs: derivationInputs };
+  const derivationOptions: ResolutionOptions = { ...options, inputs: derivationInputs, listInputs };
   const outcomes: RecordedStepOutcome[] = [];
   const results = new Map<string, WorkflowJsonValue>();
   const state = new Map<string, "completed" | "failed" | "skipped" | "omitted">();
@@ -788,10 +862,31 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
   };
   const properties: Record<string, unknown> = {};
   for (const input of workflow.inputs) {
+    const recordedDefault = input.recordedDefault ? "Omit to use the recorded value." : undefined;
+    const described = input.description ?? recordedDefault;
+    const list = input.list;
     const description =
-      input.description ?? (input.recordedDefault ? "Omit to use the recorded value." : undefined);
+      list === undefined
+        ? described
+        : [
+            "A list of words: each item is passed to the command as one separate argument.",
+            described,
+          ]
+            .filter((part) => part !== undefined)
+            .join(" ");
     properties[input.name] = {
       type: JSON_SCHEMA_TYPES[input.type] ?? "string",
+      ...(list === undefined
+        ? {}
+        : {
+            items: {
+              type: "string",
+              minLength: 1,
+              // An option-like item is refused unless the recording passed one here.
+              ...(list.optionItems === true ? {} : { pattern: "^[^-]" }),
+            },
+            minItems: list.minItems,
+          }),
       ...(description ? { description } : {}),
       ...(Object.hasOwn(input, "default") ? { default: input.default } : {}),
     };

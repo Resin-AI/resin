@@ -33,10 +33,10 @@ import {
   analyzeAgentArguments,
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
-  embeddedProgramIsProtected,
   embeddedPrograms,
   programTokenPath,
   programTokenValueAt,
+  projectedEmbeddedTokenIsBindable,
   readCodexCommandMetadata,
   recordedProgramLanguage,
   tokenizeProgram,
@@ -633,12 +633,9 @@ export class WorkflowCallRecorder {
         const origins: WorkflowCallCarrier["origins"] = {};
         const provenance: Record<string, WorkflowArgumentProvenance> = {};
         for (const [argument, value] of Object.entries(parameters)) {
-          origins[argument] = this.launderOrigin(
-            { type: "literal", value },
-            event.sessionId,
-            callId,
-            [argument],
-          );
+          origins[argument] = publicShellProfile(argument, value)
+            ? { type: "literal", value }
+            : this.launderOrigin({ type: "literal", value }, event.sessionId, callId, [argument]);
           provenance[argument] = { standing: "derived", rule: "single-observation" };
         }
         this.projectProgramSource(event, parameters, program, origins, true);
@@ -1264,12 +1261,9 @@ export class WorkflowCallRecorder {
     const provenance: Record<string, WorkflowArgumentProvenance> = {};
     // Ordinary native JSON is data, not the explicit composition interface.
     for (const [argument, value] of Object.entries(parameters)) {
-      origins[argument] = this.launderOrigin(
-        { type: "literal", value },
-        event.sessionId,
-        event.callId,
-        [argument],
-      );
+      origins[argument] = publicShellProfile(argument, value)
+        ? { type: "literal", value }
+        : this.launderOrigin({ type: "literal", value }, event.sessionId, event.callId, [argument]);
       provenance[argument] = { standing: "derived", rule: "single-observation" };
     }
     if (program !== undefined) {
@@ -1892,10 +1886,15 @@ export class WorkflowCallRecorder {
         replacements ??= new Map();
         replacements.set(index, decoded.redactedText);
       }
-      const source =
+      const redacted =
         replacements === undefined
           ? scrubbed.redactedText
           : applyProgramTokenValues(scrubbed.redactedText, sourceTokens, replacements, language);
+      // Only a POSIX shell program's words are rewritten relative to its working directory.
+      const source =
+        language === "shell"
+          ? workdirRelativeProjection(redacted, original, parameters.workdir)
+          : redacted;
       const projection = analyzeProgramSourceProjection(language, original, source);
       origins[program.argument] = {
         type: "program",
@@ -2112,9 +2111,77 @@ export class WorkflowCallRecorder {
 }
 
 /**
- * A redacted token can never become a binding hole, so it is not proposed as one either; nor is any
- * token of an embedded program that carries a secret: one a redacted top-level token touches, or
- * whose own text the redaction engine would change.
+ * The shell profiles the recorder itself stamps on a Codex command: fixed identifiers, never user
+ * data, so they stay public and the cloud can tell which POSIX shell a step ran in (and so split
+ * its `;`/newline batches). Any other value under that name stays private.
+ */
+const PUBLIC_CODEX_SHELL_PROFILES: Readonly<Record<string, true>> = {
+  "bash-login-v1": true,
+  "bash-login-native-v1": true,
+};
+
+function publicShellProfile(argument: string, value: unknown): boolean {
+  return (
+    argument === "resinCodexShellProfile" &&
+    typeof value === "string" &&
+    Object.hasOwn(PUBLIC_CODEX_SHELL_PROFILES, value)
+  );
+}
+
+/**
+ * The shell projection with every literal path inside the recorded working directory spelled
+ * relative to it, as a command run there would spell it: `/app/inputs/*.csv` run in `/app` and
+ * `inputs/*.csv` run in `/app` name the same files, and the cloud, which never learns the working
+ * directory, can only see that from the projection. Where the project lives must not make one job
+ * two. A rewritten token differs from the original, so it is protected like a redacted one; the
+ * executable original is untouched. Only a plain unquoted word no input could bind (a glob) is
+ * rewritten: protecting a bindable path would stop it from ever becoming an input, and one that
+ * differs only in spelling is offered as an input instead. An expansion, quote or escape is never
+ * rewritten; paths outside the working directory, the directory itself, and tokens the redactor
+ * already changed keep their text.
+ */
+function workdirRelativeProjection(
+  projection: string,
+  original: string,
+  workdir: WorkflowJsonValue | undefined,
+): string {
+  if (typeof workdir !== "string" || !isAbsolute(workdir)) return projection;
+  const root = resolve(workdir);
+  const tokens = tokenizeProgram("shell", projection);
+  const originalTokens = tokenizeProgram("shell", original);
+  let rewritten = projection;
+  // Right to left, so each splice leaves the earlier tokens' offsets valid.
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index]!;
+    if (
+      token.kind !== "word" ||
+      token.bindable ||
+      token.quote !== undefined ||
+      token.raw !== originalTokens[index]?.raw ||
+      !/^\/[^\s$`'"\\]*$/u.test(token.raw)
+    )
+      continue;
+    const inside = relative(root, token.raw);
+    if (
+      inside.length === 0 ||
+      inside.startsWith("..") ||
+      inside.startsWith("-") ||
+      isAbsolute(inside)
+    )
+      continue;
+    // `relative` drops a trailing slash that names a directory; the spelling keeps it.
+    const spelled = token.raw.endsWith("/") ? `${inside}/` : inside;
+    rewritten = rewritten.slice(0, token.start) + spelled + rewritten.slice(token.end);
+  }
+  return rewritten;
+}
+
+/**
+ * A redacted token can never become a binding hole, so it is not proposed as one either; nor is a
+ * token of an embedded program that carries or touches a secret. A program without a secret offers
+ * all its tokens. In a program with one, only the tokens its projection shows verbatim — outside
+ * every protected span, spelled identically in the original — are offered, each one whose own text
+ * the redaction engine leaves unchanged.
  */
 function unprotectedCandidates(
   event: NormalizedSessionEvent,
@@ -2133,34 +2200,36 @@ function unprotectedCandidates(
       ? projected.source.value
       : undefined;
   const original = program?.argument === undefined ? undefined : parameters[program.argument];
-  const safeEmbedded = new Map<number, boolean>();
-  const embeddedIsSafe = (anchor: number): boolean => {
-    const known = safeEmbedded.get(anchor);
+  const programs =
+    program !== undefined &&
+    recordedProgramLanguage(program) === "shell" &&
+    typeof original === "string"
+      ? embeddedPrograms(original)
+      : [];
+  const safeEmbedded = new Map<string, boolean>();
+  const embeddedIsSafe = (anchor: number, index: number): boolean => {
+    const key = `${anchor}.${index}`;
+    const known = safeEmbedded.get(key);
     if (known !== undefined) return known;
+    const embedded = programs.find((each) => each.anchor === anchor);
+    const token = embedded?.tokens[index];
     let safe = false;
-    if (
-      program !== undefined &&
-      recordedProgramLanguage(program) === "shell" &&
-      typeof original === "string"
-    ) {
-      const embedded = embeddedPrograms(original).find((each) => each.anchor === anchor);
-      const scrubbed =
-        embedded === undefined
-          ? undefined
-          : redactLocalWorkflowProgramSource(event, original.slice(embedded.start, embedded.end));
-      safe = scrubbed !== undefined && !scrubbed.changed;
-      if (safe && sanitized !== undefined && protectedTokens.length > 0) {
-        const projectedProgram = embeddedPrograms(sanitized).find((each) => each.anchor === anchor);
-        safe =
-          projectedProgram !== undefined &&
-          !embeddedProgramIsProtected(
-            projectedProgram,
-            tokenizeProgram("shell", sanitized),
-            protectedTokens,
-          );
-      }
+    if (embedded !== undefined && token !== undefined && typeof original === "string") {
+      const scrubbed = redactLocalWorkflowProgramSource(
+        event,
+        original.slice(embedded.start, embedded.end),
+      );
+      const projection = sanitized !== undefined && protectedTokens.length > 0;
+      const own = scrubbed?.changed ? redactLocalWorkflowProgramSource(event, token.raw) : scrubbed;
+      // A program with a secret needs its projection to establish which tokens are verbatim.
+      safe =
+        own !== undefined &&
+        !own.changed &&
+        (projection
+          ? projectedEmbeddedTokenIsBindable(original, sanitized, protectedTokens, anchor, index)
+          : !scrubbed!.changed);
     }
-    safeEmbedded.set(anchor, safe);
+    safeEmbedded.set(key, safe);
     return safe;
   };
   // A span keeps the rest of its token as recorded text, so a token that held a secret (or its
@@ -2184,7 +2253,9 @@ function unprotectedCandidates(
     const address = programTokenPath(candidate.path);
     if (address === undefined) return true;
     if (protectedTokens.includes(address.token)) return false;
-    if (address.embedded !== undefined && !embeddedIsSafe(address.token)) return false;
+    if (address.embedded !== undefined && !embeddedIsSafe(address.token, address.embedded)) {
+      return false;
+    }
     return (
       address.span === undefined ||
       spanTokenIsSafe(

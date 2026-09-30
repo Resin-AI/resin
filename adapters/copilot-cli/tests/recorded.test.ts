@@ -10,6 +10,8 @@ import { CopilotRecordDecoder } from "../src/decoder.js";
 const RECORDED = path.join(import.meta.dirname, "fixtures", "recorded", "1.0.88", "session-state");
 const BASIC = "4842b6bb-0529-4e1b-ba95-cb76fd815f52";
 const LIST_CHANGED = "96d45076-f850-4775-8447-25e3b47da524";
+const CHILD_AGENT_ID = "b943ffaa-31d5-49f2-8faa-d9a17af89f33";
+const CHILD = `${LIST_CHANGED}:agent:${CHILD_AGENT_ID}`;
 const ABORTED = "aabf7bd1-e888-432f-bca8-414de2b191d2";
 const KILLED = "56ef3192-776c-4782-b447-0a3701dc9dd8";
 
@@ -67,6 +69,7 @@ describe("Copilot CLI 1.0.88 recorded sessions", () => {
     expect(status).toEqual({
       [BASIC]: "completed",
       [LIST_CHANGED]: "completed",
+      [CHILD]: "completed",
       // Ctrl+C still shuts down cleanly; a killed process leaves the log without a shutdown.
       [ABORTED]: "completed",
       [KILLED]: "interrupted",
@@ -163,7 +166,7 @@ describe("Copilot CLI 1.0.88 recorded sessions", () => {
     expect(countResult?.output).toBe("5");
   });
 
-  it("attributes subagent work to the spawning task call", async () => {
+  it("attributes subagent work to the spawning task call, in the child's own session", async () => {
     const events = await decodeSession(LIST_CHANGED);
     const lifecycle = ofType(events, "subagent_lifecycle");
     expect(lifecycle.map((e) => [e.lifecycleType, e.role])).toEqual([
@@ -174,12 +177,51 @@ describe("Copilot CLI 1.0.88 recorded sessions", () => {
     expect(ofType(events, "tool_call").find((c) => c.toolName === "task")?.toolCallId).toBe(
       taskCallId,
     );
-    const childCalls = ofType(events, "tool_call").filter(
-      (c) => c.metadata?.parentToolCallId === taskCallId,
+    // The parent's capture holds the task call and its summary result, not the child's work.
+    expect(ofType(events, "tool_call").filter((c) => c.metadata?.parentToolCallId)).toEqual([]);
+    expect(ofType(events, "tool_result").find((r) => r.toolCallId === taskCallId)?.output).toMatch(
+      /^4 lines/,
     );
-    expect(childCalls.map((c) => c.toolName)).toEqual(["glob", "bash", "bash"]);
-    const prompt = ofType(events, "message").find((m) => m.metadata?.subagentPrompt === true);
+    expect(ofType(events, "message").some((m) => m.metadata?.subagentPrompt === true)).toBe(false);
+
+    const child = await decodeSession(CHILD);
+    expect(ofType(child, "tool_call").map((c) => c.toolName)).toEqual(["glob", "bash", "bash"]);
+    for (const call of ofType(child, "tool_call")) {
+      expect(call.metadata?.parentToolCallId).toBe(taskCallId);
+    }
+    expect(ofType(child, "tool_result")).toHaveLength(3);
+    const prompt = ofType(child, "message").find((m) => m.metadata?.subagentPrompt === true);
     expect(prompt?.role).toBe("system");
+    // Each tool call is captured once across the two sessions.
+    const parentIds = new Set(ofType(events, "tool_call").map((c) => c.callId));
+    for (const call of ofType(child, "tool_call")) expect(parentIds.has(call.callId)).toBe(false);
+    // The child's session ends at its own completion line, so its last turn settles; usage stays
+    // the parent's session.shutdown totals only, so the child's end carries none.
+    expect(ofType(child, "session_lifecycle").map((e) => e.lifecycleType)).toEqual(["end"]);
+    expect(child.at(-1)?.type).toBe("session_lifecycle");
+    expect(child.some((e) => e.providerUsage !== undefined)).toBe(false);
+  });
+
+  it("lists the subagent as an agent session linked to its user-kind parent", async () => {
+    const adapter = new CopilotHarnessAdapter({ home, env: {} });
+    const [workspace] = await adapter.listWorkspaces();
+    const sessions = await adapter.listSessions(workspace!);
+    const parent = sessions.find((s) => s.sessionId === LIST_CHANGED)!;
+    const child = sessions.find((s) => s.sessionId === CHILD)!;
+    expect(parent.metadata.sessionKind).toBe("user");
+    expect(parent.metadata.parentSessionId).toBeUndefined();
+    expect(child.metadata).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: LIST_CHANGED,
+      agentId: CHILD_AGENT_ID,
+      agentName: "count-calc-lines",
+      agentKind: "explore",
+      parentToolCallId: expect.stringMatching(/^call_/),
+    });
+    expect(child.transcriptPath).toBe(parent.transcriptPath);
+    expect(child.status).toBe("completed");
+    // The subagent never makes the parent ambiguous when resolving the running session.
+    expect(sessions.filter((s) => s.metadata.sessionKind === "agent")).toHaveLength(1);
   });
 
   it("decodes compaction and splits cumulative usage per process run", async () => {

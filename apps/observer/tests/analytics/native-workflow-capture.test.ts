@@ -2214,6 +2214,10 @@ describe("native Codex rollout workflow and computation capture", () => {
               : source.kind === "template" && source.template.type === "program"
                 ? source.template.sourceReference
                 : undefined;
+        // The shell profile is the recorder's own public identifier, recorded as a literal.
+        if (source.kind === "literal") return [argument.name, source.value];
+        if (source.kind === "template" && source.template.type === "literal")
+          return [argument.name, source.template.value];
         return [argument.name, reference && resolvePrivateReference(store, reference)];
       }),
     );

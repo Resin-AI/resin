@@ -30,14 +30,19 @@ import {
   type WorkflowValueTemplate,
   applyProgramTokenValues,
   bindProgramToken,
+  demonstratedProgramTokenList,
   demonstratedProgramTokenSpanValue,
   extractPrintedValue,
+  isOptionLikeListItem,
   parseExtractLocator,
+  programTokenListAt,
+  programTokenListShift,
   programTokenPath,
   programTokenValueAt,
   recordedProgramLanguage,
   segmentOriginal,
   tokenizeProgram,
+  workflowListInputProblem,
 } from "@resin/contracts";
 import { applyAcceptedBindings, sourceAsTemplate } from "./candidate-promotion.js";
 import { computeWorkflowProgramIdentities } from "./program-identity.js";
@@ -314,18 +319,30 @@ function bindCandidateLeaf(
     // A program read in no grammar (cmd.exe, an unproven shell dialect) is never bound.
     const language = recordedProgramLanguage(program);
     if (language === undefined) return false;
+    // A word list binds only a list input, and a list input binds only a word list.
+    const list = candidate.proposed.kind === "input" ? candidate.proposed.list : undefined;
+    if ((address.through === undefined) !== (list === undefined)) return false;
     const recorded = sourceAsTemplate(argument.source);
-    argument.source = {
-      kind: "template",
-      template: bindProgramToken(
+    let template: WorkflowValueTemplate;
+    try {
+      template = bindProgramToken(
         recorded,
         language,
         address.token,
         proposedTemplate(candidate),
         address.embedded,
         address.span,
-      ),
-    };
+        address.through,
+      );
+    } catch (error) {
+      // A second list, or a hole inside a list's run, is this candidate's conflict alone.
+      const listed =
+        address.through !== undefined ||
+        (recorded.type === "program" && recorded.holes.some((hole) => hole.through !== undefined));
+      if (listed) return false;
+      throw error;
+    }
+    argument.source = { kind: "template", template };
     return true;
   }
   if (path.length === 0) {
@@ -425,7 +442,13 @@ function bindEveryCandidate(
     }
     if (proposal.kind === "input" && proposal.type !== "unknown") {
       const declared = bound.inputs.some((input) => input.name === proposal.name);
-      if (!declared) bound.inputs.push({ name: proposal.name, type: proposal.type });
+      if (!declared) {
+        bound.inputs.push({
+          name: proposal.name,
+          type: proposal.type,
+          ...(proposal.list === undefined ? {} : { list: proposal.list }),
+        });
+      }
     }
   }
   return { plan: pruneUnusedDerivations(bound), unaddressable };
@@ -641,7 +664,9 @@ async function evaluateCandidate(
 
 /**
  * The value a replay must bind for a token candidate: the token's own value, read out of the
- * whole-argument value the demonstration used, in the language the recorded step names.
+ * whole-argument value the demonstration used, in the language the recorded step names. A word
+ * list candidate reads the words the demonstration ran in place of the recorded run, however many;
+ * a token after a word list is read where the list's change in length moved it.
  *
  * Undefined when the record cannot say where that token is — the plan has no such step, the step's
  * record names no program for that argument, the demonstration's value is not text, or the index is
@@ -654,31 +679,101 @@ async function demonstratedTokenValue(
   supplied: WorkflowJsonValue,
   resolve: (reference: string) => Promise<WorkflowJsonValue>,
   candidates: readonly WorkflowBindingCandidate[],
-): Promise<ProgramTokenValue | undefined> {
+  label: DemonstrationLabel,
+): Promise<WorkflowJsonValue | undefined> {
   const address = programTokenPath(candidate.path);
   if (address === undefined) return undefined;
   const step = plan.steps.find((entry) => entry.id === candidate.stepId);
   const program = step?.callable.program;
-  if (program === undefined || program.argument !== candidate.argument) return undefined;
+  if (step === undefined || program === undefined || program.argument !== candidate.argument) {
+    return undefined;
+  }
   if (typeof supplied !== "string") return undefined;
   const language = recordedProgramLanguage(program);
   if (language === undefined) return undefined;
-  if (address.span === undefined) return programTokenValueAt(language, supplied, address);
+  const recordedText = async (): Promise<string | undefined> => {
+    const argument = step.arguments.find((entry) => entry.name === candidate.argument);
+    const recorded =
+      argument === undefined
+        ? undefined
+        : segmentOriginal(step, argument.name, await recordedProgramText(argument.source, resolve));
+    return typeof recorded === "string" ? recorded : undefined;
+  };
+  if (address.through !== undefined) {
+    const list = candidate.proposed.kind === "input" ? candidate.proposed.list : undefined;
+    if (language !== "shell" || list === undefined) return undefined;
+    const run = { token: address.token, through: address.through };
+    // The baseline is the recording itself: its words are the recorded run.
+    if (label === "baseline") return programTokenListAt(supplied, run);
+    const recorded = await recordedText();
+    if (recorded === undefined) return undefined;
+    const optionItems =
+      list.optionItems === true ||
+      (programTokenListAt(recorded, run)?.some(isOptionLikeListItem) ?? false);
+    return demonstratedProgramTokenList(recorded, supplied, run, optionItems);
+  }
+  const list = language === "shell" ? wordListRun(step, candidate.argument, candidates) : undefined;
+  if (address.span === undefined && list === undefined) {
+    return programTokenValueAt(language, supplied, address);
+  }
   // A span is read against the recorded token: the demonstration decides it only when it keeps
-  // the recorded text around the span.
-  const argument = step?.arguments.find((entry) => entry.name === candidate.argument);
-  const recorded =
-    argument === undefined
-      ? undefined
-      : segmentOriginal(step!, argument.name, await recordedProgramText(argument.source, resolve));
-  if (typeof recorded !== "string") return undefined;
+  // the recorded text around the span. A token after a list is found against the recording too.
+  const recorded = await recordedText();
+  if (recorded === undefined) return undefined;
+  const shift = wordListShift(recorded, supplied, address.token, list);
+  if (shift === undefined) return undefined;
+  if (address.span === undefined) {
+    const at = { ...address, token: address.token + shift };
+    return programTokenValueAt(language, supplied, at);
+  }
   return demonstratedProgramTokenSpanValue(
     language,
     recorded,
     supplied,
     address,
     tokenSpanSiblings(step, candidate.argument, address, candidates),
+    shift,
   );
+}
+
+/** The run of words a word list covers in a program argument: its list hole, else a proposal. */
+function wordListRun(
+  step: WorkflowStep,
+  argument: string,
+  candidates: readonly WorkflowBindingCandidate[],
+): { token: number; through: number } | undefined {
+  const source = step.arguments.find((entry) => entry.name === argument)?.source;
+  if (source?.kind === "template" && source.template.type === "program") {
+    for (const hole of source.template.holes) {
+      if (hole.through !== undefined) return { token: hole.token, through: hole.through };
+    }
+  }
+  for (const candidate of candidates) {
+    if (candidate.stepId !== step.id || candidate.argument !== argument) continue;
+    const address = programTokenPath(candidate.path);
+    if (address?.through !== undefined) return { token: address.token, through: address.through };
+  }
+  return undefined;
+}
+
+/**
+ * How far recorded top-level token `token` moved in a demonstration of the same program: not at
+ * all before a word list, by the list's change in length after it. Undefined inside the list's run,
+ * or when the demonstration does not keep the recorded tokens around the run.
+ */
+function wordListShift(
+  recorded: string,
+  demonstrated: string,
+  token: number,
+  list: { token: number; through: number } | undefined,
+): number | undefined {
+  if (list === undefined || token < list.token) return 0;
+  if (token <= list.through) return undefined;
+  // Only a demonstration aligned around the run makes the token-count difference a position.
+  if (demonstratedProgramTokenList(recorded, demonstrated, list, true) === undefined) {
+    return undefined;
+  }
+  return programTokenListShift(recorded, demonstrated);
 }
 
 /**
@@ -896,13 +991,16 @@ export async function demonstrationEnvironment(params: {
             supplied,
             resolveOnce,
             params.candidates,
+            label,
           )
         : demonstratedValueAtPath(supplied, candidate.path);
     const name = candidate.proposed.name;
+    const list = candidate.proposed.list;
     if (
       value === undefined ||
       candidate.proposed.type === "unknown" ||
       !matchesDemonstratedType(value, candidate.proposed.type) ||
+      (list !== undefined && workflowListInputProblem(name, list, value) !== undefined) ||
       conflictingInputs.has(name)
     ) {
       continue;
@@ -1126,7 +1224,11 @@ async function demonstratedProgramText(
   return typeof recorded === "string" ? recorded : undefined;
 }
 
-/** The value a token address reads in one demonstration's program text. */
+/**
+ * The value a token address reads in one demonstration's program text, and the address it was read
+ * at there (a token after a word list moves with the list's length). A word list address reads
+ * nothing: a derivation computes one value, never a list.
+ */
 async function demonstratedTokenAt(
   plan: RecordedWorkflow,
   context: DemonstrationContext,
@@ -1134,11 +1236,19 @@ async function demonstratedTokenAt(
   resolve: (reference: string) => Promise<WorkflowJsonValue>,
   /** Candidates whose spans on the same token are read jointly with this one. */
   siblingCandidates: readonly WorkflowBindingCandidate[] = [],
-): Promise<{ text: string; value: ProgramTokenValue } | undefined> {
+  /** Every candidate, where a proposed word list may sit before this token. */
+  candidates: readonly WorkflowBindingCandidate[] = siblingCandidates,
+): Promise<{ text: string; value: ProgramTokenValue; address: ProgramTokenAddress } | undefined> {
   const address = programTokenPath(target.path);
   const step = plan.steps.find((entry) => entry.id === target.stepId);
   const program = step?.callable.program;
-  if (address === undefined || program === undefined || program.argument !== target.argument) {
+  if (
+    step === undefined ||
+    address === undefined ||
+    address.through !== undefined ||
+    program === undefined ||
+    program.argument !== target.argument
+  ) {
     return undefined;
   }
   const language = recordedProgramLanguage(program);
@@ -1151,25 +1261,35 @@ async function demonstratedTokenAt(
     resolve,
   );
   if (text === undefined) return undefined;
-  let value: ProgramTokenValue | undefined;
-  if (address.span === undefined || context.label === "baseline") {
-    value = programTokenValueAt(language, text, address);
-  } else {
-    const argument = step?.arguments.find((entry) => entry.name === target.argument);
-    const recorded =
-      argument === undefined ? undefined : await recordedProgramText(argument.source, resolve);
-    value =
-      typeof recorded === "string"
-        ? demonstratedProgramTokenSpanValue(
-            language,
-            recorded,
-            text,
-            address,
-            tokenSpanSiblings(step, target.argument, address, siblingCandidates),
-          )
-        : undefined;
-  }
-  return value === undefined ? undefined : { text, value };
+  // The baseline runs the recorded text itself, so nothing in it moved.
+  const list =
+    context.label === "baseline" || language !== "shell"
+      ? undefined
+      : wordListRun(step, target.argument, candidates);
+  const readsRecorded =
+    list !== undefined || (address.span !== undefined && context.label !== "baseline");
+  const argument = step.arguments.find((entry) => entry.name === target.argument);
+  const recordedValue =
+    readsRecorded && argument !== undefined
+      ? await recordedProgramText(argument.source, resolve)
+      : undefined;
+  const recorded = typeof recordedValue === "string" ? recordedValue : undefined;
+  if (readsRecorded && recorded === undefined) return undefined;
+  const shift = recorded === undefined ? 0 : wordListShift(recorded, text, address.token, list);
+  if (shift === undefined) return undefined;
+  const at = { ...address, token: address.token + shift };
+  const value =
+    address.span === undefined || context.label === "baseline"
+      ? programTokenValueAt(language, text, at)
+      : demonstratedProgramTokenSpanValue(
+          language,
+          recorded!,
+          text,
+          address,
+          tokenSpanSiblings(step, target.argument, address, siblingCandidates),
+          shift,
+        );
+  return value === undefined ? undefined : { text, value, address: at };
 }
 
 /**
@@ -1205,7 +1325,8 @@ async function withDerivationInputs(
     path: WorkflowValuePath;
   }> = [];
   // Reading a position the plan knows never promotes it: plan candidates still undecided count too.
-  for (const candidate of [...candidates, ...(plan.candidates ?? [])]) {
+  const known = [...candidates, ...(plan.candidates ?? [])];
+  for (const candidate of known) {
     if (candidate.proposed.kind === "input" && candidate.path[0] === "tokens") {
       positions.push({
         name: candidate.proposed.name,
@@ -1222,8 +1343,15 @@ async function withDerivationInputs(
         continue;
       }
       for (const hole of argument.source.template.holes) {
-        // Span holes bind part of a token; the caller's whole value is not readable from them.
-        if (hole.binding.type !== "input" || hole.span !== undefined) continue;
+        // Span holes bind part of a token, and a word list many; the caller's whole value is not
+        // one token there, and a derivation never reads a list.
+        if (
+          hole.binding.type !== "input" ||
+          hole.span !== undefined ||
+          hole.through !== undefined
+        ) {
+          continue;
+        }
         positions.push({
           name: hole.binding.name,
           stepId: step.id,
@@ -1240,7 +1368,7 @@ async function withDerivationInputs(
   const conflicting = new Set<string>();
   for (const position of positions) {
     if (!wanted.has(position.name)) continue;
-    const read = await demonstratedTokenAt(plan, context, position, resolve);
+    const read = await demonstratedTokenAt(plan, context, position, resolve, [], known);
     const declared = plan.inputs.find((input) => input.name === position.name);
     if (
       read === undefined ||
@@ -1405,16 +1533,36 @@ async function evaluateDerivationCandidates(
       // Recorded values the bindings claim to compute, in every demonstration.
       const expected = new Map<
         WorkflowBindingCandidate,
-        Array<{ context: DemonstrationContext; text: string; value: ProgramTokenValue }>
+        Array<{
+          context: DemonstrationContext;
+          text: string;
+          value: ProgramTokenValue;
+          address: ProgramTokenAddress;
+        }>
       >();
       for (const candidate of group) {
+        if (programTokenPath(candidate.path)?.through !== undefined) {
+          outcomes.set(
+            candidate,
+            refused(candidate, "a derivation computes one value, never a word list"),
+          );
+          continue;
+        }
         const reads: Array<{
           context: DemonstrationContext;
           text: string;
           value: ProgramTokenValue;
+          address: ProgramTokenAddress;
         }> = [];
         for (const context of contexts) {
-          const read = await demonstratedTokenAt(plan, context, candidate, resolve, group);
+          const read = await demonstratedTokenAt(
+            plan,
+            context,
+            candidate,
+            resolve,
+            group,
+            candidates,
+          );
           if (read === undefined) break;
           reads.push({ context, ...read });
         }
@@ -1442,7 +1590,7 @@ async function evaluateDerivationCandidates(
         continue;
       }
       for (const candidate of group) {
-        if (!expected.has(candidate)) {
+        if (!expected.has(candidate) && !outcomes.has(candidate)) {
           outcomes.set(
             candidate,
             refused(
@@ -1498,15 +1646,15 @@ async function evaluateDerivationCandidates(
         }
         for (const candidate of pending) {
           const read = expected.get(candidate)!.find((entry) => entry.context === context)!;
-          const address = programTokenPath(candidate.path)!;
           const program = plan.steps.find((step) => step.id === candidate.stepId)!.callable
             .program!;
           if (candidate.proposed.kind !== "result") continue;
           const derived = demonstratedValueAtPath(outcome.result, candidate.proposed.path);
           const language = recordedProgramLanguage(program);
+          // Checked where the demonstration ran the token, which a word list may have moved.
           if (
             language === undefined ||
-            !derivedValueReproduces(language, read.text, address, derived, read.value)
+            !derivedValueReproduces(language, read.text, read.address, derived, read.value)
           ) {
             outcomes.set(
               candidate,

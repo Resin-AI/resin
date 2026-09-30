@@ -958,6 +958,54 @@ function normalizeReleaseTreeModes(
   return executableRelativePaths;
 }
 
+/**
+ * Compares the release-identity portion of `version.json.provenance` on a reused (staged or
+ * installed) tree against freshly resolved provenance.
+ *
+ * Compared (immutable per release: fixed by the signed manifest, whose digest pins them):
+ * version, manifestSha256, releaseAssetSha256, releaseAssetSizeBytes, repository, commitSha,
+ * the manifest's signing key ids, and the Deno runtime version/sha256/sizeBytes.
+ *
+ * Deliberately NOT compared: `channelSha256`/`channelUrl` (the channel index is mutable and is
+ * republished about hourly, so a deferred staged release would otherwise never verify again) and
+ * the manifest/asset/Deno download URLs (locations, not identity: the payload bytes are already
+ * verified by digest and compared byte-for-byte against the installed tree).
+ */
+function assertStableProvenanceMatches(actual: unknown, expected: ReleaseProvenance): void {
+  if (!actual || typeof actual !== "object" || Array.isArray(actual)) {
+    throw new Error(
+      `Integrity violation: version.json provenance mismatch against expected release provenance.`,
+    );
+  }
+  const target = actual as Partial<ReleaseProvenance>;
+  const digest = (value: unknown): unknown =>
+    typeof value === "string" ? value.toLowerCase() : value;
+  const sortedKeys = (value: unknown): unknown =>
+    Array.isArray(value) ? [...value].map(String).sort() : value;
+  const stableView = (prov: Partial<ReleaseProvenance>): string =>
+    JSON.stringify({
+      version: prov.version ?? null,
+      manifestSha256: digest(prov.manifestSha256) ?? null,
+      releaseAssetSha256: digest(prov.releaseAssetSha256) ?? null,
+      releaseAssetSizeBytes: prov.releaseAssetSizeBytes ?? null,
+      repository: prov.repository ?? null,
+      commitSha: prov.commitSha ?? null,
+      signingKeyIds: sortedKeys(prov.signingKeyIds) ?? null,
+      deno: prov.deno
+        ? {
+            version: prov.deno.version ?? null,
+            sha256: digest(prov.deno.sha256) ?? null,
+            sizeBytes: prov.deno.sizeBytes ?? null,
+          }
+        : null,
+    });
+  if (stableView(target) !== stableView(expected)) {
+    throw new Error(
+      `Integrity violation: version.json provenance mismatch against expected release provenance.`,
+    );
+  }
+}
+
 function verifyInstalledVersionTree(
   targetDir: string,
   stagingDir: string,
@@ -1094,13 +1142,7 @@ function verifyInstalledVersionTree(
       }
 
       if (expectedProvenance) {
-        const targetProv = JSON.stringify(parsedTarget.provenance ?? null);
-        const expProv = JSON.stringify(expectedProvenance);
-        if (targetProv !== expProv) {
-          throw new Error(
-            `Integrity violation: version.json provenance mismatch against expected release provenance.`,
-          );
-        }
+        assertStableProvenanceMatches(parsedTarget.provenance, expectedProvenance);
       }
 
       if (expectedDenoRuntime) {

@@ -12,7 +12,7 @@ export const OpportunityTrackingConfigSchema = z
     minDispatchConfidence: z.number().min(0).max(1).default(0.5),
     /** Rolling per-session episode window bound. */
     maxEpisodesPerSession: z.number().int().positive().default(64),
-    /** Pattern outbox upload cadence and hash-cache reconciliation interval, in milliseconds. */
+    /** Hash-cache reconciliation interval, in milliseconds. */
     uploadIntervalMs: z.number().int().positive().default(300_000),
   })
   .strict();

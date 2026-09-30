@@ -618,14 +618,20 @@ export interface ClaudeSubagentTranscript {
   updatedAt: string;
   /** Written within the last five minutes: attach as active. */
   recent: boolean;
-  /** Identity the transcript and its `.meta.json` record: cwd, agent type, spawning tool call. */
+  /** Identity the transcript and its `.meta.json` record: cwd, agent type/name/kind, description, spawning tool call. */
   head: Record<string, string>;
+  /** Nesting level from the `.meta.json` (1 = spawned by the root session). */
+  spawnDepth?: number;
+  /** For a subagent spawned by another subagent: that subagent's id (its immediate parent). */
+  parentAgentId?: string;
 }
 
 const SUBAGENT_FILE = /^agent-([A-Za-z0-9_-]+)\.jsonl$/;
 const subagentMetaSchema = z.object({
   agentType: z.string().optional(),
+  description: z.string().optional(),
   toolUseId: z.string().optional(),
+  spawnDepth: z.number().optional(),
 });
 
 /**
@@ -692,14 +698,24 @@ export async function listClaudeSubagentTranscripts(
       // A first line still being written is read again on the next listing.
     }
     if (head === undefined) continue;
+    let spawnDepth: number | undefined;
     const metaPath = candidate.transcriptPath.replace(/\.jsonl$/, ".meta.json");
     try {
       const meta = subagentMetaSchema.safeParse(
         JSON.parse((await fsBridge.readFile(metaPath)) ?? ""),
       );
       if (meta.success) {
-        if (meta.data.agentType) head.agentType = meta.data.agentType;
+        if (meta.data.agentType) {
+          head.agentType = meta.data.agentType;
+          head.agentKind = meta.data.agentType;
+          head.agentName = meta.data.agentType;
+        }
+        if (meta.data.description) {
+          head.agentDescription = meta.data.description;
+          head.agentName ??= meta.data.description;
+        }
         if (meta.data.toolUseId) head.parentToolCallId = meta.data.toolUseId;
+        spawnDepth = meta.data.spawnDepth;
       }
     } catch {
       // The meta file is optional.
@@ -717,7 +733,30 @@ export async function listClaudeSubagentTranscripts(
         continue;
       }
     }
-    transcripts.push({ ...candidate, createdAt, updatedAt, recent, head });
+    transcripts.push({
+      ...candidate,
+      createdAt,
+      updatedAt,
+      recent,
+      head,
+      ...(spawnDepth !== undefined ? { spawnDepth } : {}),
+    });
+  }
+  // A subagent spawned by another subagent lives beside its siblings under the root session;
+  // its own `spawnDepth` and spawning tool call id name the subagent transcript that made it.
+  for (const transcript of transcripts) {
+    const toolUseId = transcript.head.parentToolCallId;
+    if (!toolUseId || (transcript.spawnDepth ?? 1) <= 1) continue;
+    for (const sibling of transcripts) {
+      if (sibling === transcript || sibling.parentSessionId !== transcript.parentSessionId) {
+        continue;
+      }
+      const content = await fsBridge.readFile(sibling.transcriptPath);
+      if (content?.includes(`"id":"${toolUseId}"`)) {
+        transcript.parentAgentId = sibling.agentId;
+        break;
+      }
+    }
   }
   return transcripts;
 }

@@ -1,5 +1,6 @@
 import {
   type NormalizedSessionEvent,
+  type ProvenPatternDto,
   ProvenPatternDtoSchema,
   hashCanonicalContent,
 } from "@resin/contracts";
@@ -119,10 +120,16 @@ function buildHarnessSession(sessionId: string): HarnessSession {
 describe("SessionOpportunityTracker", () => {
   let store: LocalStateStore;
   let tracker: SessionOpportunityTracker;
+  /** Every pattern any tracker in the current test proved: the tracker's observable dispatch. */
+  let proven: ProvenPatternDto[];
 
   beforeEach(async () => {
     store = await createInMemoryStateStore();
-    tracker = new SessionOpportunityTracker({ opportunities: store.opportunities });
+    proven = [];
+    tracker = new SessionOpportunityTracker({
+      opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
+    });
   });
 
   afterEach(() => {
@@ -155,14 +162,13 @@ describe("SessionOpportunityTracker", () => {
     await feedSession(tracker, "sess_opp_alpha", baseMs);
 
     // The trigger, not the derived dollar estimate, decides dispatch.
-    const pending = await store.opportunities.listPendingPatterns();
-    expect(pending).toHaveLength(1);
-    const payload = ProvenPatternDtoSchema.parse(pending[0]?.payload);
+    expect(proven).toHaveLength(1);
+    const payload = ProvenPatternDtoSchema.parse(proven[0]);
     // Episode attribution comes from the session, not from an event field.
     expect(payload.workspaceId).toBe(WORKSPACE_ID);
     expect(payload.localVerdicts.coverage.status).toBe("net_new");
     expect(payload.accountId).toBe(ACCOUNT_ID);
-    expect(payload.idempotencyKey).toBe(pending[0]?.idempotencyKey);
+    expect(payload.idempotencyKey).toMatch(/^opp_ik_/);
     expect(payload.localVerdicts.trigger.triggered).toBe(true);
     expect(payload.localVerdicts.trigger.triggerType).toBe("normal_frequency");
     expect(payload.localVerdicts.suppression.suppressed).toBe(false);
@@ -173,7 +179,7 @@ describe("SessionOpportunityTracker", () => {
 
     // The same structural pattern in a later session is deduplicated, not re-dispatched.
     await feedSession(tracker, "sess_opp_bravo", baseMs + 60_000);
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
+    expect(proven).toHaveLength(1);
     expect(tracker.getDiagnostics().patternsProven).toBe(1);
   });
 
@@ -195,9 +201,8 @@ describe("SessionOpportunityTracker", () => {
         { isTerminal: true, isAttributed: true },
       );
 
-      const pending = await store.opportunities.listPendingPatterns();
-      expect(pending).toHaveLength(1);
-      const payload = ProvenPatternDtoSchema.parse(pending[0]?.payload);
+      expect(proven).toHaveLength(1);
+      const payload = ProvenPatternDtoSchema.parse(proven[0]);
       expect(payload.workspaceId).toBe(workspaceId);
       expect(payload.cluster.clusterId.length).toBeLessThanOrEqual(128);
       expect(tracker.getDiagnostics().patternsProven).toBe(1);
@@ -205,14 +210,15 @@ describe("SessionOpportunityTracker", () => {
   );
 
   it("keeps dispatching when the predicted savings estimate is unknown", async () => {
-    const unknownSavings = new SessionOpportunityTracker({ opportunities: store.opportunities });
+    const unknownSavings = new SessionOpportunityTracker({
+      opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
+    });
     const baseMs = Date.parse("2026-01-05T11:00:00.000Z");
     await feedSession(unknownSavings, "sess_opp_zero_a", baseMs, false);
 
-    const pending = await store.opportunities.listPendingPatterns();
-    expect(pending).toHaveLength(1);
-    const estimate = ProvenPatternDtoSchema.parse(pending[0]?.payload).localVerdicts
-      .estimatedSavedWork;
+    expect(proven).toHaveLength(1);
+    const estimate = ProvenPatternDtoSchema.parse(proven[0]).localVerdicts.estimatedSavedWork;
     // Unknown cost stays unknown: it is never invented, and it never withholds dispatch.
     expect(estimate.estimatedCostSavedUsd).toBeUndefined();
     expect(estimate.savedCostUsd).toBeUndefined();
@@ -225,6 +231,7 @@ describe("SessionOpportunityTracker", () => {
   it("withholds a pattern whose evidence maturity is below the dispatch confidence floor", async () => {
     const floored = new SessionOpportunityTracker({
       opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
       minDispatchConfidence: 1,
     });
     const baseMs = Date.parse("2026-01-05T11:30:00.000Z");
@@ -237,22 +244,25 @@ describe("SessionOpportunityTracker", () => {
     await feedSession(floored, "sess_opp_floor_b", baseMs + 60_000);
 
     expect(floored.getDiagnostics().patternsProven).toBe(1);
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
+    expect(proven).toHaveLength(1);
     floored.reset();
   });
 
   it("does not re-dispatch a pattern already recorded in the hash cache", async () => {
     const baseMs = Date.parse("2026-01-05T12:00:00.000Z");
     await feedSession(tracker, "sess_opp_cached_a", baseMs);
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
+    expect(proven).toHaveLength(1);
     tracker.reset();
 
     // A fresh tracker has no in-memory dispatch memory: only the persisted hash cache can block.
-    const restarted = new SessionOpportunityTracker({ opportunities: store.opportunities });
+    const restarted = new SessionOpportunityTracker({
+      opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
+    });
     await feedSession(restarted, "sess_opp_cached_c", baseMs + 120_000);
     await feedSession(restarted, "sess_opp_cached_d", baseMs + 180_000);
 
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(1);
+    expect(proven).toHaveLength(1);
     expect(restarted.getDiagnostics().skippedByHashCache).toBeGreaterThan(0);
     expect(restarted.getDiagnostics().patternsProven).toBe(0);
     restarted.reset();
@@ -267,6 +277,7 @@ describe("SessionOpportunityTracker", () => {
   it("skips detection while the evolution kill switch is paused", async () => {
     const gated = new SessionOpportunityTracker({
       opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
       killSwitches: {
         canEvolve: () => ({ allowed: false, reason: "paused" }),
       } as never,
@@ -275,7 +286,7 @@ describe("SessionOpportunityTracker", () => {
     await feedSession(gated, "sess_opp_paused_b", Date.parse("2026-01-05T14:01:00.000Z"));
 
     expect(gated.getDiagnostics().killSwitchBlocked).toBeGreaterThan(0);
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(0);
+    expect(proven).toHaveLength(0);
     expect(gated.getTrackedSessionIds()).toHaveLength(0);
     gated.reset();
   });
@@ -283,6 +294,7 @@ describe("SessionOpportunityTracker", () => {
   it("bounds the workspace episode window", async () => {
     const bounded = new SessionOpportunityTracker({
       opportunities: store.opportunities,
+      onPatternProven: (pattern) => proven.push(pattern),
       maxEpisodesPerSession: 1,
       maxEpisodesPerWorkspace: 2,
     });

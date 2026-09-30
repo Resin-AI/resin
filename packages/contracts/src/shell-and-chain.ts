@@ -34,21 +34,29 @@
  * segments re-joined with the recorded separators are the source byte for byte. The splitter carries
  * a version: a device whose splitter version differs from the one a plan was split with admits
  * none of its segments.
+ *
+ * From version 4 a top-level `;` or line break also separates segments: a batch the agent wrote as
+ * one command per line (`tool a` ⏎ `tool b`) splits into one segment per line. Such a separator does
+ * not abort the rest on a failure, so a recording's exit status is the last command's alone; a
+ * segment answers with the chain's recorded output like any other, and a replay that fails a
+ * segment misses it. Blank lines between commands and a trailing line break are separators too.
+ * A line break inside quotes, or anywhere under an older version, never splits.
  */
 
 import type { WorkflowRecordedProgram, WorkflowStep } from "./recorded-workflow.js";
 import { type ShellDialect, isPosixShellDialect, isShellDialect } from "./shell-dialects.js";
 
 /** The version of these splitting rules; bump it whenever a program would split differently. */
-export const SHELL_AND_CHAIN_SPLITTER_VERSION = 3 as const;
+export const SHELL_AND_CHAIN_SPLITTER_VERSION = 4 as const;
 
 /**
  * Every splitter version this device still re-splits under: version 1 is the grammar without
- * redirections, version 2 the grammar without a `~` inside a word, so plans and tools split by an
- * older device keep verifying and running.
+ * redirections, version 2 the grammar without a `~` inside a word, version 3 the grammar without
+ * `;` or line-break separators, so plans and tools split by an older device keep verifying and
+ * running.
  */
-export type ShellAndChainSplitterVersion = 1 | 2 | typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
-const SPLITTER_VERSIONS: ReadonlySet<number> = new Set([1, 2, SHELL_AND_CHAIN_SPLITTER_VERSION]);
+export type ShellAndChainSplitterVersion = 1 | 2 | 3 | typeof SHELL_AND_CHAIN_SPLITTER_VERSION;
+const SPLITTER_VERSIONS: ReadonlySet<number> = new Set([1, 2, 3, SHELL_AND_CHAIN_SPLITTER_VERSION]);
 
 /**
  * A `~` no shell expands: inside a word, after neither `=` nor `:` (`HEAD~2..HEAD`). Tilde
@@ -376,8 +384,9 @@ function runsExternalCommand(
 }
 
 /**
- * The top-level `&&` segments of a recorded program, or `undefined` when `shell` is not a POSIX
- * shell, or the program is not a chain of two or more external commands in the grammar above.
+ * The top-level segments of a recorded program — at `&&`, and from version 4 also at `;` and line
+ * breaks — or `undefined` when `shell` is not a POSIX shell, or the program is not a chain of two
+ * or more external commands in the grammar above.
  */
 export function splitShellAndChain(
   shell: string,
@@ -389,9 +398,16 @@ export function splitShellAndChain(
   const cuts: Array<[number, number]> = [];
   let quote: "'" | '"' | undefined;
   let wordStart = true;
+  const lines = version >= 4;
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index]!;
     const code = char.charCodeAt(0);
+    // From version 4 a top-level `;` or line break ends a command as `&&` does.
+    if (lines && quote === undefined && (char === "\n" || char === ";")) {
+      cuts.push([index, index + 1]);
+      wordStart = true;
+      continue;
+    }
     if (char !== "\t" && (code < 0x20 || code > 0x7e)) return undefined;
     if (quote === "'") {
       if (char === "'") quote = undefined;
@@ -444,20 +460,33 @@ export function splitShellAndChain(
     let end = cutStart;
     while (start < end && isBlank(source[start]!)) start += 1;
     while (end > start && isBlank(source[end - 1]!)) end -= 1;
+    from = cutEnd;
+    // A blank line, the blanks after `&& ` before a line break, or a trailing line break: the
+    // separator check below decides whether the separators around it are ones a shell reads.
+    if (start === end && lines && segments.length > 0) continue;
     if (start === end) return undefined;
     const text = source.slice(start, end);
     if (!runsExternalCommand(text, version, zsh)) return undefined;
     segments.push({ start, end, text });
-    from = cutEnd;
   }
+  if (segments.length < 2) return undefined;
   // Defence in depth: the segments and the recorded separators between them are the source.
   let rejoined = source.slice(0, segments[0]!.start);
   for (const [index, segment] of segments.entries()) {
     rejoined += segment.text;
     const next = segments[index + 1];
     const separator = source.slice(segment.end, next?.start ?? source.length);
-    if (next !== undefined && !/^[ \t]*&&[ \t]*$/.test(separator)) return undefined;
-    if (next === undefined && !/^[ \t]*$/.test(separator)) return undefined;
+    // One `&&` or `;` at most, then any line breaks; or line breaks alone. A trailing `;` or line
+    // break ends the program; a trailing `&&` never does.
+    const between = lines ? /^[ \t]*(?:(?:&&|;)[ \t]*)?(?:\n[ \t]*)*$/ : /^[ \t]*&&[ \t]*$/;
+    if (next !== undefined && (!between.test(separator) || /^[ \t]*$/.test(separator)))
+      return undefined;
+    if (
+      next === undefined &&
+      !/^[ \t]*$/.test(separator) &&
+      !(lines && /^[ \t]*(?:;[ \t]*)?(?:\n[ \t]*)*$/.test(separator))
+    )
+      return undefined;
     rejoined += separator;
   }
   if (!/^[ \t]*$/.test(source.slice(0, segments[0]!.start)) || rejoined !== source)

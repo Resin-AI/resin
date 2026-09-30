@@ -170,6 +170,14 @@ const ProposedBindingSchema = z.union([
     name: NonEmptyString,
     type: z.enum(["string", "number", "boolean", "object", "array", "unknown"]),
     recordedDefault: z.literal(true).optional(),
+    // Part of the candidate's identity: a decision that dropped it would report on a candidate the
+    // plan does not carry, and the cloud would refuse it on every pass.
+    list: z
+      .object({
+        minItems: z.union([z.literal(0), z.literal(1)]),
+        optionItems: z.literal(true).optional(),
+      })
+      .optional(),
   }),
   z.object({
     kind: z.literal("extract"),

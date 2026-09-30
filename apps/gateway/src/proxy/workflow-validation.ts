@@ -189,6 +189,7 @@ async function localDemonstration(
   }> = [];
   const incoherent = new Set<string>();
   const named = new Set<string>();
+  const reusesBaseline = new Set<string>();
   // A chain's segments name its one call in turn, each a later segment of it than the one before.
   const segmentNamed = new Map<string, SegmentAddress>();
   // Each named chain's call, the segments of it the plan's steps ran, and those steps.
@@ -214,12 +215,10 @@ async function localDemonstration(
         earlier.count === address.count &&
         earlier.version === address.version &&
         earlier.index < address.index;
-      if (
-        (named.has(callId) && !continuesChain) ||
-        (label === "held-out" && baselineIds.has(callId))
-      ) {
-        incoherent.add(step.id);
-      }
+      if (named.has(callId) && !continuesChain) incoherent.add(step.id);
+      // The held-out is another run; only setup it shares with the plan (checked below) may be
+      // the plan's own call.
+      if (label === "held-out" && baselineIds.has(callId)) reusesBaseline.add(step.id);
       named.add(callId);
       if (address !== undefined && address !== null) segmentNamed.set(callId, address);
       const call = await localCalls.lookup(callId);
@@ -260,9 +259,22 @@ async function localDemonstration(
     if (own !== undefined) ownCalls.set(step.id, own);
     if (own?.workspaceRoot !== undefined) planRoots.set(step.id, own.workspaceRoot);
   }
-  const items = located[0]!.calls.length;
+  // The item count is the most calls any step names. A run that did its setup once and then the
+  // rest once per item (a script written, then invoked for every claim) names each setup step's
+  // one call: those steps are shared by every iteration, and only a leading run of them may be.
+  const items = Math.max(...located.map(({ calls }) => calls.length));
+  const shared = located.findIndex(({ calls }) => calls.length !== 1 || items === 1);
+  // Setup the held-out shares with the plan: a leading run of steps named by the plan's own one call
+  // each (the heredoc that wrote the script the job then invoked again on other values, within one
+  // session). Every step after it must be another run's call, which is what the held-out shows.
+  const ownSetup = located.findIndex(({ step }) => !reusesBaseline.has(step.id));
   const mismatched = located
-    .filter(({ step, calls }) => calls.length !== items || incoherent.has(step.id))
+    .filter(
+      ({ step, calls }, index) =>
+        (calls.length !== items && !(calls.length === 1 && index < shared)) ||
+        incoherent.has(step.id) ||
+        (reusesBaseline.has(step.id) && !(calls.length === 1 && index < ownSetup)),
+    )
     .map(({ step }) => step.id);
   if (mismatched.length > 0) return { mismatched };
 
@@ -271,8 +283,8 @@ async function localDemonstration(
   for (let item = 0; item < items; item += 1) {
     const iteration = located.map(({ step, calls, addresses }) => ({
       step,
-      call: calls[item]!,
-      address: addresses[item],
+      call: calls[calls.length === 1 ? 0 : item]!,
+      address: addresses[addresses.length === 1 ? 0 : item]!,
     }));
     const sessionId = iteration[0]!.call.sessionId;
     if (iteration.some(({ call }) => call.sessionId !== sessionId)) return undefined;

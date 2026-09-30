@@ -344,6 +344,12 @@ export class NormalizationPipeline {
           : undefined;
     mergedMetadata.sessionKind =
       rawSessionKind === "agent" || rawSessionKind === "user" ? rawSessionKind : "user";
+    // The capture path names the harness that produced the session. It is authoritative over any
+    // same-named key in the session's own metadata, so per-harness analytics cannot be spoofed
+    // by a transcript. The metadata-only projection validates it before it leaves the device.
+    if (typeof context?.harnessId === "string" && context.harnessId.length > 0) {
+      mergedMetadata.harnessId = context.harnessId;
+    }
 
     if (!mergedMetadata.resinTokenEstimateV1) {
       if (intermediate.type === "tool_call") {

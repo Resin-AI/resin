@@ -183,6 +183,41 @@ const WINDOWS_SECRET_RULES: ScannerRule[] = [
   },
 ];
 
+/** Shortest standalone token the high-entropy scan considers (and the shortest URL slot it rescans). */
+const MIN_TOKEN_LENGTH = 20;
+const URL_SHAPE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#]+/;
+
+/**
+ * The parts of a URL-shaped token that can carry a secret, with their offsets in the token: the userinfo,
+ * each query-string value and the fragment. Null when the token is not a URL. The scheme, host and path
+ * are never secret slots, so a percent-encoded path (`/values/Pending%20Invoices%21A1%3AZ200`) is not
+ * mistaken for a random key.
+ */
+function urlSecretSlots(token: string): Array<{ text: string; offset: number }> | null {
+  const head = URL_SHAPE.exec(token);
+  if (!head) return null;
+  const slots: Array<{ text: string; offset: number }> = [];
+  const schemeEnd = token.indexOf("://") + 3;
+  const authority = head[0].slice(schemeEnd);
+  const at = authority.lastIndexOf("@");
+  if (at > 0) slots.push({ text: authority.slice(0, at), offset: schemeEnd });
+  const hash = token.indexOf("#", head[0].length);
+  const fragmentStart = hash === -1 ? token.length : hash;
+  const question = token.indexOf("?", head[0].length);
+  if (question !== -1 && question < fragmentStart) {
+    let pairStart = question + 1;
+    for (const pair of token.slice(pairStart, fragmentStart).split("&")) {
+      const equals = pair.indexOf("=");
+      // A pair with a key carries its secret in the value; a bare one is the value.
+      const valueStart = pairStart + (equals === -1 ? 0 : equals + 1);
+      slots.push({ text: token.slice(valueStart, pairStart + pair.length), offset: valueStart });
+      pairStart += pair.length + 1;
+    }
+  }
+  if (hash !== -1) slots.push({ text: token.slice(hash + 1), offset: hash + 1 });
+  return slots;
+}
+
 export const DEFAULT_SCANNER_RULES: ScannerRule[] = [
   {
     id: "openai_api_key",
@@ -599,26 +634,33 @@ export class ContentScanner {
       }
 
       const tokenRegex = /[^\s"'\`\(\)\[\]\{\}<>]{20,}/g;
-      let tokenMatch: RegExpExecArray | null;
 
-      while ((tokenMatch = tokenRegex.exec(text)) !== null) {
-        const candidate = tokenMatch[0];
-        const start = tokenMatch.index;
+      /** Flags `candidate` (at `start` in `text`) when it looks like a random key. */
+      const considerToken = (candidate: string, start: number): void => {
         const end = start + candidate.length;
 
         // Skip if already covered by another rule match or already redacted
         if (candidate.startsWith("[REDACTED") || candidate.includes("[REDACTED_")) {
-          continue;
+          return;
+        }
+        // A URL is not a key: its scheme, host and path (percent-encoded or not) are locators. Only
+        // the slots that can carry a secret are scanned, each on its own.
+        const slots = urlSecretSlots(candidate);
+        if (slots) {
+          for (const slot of slots) {
+            if (slot.text.length >= MIN_TOKEN_LENGTH) considerToken(slot.text, start + slot.offset);
+          }
+          return;
         }
         if (covered(start, end) || isPathShaped(candidate)) {
-          continue;
+          return;
         }
         // `alpine@sha256:<digest>`: once the exempt digest is set aside, too little is left to be a key.
         const digestChars = digests
           .filter((digest) => digest.start >= start && digest.end <= end)
           .reduce((sum, digest) => sum + digest.end - digest.start, 0);
         if (digestChars > 0 && candidate.length - digestChars < 20) {
-          continue;
+          return;
         }
 
         // Must have character diversity (mixed case or letters + digits or special symbols)
@@ -643,6 +685,11 @@ export class ContentScanner {
             });
           }
         }
+      };
+
+      let tokenMatch: RegExpExecArray | null;
+      while ((tokenMatch = tokenRegex.exec(text)) !== null) {
+        considerToken(tokenMatch[0], tokenMatch.index);
       }
     }
 

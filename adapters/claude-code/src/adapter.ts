@@ -210,7 +210,11 @@ export class ClaudeHarnessAdapter implements StrictHarnessAdapter {
           metadata: {
             transcriptFile: path.basename(transcript.transcriptPath),
             sessionKind: "agent",
-            parentSessionId: transcript.parentSessionId,
+            // The immediate parent: the root session, or the subagent that spawned this one.
+            parentSessionId: transcript.parentAgentId
+              ? `agent-${transcript.parentAgentId}`
+              : transcript.parentSessionId,
+            rootSessionId: transcript.parentSessionId,
             agentId: transcript.agentId,
             ...transcript.head,
           },

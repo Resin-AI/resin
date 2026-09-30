@@ -8,6 +8,7 @@ import {
   computeConfigHash,
 } from "@resin/harness-contracts";
 import { COPILOT_HARNESS_ID } from "./discovery.js";
+import { CopilotAgentRouter, mayCarryAgentId, primeCopilotAgentRouter } from "./subagents.js";
 
 export interface CopilotSessionEventSourceOptions {
   pollingIntervalMs?: number;
@@ -33,6 +34,10 @@ export class CopilotSessionEventSource implements SessionEventSource {
   private pollTimer: NodeJS.Timeout | null = null;
   private reading: Promise<RawHarnessRecord[]> | null = null;
   private closed = false;
+  /** `undefined` for a main-agent session; a subagent session owns that agent's lines. */
+  private readonly agentId: string | undefined;
+  private router = new CopilotAgentRouter();
+  private primed = false;
 
   constructor(
     session: HarnessSession,
@@ -41,6 +46,8 @@ export class CopilotSessionEventSource implements SessionEventSource {
   ) {
     this.sessionId = session.sessionId;
     this.transcriptPath = session.transcriptPath;
+    const agentId = session.metadata.copilotAgentId;
+    this.agentId = typeof agentId === "string" ? agentId : undefined;
     this.pollingIntervalMs = options?.pollingIntervalMs ?? 250;
     if (initialCursor) {
       this.cursor = { ...initialCursor };
@@ -127,7 +134,12 @@ export class CopilotSessionEventSource implements SessionEventSource {
         // Truncated or replaced: start over from the beginning of the new file.
         this.offset = 0;
         this.line = 0;
+        this.router = new CopilotAgentRouter();
+      } else if (this.offset > 0 && !this.primed) {
+        // Resuming mid-file: learn which subagent ran each task call before this point.
+        await primeCopilotAgentRouter(this.router, this.transcriptPath, this.offset);
       }
+      this.primed = true;
       let pending = Buffer.alloc(0);
       let position = this.offset;
       while (records.length < batchSize && position < size) {
@@ -144,7 +156,10 @@ export class CopilotSessionEventSource implements SessionEventSource {
           this.offset += newline + 1;
           this.line += 1;
           const text = lineBytes.toString("utf8");
-          if (text.trim().length > 0) records.push(this.toRecord(text));
+          if (text.trim().length > 0) {
+            const record = this.toRecord(text);
+            if (record) records.push(record);
+          }
           newline = pending.indexOf(0x0a);
         }
       }
@@ -154,7 +169,8 @@ export class CopilotSessionEventSource implements SessionEventSource {
     return records;
   }
 
-  private toRecord(text: string): RawHarnessRecord {
+  /** The record for one line, or null when another session (main agent or subagent) owns it. */
+  private toRecord(text: string): RawHarnessRecord | null {
     let payload: unknown;
     try {
       payload = JSON.parse(text);
@@ -166,6 +182,8 @@ export class CopilotSessionEventSource implements SessionEventSource {
       typeof event.timestamp === "string" && !Number.isNaN(Date.parse(event.timestamp))
         ? new Date(event.timestamp).toISOString()
         : new Date().toISOString();
+    // Sequence and cursor follow the file line by line, owned or not, so a session's sequence
+    // numbers do not depend on which other sessions share the file.
     this.sequence += 1;
     const cursor: SourceCursor = {
       offset: this.offset,
@@ -175,11 +193,24 @@ export class CopilotSessionEventSource implements SessionEventSource {
       timestamp,
     };
     this.cursor = cursor;
+    const owner = mayCarryAgentId(text)
+      ? this.router.route(payload as Record<string, unknown>)
+      : undefined;
+    // A subagent's completion line belongs to its spawner, but it is also where the subagent's own
+    // session ends: without it that session never receives a closing event, and its last turn stays
+    // unsettled forever. Its own source therefore takes the line too, marked as its end.
+    const record = payload as { type?: unknown; agentId?: unknown };
+    const ownEnd =
+      this.agentId !== undefined &&
+      record.agentId === this.agentId &&
+      (record.type === "subagent.completed" || record.type === "subagent.failed");
+    if (owner !== this.agentId && !ownEnd) return null;
+    const recordId =
+      typeof event.id === "string" && /^[A-Za-z0-9_-]+$/.test(event.id)
+        ? event.id
+        : `${this.sessionId}-line-${this.line}`;
     return {
-      recordId:
-        typeof event.id === "string" && /^[A-Za-z0-9_-]+$/.test(event.id)
-          ? event.id
-          : `${this.sessionId}-line-${this.line}`,
+      recordId: ownEnd ? `${recordId}-end` : recordId,
       sessionId: this.sessionId,
       harnessId: COPILOT_HARNESS_ID,
       sequenceNumber: this.sequence,
@@ -187,7 +218,11 @@ export class CopilotSessionEventSource implements SessionEventSource {
       recordType: "transcript_line",
       rawPayload: payload,
       cursor,
-      metadata: { transcriptPath: this.transcriptPath, line: this.line },
+      metadata: {
+        transcriptPath: this.transcriptPath,
+        line: this.line,
+        ...(ownEnd ? { subagentEnd: true } : {}),
+      },
     };
   }
 }

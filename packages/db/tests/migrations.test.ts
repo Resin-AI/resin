@@ -11,7 +11,7 @@ import {
 } from "../src/migrations.js";
 
 describe("MigrationRunner", () => {
-  it("runs initial migration on a fresh database and creates all 25 tables", async () => {
+  it("runs initial migration on a fresh database and creates all 24 tables", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
 
@@ -21,13 +21,13 @@ describe("MigrationRunner", () => {
 
     const result = await runner.migrate();
     expect(result.initialVersion).toBe(0);
-    expect(result.targetVersion).toBe(5);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5]);
+    expect(result.targetVersion).toBe(6);
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
     expect(result.integrityOk).toBe(true);
 
-    expect(runner.getCurrentVersion()).toBe(5);
+    expect(runner.getCurrentVersion()).toBe(6);
     const applied = runner.getAppliedMigrations();
-    expect(applied).toHaveLength(5);
+    expect(applied).toHaveLength(6);
     expect(applied[0].version).toBe(1);
     expect(applied[0].name).toBe("001_initial_local_schema");
     expect(applied[1].version).toBe(2);
@@ -38,6 +38,8 @@ describe("MigrationRunner", () => {
     expect(applied[3].name).toBe("004_add_local_opportunity_tables");
     expect(applied[4].version).toBe(5);
     expect(applied[4].name).toBe("005_normalized_events_causal_step_uniqueness");
+    expect(applied[5].version).toBe(6);
+    expect(applied[5].name).toBe("006_drop_pattern_outbox");
     // Verify key tables exist and are queryable
     const testTables = [
       "workspaces",
@@ -64,7 +66,6 @@ describe("MigrationRunner", () => {
       "workflow_clusters",
       "cluster_episodes",
       "opportunity_hash_cache",
-      "pattern_outbox",
     ];
 
     for (const table of testTables) {
@@ -87,12 +88,12 @@ describe("MigrationRunner", () => {
 
     const runner = new MigrationRunner(conn);
     const firstRun = await runner.migrate();
-    expect(firstRun.appliedVersions).toEqual([1, 2, 3, 4, 5]);
+    expect(firstRun.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
 
     const secondRun = await runner.migrate();
     expect(secondRun.appliedVersions).toHaveLength(0);
-    expect(secondRun.initialVersion).toBe(5);
-    expect(secondRun.targetVersion).toBe(5);
+    expect(secondRun.initialVersion).toBe(6);
+    expect(secondRun.targetVersion).toBe(6);
     conn.close();
   });
 
@@ -174,7 +175,7 @@ describe("MigrationRunner", () => {
 
     const upgrade = await new MigrationRunner(conn).migrate();
     expect(upgrade.initialVersion).toBe(4);
-    expect(upgrade.appliedVersions).toEqual([5]);
+    expect(upgrade.appliedVersions).toEqual([5, 6]);
 
     const upgradedIndex = conn.get<{ sql: string }>(
       "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_normalized_events_session_sequence';",
@@ -254,6 +255,38 @@ describe("MigrationRunner", () => {
     conn.close();
   });
 
+  it("drops the unread pattern outbox and its indexes on upgrade, leaving other opportunity tables", async () => {
+    const conn = new LocalDatabaseConnection({ inMemory: true });
+    conn.open();
+
+    // A state file written while the outbox still existed (schema v5), with rows in it.
+    const legacyRunner = new MigrationRunner(
+      conn,
+      BUILT_IN_MIGRATIONS.filter((migration) => migration.version <= 5),
+    );
+    expect((await legacyRunner.migrate()).targetVersion).toBe(5);
+    conn.run(
+      "INSERT INTO pattern_outbox (pattern_id, idempotency_key, payload_json, created_at) VALUES (?, ?, ?, ?);",
+      ["pat_legacy", "idem_legacy", "{}", "2026-08-17T12:00:00.000Z"],
+    );
+    conn.run(
+      "INSERT INTO opportunity_hash_cache (structural_hash, outcome, last_seen_at, expires_at) VALUES (?, ?, ?, ?);",
+      ["hash_keep", "in_progress", "2026-08-17T12:00:00.000Z", "2026-08-18T12:00:00.000Z"],
+    );
+
+    const upgrade = await new MigrationRunner(conn).migrate();
+    expect(upgrade.initialVersion).toBe(5);
+    expect(upgrade.appliedVersions).toEqual([6]);
+    expect(upgrade.integrityOk).toBe(true);
+
+    const leftovers = conn.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE name LIKE '%pattern_outbox%';",
+    );
+    expect(leftovers).toEqual([]);
+    expect(conn.get<{ c: number }>("SELECT COUNT(*) AS c FROM opportunity_hash_cache;")?.c).toBe(1);
+    conn.close();
+  });
+
   it("runs the full integrity check twice when new migrations are applied", async () => {
     const conn = new LocalDatabaseConnection({ inMemory: true });
     conn.open();
@@ -264,7 +297,7 @@ describe("MigrationRunner", () => {
 
     // Real migrations keep the full structural verification.
     expect(integrityCheckSpy).toHaveBeenCalledTimes(2);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5]);
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
     expect(result.integrityOk).toBe(true);
     conn.close();
   });
@@ -285,8 +318,8 @@ describe("MigrationRunner", () => {
     expect(integrityCheckSpy).toHaveBeenCalledTimes(0);
     expect(result.appliedVersions).toEqual([]);
     expect(result.integrityOk).toBe(true);
-    expect(result.initialVersion).toBe(5);
-    expect(result.targetVersion).toBe(5);
+    expect(result.initialVersion).toBe(6);
+    expect(result.targetVersion).toBe(6);
     conn.close();
   });
 

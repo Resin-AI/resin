@@ -72,7 +72,7 @@ export interface SessionOpportunityTrackerOptions {
    * `accountId`; absent means the local fallback identifier.
    */
   accountId?: string;
-  /** Notified after a proven pattern is durably enqueued in the pattern outbox. */
+  /** Notified after a pattern is proven and its structural hash is recorded as dispatched. */
   onPatternProven?: (pattern: ProvenPatternDto) => void;
 }
 
@@ -144,9 +144,8 @@ function toPositiveInt(value: number | undefined, fallback: number): number {
  * A pattern is dispatched when it clears the trigger, suppression, coverage and evidence-maturity
  * (`confidence = min(1, occurrences / 2)`) `minDispatchConfidence` guards. Estimated saved work is
  * derived and recorded for ranking, but it is advisory: zero, negative or unknown estimates never
- * refuse a candidate on value. Proven patterns are enqueued into the local pattern outbox
- * (idempotent on idempotency key) and recorded in the local structural-hash cache so repeated
- * sessions do not re-dispatch them.
+ * refuse a candidate on value. Each proven pattern is reported to `onPatternProven` and its
+ * structural hash is recorded in the local hash cache so repeated sessions do not re-dispatch it.
  */
 export class SessionOpportunityTracker {
   private readonly opportunities: OpportunityLocalRepository;
@@ -655,13 +654,6 @@ export class SessionOpportunityTracker {
       recurrence: { confidence, occurrences: cluster.episodeCount },
     });
 
-    await this.opportunities.enqueuePattern({
-      patternId,
-      idempotencyKey,
-      workspaceId,
-      payload: pattern,
-      createdAt: new Date(this.now()).toISOString(),
-    });
     await this.recordDispatchedHash(cluster.structuralHash, engineVersion);
 
     this.dispatchedHashes.add(cluster.structuralHash);

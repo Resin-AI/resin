@@ -17,6 +17,18 @@ import {
 } from "./tailer.js";
 
 /**
+ * True for an agent-kind session that names no parent session. `captureUserSessionsOnly` skips
+ * these (background/unattributable agent transcripts). A subagent or child session that carries
+ * `metadata.parentSessionId` belongs to a user's session and its tool calls are real work, so it
+ * is always captured, linked to that parent.
+ */
+export function isUnlinkedAgentSession(session: HarnessSession): boolean {
+  if (session.metadata?.sessionKind !== "agent") return false;
+  const parent = session.metadata.parentSessionId;
+  return !(typeof parent === "string" && parent.length > 0);
+}
+
+/**
  * Summary of a single workspace and session polling cycle.
  */
 export interface PollSummary {
@@ -303,7 +315,7 @@ export class ObserverCoordinator extends EventEmitter {
                 }
 
                 if (session.status === "active" || catchUpInactive) {
-                  if (this.captureUserSessionsOnly && session.metadata?.sessionKind === "agent") {
+                  if (this.captureUserSessionsOnly && isUnlinkedAgentSession(session)) {
                     if (!this.loggedIgnoredAgentSessions.has(session.sessionId)) {
                       this.loggedIgnoredAgentSessions.add(session.sessionId);
                       this.logger?.debug(
