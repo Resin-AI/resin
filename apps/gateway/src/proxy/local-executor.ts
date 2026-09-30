@@ -149,6 +149,8 @@ export interface LocalArtifactExecutorOptions {
 const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 /** Added lines of a recorded edit shown in its description; the whole edit still applies. */
 const RECORDED_PATCH_PREVIEW_LINES = 12;
+/** Characters of a harness tool argument's recorded text shown in a tool description. */
+const RECORDED_NATIVE_ARGUMENT_CHARS = 120;
 /**
  * Characters of recorded steps one tool description may carry. Tool listings leave the recorded
  * steps out; get_tool_schema and search_tools return them, and each result stays in the agent's
@@ -702,11 +704,32 @@ export class LocalArtifactExecutor {
         continue;
       }
       const program = step.callable.program;
-      const source = step.arguments.find((argument) => argument.name === program?.argument)?.source;
+      if (program === undefined) {
+        // A harness tool call (a file write, an edit): the tool and each argument a caller can
+        // see — its recorded text, or `{input}` where a caller's value goes — so the block shows
+        // every step the tool covers, not only the commands.
+        const shown = step.arguments.flatMap((argument) => {
+          const source = argument.source;
+          if (source.kind === "template" && source.template.type === "input") {
+            return [`${argument.name} = {${source.template.name}}`];
+          }
+          const value = text(source);
+          if (value === undefined) return [];
+          const oneLine = value.replace(/\s+/gu, " ").trim();
+          return [
+            `${argument.name} = ${oneLine.length > RECORDED_NATIVE_ARGUMENT_CHARS ? `${oneLine.slice(0, RECORDED_NATIVE_ARGUMENT_CHARS)}[...]` : oneLine}`,
+          ];
+        });
+        if (shown.length === 0) continue;
+        steps.push({
+          head: `Step ${index + 1}${step.optional === undefined ? "" : ` (optional — set ${step.optional.input} to false to skip)`} calls the harness's ${step.callable.name} tool with ${shown.join(", ")}`,
+        });
+        continue;
+      }
+      const source = step.arguments.find((argument) => argument.name === program.argument)?.source;
       const bound = source === undefined ? undefined : parameterized(source);
-      const programText =
-        program === undefined || source === undefined ? undefined : (bound?.text ?? text(source));
-      if (program === undefined || programText === undefined || programText.length === 0) continue;
+      const programText = source === undefined ? undefined : (bound?.text ?? text(source));
+      if (programText === undefined || programText.length === 0) continue;
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
       const workdir = workdirSource === undefined ? undefined : text(workdirSource);
       for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
