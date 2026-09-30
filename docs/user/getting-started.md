@@ -204,6 +204,8 @@ Configure updates in `~/.resin/config/config.json` (or the file named by `RESIN_
 
 Manual `resin upgrade` still works whether or not automatic updates are enabled. Automatic updates apply only to installs from the release installer, not to source checkouts or npm installs.
 
+When error reporting is enabled, update outcomes (checks, deferrals, installs and failures, with versions and fixed reason codes only) are reported to help fix stuck updates; turn this off with `resin privacy error-reporting disable` or `DO_NOT_TRACK=1` (see [Security & Privacy Inventory](../security/privacy-inventory.md#51-error-reports-and-usage-events-posthog)).
+
 ---
 
 ## Next Steps

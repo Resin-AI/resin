@@ -59,6 +59,9 @@ function resolveVersion(): string {
 
 const VERSION = process.env.RESIN_RELEASE_VERSION ?? resolveVersion();
 
+/** The running CLI release version (what `resin --version` prints). */
+export const CLI_VERSION = VERSION;
+
 export interface InteractiveEnvironmentOptions {
   getuid?: () => number | undefined;
   isRoot?: boolean;
