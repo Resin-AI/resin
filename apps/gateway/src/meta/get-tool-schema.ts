@@ -4,7 +4,8 @@ import type {
   ToolOutputSchema,
   ToolParameterSchema,
 } from "@resin/contracts";
-import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
+import { offersForEach, withForEachInput, withForEachSentence } from "../for-each.js";
+import type { CallToolResult, JsonRpcParams, McpToolInput } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -32,7 +33,7 @@ export interface GetToolSchemaResponse {
   scope: string;
   status: string;
   description: string;
-  inputSchema: ToolParameterSchema | JsonRpcParams;
+  inputSchema: ToolParameterSchema | JsonRpcParams | McpToolInput;
   outputSchema?: ToolOutputSchema | JsonRpcParams;
   capabilities: CapabilityManifest;
   limits: ToolLimitConfig;
@@ -150,7 +151,15 @@ export function createGetToolSchemaHandler(
     const isDisabled =
       controls.disabledTools.includes(resolvedTool.toolId) && !resolvedTool.isSystem;
 
-    const inputSchema = toolInputSchema(resolvedTool);
+    // A learned tool's listing names only its inputs; here it is described in full, including the
+    // `for_each` input a learned tool with a text input also takes.
+    const learned =
+      !resolvedTool.isSystem &&
+      (resolvedTool.scope === "workspace" || resolvedTool.scope === "session");
+    const baseSchema = toolInputSchema(resolvedTool);
+    const forEach = learned && offersForEach(baseSchema);
+    const inputSchema = forEach ? withForEachInput(baseSchema as McpToolInput) : baseSchema;
+    const description = describeToolLocally(resolvedTool, context, describer);
 
     // Extract output schema if available in metadata
     const outputSchema: ToolOutputSchema | JsonRpcParams | undefined =
@@ -228,7 +237,7 @@ export function createGetToolSchemaHandler(
       version: resolvedTool.version,
       scope: resolvedTool.scope ?? "workspace",
       status: isDisabled ? "disabled" : resolvedTool.status || "active",
-      description: describeToolLocally(resolvedTool, context, describer),
+      description: forEach ? withForEachSentence(description) : description,
       inputSchema,
       outputSchema,
       capabilities,

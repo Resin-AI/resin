@@ -166,8 +166,6 @@ describe("splitting a shell && chain", () => {
     ["an absolute parent-directory target", "make > /tmp/../dev/stdout && ls"],
     ["a slash-only target", "make > / && ls"],
     ["an or-list", "make || ls && ls"],
-    ["a semicolon", "make; ls && ls"],
-    ["a newline", "make &&\nls"],
     ["a carriage return", "make &&\rls"],
     ["a comment", "make && ls # done"],
     ["a heredoc", "cat <<EOF && ls"],
@@ -195,6 +193,39 @@ describe("splitting a shell && chain", () => {
     expect(splitShellAndChain("bash", source)).toBeUndefined();
   });
 
+  it.each([
+    // The heat-pump batch: one submission per line of one command.
+    [
+      "python /workspace/submit_decision.py CLM-2606 request_missing_evidence REQUEST_MISSING_MAINTENANCE 0 0 CLM-2606 IMG-9104\npython /workspace/submit_decision.py CLM-2607 request_missing_evidence REQUEST_MISSING_MAINTENANCE 0 0 CLM-2607 IMG-9105",
+      [
+        "python /workspace/submit_decision.py CLM-2606 request_missing_evidence REQUEST_MISSING_MAINTENANCE 0 0 CLM-2606 IMG-9104",
+        "python /workspace/submit_decision.py CLM-2607 request_missing_evidence REQUEST_MISSING_MAINTENANCE 0 0 CLM-2607 IMG-9105",
+      ],
+    ],
+    ["make; ls && ls", ["make", "ls", "ls"]],
+    ["make &&\nls", ["make", "ls"]],
+    ["make\n\n  ls\n", ["make", "ls"]],
+    ["make ;\nls;", ["make", "ls"]],
+    ["make 'a;b'\nls", ["make 'a;b'", "ls"]],
+  ])("splits %j at a line break or `;` from version 4", (source, expected) => {
+    expect(splitShellAndChain("bash", source)?.segments.map((segment) => segment.text)).toEqual(
+      expected,
+    );
+    expect(splitShellAndChain("bash", source, 3)).toBeUndefined();
+  });
+
+  it.each([
+    ["a line break inside quotes", "make 'a\nb' && ls"],
+    ["two semicolons", "make ;; ls"],
+    ["a semicolon after &&", "make && ; ls"],
+    ["a leading line break", "\nmake\nls"],
+    ["a trailing &&", "make\nls &&\n"],
+    ["a heredoc batch", "cat > s.py <<'PY'\nprint(1)\nPY\npython s.py"],
+    ["one command and a line break", "make\n"],
+  ])("never splits %s from version 4", (_, source) => {
+    expect(splitShellAndChain("bash", source)).toBeUndefined();
+  });
+
   it("re-splits a version-1 address under the version-1 grammar, without redirections", () => {
     const plain = "make && ls";
     const redirecting = "make > log && ls";
@@ -208,7 +239,7 @@ describe("splitting a shell && chain", () => {
       "make > log",
     );
     expect(
-      shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 4 }),
+      shellAndChainSegmentText("bash", plain, { index: 1, count: 2, version: 5 }),
     ).toBeUndefined();
   });
 

@@ -50,14 +50,14 @@ export interface OpportunityTrackingModuleOptions {
   maxEpisodesPerSession?: number;
   /** Authenticated account owning local sessions; used for published pattern attribution. */
   accountId?: string;
-  /** Maintenance cadence for local pattern-outbox upload and hash-cache reconciliation. */
+  /** Maintenance cadence for hash-cache reconciliation. */
   uploadIntervalMs?: number;
   /** When false the tracker stays detached from the capture stream. */
   enabled?: boolean;
   /** Reuse an externally constructed tracker (tests and embedders). */
   tracker?: SessionOpportunityTracker;
   /**
-   * Observed after a proven pattern is durably enqueued in the local pattern outbox.
+   * Observed after a pattern is proven and its structural hash is recorded as dispatched.
    * The daemon uses this to surface `pattern:proven` locally.
    */
   onPatternProven?: (pattern: ProvenPatternDto) => void;
@@ -74,7 +74,7 @@ function isLocalStateStore(
  *
  * It attaches a local-only sink to the trajectory capture coordinator's normalized event stream,
  * then drives the deterministic local opportunity engine over each session's rolling episode
- * window. Proven patterns are enqueued into the local pattern outbox for upload.
+ * window. The proven pattern is reported to `onPatternProven`; nothing is queued for upload.
  */
 export class OpportunityTrackingModule implements DaemonModule {
   readonly id = "opportunity-tracking";
@@ -282,8 +282,7 @@ export class OpportunityTrackingModule implements DaemonModule {
   /**
    * Periodic local maintenance: releases in-memory windows for sessions that are already terminal
    * or absent locally, then expires stale hash-cache entries that would otherwise suppress fresh
-   * evidence. Queued patterns are already durable in the pattern outbox; reconciling
-   * published/rejected outcomes is the cloud sync worker's job.
+   * evidence. Reconciling published/rejected outcomes is the cloud sync worker's job.
    */
   private startMaintenanceTimer(): void {
     if (!this.uploadIntervalMs || this.maintenanceTimer) {

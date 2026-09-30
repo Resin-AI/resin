@@ -239,7 +239,7 @@ describe("recorded program adapters", () => {
 
   // A POSIX login profile and a POSIX PATH; Codex records this profile only for `/bin/bash -lc`.
   it.skipIf(process.platform === "win32")(
-    "keeps the inherited PATH in front when a login profile resets it",
+    "keeps the inherited directories a login profile resets away",
     async () => {
       // Debian's /etc/profile resets PATH for root; an agent harness's bundled helpers must survive.
       const workspace = await makeWorkspace();
@@ -269,6 +269,66 @@ describe("recorded program adapters", () => {
     },
   );
 
+  it("resolves programs from what the login profile activated before the inherited PATH", async () => {
+    // A SWE-bench image activates its conda environment in the profile; the MCP server's own PATH
+    // has `/usr/bin` first, whose `python` has none of the project's packages.
+    const workspace = await makeWorkspace();
+    const home = await makeWorkspace();
+    const activated = await makeWorkspace();
+    const inherited = await makeWorkspace();
+    await writeFile(join(home, ".bash_profile"), `PATH=${activated}:/usr/bin:/bin\n`);
+    await writeFile(join(activated, "resin-env-probe"), "#!/bin/sh\necho activated\n", {
+      mode: 0o755,
+    });
+    await writeFile(join(inherited, "resin-env-probe"), "#!/bin/sh\necho inherited\n", {
+      mode: 0o755,
+    });
+    const adapter = createProcessAdapter({
+      env: { HOME: home, PATH: `${inherited}:/usr/bin:/bin` },
+    });
+    const step = recordedStep({
+      id: "native-activated-path",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: 'resin-env-probe; echo "${PATH##*:}"',
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe(`activated\n${inherited}\n`);
+  });
+
+  it("gives a Codex shell replay the harness's container environment, not only its launch allow-list", async () => {
+    // An image's `ENV PYTHONPATH=…` reached the recorded command through the harness; the MCP
+    // server it launched never got it, and `import FreeCAD` failed on replay.
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter({
+      harnessEnvironment: { RESIN_TEST_IMAGE_LIB: "/opt/conda/lib" },
+    });
+    const step = recordedStep({
+      id: "native-image-env",
+      runtime: RESIN_PROCESS_RUNTIME,
+      name: "command_exec",
+      program: { kind: "shell", source: "", argument: "cmd" },
+    });
+    expect(
+      await adapter.call({
+        step,
+        arguments: {
+          cmd: 'echo "${RESIN_TEST_IMAGE_LIB-unset}"',
+          workdir: workspace,
+          resinCodexShellProfile: "bash-login-native-v1",
+        },
+      }),
+    ).toBe("/opt/conda/lib\n");
+  });
+
   it("refuses a program that failed, naming the step, the exit code and the stderr", async () => {
     const workspace = await makeWorkspace();
     const adapter = createProcessAdapter({ cwd: workspace });
@@ -288,6 +348,36 @@ describe("recorded program adapters", () => {
     expect(message).toContain("step 'explode'");
     expect(message).toContain("exited with code 7");
     expect(message).toContain("boom");
+  });
+
+  it("keeps a test run's failure report when a teardown line repeats after it", async () => {
+    // Django's parallel runner prints one `Destroying test database` line per worker after the
+    // failure it reports; a tail of the last bytes held only those.
+    const workspace = await makeWorkspace();
+    const adapter = createProcessAdapter({ cwd: workspace });
+
+    const message = await failureOf(() =>
+      adapter.call({
+        step: recordedStep({
+          id: "tests",
+          runtime: RESIN_PROCESS_RUNTIME,
+          name: "tests",
+          program: {
+            kind: "shell",
+            source:
+              "echo 'FAIL: test_bulk_update (queries.test_bulk_update.BulkUpdateTests)' >&2; " +
+              "echo 'AssertionError: 2 != 3' >&2; echo 'FAILED (failures=1)' >&2; " +
+              "for i in $(seq 40); do echo \"Destroying test database for alias 'default'...\" >&2; done; exit 1",
+          },
+        }),
+        arguments: {},
+      }),
+    );
+
+    expect(message).toContain("FAIL: test_bulk_update");
+    expect(message).toContain("AssertionError: 2 != 3");
+    expect(message).toContain("Destroying test database for alias 'default'... (×40)");
+    expect(message.match(/Destroying test database/g)).toHaveLength(1);
   });
 
   it("returns a program's answer exactly as the program printed it", async () => {

@@ -20,13 +20,10 @@ export const PI_MCP_TOOL_PREFIX = "mcp__";
 /**
  * Gateway meta-tools the bridge does not register. They exist for clients whose native catalog
  * can go stale; the bridge follows list_changed, so they would only add per-request tokens.
+ * get_tool_schema stays: a learned tool is listed by its purpose and inputs only, and
+ * get_tool_schema is where its recorded commands are shown.
  */
-export const PI_BRIDGE_HIDDEN_TOOLS = [
-  "search_tools",
-  "get_tool_schema",
-  "invoke_tool",
-  "manage_tools",
-] as const;
+export const PI_BRIDGE_HIDDEN_TOOLS = ["search_tools", "invoke_tool", "manage_tools"] as const;
 
 export interface PiMcpBridgeServer {
   /** MCP server name; becomes the `mcp__<name>__` tool-name segment. */

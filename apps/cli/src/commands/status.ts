@@ -15,8 +15,10 @@ import {
 } from "@resin/harness-contracts";
 import {
   type DaemonHealthReport,
+  type HarnessVersionEvidence,
   IpcClient,
   StoredCloudCredentialsSchema,
+  classifyHarnessVersionEvidence,
   daemonPipePresent,
   resolvePaths,
 } from "@resin/observer";
@@ -46,6 +48,12 @@ import {
   type CloudCredentialStatus,
   DeviceAuthClient,
 } from "../service/auth-bootstrap.js";
+import {
+  type LocalStateReader,
+  type ServedCatalogReading,
+  type ServedCatalogUnavailableReason,
+  openLocalStateReader,
+} from "../service/local-state-reader.js";
 import { createUserServiceManager } from "../service/manager.js";
 import {
   type NotificationConsumer,
@@ -263,6 +271,13 @@ export interface DaemonStatusSummary {
     version: string | null;
     /** `version` against the definition's exact tested versions. */
     versionStatus: HarnessVersionClassification;
+    /**
+     * Local decode evidence for the installed `version`: counters the observer keeps while it
+     * captures real sessions, classified against named thresholds.
+     */
+    versionEvidence: HarnessVersionEvidence;
+    /** `verified on N local sessions`, `decode problems: ...`, or the fixture label. */
+    versionLabel: string;
     lastCheckedAt: string | null;
     recentAction: "discovered" | "reconciled" | "drift_detected" | "repair_failed" | null;
   }>;
@@ -275,7 +290,19 @@ export interface DaemonStatusSummary {
   tools: {
     metaToolsCount: number;
     metaTools: string[];
-    activeCustomToolsCount: number;
+    /**
+     * Learned (non-system) tools in the latest catalog the MCP gateway served for the active
+     * workspace, from the local state store; null when that catalog cannot be read. Never 0 as
+     * a stand-in for unknown.
+     */
+    activeCustomToolsCount: number | null;
+    customToolsCatalog: {
+      status: "available" | "unavailable";
+      workspaceId: string | null;
+      /** When the gateway resolved the counted catalog snapshot. */
+      asOf: string | null;
+      reason: ServedCatalogUnavailableReason | null;
+    };
   };
   remediations: StatusRemediation[];
   notifications?: ActionableNotification[];
@@ -298,6 +325,8 @@ interface StatusCollectionOptions {
   env?: NodeJS.ProcessEnv;
   entryPath?: string;
   now?: () => number;
+  /** Read-only local state store view; defaults to `<dataDir>/state.db`. Not closed when injected. */
+  stateReader?: LocalStateReader;
 }
 
 interface LocalConfigSnapshot {
@@ -563,13 +592,13 @@ export async function fetchDaemonStatusSummary(
   );
 
   const harnessSnapshot = await readHarnessSnapshot(fsBridge, resinHome);
-  const harnesses = await collectHarnessStatuses(
-    home,
-    fsBridge,
-    harnessSnapshot,
-    env,
-    options.entryPath,
-  );
+  const stateReader = options.stateReader ?? openLocalStateReader({ dataDir: daemonPaths.dataDir });
+  const [harnesses, servedCatalog] = await Promise.all([
+    collectHarnessStatuses(home, fsBridge, harnessSnapshot, env, stateReader, options.entryPath),
+    stateReader.servedCatalog(options.cwd ?? process.cwd()),
+  ]).finally(() => {
+    if (options.stateReader === undefined) stateReader.close();
+  });
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
   const update = await readUpdateStatus(fsBridge, {
     home,
@@ -659,7 +688,8 @@ export async function fetchDaemonStatusSummary(
     tools: {
       metaToolsCount: SYSTEM_META_TOOL_NAMES.length,
       metaTools: [...SYSTEM_META_TOOL_NAMES],
-      activeCustomToolsCount: 0,
+      activeCustomToolsCount: servedCatalog.available ? servedCatalog.customToolsCount : null,
+      customToolsCatalog: describeServedCatalog(servedCatalog),
     },
     remediations,
     notifications: reportedNotifications,
@@ -734,10 +764,11 @@ export function formatStatusForTerminal(
   const agents = summary.harnesses
     .filter((harness) => harness.installed)
     .map((harness) => {
+      const versionTag = describeBriefVersionTag(harness);
       const name =
-        harness.versionStatus === "untested"
-          ? `${escapeTerminalControls(harness.name)} ${escapeTerminalControls(harness.version ?? "")} (untested)`
-          : escapeTerminalControls(harness.name);
+        versionTag === null
+          ? escapeTerminalControls(harness.name)
+          : `${escapeTerminalControls(harness.name)} ${escapeTerminalControls(harness.version ?? "")} (${escapeTerminalControls(versionTag)})`;
       if (harness.status === "drift" || harness.status === "error") return `${name} (needs repair)`;
       if (!harness.configured || !harness.mcpAttached || harness.status !== "attached") {
         return `${name} (needs setup)`;
@@ -944,7 +975,7 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
 
   lines.push("\n[Tools & MCP Catalog]");
   lines.push(`  System Tools:   ${summary.tools.metaToolsCount}`);
-  lines.push(`  Custom Tools:   ${summary.tools.activeCustomToolsCount}`);
+  lines.push(`  Custom Tools:   ${formatCustomToolsCount(summary.tools)}`);
 
   lines.push("\n[Harness Integrations]");
   lines.push("  [Agent Harness Connections]");
@@ -953,7 +984,7 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
       ? "Not Installed"
       : harness.version === null
         ? "Installed, version unknown"
-        : `Installed ${escapeTerminalControls(harness.version)}, ${harness.versionStatus}`;
+        : `Installed ${escapeTerminalControls(harness.version)}, ${escapeTerminalControls(harness.versionLabel ?? harness.versionStatus)}`;
     const attached = harness.configured ? "Configured (MCP Attached)" : "Not Configured";
     lines.push(`  - ${harness.name.padEnd(16)} [${installed}] - ${attached}`);
   }
@@ -1291,6 +1322,7 @@ async function collectHarnessStatuses(
   fsBridge: ConfigFsBridge,
   cached: CachedHarnessSnapshot,
   env: NodeJS.ProcessEnv,
+  stateReader: LocalStateReader,
   entryPath?: string,
 ): Promise<DaemonStatusSummary["harnesses"]> {
   const resinCommand =
@@ -1320,6 +1352,10 @@ async function collectHarnessStatuses(
       const versionStatus = installed
         ? classifyHarnessVersion(probe?.version, definition.testedVersions)
         : "unknown";
+      const versionEvidence: HarnessVersionEvidence =
+        versionStatus === "unknown" || !probe
+          ? { kind: "none" }
+          : classifyHarnessVersionEvidence(stateReader.harnessVersionStats(id, probe.version));
       const configured = liveConfigured ?? cachedHarness?.configured ?? false;
       const useCachedDiagnostic = liveConfigured === null;
       const drift =
@@ -1336,6 +1372,8 @@ async function collectHarnessStatuses(
         mcpAttached: configured,
         version: versionStatus === "unknown" ? null : (probe?.version ?? null),
         versionStatus,
+        versionEvidence,
+        versionLabel: describeHarnessVersion(versionStatus, versionEvidence),
         status: error
           ? "error"
           : drift
@@ -1350,6 +1388,67 @@ async function collectHarnessStatuses(
       };
     }),
   );
+}
+
+/**
+ * Label for an installed harness version. Decode evidence gathered from real local sessions wins
+ * (`verified` or `problems`); with too little or no evidence the recorded-fixture classification
+ * is the fallback.
+ */
+export function describeHarnessVersion(
+  versionStatus: HarnessVersionClassification,
+  evidence: HarnessVersionEvidence,
+): string {
+  if (evidence.kind === "verified") return `verified on ${evidence.sessions} local sessions`;
+  if (evidence.kind === "problems") return `decode problems: ${evidence.problems.join("; ")}`;
+  return versionStatus;
+}
+
+/** The parenthesized version note in the brief Agents row; null when nothing needs saying. */
+function describeBriefVersionTag(harness: DaemonStatusSummary["harnesses"][number]): string | null {
+  const evidenceKind = harness.versionEvidence?.kind;
+  if (evidenceKind === "problems") return harness.versionLabel;
+  if (harness.versionStatus === "untested") {
+    return evidenceKind === "verified" ? harness.versionLabel : "untested";
+  }
+  return null;
+}
+
+const CATALOG_UNAVAILABLE_LABELS: Record<ServedCatalogUnavailableReason, string> = {
+  state_db_missing: "no local state store yet",
+  state_db_unreadable: "local state store unreadable",
+  no_workspace: "no Resin project for this directory",
+  no_snapshot: "no catalog served for this workspace yet",
+  snapshot_unreadable: "catalog snapshot unreadable",
+};
+
+function describeServedCatalog(
+  reading: ServedCatalogReading,
+): DaemonStatusSummary["tools"]["customToolsCatalog"] {
+  return reading.available
+    ? {
+        status: "available",
+        workspaceId: reading.workspaceId,
+        asOf: reading.asOf,
+        reason: null,
+      }
+    : {
+        status: "unavailable",
+        workspaceId: reading.workspaceId,
+        asOf: null,
+        reason: reading.reason,
+      };
+}
+
+function formatCustomToolsCount(tools: DaemonStatusSummary["tools"]): string {
+  if (tools.activeCustomToolsCount !== null) {
+    const asOf = tools.customToolsCatalog?.asOf;
+    return asOf
+      ? `${tools.activeCustomToolsCount} (catalog as of ${asOf})`
+      : `${tools.activeCustomToolsCount}`;
+  }
+  const reason = tools.customToolsCatalog?.reason;
+  return reason ? `unknown (${CATALOG_UNAVAILABLE_LABELS[reason]})` : "unknown";
 }
 
 type UpdateJournalStatus = Omit<

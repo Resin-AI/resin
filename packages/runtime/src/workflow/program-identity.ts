@@ -8,6 +8,7 @@
 
 import {
   type ProgramToken,
+  type ProgramTokenListValue,
   type ProgramTokenSpanValue,
   type RecordedWorkflow,
   type WorkflowJsonValue,
@@ -122,7 +123,17 @@ async function identityForProgram(
     ? embeddedPrograms(source)
     : [];
   const spans: ProgramTokenSpanValue[] = [];
+  const lists: ProgramTokenListValue[] = [];
   for (const hole of template.holes) {
+    if (hole.through !== undefined) {
+      // A word list is one hole over its whole run: one sentinel word names both ends.
+      lists.push({
+        token: hole.token,
+        through: hole.through,
+        items: [`__resin_program_hole_${hole.token}_through_${hole.through}__`],
+      });
+      continue;
+    }
     if (hole.span !== undefined) {
       // The span is part of the identity: the sentinel names the token and both offsets.
       const at = hole.embedded === undefined ? `${hole.token}` : `${hole.token}_${hole.embedded}`;
@@ -151,6 +162,7 @@ async function identityForProgram(
     template.language,
     embedded,
     spans,
+    lists,
   );
   return {
     stepId,

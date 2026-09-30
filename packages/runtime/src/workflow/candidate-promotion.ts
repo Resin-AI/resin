@@ -119,7 +119,8 @@ export function applyConfirmedWorkflowBinding(
     if (
       existing !== undefined &&
       (existing.type !== proposed.type ||
-        (existing.recordedDefault === true) !== (proposed.recordedDefault === true))
+        (existing.recordedDefault === true) !== (proposed.recordedDefault === true) ||
+        hashCanonical(existing.list ?? null) !== hashCanonical(proposed.list ?? null))
     )
       return undefined;
     // A recorded default keeps the recorded token when omitted, so only a token can carry one.
@@ -149,6 +150,9 @@ export function applyConfirmedWorkflowBinding(
     // A program read in no grammar (cmd.exe, an unproven shell dialect) is never bound.
     const language = recordedProgramLanguage(program);
     if (language === undefined) return undefined;
+    // A word list binds only a list input, and a list input binds only a word list.
+    const list = proposed.kind === "input" ? proposed.list : undefined;
+    if ((address.through === undefined) !== (list === undefined)) return undefined;
     replaced = bindProgramToken(
       source,
       language,
@@ -156,7 +160,10 @@ export function applyConfirmedWorkflowBinding(
       leaf,
       address.embedded,
       address.span,
+      address.through,
     );
+  } else if (proposed.kind === "input" && proposed.list !== undefined) {
+    return undefined;
   } else {
     replaced = withLeafAt(template, candidate.path, leaf);
   }
@@ -179,6 +186,7 @@ export function applyConfirmedWorkflowBinding(
             name: proposed.name,
             type: proposed.type,
             ...(proposed.recordedDefault === true ? { recordedDefault: true as const } : {}),
+            ...(proposed.list === undefined ? {} : { list: proposed.list }),
           },
         ]
       : plan.inputs;

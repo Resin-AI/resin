@@ -36,6 +36,7 @@ import {
 } from "../src/analytics/workflow-call-recorder.js";
 import { isWorkflowCallEvent, isWorkflowResultEvent } from "../src/analytics/workflow-carrier.js";
 import { HARNESS_DEFINITIONS } from "../src/harness-registry.js";
+import { EXPECTED_PASSTHROUGH_RECORD_TYPES } from "../src/harness-version-stats.js";
 import { isLocalWorkflowResultSuppressed } from "../src/normalization/local-workflow-payload.js";
 import {
   NormalizationPipeline,
@@ -46,28 +47,6 @@ const ADAPTERS_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../adapters",
 );
-
-/**
- * Raw record types each adapter deliberately passes through as `unknown_passthrough`. Anything
- * else surfacing as passthrough is a record the decoder no longer understands.
- */
-const EXPECTED_PASSTHROUGH: Record<string, readonly string[]> = {
-  // Transcript bookkeeping: hook/file attachments, prompt-queue and resume markers, mode
-  // switches and hook summaries. None is a prompt, answer or tool step.
-  "claude-code": ["attachment", "queue-operation", "atis-latch", "last-prompt", "mode", "system"],
-  // Per-model-call usage the next assistant message did not claim.
-  "muse-code": ["muse.model_completed"],
-  // Session configuration changes and harness-injected reminders that are not user prompts.
-  omp: [
-    "title",
-    "model_change",
-    "thinking_level_change",
-    "service_tier_change",
-    "credential_pin",
-    "custom_message",
-  ],
-  pi: ["model_change", "thinking_level_change", "context_edit", "session_info", "usage"],
-};
 
 /**
  * Actionable steps a harness records with no call behind them, so no call identity can exist.
@@ -335,7 +314,7 @@ function uncoveredNativeResults(events: readonly NormalizedSessionEvent[]): stri
 /** Problems that would make Cloud detection miss or reject this session's work. */
 function qualificationProblems(key: string, sessions: SessionCapture[]): string[] {
   const problems: string[] = [];
-  const passthroughAllowed = new Set(EXPECTED_PASSTHROUGH[key.split("/")[0]!] ?? []);
+  const passthroughAllowed = new Set(EXPECTED_PASSTHROUGH_RECORD_TYPES[key.split("/")[0]!] ?? []);
   for (const session of sessions) {
     const at = `${session.sessionId}`;
     const identities = new Set<string>();

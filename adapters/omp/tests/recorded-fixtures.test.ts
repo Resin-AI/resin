@@ -1,9 +1,14 @@
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { IntermediateSessionEvent, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { OmpRecordDecoder } from "../src/decoder.js";
-import { OMP_TESTED_VERSIONS, classifyTranscriptSessionKind } from "../src/discovery.js";
+import {
+  OMP_TESTED_VERSIONS,
+  buildOmpDiscoveryCatalog,
+  classifyTranscriptSessionKind,
+} from "../src/discovery.js";
 import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.js";
 
 // Scrubbed sessions recorded with `omp -p` on the release named by the directory; see CAPTURE.md.
@@ -84,6 +89,36 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
     expect(classifyTranscriptSessionKind(path.join(root, SUBAGENT))).toBe("agent");
     const { events } = await decode(version, SUBAGENT);
     expect(toolEvents(events, "tool_call").map((call) => call.toolName)).toEqual(["bash", "yield"]);
+  });
+
+  it("lists the subagent as a session linked to its parent, and counts each tool call once", async () => {
+    const home = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-recorded-link-"));
+    try {
+      const sessions = path.join(home, "agent", "sessions", "recorded-project");
+      await fsp.mkdir(sessions, { recursive: true });
+      await fsp.cp(path.join(RECORDED, version, "sessions"), sessions, { recursive: true });
+      const catalog = await buildOmpDiscoveryCatalog({ ompHome: home, activeOnly: false });
+      const all = catalog.getAllSessions();
+      const parent = all.find((session) => session.transcriptPath.endsWith(`${MAIN}.jsonl`));
+      const child = all.find((session) => session.transcriptPath.endsWith(SUBAGENT));
+      expect(parent?.metadata.sessionKind).toBe("user");
+      expect(parent?.metadata.parentSessionId).toBeUndefined();
+      expect(child?.metadata).toMatchObject({
+        sessionKind: "agent",
+        parentSessionId: parent?.sessionId,
+        agentName: "HumanBlackbird",
+      });
+      expect(child?.sessionId).not.toBe(parent?.sessionId);
+
+      // The parent's `task` call and the child's own calls are disjoint records.
+      const parentCalls = toolEvents((await decode(version, `${MAIN}.jsonl`)).events, "tool_call");
+      const childCalls = toolEvents((await decode(version, SUBAGENT)).events, "tool_call");
+      const parentIds = new Set(parentCalls.map((call) => call.callId));
+      expect(childCalls.length).toBeGreaterThan(0);
+      for (const call of childCalls) expect(parentIds.has(call.callId)).toBe(false);
+    } finally {
+      await fsp.rm(home, { recursive: true, force: true });
+    }
   });
 
   it("recovers the full output of an Eval whose display OMP truncated", async () => {

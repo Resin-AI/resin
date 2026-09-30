@@ -24,6 +24,7 @@ export const copilotInstallHarness: HarnessInstallDefinition = {
     "Token usage is recorded per Copilot process run (session.shutdown), not per model call: per-call usage events are ephemeral and never written to session-state.",
     "A Copilot process killed outright (not Ctrl+C, which still shuts down cleanly) writes no session.shutdown, so that run's token usage is not captured.",
     "File edits are decoded from apply_patch (the tool GPT-family models use); other models' edit tools are captured as exact tool calls/results without file_edit events.",
+    "Subagents (the `task` tool) are written into their parent's events.jsonl, so Resin exposes each as its own agent session over that file, linked to its parent, with its tool calls and messages counted there only. Copilot records no per-subagent token usage: the subagent's tokens are inside the parent's session.shutdown totals (counted once, on the parent), and subagent.completed's totalTokens is not added on top.",
   ],
   probeInstallation: ({ home, env }) => probeCopilotInstallation({ home, env }),
   mcpConfig: {

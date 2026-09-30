@@ -60,11 +60,16 @@ function workspaceIdForCodexRoot(rootPath: string): string {
   return `ws_codex_${slug || "root"}_${digest}`;
 }
 
+function codexSessionId(inspection: CodexTranscriptInspection): string {
+  const baseName = path.basename(inspection.fileName, path.extname(inspection.fileName));
+  return baseName.startsWith("sess_") ? baseName : `sess_${baseName}`;
+}
+
 function sessionForCodexTranscript(
   inspection: CodexTranscriptInspection,
   workspaceId: string,
+  sessionIdsByThreadId: ReadonlyMap<string, string>,
 ): HarnessSession {
-  const baseName = path.basename(inspection.fileName, path.extname(inspection.fileName));
   const metadata: Record<string, unknown> = {
     fileSizeBytes: inspection.fileSizeBytes,
     fileName: inspection.fileName,
@@ -75,9 +80,31 @@ function sessionForCodexTranscript(
   if (inspection.threadId) metadata.threadId = inspection.threadId;
   if (inspection.rootId) metadata.rootId = inspection.rootId;
   if (inspection.parentThreadId) metadata.parentThreadId = inspection.parentThreadId;
+  if (inspection.forkedFromId) metadata.forkedFromId = inspection.forkedFromId;
+
+  // A multi-agent child is its own rollout: its tool calls belong to it, and it links to the
+  // rollout of the thread that spawned it (the immediate parent, so nested children chain).
+  if (inspection.parentThreadId || inspection.threadSource === "subagent") {
+    metadata.sessionKind = "agent";
+    if (inspection.parentThreadId) {
+      // A parent rollout outside the discovered set (older than the transcript cap) cannot be
+      // named by its file; its thread id keeps the child captured and linkable.
+      metadata.parentSessionId =
+        sessionIdsByThreadId.get(inspection.parentThreadId) ?? `sess_${inspection.parentThreadId}`;
+    }
+    const agentName =
+      inspection.agentNickname ??
+      (inspection.agentPath ? path.posix.basename(inspection.agentPath) : undefined) ??
+      inspection.agentRole;
+    if (agentName) metadata.agentName = agentName;
+    if (inspection.agentRole) metadata.agentKind = inspection.agentRole;
+    if (inspection.threadId) metadata.agentId = inspection.threadId;
+    if (inspection.agentPath) metadata.agentPath = inspection.agentPath;
+    if (inspection.agentDepth !== undefined) metadata.agentDepth = inspection.agentDepth;
+  }
 
   return {
-    sessionId: baseName.startsWith("sess_") ? baseName : `sess_${baseName}`,
+    sessionId: codexSessionId(inspection),
     workspaceId,
     harnessId: CODEX_HARNESS_ID,
     transcriptPath: inspection.filePath,
@@ -119,7 +146,7 @@ export const CODEX_OBSERVATION_FIDELITY: ObservationFidelity = Object.freeze(
     transcriptAvailability: "file_tail",
     toolCallVisibility: "full",
     toolResultVisibility: "full",
-    subagentVisibility: "shallow",
+    subagentVisibility: "full",
     mcpListChange: "requires_restart",
     contextNudge: "unsupported",
     notes:
@@ -233,6 +260,12 @@ export class CodexHarnessAdapter implements HarnessAdapter {
     const inspections = await discoverCodexTranscripts(sessionRoot, {
       cache: this.inspectionCache,
     });
+    const sessionIdsByThreadId = new Map<string, string>();
+    for (const inspection of inspections) {
+      if (inspection.threadId) {
+        sessionIdsByThreadId.set(inspection.threadId, codexSessionId(inspection));
+      }
+    }
     const workspacesByRoot = new Map<string, HarnessWorkspace>();
     const sessionsByWorkspaceId = new Map<string, HarnessSession[]>();
     const sessionsByRoot = new Map<string, HarnessSession[]>();
@@ -257,7 +290,11 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       const isUnbound = inspection.canonicalCwd === null;
       const rootPath = inspection.canonicalCwd ?? unknownRoot;
       const workspace = getWorkspace(rootPath, isUnbound);
-      const session = sessionForCodexTranscript(inspection, workspace.workspaceId);
+      const session = sessionForCodexTranscript(
+        inspection,
+        workspace.workspaceId,
+        sessionIdsByThreadId,
+      );
       const workspaceSessions = sessionsByWorkspaceId.get(workspace.workspaceId) ?? [];
       workspaceSessions.push(session);
       sessionsByWorkspaceId.set(workspace.workspaceId, workspaceSessions);

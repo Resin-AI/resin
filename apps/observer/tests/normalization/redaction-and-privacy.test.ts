@@ -54,6 +54,52 @@ describe("Privacy Redaction & Secret Scrubbing", () => {
       expect(flagged(`value ${secret} end`).length).toBeGreaterThan(0);
     });
 
+    describe("URLs", () => {
+      it.each([
+        "https://sheets.googleapis.com/v4/spreadsheets/ss_inv_tracker/values/Pending%20Invoices%21A1%3AZ200",
+        "https://sheets.googleapis.com/v4/spreadsheets/ss_hours/values/2025%20Rate%20Card%20%28ARCHIVED%29%21A1%3AZ200",
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/msg_collections_policy?format=full&maxResults=100",
+      ])("does not redact the locator %s", (url) => {
+        expect(flagged(`r = requests.get('${url}')`)).toEqual([]);
+        expect(flagged(`curl -s ${url}`)).toEqual([]);
+      });
+
+      it("redacts only the secret slot of a URL, never its scheme, host and path", () => {
+        const secret = "Zx9Kq2Lm7Pv4Tn8RwY3bQ5cD";
+        const base =
+          "https://sheets.googleapis.com/v4/spreadsheets/ss_1/values/Pending%20Invoices%21A1%3AZ200";
+        expect(flagged(`${base}?sig=${secret}`)).toEqual([secret]);
+        expect(flagged(`${base}?valueInputOption=RAW&sig=${secret}&alt=json`)).toEqual([secret]);
+        expect(flagged(`${base}#${secret}`)).toEqual([secret]);
+      });
+
+      it("still redacts a token in the query string and a password in the userinfo", () => {
+        const scanner = new ContentScanner();
+        const query = scanner.scan(
+          "GET https://api.example.com/v1/values/Pending%20Invoices%21A1%3AZ200?access_token=Zx9Kq2Lm7Pv4Tn8RwY3b",
+        );
+        expect(query.map((match) => match.match)).toEqual(["Zx9Kq2Lm7Pv4Tn8RwY3b"]);
+        const userinfo = scanner.scan(
+          "git clone https://deploy:Zx9Kq2Lm7Pv4Tn8R@git.example.com/org/repo.git",
+        );
+        expect(userinfo.length).toBeGreaterThan(0);
+        expect(
+          userinfo.every((match) => !"git.example.com/org/repo.git".includes(match.match)),
+        ).toBe(true);
+      });
+
+      it("still redacts a high-entropy userinfo that a rule does not name", () => {
+        const userinfo = "Zx9Kq2Lm7Pv4Tn8RwY3bQ5cD";
+        expect(
+          flagged(`https://${userinfo}@registry.example.com/v2/images/base/manifests/latest`),
+        ).toEqual([userinfo]);
+      });
+    });
+
+    it("still flags a bare high-entropy string", () => {
+      expect(flagged("value Zx9Kq2Lm7Pv4Tn8RwY3bQ5cD end")).toEqual(["Zx9Kq2Lm7Pv4Tn8RwY3bQ5cD"]);
+    });
+
     it("still flags hex whenever the entropy threshold admits it", () => {
       // Hex carries at most 4 bits per character, under the default threshold; a lower one flags it.
       expect(

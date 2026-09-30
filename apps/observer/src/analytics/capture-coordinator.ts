@@ -281,6 +281,17 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * post-dedup event alongside the other evidence recorders, before projection.
    */
   workflowCallRecorder?: WorkflowCallRecorder;
+  /**
+   * Local-only observer of every normalization batch, after dedup and dead-lettering. It feeds
+   * the per-harness-version decode stats and must be cheap and synchronous; a throwing observer
+   * is ignored and never affects capture.
+   */
+  onPipelineResults?: (session: HarnessSession, results: readonly PipelineProcessResult[]) => void;
+  /**
+   * Resolves the harness version stamped on events when the adapter's session metadata carries no
+   * `harnessVersion`. The resolver must cache; it runs on every batch.
+   */
+  resolveHarnessVersion?: (harnessId: string) => Promise<string | null>;
 }
 
 interface GenericSessionTail {
@@ -335,6 +346,8 @@ export class TrajectoryCaptureCoordinator {
   private readonly maxBatchSize: number;
   private readonly maxBatchBytes: number;
   private readonly telemetry?: TelemetryAggregator;
+  private readonly onPipelineResults?: TrajectoryCaptureCoordinatorOptions["onPipelineResults"];
+  private readonly resolveHarnessVersion?: TrajectoryCaptureCoordinatorOptions["resolveHarnessVersion"];
   private onSessionEvents?: SessionEventSink;
   private computationEvidenceRecorder: ComputationEvidenceRecorder;
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
@@ -414,6 +427,8 @@ export class TrajectoryCaptureCoordinator {
         pipelineOrOptions.maxBatchBytes ?? OBSERVATION_UPLOAD_POLICY.maxBytes,
       );
       this.telemetry = pipelineOrOptions.telemetry;
+      this.onPipelineResults = pipelineOrOptions.onPipelineResults;
+      this.resolveHarnessVersion = pipelineOrOptions.resolveHarnessVersion;
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
       this.computationEvidenceRecorder =
         pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
@@ -674,6 +689,28 @@ export class TrajectoryCaptureCoordinator {
   }
 
   /**
+   * The adapter's session metadata, plus the harness version when the adapter reports none. The
+   * pipeline stamps this onto every event so the cloud can attribute sessions per harness version.
+   */
+  private async sessionCustomMetadata(session: HarnessSession): Promise<JsonObject | undefined> {
+    const base = JsonObjectSchema.safeParse(session.metadata).data;
+    if (!this.resolveHarnessVersion || typeof base?.harnessVersion === "string") return base;
+    const version = await this.resolveHarnessVersion(session.harnessId).catch(() => null);
+    return version ? { ...base, harnessVersion: version } : base;
+  }
+
+  private observePipelineResults(
+    session: HarnessSession,
+    results: readonly PipelineProcessResult[],
+  ): void {
+    try {
+      this.onPipelineResults?.(session, results);
+    } catch {
+      // Decode statistics are advisory; they must never affect capture.
+    }
+  }
+
+  /**
    * Per-session serial lock to ensure records within the same session are processed in order
    * while allowing concurrent sessions to execute in parallel without cross-session blocking.
    */
@@ -796,7 +833,7 @@ export class TrajectoryCaptureCoordinator {
         // ATTRIBUTED SESSION PATH
         const ingestedEvents: NormalizedSessionEvent[] = [];
         if (telemetryRecords.length > 0) {
-          const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
+          const customMetadata = await this.sessionCustomMetadata(session);
           const pipelineContext: PipelineProcessContext = {
             sessionId: session.sessionId,
             harnessId: session.harnessId,
@@ -807,6 +844,7 @@ export class TrajectoryCaptureCoordinator {
           let pipelineResults: PipelineProcessResult[];
           try {
             pipelineResults = await this.pipeline.processBatch(telemetryRecords, pipelineContext);
+            this.observePipelineResults(session, pipelineResults);
           } catch (err) {
             this.logger?.error(`Normalization pipeline failed for session ${sessionId}`, {
               error: err instanceof Error ? err.message : String(err),
@@ -994,7 +1032,7 @@ export class TrajectoryCaptureCoordinator {
         }
 
         if (telemetryRecords.length > 0) {
-          const customMetadata = JsonObjectSchema.safeParse(session.metadata).data;
+          const customMetadata = await this.sessionCustomMetadata(session);
           const pipelineContext: PipelineProcessContext = {
             sessionId: session.sessionId,
             harnessId: session.harnessId,
@@ -1006,6 +1044,7 @@ export class TrajectoryCaptureCoordinator {
           let pipelineResults: PipelineProcessResult[];
           try {
             pipelineResults = await this.pipeline.processBatch(telemetryRecords, pipelineContext);
+            this.observePipelineResults(session, pipelineResults);
           } catch (err) {
             this.logger?.error(`Normalization pipeline failed for generic session ${sessionId}`, {
               error: err instanceof Error ? err.message : String(err),

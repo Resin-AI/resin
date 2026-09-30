@@ -60,6 +60,9 @@ export * from "./analytics/index.js";
 // Native Computation Source Analysis, Canonical Program Building & Evidence Capture
 export * from "./analytics/computation/index.js";
 
+// Local Per-Harness-Version Decode Evidence
+export * from "./harness-version-stats.js";
+
 // Trajectory Capture Daemon Module & Attribution
 export * from "./trajectory-capture-module.js";
 

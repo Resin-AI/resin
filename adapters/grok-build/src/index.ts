@@ -42,5 +42,6 @@ export {
   listGrokProjects,
   listGrokSessions,
   readGrokSessionSummary,
-  readGrokSubagentParents,
+  readGrokSubagentLinks,
 } from "./store.js";
+export type { GrokSubagentLink } from "./store.js";

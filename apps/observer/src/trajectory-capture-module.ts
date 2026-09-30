@@ -23,6 +23,11 @@ import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import { HARNESS_DEFINITIONS } from "./harness-registry.js";
+import {
+  type HarnessVersionResolver,
+  HarnessVersionStatsRecorder,
+  createInstalledVersionResolver,
+} from "./harness-version-stats.js";
 import type {
   DaemonModule,
   Logger,
@@ -229,9 +234,16 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    */
   logger?: Logger;
   /**
-   * If true, only user sessions will be attached by the tailing coordinator.
+   * If true (default), agent sessions that name no parent session are not attached. Subagent and
+   * child sessions that carry `metadata.parentSessionId` are user work and are always captured.
    */
   captureUserSessionsOnly?: boolean;
+  /**
+   * Resolves the harness version a session ran under when its adapter reports none. Defaults to
+   * probing the installed harness. Per-harness-version decode stats are only kept when the module
+   * has a state store.
+   */
+  resolveHarnessVersion?: HarnessVersionResolver;
 }
 
 function isLocalStateStore(
@@ -283,6 +295,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private skipBackfillOnNextStart = false;
   private logger?: Logger;
   private readonly captureUserSessionsOnly: boolean;
+  private readonly decodeStats?: HarnessVersionStatsRecorder;
+  private readonly resolveHarnessVersion?: HarnessVersionResolver;
 
   constructor(options: TrajectoryCaptureRuntimeModuleOptions = {}) {
     this.logger = options.logger;
@@ -333,6 +347,21 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       } else {
         dbConnection = options.store;
       }
+    }
+
+    // Tests with no store and no injected resolver must not probe real installed harnesses.
+    const resolveHarnessVersion =
+      dbConnection || options.resolveHarnessVersion
+        ? (options.resolveHarnessVersion ??
+          createInstalledVersionResolver({ definitions: HARNESS_DEFINITIONS }))
+        : undefined;
+    this.resolveHarnessVersion = resolveHarnessVersion;
+    if (dbConnection && resolveHarnessVersion) {
+      this.decodeStats = new HarnessVersionStatsRecorder({
+        conn: dbConnection,
+        resolveVersion: resolveHarnessVersion,
+        logger: this.logger,
+      });
     }
 
     this.normalizationPipeline =
@@ -415,6 +444,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         isTelemetryEnabled: () => this.telemetryEnabled,
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
+        resolveHarnessVersion: this.resolveHarnessVersion,
+        onPipelineResults: this.decodeStats
+          ? (session, results) => this.decodeStats?.record(session, results)
+          : undefined,
         workflowCallRecorder: new WorkflowCallRecorder({
           privateValueOwnerWorkspaceId: options.privateValueOwnerWorkspaceId,
         }),
@@ -808,6 +841,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.logger = context.logger;
     this.rebuildOwnedObserverCoordinator();
     this.captureCoordinator.setTelemetryEnabled(true);
+    this.decodeStats?.start();
 
     // Resolve observation client from cloud-runtime if not already injected
     if (!this.resolvedObservationClient && !this.getObservationClientFn) {
@@ -894,6 +928,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     } finally {
       // Shutdown (SIGTERM/SIGINT or IPC) always persists pending placeholder aliases.
       FilePrivateValueStore.default().flush();
+      await this.decodeStats?.stop();
       this.captureCoordinator.clearComputationEvidence();
       this.captureCoordinator.clearCommandSequenceEvidence();
     }

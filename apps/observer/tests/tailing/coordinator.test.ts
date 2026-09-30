@@ -1344,6 +1344,49 @@ describe("ObserverCoordinator captureUserSessionsOnly and Stuck Flush Isolation"
     await coordinator.stop();
   });
 
+  it("captures a parent-linked subagent session by default and still skips an unlinked agent session", async () => {
+    const coordinator = new ObserverCoordinator({ pollIntervalMs: 5000 });
+    const adapter = new FakeHarnessAdapter({ id: "linked-agent-adapter" });
+    coordinator.registerAdapter(adapter);
+    const ws: HarnessWorkspace = {
+      workspaceId: "ws-linked",
+      harnessId: "linked-agent-adapter",
+      rootPath: "/tmp/ws-linked",
+      name: "Linked WS",
+    };
+    adapter.addWorkspace(ws);
+    const base = {
+      workspaceId: ws.workspaceId,
+      harnessId: "linked-agent-adapter",
+      status: "active" as const,
+      startedAt: new Date().toISOString(),
+    };
+    adapter.addSession({
+      ...base,
+      sessionId: "parent",
+      transcriptPath: "/tmp/parent.jsonl",
+      metadata: { sessionKind: "user" },
+    });
+    adapter.addSession({
+      ...base,
+      sessionId: "child",
+      transcriptPath: "/tmp/child.jsonl",
+      metadata: { sessionKind: "agent", parentSessionId: "parent", agentName: "scout" },
+    });
+    adapter.addSession({
+      ...base,
+      sessionId: "orphan",
+      transcriptPath: "/tmp/orphan.jsonl",
+      metadata: { sessionKind: "agent", parentSessionId: "" },
+    });
+
+    const summary = await coordinator.pollOnce();
+    expect(summary.sessionsAttached).toBe(2);
+    expect(coordinator.getTailer().getActiveSessions().sort()).toEqual(["child", "parent"]);
+
+    await coordinator.stop();
+  });
+
   it("attaches agent sessions when captureUserSessionsOnly is explicitly false", async () => {
     const coordinator = new ObserverCoordinator({
       pollIntervalMs: 5000,

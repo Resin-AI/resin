@@ -179,14 +179,21 @@ export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
  * code-mode harnesses repeat a server's instructions in every tool description they list.
  */
 const GATEWAY_USE_RULES =
-  "Use a tool only when it does exactly the user's task, never to widen its scope or side effects, and check its errors and effects before claiming success. " +
-  "Discovery is read-only: never enable, pin, disable or roll back tools. Honor the user's tool choices; use no tools for requests that need none.";
+  "Use a tool only for exactly the user's task, honoring their tool choices; check its errors and effects, and never enable, pin, disable or roll back tools.";
+
+/**
+ * How learned tools are used. Their listing names each one's purpose and inputs only; the recorded
+ * steps and input docs are one get_tool_schema call away. With the discovery route after it, this
+ * first line stays within the 250 characters Codex keeps of a deferred tool source's summary.
+ */
+const LEARNED_TOOL_GUIDANCE =
+  "Learned tools rerun recorded work: call one directly when it is your next step; omitted inputs reuse recorded values.";
 
 /** Static initialization instructions returned to MCP clients during capability negotiation. */
-export const DEFAULT_GATEWAY_INSTRUCTIONS = `Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: search_tools(query=<task>) -> invoke_tool, or manage_tools(action=list_versions,scope=workspace) -> get_tool_schema -> invoke_tool.\n${GATEWAY_USE_RULES}`;
+export const DEFAULT_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: search_tools(query=<task>) or manage_tools(action=list_versions,scope=workspace); get_tool_schema(name): steps; invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /** Initialization instructions for a connection whose tool search is disabled: discovery uses manage_tools. */
-export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `Learned tools run recorded work from this workspace: call one directly instead of redoing it. Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>) -> get_tool_schema -> invoke_tool.\n${GATEWAY_USE_RULES}`;
+export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>); get_tool_schema(name): steps; invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.

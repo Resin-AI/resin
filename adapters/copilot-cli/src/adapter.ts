@@ -29,10 +29,12 @@ import {
   resolveCopilotHome,
   resolveCopilotMcpConfigPath,
   toCopilotSession,
+  toCopilotSubagentSessions,
   toCopilotWorkspace,
 } from "./discovery.js";
 import { getCopilotRefreshCapability, notifyCopilotCatalogRefresh } from "./refresh.js";
 import { CopilotSessionEventSource } from "./source.js";
+import { listCopilotSubagents } from "./subagents.js";
 
 export interface CopilotHarnessAdapterOptions {
   home?: string;
@@ -83,14 +85,22 @@ export class CopilotHarnessAdapter implements StrictHarnessAdapter {
 
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
     const now = this.options.now?.() ?? Date.now();
-    return (await listCopilotSessionEntries(this.copilotHome))
-      .filter((entry) => entry.cwd === workspace.rootPath)
-      .map((entry) => toCopilotSession(entry, now));
+    const sessions: HarnessSession[] = [];
+    for (const entry of await listCopilotSessionEntries(this.copilotHome)) {
+      if (entry.cwd !== workspace.rootPath) continue;
+      sessions.push(toCopilotSession(entry, now));
+      // Subagent runs share their parent's events.jsonl; each is its own linked session.
+      sessions.push(
+        ...toCopilotSubagentSessions(entry, await listCopilotSubagents(entry.eventsPath), now),
+      );
+    }
+    return sessions;
   }
 
   async resolveActiveSession(workspace: HarnessWorkspace): Promise<HarnessSession | null> {
+    // A running subagent belongs to its running parent; only user sessions are candidates.
     const active = (await this.listSessions(workspace)).filter(
-      (session) => session.status === "active",
+      (session) => session.status === "active" && session.metadata.sessionKind !== "agent",
     );
     if (active.length > 1) {
       throw new AmbiguousActiveSessionError(
@@ -152,7 +162,7 @@ export class CopilotHarnessAdapter implements StrictHarnessAdapter {
         mcpListChange: "supported",
         contextNudge: "unsupported",
         notes:
-          "Tails session-state/<id>/events.jsonl: exact tool arguments and results, subagent events tagged with parentToolCallId, token usage per process run from session.shutdown.",
+          "Tails session-state/<id>/events.jsonl: exact tool arguments and results, token usage per process run from session.shutdown. Each subagent (its events carry agentId, framed by subagent.started/completed) is its own linked agent session over the same file.",
       }),
       supportedTransports: ["stdio", "http", "sse"],
       supportsMultiWorkspace: true,

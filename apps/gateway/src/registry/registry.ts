@@ -709,14 +709,6 @@ export class ToolRegistry {
     this.initSystemMetaTools();
   }
 
-  /** The local-only detail about what a tool runs, when a describer is installed. */
-  describeLocally(
-    tool: Pick<RegistryTool, "artifactDigest">,
-    context: Parameters<LocalToolDescriber>[1],
-  ): string | undefined {
-    return this.localToolDescriber?.(tool, context);
-  }
-
   getSafetyGateEvaluator(): SafetyGateEvaluator | undefined {
     return this.safetyGateEvaluator;
   }

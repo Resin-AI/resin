@@ -39,7 +39,9 @@ import {
 import { z } from "zod";
 import {
   type SingleCommandOutput,
+  callsOnlyCommandFreeTools,
   extractSingleCommandOutput,
+  extractStdinWrite,
   hasUnresolvedCodeModeEffects,
   isApplyPatchOnlyCell,
   isNativeCommandCarrierCell,
@@ -157,6 +159,11 @@ const CodexDecoderOptionsSchema: z.ZodType<CodexDecoderOptions> = z.object({
   lastCausalSequence: z.number().optional(),
   workspaceId: z.string().optional(),
 });
+
+/** Codex thread and turn ids are lowercase UUIDv7: lexicographic order is creation order. */
+function isUuidV7(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
 
 /**
  * Helper to generate unique event IDs.
@@ -1110,6 +1117,40 @@ export class CodexSessionDecoder {
   private toolCallSeq = 0;
   /** Code-mode `exec` calls awaiting their output; a collab item inside one was made by it. */
   private readonly openExecCallIds = new Set<string>();
+  /** The rollout's own `session_meta` has been read; a later one is a replayed parent header. */
+  private seenSessionMeta = false;
+  /** Own thread id of a forked rollout while it still replays its parent's history. */
+  private forkReplayOwnThreadId?: string;
+
+  /**
+   * A forked rollout (`session_meta.forked_from_id`, including every multi-agent child that
+   * forked its parent's context) starts with a copy of the parent's records: the parent's
+   * `session_meta`, turns, tool calls and token counts. They belong to the parent's own capture,
+   * so they are dropped. The copy ends at the first turn the fork started itself: thread and turn
+   * ids are UUIDv7, so a turn older than the fork's thread id was inherited. Anything not
+   * provably inherited is kept.
+   */
+  private isForkReplayRecord(wrapperType: string, payload: CodexTranscriptPayload): boolean {
+    if (wrapperType === "session_meta" && !this.seenSessionMeta) {
+      this.seenSessionMeta = true;
+      const ownThreadId = asString(payload.id);
+      if (asString(payload.forked_from_id) && ownThreadId && isUuidV7(ownThreadId)) {
+        this.forkReplayOwnThreadId = ownThreadId;
+      }
+      return false;
+    }
+    const ownThreadId = this.forkReplayOwnThreadId;
+    if (ownThreadId === undefined) return false;
+    if (wrapperType === "event_msg" && asString(payload.type) === "task_started") {
+      const turnId = asString(payload.turn_id);
+      if (!turnId || !isUuidV7(turnId) || turnId >= ownThreadId) {
+        this.forkReplayOwnThreadId = undefined;
+        return false;
+      }
+    }
+    return true;
+  }
+
   private callMap = new Map<
     string,
     {
@@ -1174,6 +1215,14 @@ export class CodexSessionDecoder {
   private heldCommand?: { cellCallId: string; events: NormalizedSessionEvent[] };
   /** The reply of a carrier cell the current record carried. */
   private carrierReply?: { callId: string; status: string; printed: string[] };
+  /**
+   * Settling cells that only poll a running command (`write_stdin` with empty `chars`), by the
+   * polled session ID. Such a poll cannot start a command, so the polled command's own completion
+   * may still be linked to the cell that started it while the poll is open.
+   */
+  private stdinPolls = new Map<string, string>();
+  /** Session IDs that received input: their commands' results depend on it, so never link them. */
+  private interactiveSessions = new Set<string>();
   private nativeUsageSeen = new Set<string>();
   private nativeContexts = new Map<string, CodexNativeThreadContext>();
   private currentNativeContext?: CodexNativeThreadContext;
@@ -1198,11 +1247,18 @@ export class CodexSessionDecoder {
         : (options.lastCausalSequence ?? 0);
   }
 
+  /** Losing track of an interactive session could link its input-dependent result: stop linking. */
+  private noteStdinInput(sessionId: string): void {
+    if (this.interactiveSessions.size >= 128) this.unsafeCodeMode = true;
+    else this.interactiveSessions.add(sessionId);
+  }
+
   private matchCommand(
     nativeId: string,
     startedAtMs: number | undefined,
     argv: string[],
     cwd: string | undefined,
+    processId: string | undefined,
   ): CodexCommandAssociation | undefined {
     if (
       startedAtMs === undefined ||
@@ -1229,7 +1285,10 @@ export class CodexSessionDecoder {
       wrapper.blocked ||
       wrapper.status === "yielded" ||
       this.unsafeCodeMode ||
-      this.settlingCells.size > 0
+      [...this.settlingCells].some(
+        (cell) => processId === undefined || this.stdinPolls.get(cell) !== processId,
+      ) ||
+      (processId !== undefined && this.interactiveSessions.has(processId))
     ) {
       wrapper.blocked = true;
       return undefined;
@@ -1713,6 +1772,7 @@ export class CodexSessionDecoder {
       return [];
     }
     if (!this.rememberNativeItem(item, threadId, outputSource)) return [];
+    if (source === "response_item") this.stdinPolls.delete(outputCallId ?? "");
     if (
       source === "response_item" &&
       itemType === "custom_tool_call_output" &&
@@ -2268,6 +2328,7 @@ export class CodexSessionDecoder {
     envelope: CodexTranscriptPayload,
     payload: CodexTranscriptPayload,
   ): NormalizedSessionEvent[] {
+    if (this.isForkReplayRecord(wrapperType, payload)) return [];
     const metadata = this.prepareNativeRecord(wrapperType, envelope, payload);
     const timestamp =
       asString(envelope.timestamp) ?? asString(payload.timestamp) ?? asString(envelope.created_at);
@@ -2476,6 +2537,9 @@ export class CodexSessionDecoder {
               args: [],
               cwd: asString(args.workdir) ?? asString(args.cwd),
             });
+          const chars = asString(args.chars);
+          const session = asString(args.session_id) ?? asNumber(args.session_id)?.toString();
+          if (native.name === "write_stdin" && chars && session) this.noteStdinInput(session);
         }
         const nativeInput = native.arguments ?? native.input;
         const audited =
@@ -2500,14 +2564,20 @@ export class CodexSessionDecoder {
           (typeof nativeInput !== "string" ||
             (!extracted && hasUnresolvedCodeModeEffects(nativeInput)))
         ) {
-          if (
-            callId &&
+          const stdin =
+            typeof nativeInput === "string" ? extractStdinWrite(nativeInput) : undefined;
+          if (stdin && stdin.chars !== "") this.noteStdinInput(stdin.sessionId);
+          const settles =
             typeof nativeInput === "string" &&
             this.settlingCells.size < 128 &&
-            settlesBeforeCompletion(nativeInput)
-          )
+            settlesBeforeCompletion(nativeInput);
+          // A proven cell whose tools cannot start a native command has nothing to settle, however
+          // it ends: a failed `apply_patch` or an open `view_image` cell must not stop later links.
+          const commandFree = settles && callsOnlyCommandFreeTools(nativeInput);
+          if (callId && settles && !commandFree) {
             this.settlingCells.add(callId);
-          else this.unsafeCodeMode = true;
+            if (stdin?.chars === "") this.stdinPolls.set(callId, stdin.sessionId);
+          } else if (!commandFree) this.unsafeCodeMode = true;
         }
         const callTime = asNumber(
           asObject(native.internal_chat_message_metadata_passthrough)?.create_time,
@@ -2583,7 +2653,8 @@ export class CodexSessionDecoder {
           this.carrierCells.set(callId, {
             observedStarted,
             commands: 0,
-            ...(prints === undefined ? {} : { prints }),
+            // Only a cell printing the command's output alone (`text(r.output)`) can supply it.
+            ...(prints === undefined || prints.printsResponse ? {} : { prints }),
           });
         }
         return decoded;
@@ -2738,6 +2809,7 @@ export class CodexSessionDecoder {
           return this.nativeUnknown(p);
         const cwd = asString(item?.cwd);
         const nativeId = asString(item?.id) ?? asString(item?.call_id);
+        const processId = asString(item?.process_id);
         const tracked = nativeId ? this.nativeCommands.get(nativeId) : undefined;
         // A repeat of the same completion is dropped; one that disagrees (another executable, argv
         // or directory) is kept, so the recorder sees conflicting evidence rather than the first word.
@@ -2772,7 +2844,9 @@ export class CodexSessionDecoder {
               wrapper.blocked = true;
         }
         const association =
-          nativeId && !tracked ? this.matchCommand(nativeId, startedAtMs, argv, cwd) : undefined;
+          nativeId && !tracked
+            ? this.matchCommand(nativeId, startedAtMs, argv, cwd, processId)
+            : undefined;
         const decoded = this.normalizePayload({
           type: "command_exec",
           timestamp: p.timestamp,

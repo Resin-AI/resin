@@ -175,9 +175,19 @@ export class AuditRepository {
     );
   }
 
-  listPendingInvocationUploads(limit: number): InvocationRecord[] {
-    const sql =
-      "SELECT * FROM invocation_records WHERE uploaded_at IS NULL ORDER BY started_at ASC LIMIT ?;";
+  /**
+   * Pending invocation records, oldest first. `excludeWorkspaceIds` skips whole workspaces whose
+   * telemetry the cloud is currently refusing, so their backlog neither starves nor is retired.
+   */
+  listPendingInvocationUploads(
+    limit: number,
+    excludeWorkspaceIds: readonly string[] = [],
+  ): InvocationRecord[] {
+    const exclusion =
+      excludeWorkspaceIds.length > 0
+        ? ` AND workspace_id NOT IN (${excludeWorkspaceIds.map(() => "?").join(", ")})`
+        : "";
+    const sql = `SELECT * FROM invocation_records WHERE uploaded_at IS NULL${exclusion} ORDER BY started_at ASC LIMIT ?;`;
     const rows = this.conn.all<{
       invocation_id: string;
       session_id: string;
@@ -193,7 +203,7 @@ export class AuditRepository {
       error_details_json: string | null;
       resource_usage_json: string | null;
       usage_estimate_json: string | null;
-    }>(sql, [limit]);
+    }>(sql, [...excludeWorkspaceIds, limit]);
 
     return rows.map((row) =>
       InvocationRecordSchema.parse({

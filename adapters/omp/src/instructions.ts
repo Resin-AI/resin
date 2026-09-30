@@ -17,14 +17,15 @@ export const OMP_GUIDANCE_MARKERS: ManagedBlockMarkers = {
 
 /**
  * Guidance placed in OMP's user context file. OMP mounts MCP tools as `xd://` devices listed
- * only by name and a one-line summary, so without this the model never opens them.
+ * only by name and a one-line summary, so without this the model never opens them. A learned
+ * tool's summary is its whole listing (purpose and inputs); get_tool_schema shows its commands.
  */
 export const OMP_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are MCP tools mounted as \`xd://mcp__resin_<name>\` devices; each description shows the commands it runs, with \`{input}\` where a value you pass goes, and each input's recorded value.
+Resin learned tools from earlier work in this workspace. They are MCP tools mounted as \`xd://mcp__resin_<name>\` devices, each listed in your prompt with its purpose and inputs; writing \`{"name": "<name>"}\` to \`xd://mcp__resin_get_tool_schema\` shows the commands one runs and each input's recorded value.
 
-- In your first step, next to your own first look at the task, \`read\` the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`) to see their commands and inputs.
-- A tool whose commands do your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call one by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`); when several apply, call them together. Omitted inputs reuse the recorded values.
+- In your first step, next to your own first look at the task, go through the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`).
+- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call one by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`); when several apply, call them together. Omitted inputs reuse the recorded values.
 - Their output is the commands' current output: use it instead of running those commands yourself.`;
 
 /**

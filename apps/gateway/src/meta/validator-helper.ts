@@ -24,6 +24,29 @@ function describeValueType<TInput>(v: TInput): string {
   return "object";
 }
 
+/** Why a string breaks its schema's `minLength`, `maxLength` or `pattern`; `label` names it. */
+function stringConstraintErrors(label: string, schema: JsonRpcParams, value: string): string[] {
+  const errors: string[] = [];
+  if (Number.isFinite(schema.minLength) && value.length < Number(schema.minLength)) {
+    errors.push(`Parameter '${label}' must be at least ${Number(schema.minLength)} characters`);
+  }
+  if (Number.isFinite(schema.maxLength) && value.length > Number(schema.maxLength)) {
+    errors.push(`Parameter '${label}' must be at most ${Number(schema.maxLength)} characters`);
+  }
+  if (schema.pattern && Object.prototype.toString.call(schema.pattern) === "[object String]") {
+    try {
+      if (!new RegExp(String(schema.pattern)).test(value)) {
+        errors.push(
+          `Parameter '${label}' does not match required pattern '${String(schema.pattern)}'`,
+        );
+      }
+    } catch {
+      // Ignore invalid regex in schema
+    }
+  }
+  return errors;
+}
+
 export function validateParameters(
   schema: ToolParameterSchema | JsonRpcParams | null | undefined,
   params: JsonRpcParams | null | undefined,
@@ -78,38 +101,7 @@ export function validateParameters(
                   `Parameter '${key}' must be a string (got ${describeValueType(value)})`,
                 );
               } else {
-                const strVal = String(value);
-                if (
-                  Number.isFinite(subSchema.minLength) &&
-                  strVal.length < Number(subSchema.minLength)
-                ) {
-                  errors.push(
-                    `Parameter '${key}' must be at least ${Number(subSchema.minLength)} characters`,
-                  );
-                }
-                if (
-                  Number.isFinite(subSchema.maxLength) &&
-                  strVal.length > Number(subSchema.maxLength)
-                ) {
-                  errors.push(
-                    `Parameter '${key}' must be at most ${Number(subSchema.maxLength)} characters`,
-                  );
-                }
-                if (
-                  subSchema.pattern &&
-                  Object.prototype.toString.call(subSchema.pattern) === "[object String]"
-                ) {
-                  try {
-                    const regex = new RegExp(String(subSchema.pattern));
-                    if (!regex.test(strVal)) {
-                      errors.push(
-                        `Parameter '${key}' does not match required pattern '${String(subSchema.pattern)}'`,
-                      );
-                    }
-                  } catch {
-                    // Ignore invalid regex in schema
-                  }
-                }
+                errors.push(...stringConstraintErrors(key, subSchema, String(value)));
               }
               break;
 
@@ -187,6 +179,10 @@ export function validateParameters(
                       ) {
                         errors.push(
                           `Parameter '${key}[${i}]' must be a string (got ${describeValueType(itemVal)})`,
+                        );
+                      } else if (String(itemType) === "string") {
+                        errors.push(
+                          ...stringConstraintErrors(`${key}[${i}]`, itemSchema, String(itemVal)),
                         );
                       } else if (String(itemType) === "number" && !Number.isFinite(itemVal)) {
                         errors.push(

@@ -143,13 +143,13 @@ describe("get_tool_schema Meta-Tool", () => {
     const resV1 = await handler(context, { toolId: "tool_multiver", version: "1.0.0" });
     const dataV1 = parseResponseJson(resV1);
     expect(dataV1.version).toBe("1.0.0");
-    expect(dataV1.description).toBe("Version 1.0.0 description");
+    expect(dataV1.description).toMatch(/^Version 1\.0\.0 description/);
 
     // Request specific version v2
     const resV2 = await handler(context, { toolId: "tool_multiver", version: "2.0.0" });
     const dataV2 = parseResponseJson(resV2);
     expect(dataV2.version).toBe("2.0.0");
-    expect(dataV2.description).toBe("Version 2.0.0 description");
+    expect(dataV2.description).toMatch(/^Version 2\.0\.0 description/);
 
     // Pin to v1 and check default resolution without version param
     await registry.pinToolVersion("tool_multiver", "1.0.0", "ws-version");

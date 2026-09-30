@@ -1079,5 +1079,103 @@ describe("a held-out run of one segment of a recorded && chain", () => {
       expect(answer.verification?.status).not.toBe("verified");
       expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
     });
+
+    describe("a held-out batch: the setup once, then one line per item", () => {
+      const BATCH = "./reportctl render --region APAC\n./reportctl render --region AMER";
+      const line = (index: number) => ({ index, count: 2, version: SPLITTER });
+      const batch: Turn[] = [
+        { user: "Produce the monthly reports" },
+        whole("mkdir", "mkdir -p out"),
+        whole("batch", BATCH),
+      ];
+
+      it("verifies every line as an iteration sharing the setup call", async () => {
+        const answer = await cross(EMEA, true, batch, [
+          [{ callId: "mkdir", address: null }],
+          [
+            { callId: "batch", address: line(0) },
+            { callId: "batch", address: line(1) },
+          ],
+        ]);
+        expect(answer.verification?.status).toBe("verified");
+        expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+      });
+
+      it("misses the batch when a line is left out of the iterations", async () => {
+        const answer = await cross(EMEA, true, batch, [
+          [{ callId: "mkdir", address: null }],
+          [{ callId: "batch", address: line(0) }],
+        ]);
+        expect(answer.verification?.status).not.toBe("verified");
+        expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+      });
+
+      it("misses a once-named step that follows an iterated one", async () => {
+        const answer = await cross(
+          EMEA,
+          true,
+          [
+            { user: "Produce the monthly reports" },
+            whole("mkdir", "mkdir -p out"),
+            whole("mkdir-again", "mkdir -p out"),
+            whole("render", "./reportctl render --region APAC"),
+          ],
+          [
+            [
+              { callId: "mkdir", address: null },
+              { callId: "mkdir-again", address: null },
+            ],
+            [{ callId: "render", address: null }],
+          ],
+        );
+        expect(answer.verification?.status).not.toBe("verified");
+        expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([false]);
+      });
+
+      it("verifies a run the session repeated, sharing the plan's own setup call", async () => {
+        // heat-pump--b: the script was written once, then invoked again on other values in the same
+        // session; the held-out run's setup is necessarily the plan's own call.
+        const store = new InMemoryPrivateValueStore();
+        const recorded = record(store, [
+          { user: "Produce the monthly reports" },
+          whole("mkdir", "mkdir -p out"),
+          whole("emea", "./reportctl render --region EMEA"),
+          whole("apac", "./reportctl render --region APAC"),
+        ]);
+        const plan: RecordedWorkflow = { ...recorded, steps: recorded.steps.slice(0, 2) };
+        delete (plan as { baseline?: unknown }).baseline;
+        const region = tokenizeProgram("shell", "./reportctl render --region EMEA").findIndex(
+          (token) => token.raw === "EMEA",
+        );
+        const ask = (setupCallId: string, invokeCallId: string) =>
+          validator(store, { sessions: [SESSION] })({
+            ...plan,
+            candidates: [
+              {
+                stepId: plan.steps[1]!.id,
+                argument: "command",
+                path: ["tokens", region],
+                proposed: { kind: "input", name: "region", type: "string" },
+                reason: "varies-across-executions",
+                missing: "a demonstration with a different value",
+              },
+            ],
+            heldOut: {
+              inputs: [],
+              observed: [],
+              calls: [
+                { stepId: plan.steps[0]!.id, callIds: [setupCallId], segments: [null] },
+                { stepId: plan.steps[1]!.id, callIds: [invokeCallId], segments: [null] },
+              ],
+            },
+          });
+        const answer = await ask("mkdir", "apac");
+        expect(answer.verification?.status).toBe("verified");
+        expect(answer.verdicts.map((verdict) => verdict.confirmed)).toEqual([true]);
+        // A held-out whose every step is the plan's own call demonstrates nothing new.
+        const own = await ask("mkdir", "emea");
+        expect(own.verification?.status).not.toBe("verified");
+      });
+    });
   });
 });

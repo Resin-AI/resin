@@ -24,7 +24,7 @@ export const codexInstallHarness: HarnessInstallDefinition = {
   testedVersions: CODEX_TESTED_VERSIONS,
   knownLimits: [
     "No native-tool invoker: learned tools replay Codex built-in steps only as shell commands and apply_patch edits; web search and multi-agent steps are recorded but not replayable.",
-    "Multi-agent child threads are separate rollouts, bound to the parent's project through their own session_meta cwd.",
+    "Multi-agent child threads are separate rollouts: each is captured as its own agent session linked to the spawning thread's session (its own cwd binds it to a project), and the history a forked child replays from its parent is not captured again.",
     "Compaction boundaries are captured, but Codex does not record the token count after compaction.",
   ],
   probeInstallation: ({ targetPath, home, env }) =>

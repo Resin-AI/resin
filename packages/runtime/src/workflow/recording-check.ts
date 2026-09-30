@@ -12,6 +12,7 @@
 
 import path from "node:path";
 import {
+  type ProgramTokenAddress,
   type ShellDialect,
   type WorkflowJsonValue,
   type WorkflowStep,
@@ -153,8 +154,7 @@ function templateBinds(template: WorkflowValueTemplate, path: WorkflowValuePath)
       const { span } = address;
       return template.holes.some(
         (hole) =>
-          hole.token === address.token &&
-          hole.embedded === address.embedded &&
+          holeCovers(hole, address) &&
           // A whole-token hole binds every span of it; a span hole binds only what it covers.
           (hole.span === undefined ||
             (span !== undefined && hole.span.start <= span.start && hole.span.end >= span.end)) &&
@@ -164,6 +164,24 @@ function templateBinds(template: WorkflowValueTemplate, path: WorkflowValuePath)
     default:
       return false;
   }
+}
+
+/**
+ * Whether a program hole replaces the token `address` names: a word list replaces every word of its
+ * run, any other hole only its own (top-level or embedded) token.
+ */
+function holeCovers(
+  hole: Extract<WorkflowValueTemplate, { type: "program" }>["holes"][number],
+  address: ProgramTokenAddress,
+): boolean {
+  if (hole.through === undefined && address.through === undefined) {
+    return hole.token === address.token && hole.embedded === address.embedded;
+  }
+  return (
+    address.embedded === undefined &&
+    hole.token <= address.token &&
+    (address.through ?? address.token) <= (hole.through ?? hole.token)
+  );
 }
 
 /** Whether the plan binds this argument position to an earlier step, rather than recorded text. */
@@ -236,9 +254,7 @@ function templateDeviceSourced(
       }
       const address = programTokenPath(path);
       if (address === undefined) return false;
-      const covering = template.holes.filter(
-        (hole) => hole.token === address.token && hole.embedded === address.embedded,
-      );
+      const covering = template.holes.filter((hole) => holeCovers(hole, address));
       if (!covering.every((hole) => templateDeviceSourced(hole.binding, [], rules))) return false;
       // A whole-token hole replaces the token; a span hole leaves the rest of it to the text.
       return text || covering.some((hole) => hole.span === undefined);

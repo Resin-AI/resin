@@ -95,4 +95,28 @@ describe("OpenCode 1.1.65 recorded legacy JSON storage", () => {
       "read",
     ]);
   });
+
+  it("lists the subagent session as an agent session linked to its parent, named from its title", async () => {
+    const [workspace] = await adapter.listWorkspaces();
+    const sessions = await adapter.listSessions(workspace!);
+    const byId = new Map(sessions.map((s) => [s.sessionId, s.metadata]));
+    expect(byId.get(MAIN)).toMatchObject({ sessionKind: "user" });
+    expect(byId.get(MAIN)?.parentSessionId).toBeUndefined();
+    expect(byId.get(CHILD)).toMatchObject({
+      sessionKind: "agent",
+      parentSessionId: MAIN,
+      agentName: "general",
+    });
+  });
+
+  it("records the child's calls once: the parent only has the task call, the child only its own", async () => {
+    const parent = (await decodeSession(MAIN)).filter((e) => e.type === "tool_call");
+    const child = (await decodeSession(CHILD)).filter((e) => e.type === "tool_call");
+    expect(parent.some((c) => c.toolName === "task")).toBe(true);
+    expect(child.some((c) => c.toolName === "task")).toBe(false);
+    const parentIds = new Set(parent.map((c) => c.toolCallId));
+    for (const call of child) expect(parentIds.has(call.toolCallId)).toBe(false);
+    // The parent's `task` result embeds the child's answer as text only, never as tool calls.
+    expect(parent.filter((c) => c.toolName === "glob")).toHaveLength(0);
+  });
 });

@@ -309,8 +309,17 @@ export interface CodexTranscriptInspection {
   nativeSessionId?: string;
   threadId?: string;
   rootId?: string;
-  /** Spawning thread of a multi-agent child rollout. */
+  /** Immediate spawning thread of a multi-agent child rollout (not the root thread). */
   parentThreadId?: string;
+  /** Thread this rollout forked from; its rollout replays that thread's history. */
+  forkedFromId?: string;
+  /** `source.subagent.thread_spawn` identity, or the bare `source.subagent` kind (e.g. `review`). */
+  agentNickname?: string;
+  agentRole?: string;
+  agentPath?: string;
+  agentDepth?: number;
+  /** Codex's `thread_source` (`user` or `subagent`). */
+  threadSource?: string;
   status: SessionStatus;
   inspectedBytes: number;
 }
@@ -576,6 +585,12 @@ async function inspectCodexTranscript(
     let threadId: string | undefined;
     let rootId: string | undefined;
     let parentThreadId: string | undefined;
+    let forkedFromId: string | undefined;
+    let agentNickname: string | undefined;
+    let agentRole: string | undefined;
+    let agentPath: string | undefined;
+    let agentDepth: number | undefined;
+    let threadSource: string | undefined;
     let createdAt = fileStat.birthtime.getTime()
       ? fileStat.birthtime.toISOString()
       : fileStat.mtime.toISOString();
@@ -605,6 +620,18 @@ async function inspectCodexTranscript(
       const spawn = isJsonObject(subagent?.thread_spawn) ? subagent.thread_spawn : undefined;
       parentThreadId =
         nonEmptyString(payload.parent_thread_id) ?? nonEmptyString(spawn?.parent_thread_id);
+      forkedFromId = nonEmptyString(payload.forked_from_id);
+      agentNickname =
+        nonEmptyString(spawn?.agent_nickname) ?? nonEmptyString(payload.agent_nickname);
+      // `source.subagent` is either the thread_spawn object or a bare kind such as `review`.
+      agentRole =
+        nonEmptyString(spawn?.agent_role) ??
+        nonEmptyString(payload.agent_role) ??
+        nonEmptyString(source?.subagent);
+      agentPath = nonEmptyString(spawn?.agent_path) ?? nonEmptyString(payload.agent_path);
+      if (typeof spawn?.depth === "number" && Number.isFinite(spawn.depth))
+        agentDepth = spawn.depth;
+      threadSource = nonEmptyString(payload.thread_source);
       createdAt = codexRecordTimestamp(value) ?? createdAt;
       break;
     }
@@ -658,6 +685,12 @@ async function inspectCodexTranscript(
       ...(threadId ? { threadId } : {}),
       ...(rootId ? { rootId } : {}),
       ...(parentThreadId ? { parentThreadId } : {}),
+      ...(forkedFromId ? { forkedFromId } : {}),
+      ...(agentNickname ? { agentNickname } : {}),
+      ...(agentRole ? { agentRole } : {}),
+      ...(agentPath ? { agentPath } : {}),
+      ...(agentDepth !== undefined ? { agentDepth } : {}),
+      ...(threadSource ? { threadSource } : {}),
       status,
       inspectedBytes,
     };

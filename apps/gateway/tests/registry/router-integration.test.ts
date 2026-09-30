@@ -131,9 +131,9 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     );
   });
 
-  it("lists a workspace's learned tool with what it runs here, marked for native listing", async () => {
+  it("lists a learned tool by purpose and input names, leaving its recorded steps to get_tool_schema", async () => {
     const registry = new ToolRegistry();
-    registry.setLocalToolDescriber(() => "Recorded on this machine:\nStep 1 runs: cat design.md");
+    registry.setLocalToolDescriber(() => "Recorded on this machine:\nStep 1 runs: cat {input}");
     const router = createRegistryGatewayRouter(registry);
     const context = {
       workspaceId: "ws-learned",
@@ -147,21 +147,42 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       roots: [],
     };
     await registry.registerTool(
-      makeManifest({ id: "learned-tool-id", name: "read_design" }),
+      makeManifest({
+        id: "learned-tool-id",
+        name: "read_design",
+        description:
+          "Prints a design document, e.g. design.md. Call this when you need the design. Learned from one run.",
+        parameters: {
+          type: "object",
+          properties: {
+            input: { type: "string", description: "File to print, such as design.md." },
+          },
+          required: [],
+        },
+      }),
       undefined,
-      {
-        workspaceId: context.workspaceId,
-      },
+      { workspaceId: context.workspaceId },
     );
 
     const tools = await router.listTools(context);
     const learned = tools.find((tool) => tool.name === "read_design");
     expect(learned?._meta).toEqual({ [RESIN_LEARNED_TOOL_META]: true });
-    // The learned tool has a text input, so its local detail also offers `for_each`.
-    expect(learned?.description).toBe(
-      `Test tool description\n\nRecorded on this machine:\nStep 1 runs: cat design.md\n\n${FOR_EACH_DESCRIPTION_SENTENCE}`,
-    );
+    // One sentence, however the description punctuates inside it, plus the inputs' names.
+    expect(learned?.description).toBe("Prints a design document, e.g. design.md. Inputs: input.");
+    // Each input keeps its name and type; its docs and `for_each` usage are one lookup away.
+    expect(learned?.inputSchema.properties?.input).toEqual({ type: "string" });
+    expect(learned?.inputSchema.properties?.for_each).toEqual({ type: "object" });
     expect(tools.find((tool) => tool.name === "invoke_tool")?._meta).toBeUndefined();
+
+    const schema = await router.callTool(context, "get_tool_schema", { name: "read_design" });
+    const described = JSON.parse(schema.content[0]!.text as string);
+    expect(described.description).toBe(
+      `Prints a design document, e.g. design.md. Call this when you need the design. Learned from one run.\n\nRecorded on this machine:\nStep 1 runs: cat {input}\n\n${FOR_EACH_DESCRIPTION_SENTENCE}`,
+    );
+    expect(described.inputSchema.properties.input.description).toBe(
+      "File to print, such as design.md.",
+    );
+    expect(described.inputSchema.properties.for_each.description).toContain("once per value");
   });
 
   it("lists active catalog tools via tools/list", async () => {
@@ -205,7 +226,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     expect(listRes.result.tools).toHaveLength(5);
     const greetTool = listRes.result.tools.find((t) => t.name === "greet");
     expect(greetTool).toBeDefined();
-    expect(greetTool?.description).toBe("Greets a user");
+    expect(greetTool?.description).toBe("Greets a user. Inputs: input.");
   });
 
   it("waits once for a fresh install's catalog sync before the first tool list", async () => {

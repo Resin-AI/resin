@@ -22,7 +22,7 @@ export const piInstallHarness: HarnessInstallDefinition = {
     "Pi has no MCP client: Resin installs a Pi extension (<agent-dir>/extensions/resin.ts) that bridges `resin mcp`; runs with --no-extensions or -ne do not load it.",
     "Runs with --no-session write no transcript and cannot be captured.",
     "Sessions stored with --session-dir are only discovered when that directory is also set via PI_CODING_AGENT_SESSION_DIR or the sessionDir setting.",
-    "Pi has no built-in subagents; nothing below the session is captured.",
+    "Pi writes no subagent record: it has no built-in subagents, and Pi's reference subagent extension runs each subagent as a `pi --mode json -p --no-session` child process that writes no session file, so subagent tool calls are not captured (only the parent's own tool call and result). `/fork` and `/clone` sessions are separate user sessions linked to their source, not subagents.",
   ],
   probeInstallation: ({ targetPath, home, env }) =>
     probePiInstallation({ env, configPath: targetPath, homePath: resolvePiAgentDir(home, env) }),

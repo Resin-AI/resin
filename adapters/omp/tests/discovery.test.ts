@@ -1720,6 +1720,65 @@ describe("OMP Discovery, Installation Probing & Breadcrumbs", () => {
     }
   });
 
+  it("links subagents and subagents of subagents to their immediate parent session", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-subagent-link-"));
+    try {
+      const ompHome = path.join(tmpDir, ".omp");
+      const wsDir = path.join(tmpDir, "proj");
+      await fsp.mkdir(wsDir, { recursive: true });
+      const sessionsDir = path.join(ompHome, "agent", "sessions", "proj-slug");
+      const uuid = "01a0e881-17b6-72ba-a5fa-4c03e6a7bdde";
+      const sessionDirName = `2026-09-28T14-52-49-462Z_${uuid}`;
+      const sessionDir = path.join(sessionsDir, sessionDirName);
+      const agentDir = path.join(sessionDir, "Planner");
+      await fsp.mkdir(agentDir, { recursive: true });
+      const transcript = (id: string, parentSession?: string) =>
+        `${[
+          JSON.stringify({
+            type: "session",
+            id,
+            cwd: wsDir,
+            timestamp: "2026-09-28T16:00:00Z",
+            ...(parentSession ? { parentSession } : {}),
+          }),
+          JSON.stringify({ type: "agent_end", timestamp: "2026-09-28T16:01:00Z" }),
+        ].join("\n")}\n`;
+      const mainPath = path.join(sessionsDir, `${sessionDirName}.jsonl`);
+      const plannerPath = path.join(sessionDir, "Planner.jsonl");
+      const legacyPath = path.join(sessionDir, "Legacy.jsonl");
+      const nestedPath = path.join(agentDir, "Planner.Reviewer.jsonl");
+      await fsp.writeFile(mainPath, transcript(uuid));
+      // Newer transcripts name their parent in the session header.
+      await fsp.writeFile(plannerPath, transcript("sess-planner", mainPath));
+      // Older ones carry no parent; the layout links them.
+      await fsp.writeFile(legacyPath, transcript("sess-legacy"));
+      await fsp.writeFile(nestedPath, transcript("sess-reviewer"));
+
+      const catalog = await buildOmpDiscoveryCatalog({ ompHome, searchPaths: [wsDir] });
+      const byId = new Map(catalog.getAllSessions().map((session) => [session.sessionId, session]));
+      expect(byId.get(uuid)?.metadata.sessionKind).toBe("user");
+      expect(byId.get(uuid)?.metadata.parentSessionId).toBeUndefined();
+      expect(byId.get("sess-planner")?.metadata).toMatchObject({
+        sessionKind: "agent",
+        parentSessionId: uuid,
+        agentName: "Planner",
+      });
+      expect(byId.get("sess-legacy")?.metadata).toMatchObject({
+        sessionKind: "agent",
+        parentSessionId: uuid,
+        agentName: "Legacy",
+      });
+      // A child of a subagent links to the subagent, not the top-level session.
+      expect(byId.get("sess-reviewer")?.metadata).toMatchObject({
+        sessionKind: "agent",
+        parentSessionId: "sess-planner",
+        agentName: "Reviewer",
+      });
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("classifies session kind correctly distinguishing workspace slugs with timestamps from session directories", () => {
     const uuid = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d";
 

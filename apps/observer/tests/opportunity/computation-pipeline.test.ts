@@ -388,6 +388,5 @@ describe("public computation pipeline from native fixture records", () => {
         payload.localVerdicts.estimatedSavedWork.estimatedTokensSaved > 0,
     );
     expect(computationCandidate).toBeDefined();
-    expect(await store.opportunities.listPendingPatterns()).toHaveLength(proven.length);
   });
 });

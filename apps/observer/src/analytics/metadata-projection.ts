@@ -719,6 +719,66 @@ function projectRecordedReferences(
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
+/** Harness ids are short lowercase slugs (`claude-code`, `codex-cli`, `omp`). */
+const HARNESS_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** A harness release string: semver-like, never prose. */
+const HARNESS_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}$/;
+/** An opaque session or agent identifier: printable ASCII without whitespace, bounded. */
+const OPAQUE_IDENTIFIER_PATTERN = /^[\x21-\x7e]{1,256}$/;
+/** An agent role slug such as `explore` or `task`. */
+const AGENT_KIND_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+const AGENT_NAME_MAX_LENGTH = 64;
+
+/**
+ * The user's or harness's own label for a subagent (an OMP agent file stem, a Claude description)
+ * is free-form text. Only letters, digits and a few name punctuation marks survive: path
+ * separators, quotes, brackets and control characters become word breaks. The result is bounded,
+ * so it can name an agent for analytics but cannot carry a command, path or sentence-length prose.
+ */
+function sanitizeAgentName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N} ._:@#+-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, AGENT_NAME_MAX_LENGTH)
+    .trim();
+  return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function matchingString(value: unknown, pattern: RegExp): string | undefined {
+  return typeof value === "string" && pattern.test(value) ? value : undefined;
+}
+
+/**
+ * The identity of the session an event belongs to, so per-harness analytics and the parent link of
+ * a subagent session survive the metadata-only projection. Every field is validated against a
+ * strict pattern or sanitized and capped; anything else is dropped rather than guessed at.
+ */
+function projectSessionAttribution(
+  source: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const projected: Record<string, string> = {};
+  if (source === undefined) return projected;
+  const harnessId = matchingString(source.harnessId, HARNESS_ID_PATTERN);
+  if (harnessId !== undefined) projected.harnessId = harnessId;
+  const harnessVersion = matchingString(source.harnessVersion, HARNESS_VERSION_PATTERN);
+  if (harnessVersion !== undefined) projected.harnessVersion = harnessVersion;
+  const parentSessionId = matchingString(source.parentSessionId, OPAQUE_IDENTIFIER_PATTERN);
+  if (parentSessionId !== undefined) projected.parentSessionId = parentSessionId;
+  const agentId = matchingString(source.agentId, OPAQUE_IDENTIFIER_PATTERN);
+  if (agentId !== undefined) projected.agentId = agentId;
+  const agentKind = matchingString(
+    typeof source.agentKind === "string" ? source.agentKind.toLowerCase() : undefined,
+    AGENT_KIND_PATTERN,
+  );
+  if (agentKind !== undefined) projected.agentKind = agentKind;
+  const agentName = sanitizeAgentName(source.agentName);
+  if (agentName !== undefined) projected.agentName = agentName;
+  return projected;
+}
+
 export function projectEventToMetadataOnly(
   event: NormalizedSessionEvent,
   options: MetadataProjectionOptions = {},
@@ -785,6 +845,7 @@ export function projectEventToMetadataOnly(
   if (sessionKind !== undefined) {
     metadata.sessionKind = sessionKind;
   }
+  Object.assign(metadata, projectSessionAttribution(event.metadata));
   // A source-observed successful assistant stop is bounded completion evidence, not arbitrary
   // metadata. It survives only on assistant messages and only for the shared allowlist; tool-use,
   // truncation, errors and unknown values are deliberately omitted.

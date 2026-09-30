@@ -167,6 +167,40 @@ describe("NormalizationPipeline Scenario ID & Metadata", () => {
     }
   });
 
+  it("stamps the capturing harness id, overriding a same-named key in session metadata", async () => {
+    const pipeline = new NormalizationPipeline();
+    const rawRecord: RawHarnessRecord = {
+      recordId: "rec_harness_1",
+      sessionId,
+      harnessId: "test_harness",
+      sequenceNumber: 1,
+      timestamp,
+      recordType: "custom",
+      rawPayload: { type: "message", role: "user", content: "harness stamp" },
+      cursor: { offset: 0, line: 1, sequence: 1, timestamp },
+      metadata: {},
+    };
+    const stamped = await pipeline.processRecord(rawRecord, {
+      harnessId: "omp",
+      customMetadata: { harnessId: "spoofed", harnessVersion: "18.4.3" },
+    });
+    expect(stamped[0].status).toBe("success");
+    if (stamped[0].status === "success") {
+      expect(stamped[0].event.metadata?.harnessId).toBe("omp");
+      expect(stamped[0].event.metadata?.harnessVersion).toBe("18.4.3");
+    }
+
+    const unstamped = await pipeline.processRecord({
+      ...rawRecord,
+      recordId: "rec_harness_2",
+      sequenceNumber: 2,
+    });
+    expect(unstamped[0].status).toBe("success");
+    if (unstamped[0].status === "success") {
+      expect(unstamped[0].event.metadata?.harnessId).toBeUndefined();
+    }
+  });
+
   describe("Tool-I/O Token Estimation & Redaction Pipeline", () => {
     it("estimates 1 token for explicit result: null in tool_result without falling back to output", async () => {
       const pipeline = new NormalizationPipeline();

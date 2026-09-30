@@ -38,11 +38,12 @@ import { GrokSessionEventSource } from "./source.js";
 import {
   type GrokSessionCache,
   type GrokSessionEntry,
+  type GrokSubagentLink,
   computeGrokForkPrefixOffset,
   isGrokTurnOpen,
   listGrokProjects,
   listGrokSessions,
-  readGrokSubagentParents,
+  readGrokSubagentLinks,
 } from "./store.js";
 
 export const GROK_ADAPTER_CAPABILITIES: AdapterCapabilities = {
@@ -161,6 +162,30 @@ export class GrokHarnessAdapter implements HarnessAdapter {
     return active;
   }
 
+  /**
+   * Subagent links for this project directory. A child started in another cwd (a worktree
+   * subagent) lives in that cwd's project directory while its `meta.json` sits in the parent's,
+   * so links still missing for a subagent-kind child are looked up in the other projects.
+   */
+  private async subagentLinksFor(
+    entries: readonly GrokSessionEntry[],
+    sessionsDir: string,
+  ): Promise<Map<string, GrokSubagentLink>> {
+    const links = await readGrokSubagentLinks(entries, this.sessionCache);
+    const unlinked = entries.some(
+      (entry) => entry.summary?.sessionKind === "subagent" && !links.has(entry.sessionId),
+    );
+    if (!unlinked) return links;
+    for (const project of await listGrokProjects(resolveGrokSessionsDir(this.home, this.env))) {
+      if (project.dir === sessionsDir) continue;
+      const others = await listGrokSessions(project.dir, project.cwd, this.sessionCache);
+      for (const [child, link] of await readGrokSubagentLinks(others, this.sessionCache)) {
+        if (!links.has(child)) links.set(child, link);
+      }
+    }
+    return links;
+  }
+
   async listSessions(workspace: HarnessWorkspace): Promise<HarnessSession[]> {
     const sessionsDir = workspace.metadata.sessionsDir;
     if (typeof sessionsDir !== "string") return [];
@@ -170,9 +195,9 @@ export class GrokHarnessAdapter implements HarnessAdapter {
       this.sessionCacheClearedAt = Date.now();
     }
     const entries = await listGrokSessions(sessionsDir, workspace.rootPath, this.sessionCache);
-    const [active, subagentParents] = await Promise.all([
+    const [active, subagentLinks] = await Promise.all([
       this.activeSessionIds(),
-      readGrokSubagentParents(entries, this.sessionCache),
+      this.subagentLinksFor(entries, sessionsDir),
     ]);
     const sessions: HarnessSession[] = [];
     for (const entry of entries) {
@@ -187,7 +212,9 @@ export class GrokHarnessAdapter implements HarnessAdapter {
       const summary = entry.summary;
       const updatedAt = entry.updatesMtime.toISOString();
       const status: SessionStatus = isActive ? "active" : "completed";
-      const subagentParent = subagentParents.get(entry.sessionId);
+      const subagentLink = subagentLinks.get(entry.sessionId);
+      const isSubagent = summary?.sessionKind === "subagent" || subagentLink !== undefined;
+      const agentName = summary?.agentName ?? subagentLink?.subagentType;
       sessions.push({
         sessionId: entry.sessionId,
         workspaceId: workspace.workspaceId,
@@ -200,10 +227,15 @@ export class GrokHarnessAdapter implements HarnessAdapter {
           fileMtime: updatedAt,
           cwd: entry.cwd,
           sessionDir: entry.sessionDir,
-          // Subagent children are captured as their own agent sessions linked to the parent.
-          sessionKind: summary?.sessionKind === "subagent" ? "agent" : "user",
+          // Subagent children are captured as their own agent sessions linked to the parent that
+          // spawned them (their immediate parent when nested).
+          sessionKind: isSubagent ? "agent" : "user",
           grokSessionKind: summary?.sessionKind ?? null,
-          ...(subagentParent ? { parentSessionId: subagentParent } : {}),
+          ...(subagentLink ? { parentSessionId: subagentLink.parentSessionId } : {}),
+          ...(subagentLink?.subagentId ? { agentId: subagentLink.subagentId } : {}),
+          ...(subagentLink?.subagentType ? { agentKind: subagentLink.subagentType } : {}),
+          ...(isSubagent && agentName ? { agentName } : {}),
+          ...(subagentLink?.description ? { agentDescription: subagentLink.description } : {}),
           ...(summary?.parentSessionId ? { forkedFromSessionId: summary.parentSessionId } : {}),
           ...(summary?.modelId ? { model: summary.modelId } : {}),
         },

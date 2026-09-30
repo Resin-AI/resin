@@ -9,6 +9,7 @@ import {
   type SessionStatus,
   UNKNOWN_HARNESS_VERSION,
 } from "@resin/harness-contracts";
+import type { CopilotSubagent } from "./subagents.js";
 
 export const COPILOT_HARNESS_ID = "copilot-cli";
 export const COPILOT_DISPLAY_NAME = "GitHub Copilot CLI";
@@ -345,12 +346,68 @@ export function toCopilotSession(entry: CopilotSessionEntry, now = Date.now()): 
     createdAt,
     updatedAt: entry.modifiedAt.toISOString(),
     metadata: {
+      sessionKind: "user",
       cwd: entry.cwd,
       ...(entry.workspace.gitRoot ? { gitRoot: entry.workspace.gitRoot } : {}),
       ...(entry.workspace.branch ? { branch: entry.workspace.branch } : {}),
       ...(entry.workspace.name ? { title: entry.workspace.name } : {}),
     },
   };
+}
+
+/**
+ * Session id of a subagent: the parent's id plus the subagent's `agentId`, so it is stable across
+ * polls, differs from the parent's, and nests (a subagent's subagent hangs off the subagent's id).
+ * Ids over the identifier length limit are shortened with a digest of the full id.
+ */
+export function copilotSubagentSessionId(parentSessionId: string, agentId: string): string {
+  const id = `${parentSessionId}:agent:${agentId}`.replace(/[^a-zA-Z0-9_.:-]/g, "_");
+  if (id.length <= 128) return id;
+  return `${id.slice(0, 63)}:${createHash("sha256").update(id).digest("hex").slice(0, 64)}`;
+}
+
+/**
+ * Every subagent of one Copilot session as its own agent session over the parent's shared
+ * `events.jsonl` (see `subagents.ts`). `metadata.copilotAgentId` selects the subagent's lines.
+ */
+export function toCopilotSubagentSessions(
+  entry: CopilotSessionEntry,
+  subagents: readonly CopilotSubagent[],
+  now = Date.now(),
+): HarnessSession[] {
+  const parent = toCopilotSession(entry, now);
+  return subagents.map((agent) => {
+    const createdAt = normalizeIso(agent.startedAt) ?? parent.createdAt;
+    const updatedAt = normalizeIso(agent.lastEventAt) ?? createdAt;
+    return {
+      sessionId: copilotSubagentSessionId(entry.sessionId, agent.agentId),
+      workspaceId: parent.workspaceId,
+      harnessId: COPILOT_HARNESS_ID,
+      transcriptPath: entry.eventsPath,
+      // A subagent that never settled runs (or died) with its parent process.
+      status: agent.outcome ?? parent.status,
+      createdAt,
+      updatedAt,
+      metadata: {
+        cwd: entry.cwd,
+        ...(entry.workspace.gitRoot ? { gitRoot: entry.workspace.gitRoot } : {}),
+        ...(entry.workspace.branch ? { branch: entry.workspace.branch } : {}),
+        sessionKind: "agent",
+        parentSessionId: agent.parentAgentId
+          ? copilotSubagentSessionId(entry.sessionId, agent.parentAgentId)
+          : entry.sessionId,
+        copilotAgentId: agent.agentId,
+        agentId: agent.agentId,
+        ...(agent.agentDisplayName || agent.agentType
+          ? { agentName: agent.agentDisplayName ?? agent.agentType }
+          : {}),
+        ...(agent.agentType ? { agentKind: agent.agentType } : {}),
+        ...(agent.agentDescription ? { agentDescription: agent.agentDescription } : {}),
+        ...(agent.toolCallId ? { parentToolCallId: agent.toolCallId } : {}),
+        ...(agent.model ? { model: agent.model } : {}),
+      },
+    };
+  });
 }
 
 function normalizeIso(value: string | undefined): string | undefined {

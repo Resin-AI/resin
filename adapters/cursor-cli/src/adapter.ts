@@ -151,7 +151,9 @@ export class CursorHarnessAdapter implements StrictHarnessAdapter {
         transcriptAvailability: "file_tail",
         toolCallVisibility: "full",
         toolResultVisibility: "full",
-        // Subagent sessions are captured, but unlinked to the parent's Task call.
+        // Subagent conversations are captured as their own sessions; the parent link (and agent
+        // kind) exists only when a subagentStart/subagentStop hook names it, and never links a
+        // subagent to the parent's Task call.
         subagentVisibility: "shallow",
         mcpListChange: "requires_restart",
         contextNudge: "via_file",

@@ -132,8 +132,39 @@ describe("recorded grok 1.0.13 sessions", () => {
     expect(sessions.get(CHILD)?.metadata).toMatchObject({
       sessionKind: "agent",
       parentSessionId: MAIN,
+      agentId: CHILD,
+      agentName: "explore",
+      agentKind: "explore",
     });
+    expect(sessions.get(MAIN)?.metadata.sessionKind).toBe("user");
+    expect(sessions.get(MAIN)?.metadata.parentSessionId).toBeUndefined();
     expect(userPrompts(await capture(CHILD))[0]).toMatch(/^Count the number of lines/);
+  });
+
+  it("counts the child's tool calls and usage in the child only", async () => {
+    const parent = await capture(MAIN);
+    const child = await capture(CHILD);
+    const callsOf = (events: IntermediateSessionEvent[]) =>
+      events.flatMap((e) => (e.type === "tool_call" ? [e] : []));
+    // The child read README.md itself; the parent only spawned and awaited it.
+    expect(callsOf(child).map((c) => c.toolName)).toEqual(["read_file"]);
+    const parentCallIds = new Set(callsOf(parent).map((c) => c.callId));
+    for (const call of callsOf(child)) expect(parentCallIds.has(call.callId)).toBe(false);
+    expect(callsOf(parent).filter((c) => c.toolName === "read_file")).toHaveLength(1);
+    const parentResults = parent.flatMap((e) => (e.type === "tool_result" ? [e] : []));
+    const childResultIds = child.flatMap((e) => (e.type === "tool_result" ? [e.callId] : []));
+    expect(childResultIds).toHaveLength(1);
+    for (const id of childResultIds) {
+      expect(parentResults.some((r) => r.callId === id)).toBe(false);
+    }
+    // Turn usage is the sum of each session's own turn_completed; the parent's `subagent_finished`
+    // token count and its awaited-output summary add nothing to it.
+    const usageOf = (events: IntermediateSessionEvent[]) =>
+      events.flatMap((e) =>
+        e.type === "session_lifecycle" && e.providerUsage ? [e.providerUsage.totalTokens] : [],
+      );
+    expect(usageOf(child)).toEqual([12789]);
+    expect(usageOf(parent)).toEqual([124137, 64290]);
   });
 
   it("captures a --fork-session fork without re-emitting the parent's turns", async () => {

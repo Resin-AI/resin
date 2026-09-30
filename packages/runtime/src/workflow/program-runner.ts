@@ -29,6 +29,7 @@ import {
 } from "@resin/contracts";
 import { serviceHostExecutablePath } from "@resin/windows-security";
 import { runDerivation } from "./derivation-sandbox.js";
+import { harnessLoginIdentity, inheritedHarnessEnvironment } from "./harness-environment.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
 import { RESIN_PROGRAM_LANGUAGES } from "./runtime-families.js";
@@ -55,6 +56,11 @@ export interface ProgramRunnerOptions {
   maxOutputBytes?: number;
   /** Extra environment; PATH is always inherited. */
   env?: Record<string, string>;
+  /**
+   * Variables a Codex shell replay gets besides this process's own: the harness's container
+   * environment. Read from the launching processes unless given (tests).
+   */
+  harnessEnvironment?: Record<string, string>;
   /** Resolves private Python setup-cell source in the owning workspace. */
   resolvePrivate?: (
     reference: string,
@@ -652,11 +658,14 @@ function resolveInterpreter(
  * merges the two the same way: a quiet `pip install` that only warned on stderr still produced
  * the output it recorded. A login shell's profile may also reset PATH (Debian's `/etc/profile`
  * does for root), dropping directories the recorded command resolved programs from, such as an
- * agent harness's bundled helpers; the inherited PATH goes back in front. Both happen on the
- * script's first line so its line numbers are unchanged.
+ * agent harness's bundled helpers; the inherited directories the profile's PATH lacks go back
+ * behind it. Behind, not in front: the profile also puts what the image activated first (a conda
+ * environment's `bin`), and an inherited `/usr/bin` in front of it resolves `python` to an
+ * interpreter without the project's packages. Both happen on the script's first line so its line
+ * numbers are unchanged.
  */
 const INHERITED_PATH_VARIABLE = "RESIN_INHERITED_PATH";
-const CODEX_SHELL_PRELUDE = `exec 2>&1; if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then PATH="$${INHERITED_PATH_VARIABLE}:$PATH"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE}; `;
+const CODEX_SHELL_PRELUDE = `exec 2>&1; if [ -n "\${${INHERITED_PATH_VARIABLE}-}" ]; then _resin_rest=""; _resin_left="$${INHERITED_PATH_VARIABLE}:"; while [ -n "$_resin_left" ]; do _resin_dir="\${_resin_left%%:*}"; _resin_left="\${_resin_left#*:}"; case ":$PATH:" in *":$_resin_dir:"*) ;; *) if [ -n "$_resin_dir" ]; then _resin_rest="$_resin_rest:$_resin_dir"; fi;; esac; done; PATH="$PATH$_resin_rest"; export PATH; fi; unset ${INHERITED_PATH_VARIABLE} _resin_rest _resin_left _resin_dir; `;
 
 function invocationFor(
   program: WorkflowRecordedProgram,
@@ -1638,9 +1647,29 @@ export async function runRecordedProgram(
   }
 }
 
+/**
+ * Consecutive identical lines as one line and a count. A test runner that tears down a database
+ * per worker prints the same line dozens of times after the failure it reports; the failure is
+ * what a caller needs from a bounded tail.
+ */
+function collapseRepeatedLines(text: string): string {
+  const collapsed: string[] = [];
+  let repeats = 1;
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (index + 1 < lines.length && lines[index + 1] === line) {
+      repeats += 1;
+      continue;
+    }
+    collapsed.push(repeats > 1 ? `${line} (×${repeats})` : line);
+    repeats = 1;
+  }
+  return collapsed.join("\n");
+}
+
 /** The tail of a failure message, bounded so a noisy program cannot flood a step's error. */
-function stderrTail(stderr: string, limit = 800): string {
-  const text = stderr.trim();
+function stderrTail(stderr: string, limit = 2000): string {
+  const text = collapseRepeatedLines(stderr.trim());
   if (text.length <= limit) return text;
   return `…${text.slice(text.length - limit)}`;
 }
@@ -1783,7 +1812,19 @@ export async function runRecordedCall(
     ...options,
     ...(workdirProfile && typeof requestedWorkdir === "string" ? { cwd: requestedWorkdir } : {}),
     ...(shellProfile === "bash-login-v1" || nativeCodexShell
-      ? { shellInvocation: "bash-login" as const }
+      ? {
+          shellInvocation: "bash-login" as const,
+          // The harness ran the recording with its container's environment, not the allow-list
+          // it launched this process with: an image's `PYTHONPATH` must reach the replay, and the
+          // login shell must read the harness user's profile (its `HOME`), not the server's.
+          env: {
+            ...(options.harnessEnvironment ?? {
+              ...inheritedHarnessEnvironment(),
+              ...harnessLoginIdentity(),
+            }),
+            ...options.env,
+          },
+        }
       : {}),
     ...(options.resolvePrivate === undefined && request.resolvePrivate
       ? { resolvePrivate: request.resolvePrivate }

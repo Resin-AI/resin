@@ -192,18 +192,27 @@ export interface MuseSessionLog {
   filePath: string;
   /** Workspace root recorded by the lead session, when found. */
   workspaceRoot: string | null;
+  /** The session that linked this log (its immediate parent, so nested children link to the child). */
   parentSessionId: string | null;
   childKind: MuseChildKind | null;
-  /** Observer agent id (e.g. `verify-reminder`) or subagent id. */
+  /** Muse's native subagent id (`subagent_id`); observers have none. */
   childAgentId: string | null;
+  /** Subagent `role` (e.g. `explorer`) or observer agent id (e.g. `verify-reminder`). */
+  childAgentName: string | null;
   createdAt: string;
   updatedAt: string;
   sizeBytes: number;
 }
 
+interface MuseChildLink {
+  kind: MuseChildKind;
+  agentId: string | null;
+  agentName: string | null;
+}
+
 interface LeadSessionScan {
   workspaceRoot: string | null;
-  children: Map<string, { kind: MuseChildKind; agentId: string | null }>;
+  children: Map<string, MuseChildLink>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -246,6 +255,10 @@ function workspaceRootOf(record: Record<string, unknown>): string | null {
  */
 async function scanLeadSession(filePath: string): Promise<LeadSessionScan> {
   const scan: LeadSessionScan = { workspaceRoot: null, children: new Map() };
+  // `resume_context_recorded` names the subagent's role; `child_session_bound` names its log.
+  // Both carry the muse `subagent_id`, which joins them.
+  const rolesBySubagentId = new Map<string, string>();
+  const subagentIdByChild = new Map<string, string>();
   const stream = createReadStream(filePath, { encoding: "utf8" });
   const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
   let bytes = 0;
@@ -255,6 +268,7 @@ async function scanLeadSession(filePath: string): Promise<LeadSessionScan> {
       const wantsRoot = scan.workspaceRoot === null && bytes <= HEAD_INSPECTION_BYTES;
       const wantsChild =
         line.includes("child_session_bound") ||
+        line.includes("resume_context_recorded") ||
         line.includes("memory_reminder_child_session_linked");
       if (!wantsRoot && !wantsChild) continue;
       let parsed: unknown;
@@ -270,20 +284,23 @@ async function scanLeadSession(filePath: string): Promise<LeadSessionScan> {
         if (record.payload_type === "subagent.control.child_session_bound" && bound) {
           const child = bound.child_session_id;
           if (typeof child === "string") {
-            scan.children.set(child, {
-              kind: "subagent",
-              agentId: typeof bound.subagent_id === "string" ? bound.subagent_id : null,
-            });
+            const subagentId = typeof bound.subagent_id === "string" ? bound.subagent_id : null;
+            if (subagentId) subagentIdByChild.set(child, subagentId);
+            scan.children.set(child, { kind: "subagent", agentId: subagentId, agentName: null });
+          }
+        }
+        if (record.payload_type === "subagent.control.resume_context_recorded" && bound) {
+          if (typeof bound.subagent_id === "string" && typeof bound.role === "string") {
+            rolesBySubagentId.set(bound.subagent_id, bound.role);
           }
         }
         const event = asRecord(payload?.event);
         if (event?.kind === "memory_reminder_child_session_linked") {
           const child = event.child_session_id;
           if (typeof child === "string") {
-            scan.children.set(child, {
-              kind: "observer",
-              agentId: typeof event.reminder_agent_id === "string" ? event.reminder_agent_id : null,
-            });
+            const reminder =
+              typeof event.reminder_agent_id === "string" ? event.reminder_agent_id : null;
+            scan.children.set(child, { kind: "observer", agentId: null, agentName: reminder });
           }
         }
       }
@@ -291,6 +308,11 @@ async function scanLeadSession(filePath: string): Promise<LeadSessionScan> {
   } finally {
     lines.close();
     stream.destroy();
+  }
+  for (const [child, subagentId] of subagentIdByChild) {
+    const link = scan.children.get(child);
+    const role = rolesBySubagentId.get(subagentId);
+    if (link && role) link.agentName = role;
   }
   return scan;
 }
@@ -320,10 +342,34 @@ async function statLog(
   }
 }
 
+interface NestedLog {
+  sessionId: string;
+  filePath: string;
+  /** The session whose directory holds this log. */
+  physicalParent: string;
+}
+
+/** Child log candidates found on disk under `<dir>/subagent/<id>/`, at any nesting depth. */
+async function listNestedLogs(dir: string, physicalParent: string): Promise<NestedLog[]> {
+  const found: NestedLog[] = [];
+  for (const childId of await listDirs(path.join(dir, "subagent"))) {
+    const childDir = path.join(dir, "subagent", childId);
+    found.push({
+      sessionId: childId,
+      filePath: path.join(childDir, "session.jsonl"),
+      physicalParent,
+    });
+    found.push(...(await listNestedLogs(childDir, childId)));
+  }
+  return found;
+}
+
 /**
  * Enumerates every session log under `<root>/YYYY/MM/DD/<session-id>/session.jsonl`, plus the
  * nested `subagent/<child-id>/session.jsonl` logs of spawned subagents and background observer
- * agents. Children inherit their lead session's workspace root.
+ * agents. Children inherit their lead session's workspace root. A child's parent is the session
+ * whose log linked it (`child_session_bound` / `memory_reminder_child_session_linked`), else the
+ * session whose directory holds it.
  */
 export async function discoverMuseSessionLogs(sessionRoot: string): Promise<MuseSessionLog[]> {
   const logs: MuseSessionLog[] = [];
@@ -344,21 +390,35 @@ export async function discoverMuseSessionLogs(sessionRoot: string): Promise<Muse
             parentSessionId: null,
             childKind: null,
             childAgentId: null,
+            childAgentName: null,
             ...stat,
           });
-          for (const childId of await listDirs(path.join(sessionDir, "subagent"))) {
-            const childPath = path.join(sessionDir, "subagent", childId, "session.jsonl");
-            const childStat = await statLog(childPath);
+          const links = new Map(scan.children);
+          const linkedBy = new Map<string, string>();
+          const present: { log: NestedLog; stat: NonNullable<typeof stat> }[] = [];
+          for (const candidate of await listNestedLogs(sessionDir, sessionId)) {
+            const childStat = await statLog(candidate.filePath);
             if (!childStat) continue;
-            const link = scan.children.get(childId);
+            present.push({ log: candidate, stat: childStat });
+            // A child log can link its own children (a subagent of a subagent).
+            const childScan = await scanLeadSession(candidate.filePath);
+            for (const [grandchild, link] of childScan.children) {
+              if (grandchild === candidate.sessionId || grandchild === sessionId) continue;
+              links.set(grandchild, link);
+              linkedBy.set(grandchild, candidate.sessionId);
+            }
+          }
+          for (const { log: candidate, stat: childStat } of present) {
+            const link = links.get(candidate.sessionId);
             logs.push({
-              sessionId: childId,
-              filePath: childPath,
+              sessionId: candidate.sessionId,
+              filePath: candidate.filePath,
               workspaceRoot: scan.workspaceRoot,
-              parentSessionId: sessionId,
+              parentSessionId: linkedBy.get(candidate.sessionId) ?? candidate.physicalParent,
               // A nested log the lead never linked is still a child the lead started.
               childKind: link?.kind ?? "subagent",
               childAgentId: link?.agentId ?? null,
+              childAgentName: link?.agentName ?? null,
               ...childStat,
             });
           }
@@ -397,9 +457,15 @@ export function sessionForMuseLog(
     metadata: {
       fileSizeBytes: log.sizeBytes,
       ...(log.workspaceRoot ? { cwd: log.workspaceRoot } : {}),
-      ...(log.parentSessionId ? { parentSessionId: log.parentSessionId } : {}),
-      ...(log.childKind ? { childKind: log.childKind } : {}),
-      ...(log.childAgentId ? { childAgentId: log.childAgentId } : {}),
+      ...(log.parentSessionId
+        ? {
+            sessionKind: "agent",
+            parentSessionId: log.parentSessionId,
+            ...(log.childKind ? { agentKind: log.childKind } : {}),
+            ...(log.childAgentName ? { agentName: log.childAgentName } : {}),
+            ...(log.childAgentId ? { agentId: log.childAgentId } : {}),
+          }
+        : { sessionKind: "user" }),
     },
   };
 }
