@@ -138,6 +138,14 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 const MAX_HARNESS_INTROSPECTION_SESSIONS = 256;
 const MAX_HARNESS_INTROSPECTION_CALLS = 4096;
 
+/**
+ * A tracked session that recorded nothing for this long is not active work: it ended without a
+ * terminal record (a subagent, a killed process) or sits open unused. It counts as active again as
+ * soon as it records something. Background updates activate only while no session is active, so a
+ * session that could never stop counting would hold every update back until the daemon restarted.
+ */
+export const ACTIVE_SESSION_IDLE_MS = 30 * 60_000;
+
 const JsonObjectSchema: z.ZodType<JsonObject> = z.record(JsonValueSchema);
 
 function extractHttpStatus(err: unknown): number | undefined {
@@ -341,6 +349,8 @@ export class TrajectoryCaptureCoordinator {
   private readonly genericSessions = new Set<string>();
   private readonly sessionLocks = new Map<string, Promise<void>>();
   private readonly genericSessionTails = new Map<string, GenericSessionTail>();
+  /** When each session last delivered records (wall clock); see {@link ACTIVE_SESSION_IDLE_MS}. */
+  private readonly sessionActivityAtMs = new Map<string, number>();
   private readonly coalesceDwellMs: number;
   private readonly turnHintDwellMs: number;
   private readonly maxBatchSize: number;
@@ -739,6 +749,7 @@ export class TrajectoryCaptureCoordinator {
     sourceAck: () => Promise<void>,
   ): Promise<void> => {
     const { sessionId } = session;
+    if (records.length > 0) this.sessionActivityAtMs.set(sessionId, Date.now());
     // Aliases minted while processing this batch are persisted before the batch becomes durable
     // (cursor ack); uploads flush the same way before events leave the device.
     const ack = async () => {
@@ -1711,10 +1722,19 @@ export class TrajectoryCaptureCoordinator {
   }
 
   /**
-   * Returns the count of currently active sessions being tracked.
+   * Tracked sessions that recorded something within {@link ACTIVE_SESSION_IDLE_MS}: the sessions
+   * doing work now. Entries idle past the window are dropped here, which keeps the map bounded.
    */
-  public getActiveSessionCount(): number {
-    return this.activeSessions.size + this.activeGenericSessions.size;
+  public getActiveSessionCount(nowMs = Date.now()): number {
+    let active = 0;
+    for (const [sessionId, atMs] of this.sessionActivityAtMs) {
+      if (nowMs - atMs > ACTIVE_SESSION_IDLE_MS) {
+        this.sessionActivityAtMs.delete(sessionId);
+      } else if (this.activeSessions.has(sessionId) || this.activeGenericSessions.has(sessionId)) {
+        active += 1;
+      }
+    }
+    return active;
   }
 
   /**
