@@ -745,7 +745,8 @@ async function qualifyMcp(installedRoot, sandboxDir) {
     const listed = await rpc.request(2, "tools/list", {});
     if (listed.error) throw new Error(`MCP tools/list failed: ${JSON.stringify(listed)}`);
     const toolNames = (listed.result?.tools ?? []).map((tool) => tool.name);
-    const expectedMetaTools = ["get_tool_schema", "invoke_tool", "manage_tools"];
+    // Search-only listing is the default (resin#234): the four meta-tools, and nothing else.
+    const expectedMetaTools = ["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"];
     for (const metaTool of expectedMetaTools) {
       if (!toolNames.includes(metaTool)) {
         throw new Error(
@@ -753,8 +754,11 @@ async function qualifyMcp(installedRoot, sandboxDir) {
         );
       }
     }
-    if (toolNames.includes("search_tools")) {
-      throw new Error("MCP catalog exposed search_tools without --enable-tool-search");
+    const extra = toolNames.filter((name) => !expectedMetaTools.includes(name));
+    if (extra.length > 0) {
+      throw new Error(
+        `MCP catalog listed tools beyond the meta-tools under search-only listing: ${JSON.stringify(extra)}`,
+      );
     }
     const removedUtilities = ["echo", "workspace_info", "fail_tool", "slow_tool"];
     for (const utility of removedUtilities) {
