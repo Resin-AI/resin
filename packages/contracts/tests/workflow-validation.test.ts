@@ -61,6 +61,35 @@ it("keeps a word-list proposal's shape, which is part of the candidate it report
   expect(parsed.verdicts[0]!.candidate).toEqual(candidate);
 });
 
+it("carries an input form only as a relative directory below the working directory", () => {
+  const candidate = {
+    stepId: "build",
+    argument: "command",
+    path: ["tokens", 2],
+    proposed: { kind: "input" as const, name: "service", type: "string" as const },
+  };
+  const withForm = (form: unknown) =>
+    WorkflowValidationDecisionSchema.safeParse({
+      ...decision(),
+      verdicts: [{ candidate, confirmed: true, form }],
+      accepted: [{ stepId: "build", argument: "command", path: ["tokens", 2] }],
+    });
+  const kept = withForm({ value: "name", directory: "services", entry: "directory" });
+  expect(kept.success && kept.data.verdicts[0]!.form).toEqual({
+    value: "name",
+    directory: "services",
+    entry: "directory",
+  });
+  expect(withForm({ value: "path", directory: "data/sources" }).success).toBe(true);
+  for (const directory of ["../services", "/home/user/services", "a/../b", "", "a b", "a//b"]) {
+    expect(withForm({ value: "name", directory }).success).toBe(false);
+  }
+  expect(withForm({ value: "path", directory: "." }).success).toBe(false);
+  expect(withForm({ value: "name", directory: "services", values: ["billing"] }).success).toBe(
+    false,
+  );
+});
+
 it("rejects non-SHA256 identity fields", () => {
   expect(
     WorkflowValidationDecisionSchema.safeParse(
