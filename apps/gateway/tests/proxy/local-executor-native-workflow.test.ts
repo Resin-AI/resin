@@ -16,6 +16,7 @@ import { derivationHeader, derivationInputTokenIndexes, embeddedPrograms } from 
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
   ArtifactCache,
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
@@ -281,6 +282,110 @@ describe("recorded workflows of ordinary calls", () => {
     const other = resolveWorkspaceContext({ cwd: otherDir });
     expect(other.workspaceId).not.toBe(context.workspaceId);
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, other)).toBeUndefined();
+  });
+
+  it("describes a harness tool step by its tool and the arguments a caller sees", async () => {
+    // A job that writes a file and then validates it: the write is the first step the tool covers,
+    // so the description shows it, with `{input}` where a caller's value goes.
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:2", "python3 scripts/validate.py sources/orders_001.json", {
+      workspaceId: context.workspaceId,
+    });
+    privateValues.set("private:sess:3", "Creating the source", {
+      workspaceId: context.workspaceId,
+    });
+    const installed = await installPlan(
+      {
+        id: "tool_write_then_validate",
+        name: "wf_write_then_validate",
+        version: "1.0.0",
+        description: "write then validate",
+        parameters: {
+          type: "object",
+          properties: { content: { type: "string" } },
+          required: ["content"],
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_write_then_validate",
+        inputs: [{ name: "content", type: "string" }],
+        privateReferences: ["private:sess:2", "private:sess:3"],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_w",
+            callable: { runtime: RESIN_HARNESS_TOOL_RUNTIME, name: "write" },
+            arguments: [
+              {
+                name: "path",
+                source: {
+                  kind: "template",
+                  template: { type: "literal", value: "sources/orders_001.json" },
+                },
+              },
+              {
+                name: "content",
+                source: { kind: "template", template: { type: "input", name: "content" } },
+              },
+              {
+                name: "i",
+                source: {
+                  kind: "template",
+                  template: { type: "private", reference: "private:sess:3" },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+          {
+            id: "step1",
+            callId: "call_v",
+            callable: {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            arguments: [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: { type: "private", reference: "private:sess:2" },
+                },
+              },
+            ],
+            dependsOn: ["step0"],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+    expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
+      "Recorded on this machine:\n" +
+        "Step 1 calls the harness's write tool with path = sources/orders_001.json, content = {content}, i = Creating the source\n" +
+        "Step 2 runs this recorded shell program:\npython3 scripts/validate.py sources/orders_001.json",
+    );
   });
 
   it("describes a parameterized recorded program with each parameter's recorded value", async () => {

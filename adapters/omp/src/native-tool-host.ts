@@ -47,7 +47,12 @@ if (
   );
   process.exit(2);
 }
-const result = await tool.execute(`resin-${randomUUID()}`, request.parameters);
+// A recording keeps a call's `i` (OMP's one-line intent) as metadata, not as an argument; the
+// built-in gets one back here so its schema is satisfied.
+const result = await tool.execute(`resin-${randomUUID()}`, {
+  i: "Replaying a learned tool's recorded step",
+  ...request.parameters,
+});
 const content: Array<{ type: "text"; text: string }> = [];
 const parts: unknown[] = Array.isArray(result.content) ? result.content : [];
 for (const part of parts) {
