@@ -8132,7 +8132,7 @@ async function planOmpMcpConfig(options) {
   } else {
     serverEntry = {
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: options.args !== void 0 ? options.args : [...CANONICAL_RESIN_MCP_ARGS]
+      args: options.args !== void 0 ? options.args : [...OMP_RESIN_MCP_ARGS]
     };
     if (explicitType !== void 0) {
       serverEntry.type = explicitType;
@@ -8159,7 +8159,7 @@ async function planOmpMcpConfig(options) {
     }
   });
 }
-var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH, DEFAULT_GATEWAY_SERVER_NAME2;
+var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH, DEFAULT_GATEWAY_SERVER_NAME2, OMP_RESIN_MCP_LAUNCH_FLAGS, OMP_RESIN_MCP_ARGS;
 var init_config_planner7 = __esm({
   "adapters/omp/dist/config-planner.js"() {
     "use strict";
@@ -8168,19 +8168,12 @@ var init_config_planner7 = __esm({
     DEFAULT_OMP_CONFIG_FILENAME = path21.join("agent", "mcp.json");
     DEFAULT_OMP_MCP_CONFIG_PATH = path21.join("agent", "mcp.json");
     DEFAULT_GATEWAY_SERVER_NAME2 = CANONICAL_RESIN_MCP_SERVER_KEY;
+    OMP_RESIN_MCP_LAUNCH_FLAGS = ["--search-listing"];
+    OMP_RESIN_MCP_ARGS = [...CANONICAL_RESIN_MCP_ARGS, ...OMP_RESIN_MCP_LAUNCH_FLAGS];
   }
 });
 
 // adapters/omp/dist/device-surface.js
-function ompNamePart(value, fallback) {
-  const part = value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
-  return part.length > 0 ? part : fallback;
-}
-function ompMcpToolName(serverName, toolName) {
-  const server = ompNamePart(serverName, "server");
-  const tool = ompNamePart(toolName, "tool");
-  return `mcp__${server}_${tool.startsWith(`${server}_`) ? tool.slice(server.length + 1) : tool}`;
-}
 var init_device_surface = __esm({
   "adapters/omp/dist/device-surface.js"() {
     "use strict";
@@ -8197,38 +8190,6 @@ function resolveOmpGuidancePath(home, env) {
 function resolveOmpConfigHome(home, env) {
   return readHostPathEnv(env, "OMP_HOME") ?? readHostPathEnv(env, "RESIN_OMP_HOME") ?? path22.join(home, ".omp");
 }
-function renderOmpInvocationSnippet(toolName, serverName) {
-  const path41 = `xd://${ompMcpToolName(serverName, toolName)}`;
-  return [
-    `- **Invoke**: write the JSON arguments to \`${path41}\` (e.g. \`write\` \`{"path": "${path41}", "content": "{}"}\` when the tool takes no inputs).`,
-    `- **Docs**: \`read\` \`${path41}\` returns the tool's documentation.`
-  ].join("\n");
-}
-function renderOmpCatalogInstructionsBody(options) {
-  const serverName = options.serverName ?? "resin";
-  const lines = [
-    "",
-    options.markdown.trim(),
-    "",
-    "These tools are exposed over MCP. Invoke them through the `xd://` tool-device surface rather than re-running the underlying shell commands manually."
-  ];
-  for (const toolName of options.toolNames ?? []) {
-    lines.push("", `#### Invocation: \`${toolName}\``);
-    lines.push(renderOmpInvocationSnippet(toolName, serverName));
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-async function applyOmpCatalogInstructions(options) {
-  const targetPath = options.appendSystemPath ?? path22.join(resolveOmpHome({ customHome: options.ompHome }), DEFAULT_APPEND_SYSTEM_FILENAME);
-  const markdown = options.markdown?.trim();
-  const body = markdown ? renderOmpCatalogInstructionsBody({
-    markdown,
-    toolNames: options.toolNames,
-    serverName: options.serverName
-  }) : null;
-  return applyManagedBlock(defaultFsBridge, targetPath, OMP_CATALOG_MARKERS, body);
-}
 var DEFAULT_APPEND_SYSTEM_FILENAME, OMP_GUIDANCE_MARKERS, OMP_RESIN_GUIDANCE, OMP_CATALOG_MARKERS;
 var init_instructions4 = __esm({
   "adapters/omp/dist/instructions.js"() {
@@ -8243,11 +8204,11 @@ var init_instructions4 = __esm({
     };
     OMP_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are MCP tools mounted as \`xd://mcp__resin_<name>\` devices, each listed in your prompt with its purpose and inputs; writing \`{"name": "<name>"}\` to \`xd://mcp__resin_get_tool_schema\` shows the commands one runs and each input's recorded value.
+Resin learned tools from earlier work in this workspace. They are not listed in your prompt: find them with \`xd://mcp__resin_search_tools\`.
 
-- In your first step, next to your own first look at the task, go through the \`xd://mcp__resin_\` devices listed in your prompt (other than \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`).
-- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call one by writing its JSON arguments to the device path (e.g. \`write\` \`{"path": "xd://mcp__resin_<name>", "content": "{}"}\`); when several apply, call them together. Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.`;
+- Before running a multi-step job by hand, write \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\` to \`xd://mcp__resin_search_tools\`.
+- A tool that does your task is the procedure an earlier run already worked out: write \`{"name": "<name>"}\` to \`xd://mcp__resin_get_tool_schema\` to see its commands and inputs, then call it with your task's values by writing \`{"name": "<name>", "parameters": {...}}\` to \`xd://mcp__resin_invoke_tool\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
+- Its output is the commands' current output: use it instead of running those commands yourself.`;
     OMP_CATALOG_MARKERS = {
       start: "<!-- resin:catalog:start -->",
       end: "<!-- resin:catalog:end -->"
@@ -8257,13 +8218,17 @@ Resin learned tools from earlier work in this workspace. They are MCP tools moun
 
 // adapters/omp/dist/install.js
 import path23 from "node:path";
-var ompInstallHarness;
+var removeCatalogBlock, ompInstallHarness;
 var init_install7 = __esm({
   "adapters/omp/dist/install.js"() {
     "use strict";
+    init_dist();
     init_config_planner7();
     init_discovery7();
     init_instructions4();
+    removeCatalogBlock = async ({ home, env, fsBridge, dryRun }) => [
+      await applyManagedBlock(fsBridge, path23.join(resolveOmpConfigHome(home, env), DEFAULT_APPEND_SYSTEM_FILENAME), OMP_CATALOG_MARKERS, null, { dryRun })
+    ];
     ompInstallHarness = {
       id: "omp",
       displayName: "Oh My Pi (OMP)",
@@ -8290,6 +8255,7 @@ var init_install7 = __esm({
         serverKey: "resin",
         jsonContainerKeys: ["mcpServers"],
         transports: ["stdio", "sse", "websocket", "http"],
+        launchFlags: OMP_RESIN_MCP_LAUNCH_FLAGS,
         planRegistration: ({ targetPath, command, args, fsBridge }) => planOmpMcpConfig({ customConfigPath: targetPath, command, args: [...args], fsBridge })
       },
       guidance: {
@@ -8299,11 +8265,12 @@ var init_install7 = __esm({
       },
       installExtensions: [
         {
-          // The gateway writes the learned-tool catalog into OMP's appended system prompt as the
-          // catalog changes; install has nothing to write, and uninstall removes the block.
+          // OMP is registered with `--search-listing`, so the gateway writes no per-tool catalog into
+          // OMP's appended system prompt. Install removes a block an earlier full listing left there,
+          // and uninstall removes it too.
           name: "learned-tool catalog",
-          install: async () => [],
-          uninstall: async ({ home, env, dryRun }) => dryRun ? [] : [await applyOmpCatalogInstructions({ ompHome: resolveOmpConfigHome(home, env) })],
+          install: removeCatalogBlock,
+          uninstall: removeCatalogBlock,
           verify: async () => true
         }
       ]

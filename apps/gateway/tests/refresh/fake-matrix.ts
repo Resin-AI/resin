@@ -155,6 +155,7 @@ export interface FakeConnectionOptions {
   supportsListChanged?: boolean;
   isInitialized?: boolean;
   hasReceivedInitializedNotification?: boolean;
+  searchListing?: boolean;
   onNotification?: (msg: JsonRpcNotification) => void;
 }
 
@@ -182,6 +183,7 @@ export function createMockConnection(options: FakeConnectionOptions = {}) {
     isInitialized: options.isInitialized ?? true,
     hasReceivedInitializedNotification: options.hasReceivedInitializedNotification ?? true,
     isClosed: false,
+    searchListing: options.searchListing ?? false,
     clientCapabilities: {
       roots: { listChanged: true },
       tools: {

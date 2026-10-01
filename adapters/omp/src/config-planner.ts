@@ -21,6 +21,13 @@ import { resolveOmpHome } from "./discovery.js";
 export const DEFAULT_OMP_CONFIG_FILENAME = path.join("agent", "mcp.json");
 export const DEFAULT_OMP_MCP_CONFIG_PATH = path.join("agent", "mcp.json");
 export const DEFAULT_GATEWAY_SERVER_NAME = CANONICAL_RESIN_MCP_SERVER_KEY;
+/**
+ * OMP renders every listed MCP tool into its system prompt, so Resin is registered with only the
+ * meta tools listed; the model finds learned tools with search_tools.
+ */
+export const OMP_RESIN_MCP_LAUNCH_FLAGS = ["--search-listing"] as const;
+/** `resin mcp` arguments OMP is registered with. */
+export const OMP_RESIN_MCP_ARGS = [...CANONICAL_RESIN_MCP_ARGS, ...OMP_RESIN_MCP_LAUNCH_FLAGS];
 
 export interface PlanOmpMcpConfigOptions {
   workspace?: HarnessWorkspace;
@@ -160,7 +167,7 @@ export async function planOmpMcpConfig(
   } else {
     serverEntry = {
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: options.args !== undefined ? options.args : [...CANONICAL_RESIN_MCP_ARGS],
+      args: options.args !== undefined ? options.args : [...OMP_RESIN_MCP_ARGS],
     };
     if (explicitType !== undefined) {
       serverEntry.type = explicitType;

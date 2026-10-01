@@ -34,6 +34,8 @@ export interface McpStdioShimOptions {
   standaloneFallback?: boolean;
   enableToolSearch?: boolean;
   fullCatalog?: boolean;
+  /** List only the meta tools; learned tools are found with search_tools. `fullCatalog` wins. */
+  searchListing?: boolean;
   cwd?: string;
   harnessId?: string;
   maxStartupAttempts?: number;
@@ -310,11 +312,11 @@ export class McpStdioShim {
   }
 
   private prepareTransport(): { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } {
-    this.surface = createToolSearchSurface(
-      this.stdout,
-      this.options.enableToolSearch === true,
-      this.options.fullCatalog === true,
-    );
+    this.surface = createToolSearchSurface(this.stdout, {
+      enableSearch: this.options.enableToolSearch === true,
+      fullCatalog: this.options.fullCatalog === true,
+      searchOnlyListing: this.options.searchListing === true,
+    });
     // `pipe()` forwards no errors: every stream in the chain needs its own listener, or a write
     // after the harness closed stdout (EPIPE) is an uncaught exception that kills the process.
     this.guardStream(this.stdin, "harness");
@@ -510,10 +512,11 @@ export class McpStdioShim {
         name: "resin-mcp-standalone",
         version: "0.1.0",
       },
-      // OMP reads learned tools only through `xd://` devices its prompt names, so a catalog change
-      // rewrites the managed block in OMP's appended system prompt. The coordinator dispatches by the
-      // harness each connection's MCP client names itself as, so this is wired whether or not the
-      // shim was started with `--harness omp` (`resin init` registers OMP as plain `resin mcp`).
+      // An OMP connection that lists learned tools reads them only through `xd://` devices its
+      // prompt names, so a catalog change rewrites the managed block in OMP's appended system
+      // prompt; a `--search-listing` connection (how `resin init` registers OMP) gets that block
+      // removed instead. The coordinator dispatches by the harness each connection's MCP client
+      // names itself as, so this is wired whether or not the shim was started with `--harness omp`.
       refreshCoordinatorOptions: {
         adapters: {
           omp: {

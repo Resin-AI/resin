@@ -53,6 +53,8 @@ Options:
   --no-standalone        Disable standalone fallback
   --enable-tool-search  Expose search_tools (disabled by default)
   --full-catalog        Expose full native tool catalog instead of stable facade
+  --search-listing      List only the meta tools; find learned tools with search_tools
+                        (--full-catalog wins when both are given)
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -72,6 +74,7 @@ function parseArgs(args: string[]) {
   let showHelp = false;
   let enableToolSearch = false;
   let fullCatalog = false;
+  let searchListing = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -81,6 +84,8 @@ function parseArgs(args: string[]) {
       enableToolSearch = true;
     } else if (arg === "--full-catalog") {
       fullCatalog = true;
+    } else if (arg === "--search-listing") {
+      searchListing = true;
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -102,6 +107,7 @@ function parseArgs(args: string[]) {
     standaloneFallback,
     enableToolSearch,
     fullCatalog,
+    searchListing,
     socketPath,
     cwd,
     harnessId,
@@ -125,6 +131,7 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<number | un
     standaloneFallback: args.standaloneFallback,
     enableToolSearch: args.enableToolSearch,
     fullCatalog: args.fullCatalog,
+    searchListing: args.searchListing,
     db: args.dbPath ? new LocalDatabaseConnection({ path: args.dbPath }) : undefined,
     socketPath: args.standaloneMode && !args.socketPath ? "" : args.socketPath,
     cwd: args.cwd,

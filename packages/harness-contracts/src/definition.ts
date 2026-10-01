@@ -43,7 +43,10 @@ export interface HarnessRegistrationContext {
   readonly gatewayUrl: string;
   /** Absolute Resin shim command the harness should spawn. */
   readonly command: string;
-  /** `["mcp"]`, or `[<resin.mjs>, "mcp"]` when `command` is `node.exe` on native Windows. */
+  /**
+   * `["mcp", ...launchFlags]`, or `[<resin.mjs>, "mcp", ...launchFlags]` when `command` is
+   * `node.exe` on native Windows.
+   */
   readonly args: readonly string[];
   readonly fsBridge: ConfigFsBridge;
 }
@@ -93,10 +96,15 @@ export interface HarnessMcpConfigSurface {
   readonly jsonContainerKeys: readonly string[];
   /** MCP transports the harness can use to reach Resin (support matrix). */
   readonly transports: readonly string[];
+  /**
+   * `resin mcp` flags this harness is registered with, after `mcp` (e.g. `["--search-listing"]`).
+   * Part of the expected registration: an entry without them is drift that reconcile rewrites.
+   */
+  readonly launchFlags?: readonly string[];
   planRegistration(context: HarnessRegistrationContext): Promise<ConfigMutationPlan>;
   /**
    * Whether `targetPath` holds Resin's expected registration for `command`. Omit to use the
-   * generic check: the entry under `serverKey` is `{ command, args: ["mcp"] }` with no `url`
+   * generic check: the entry under `serverKey` is `{ command, args: ["mcp", ...launchFlags] }` with no `url`
    * and `type` absent or "stdio". Required for `owned-file` or any other entry shape.
    */
   verifyRegistration?(context: HarnessRegistrationCheckContext): Promise<boolean>;

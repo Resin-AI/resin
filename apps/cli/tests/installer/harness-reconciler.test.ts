@@ -51,6 +51,12 @@ function resinLaunch(home: string): { command: string; args: string[] } {
   return { command: launch.command, args: [...launch.args] };
 }
 
+/** The launch Resin registers OMP with: the shared launch plus `--search-listing`. */
+function ompLaunch(home: string): { command: string; args: string[] } {
+  const launch = resinLaunch(home);
+  return { command: launch.command, args: [...launch.args, "--search-listing"] };
+}
+
 /** The Codex TOML `command` line Resin writes for `home` (TOML basic-string escaped). */
 function codexCommandLine(home: string): string {
   return `command = ${JSON.stringify(resinLaunch(home).command)}`;
@@ -248,7 +254,7 @@ describe("HarnessReconciler", () => {
     ).toMatchObject({
       mcpServers: {
         resin: {
-          ...resinLaunch(HOME),
+          ...ompLaunch(HOME),
         },
       },
     });
@@ -299,6 +305,51 @@ describe("HarnessReconciler", () => {
     expect(JSON.parse((await bridge.readFile(targetPath)) ?? "").mcpServers.resin).toEqual({
       ...resinLaunch(HOME),
     });
+
+    const converged = await reconciler.reconcile(options);
+    expect(converged.results[0]).toMatchObject({
+      condition: "healthy",
+      status: "registered",
+      changed: false,
+    });
+  });
+
+  it("moves an OMP registration without --search-listing to it and drops the per-tool catalog block", async () => {
+    const bridge = new InMemoryConfigFsBridge();
+    const targetPath = path.join(HOME, ".omp", "agent", "mcp.json");
+    const appendSystemPath = path.join(HOME, ".omp", "agent", "APPEND_SYSTEM.md");
+    await bridge.writeFile(
+      targetPath,
+      JSON.stringify({
+        mcpServers: { resin: { ...resinLaunch(HOME), env: { KEEP: "1" } } },
+      }),
+    );
+    await bridge.writeFile(
+      appendSystemPath,
+      "User notes\n<!-- resin:catalog:start -->\n### `build_site`\n<!-- resin:catalog:end -->\n",
+    );
+    const options = {
+      harnesses: ["omp"] as const,
+      installedHarnesses: ["omp"] as const,
+      customHome: HOME,
+      workspacePath: WORKSPACE,
+      gatewayUrl: GATEWAY_URL,
+      fsBridge: bridge,
+      probeHarness: NO_INSTALLATION_PROBE,
+    };
+    const reconciler = new HarnessReconciler();
+
+    const repaired = await reconciler.reconcile(options);
+    expect(repaired.results[0]).toMatchObject({
+      condition: "drifted",
+      status: "reconciled",
+      changed: true,
+    });
+    expect(JSON.parse((await bridge.readFile(targetPath)) ?? "").mcpServers.resin).toEqual({
+      ...ompLaunch(HOME),
+      env: { KEEP: "1" },
+    });
+    expect(await bridge.readFile(appendSystemPath)).toBe("User notes\n");
 
     const converged = await reconciler.reconcile(options);
     expect(converged.results[0]).toMatchObject({
@@ -385,8 +436,8 @@ describe("HarnessReconciler", () => {
       command: "user-mcp",
       env: { TOKEN: "keep" },
     });
-    expect(omp.mcpServers.resin.command).toBe(resinLaunch(HOME).command);
-    expect(omp.mcpServers.resin.args).toEqual(resinLaunch(HOME).args);
+    expect(omp.mcpServers.resin.command).toBe(ompLaunch(HOME).command);
+    expect(omp.mcpServers.resin.args).toEqual(ompLaunch(HOME).args);
     expect(omp.mcpServers.resin.env).toEqual({
       RESIN_USER_TOKEN: "keep-owned-env",
     });
@@ -635,7 +686,7 @@ describe("HarnessReconciler", () => {
     });
     const repaired = JSON.parse((await bridge.readFile(targetPath)) ?? "");
     expect(repaired.mcpServers.resin).toEqual({
-      ...resinLaunch(HOME),
+      ...ompLaunch(HOME),
       env: { RESIN_TOKEN: "keep" },
     });
   });
@@ -1294,7 +1345,7 @@ describe("HarnessReconciler", () => {
         (await bridge.readFile(path.join(HOME, ".omp", "agent", "mcp.json"))) ?? "{}",
       );
       expect(omp.mcpServers.resin).toEqual({
-        ...resinLaunch(HOME),
+        ...ompLaunch(HOME),
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
@@ -1382,7 +1433,7 @@ describe("HarnessReconciler", () => {
       expect(omp.settings).toEqual({ compact: true });
       expect(omp.mcpServers.user_srv).toEqual({ command: "user-bin" });
       expect(omp.mcpServers.resin).toEqual({
-        ...resinLaunch(HOME),
+        ...ompLaunch(HOME),
         env: { CUSTOM_VAR: "keep-me" },
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
@@ -1430,7 +1481,7 @@ describe("HarnessReconciler", () => {
         (await bridge.readFile(path.join(HOME, ".omp", "agent", "mcp.json"))) ?? "{}",
       );
       expect(omp.mcpServers.resin).toEqual({
-        ...resinLaunch(HOME),
+        ...ompLaunch(HOME),
         env: { TOKEN: "user-tok" },
       });
 

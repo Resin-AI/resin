@@ -123,7 +123,7 @@ describe("harness adapter operations", () => {
         harnessId: "omp" as const,
         targetPath: path.join(HOME, ".omp", "agent", "mcp.json"),
         serverKey: "resin",
-        expectedServer: { command: "resin", args: ["mcp"] },
+        expectedServer: { command: "resin", args: ["mcp", "--search-listing"] },
       },
     ];
 
@@ -500,7 +500,10 @@ describe("harness adapter operations", () => {
         fsBridge: bridge,
       });
       const ompParsed = JSON.parse(ompPlan.plannedContent);
-      expect(ompParsed.mcpServers.resin).toEqual({ command: "resin", args: ["mcp"] });
+      expect(ompParsed.mcpServers.resin).toEqual({
+        command: "resin",
+        args: ["mcp", "--search-listing"],
+      });
       expect(ompParsed.mcpServers["resin-gateway"]).toBeUndefined();
       expect(ompParsed.mcpServers.user_tool).toBeDefined();
     });

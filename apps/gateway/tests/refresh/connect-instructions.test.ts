@@ -4,6 +4,7 @@ import path from "node:path";
 import { applyOmpCatalogInstructions } from "@resin/adapter-omp";
 import { describe, expect, it } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
+import { RESIN_LEARNED_TOOL_META, RESIN_SEARCH_LISTING_META } from "../../src/protocol/types.js";
 import type { ProductionProxyRuntime } from "../../src/proxy/runtime.js";
 
 describe("OMP learned-tool block on connect", () => {
@@ -71,4 +72,73 @@ describe("OMP learned-tool block on connect", () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+  it.each([
+    { searchListing: false, expected: "User notes\n<!-- resin:catalog:start -->" },
+    { searchListing: true, expected: "User notes\n" },
+  ])(
+    "on connect, writes the learned-tool block only when the client lists learned tools (searchListing=$searchListing)",
+    async ({ searchListing, expected }) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "resin-connect-block-"));
+      const appendSystem = path.join(root, "APPEND_SYSTEM.md");
+      fs.writeFileSync(
+        appendSystem,
+        "User notes\n<!-- resin:catalog:start -->\n### `stale_tool`\n<!-- resin:catalog:end -->\n",
+      );
+      const gateway = new LocalMcpGateway({
+        router: {
+          listTools: async () => [
+            {
+              name: "release_notes",
+              description: "Drafts release notes.",
+              inputSchema: { type: "object" },
+              _meta: { [RESIN_LEARNED_TOOL_META]: true },
+            },
+          ],
+          callTool: async () => ({ content: [] }),
+        },
+        refreshCoordinatorOptions: {
+          adapters: {
+            omp: {
+              harnessId: "omp",
+              syncCatalogInstructions: async (_workspace, instructions) => {
+                await applyOmpCatalogInstructions({
+                  ...instructions,
+                  appendSystemPath: appendSystem,
+                });
+              },
+            },
+          },
+        },
+      });
+      try {
+        const connection = gateway.createConnection({
+          connectionId: "conn-omp",
+          cwd: root,
+          sendMessage: () => {},
+        });
+        await gateway.handleMessage(connection.connectionId, {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+            capabilities: {},
+            ...(searchListing ? { _meta: { [RESIN_SEARCH_LISTING_META]: true } } : {}),
+          },
+        });
+        expect(connection.searchListing).toBe(searchListing);
+        await expect
+          .poll(() => fs.readFileSync(appendSystem, "utf8"))
+          .toSatisfy((text: string) =>
+            searchListing
+              ? text === expected
+              : text.startsWith(expected) && text.includes("### `release_notes`"),
+          );
+      } finally {
+        gateway.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

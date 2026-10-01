@@ -4,10 +4,20 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DEFAULT_GATEWAY_INSTRUCTIONS, LocalMcpGateway } from "../src/gateway.js";
+import {
+  DEFAULT_GATEWAY_INSTRUCTIONS,
+  LocalMcpGateway,
+  searchListingGatewayInstructions,
+} from "../src/gateway.js";
 import { MCP_ERROR_CODES } from "../src/protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../src/protocol/framing.js";
-import type { JsonRpcMessage, JsonRpcParams, JsonRpcResponse } from "../src/protocol/types.js";
+import {
+  type JsonRpcMessage,
+  type JsonRpcParams,
+  type JsonRpcResponse,
+  RESIN_LEARNED_TOOL_META,
+  RESIN_SEARCH_LISTING_META,
+} from "../src/protocol/types.js";
 import { McpStdioShim } from "../src/shim/stdio-bridge.js";
 import {
   CONNECTION_DISABLED_SEARCH_REASON,
@@ -226,7 +236,9 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
 });
 
 function createSurfaceClient(
-  enableSearch: boolean | { enableSearch?: boolean; fullCatalog?: boolean } = false,
+  enableSearch:
+    | boolean
+    | { enableSearch?: boolean; fullCatalog?: boolean; searchOnlyListing?: boolean } = false,
   fullCatalog = false,
 ) {
   const output = new PassThrough();
@@ -1223,6 +1235,159 @@ describe("targeted regression coverage for response identity, aliases, and proto
           ? result.instructions
           : undefined;
       expect(instructions).toBe(`${DISABLED_SEARCH_GATEWAY_INSTRUCTIONS}${customSuffix}`);
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("search-only listing", () => {
+  const LEARNED = { [RESIN_LEARNED_TOOL_META]: true };
+  const initialize = (id: number): JsonRpcMessage => ({
+    jsonrpc: "2.0",
+    id,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+    },
+  });
+  const initializeResult = (id: number): JsonRpcMessage => ({
+    jsonrpc: "2.0",
+    id,
+    result: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      serverInfo: { name: "resin", version: "0.1.0" },
+      instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
+    },
+  });
+  const instructionsOf = (message: JsonRpcMessage | undefined) =>
+    z.object({ result: z.object({ instructions: z.string() }) }).parse(message).result.instructions;
+  const listWithLearned = (client: ReturnType<typeof createSurfaceClient>, id: number) => {
+    client.send({ jsonrpc: "2.0", id, method: "tools/list" });
+    client.respond({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: [
+          { name: "search_tools", inputSchema: { type: "object" } },
+          { name: "sys_search_tools", inputSchema: { type: "object" } },
+          { name: "get_tool_schema", inputSchema: { type: "object" } },
+          { name: "invoke_tool", inputSchema: { type: "object" } },
+          { name: "manage_tools", inputSchema: { type: "object" } },
+          { name: "build_site", inputSchema: { type: "object" }, _meta: LEARNED },
+          { name: "run_tests", inputSchema: { type: "object" }, _meta: LEARNED },
+          { name: "upstream_tool", inputSchema: { type: "object" } },
+        ],
+      },
+    });
+    const response = client.received.find((message) => "id" in message && message.id === id);
+    return z
+      .object({ result: z.object({ tools: z.array(z.object({ name: z.string() })) }) })
+      .parse(response)
+      .result.tools.map((tool) => tool.name);
+  };
+
+  it("lists only the four meta tools and still forwards learned tool calls by name", () => {
+    const client = createSurfaceClient({ searchOnlyListing: true });
+    try {
+      client.send(initialize(1));
+      client.respond(initializeResult(1));
+      expect(listWithLearned(client, 2)).toEqual([
+        "search_tools",
+        "get_tool_schema",
+        "invoke_tool",
+        "manage_tools",
+      ]);
+
+      const call: JsonRpcMessage = {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "build_site", arguments: { mode: "prod" } },
+      };
+      client.send(call);
+      expect(client.forwarded.at(-1)).toEqual(call);
+      const result: JsonRpcMessage = {
+        jsonrpc: "2.0",
+        id: 3,
+        result: { content: [{ type: "text", text: "built" }] },
+      };
+      client.respond(result);
+      expect(client.received.at(-1)).toEqual(result);
+
+      const searchCall: JsonRpcMessage = {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "search_tools", arguments: { query: "build the site" } },
+      };
+      client.send(searchCall);
+      expect(client.forwarded.at(-1)).toEqual(searchCall);
+
+      const changed: JsonRpcMessage = {
+        jsonrpc: "2.0",
+        method: "notifications/tools/list_changed",
+      };
+      client.respond(changed);
+      expect(client.received.at(-1)).toEqual(changed);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("tags initialize for the gateway and swaps in search-listing instructions", () => {
+    const client = createSurfaceClient({ searchOnlyListing: true });
+    try {
+      client.send(initialize(1));
+      expect(client.forwarded[0]).toMatchObject({
+        params: {
+          clientInfo: { name: "omp-coding-agent" },
+          _meta: { [RESIN_SEARCH_LISTING_META]: true },
+        },
+      });
+      client.respond(initializeResult(1));
+      const instructions = instructionsOf(client.received.at(-1));
+      // No catalog seen yet on this connection: no count.
+      expect(instructions).toBe(searchListingGatewayInstructions());
+      expect(instructions).toContain("search_tools(query=");
+      expect(instructions).not.toMatch(/\d+ learned tool/);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("states the learned-tool count from the last unfiltered list it saw", () => {
+    const client = createSurfaceClient({ searchOnlyListing: true });
+    try {
+      listWithLearned(client, 1);
+      client.send(initialize(2));
+      client.respond(initializeResult(2));
+      const instructions = instructionsOf(client.received.at(-1));
+      expect(instructions).toBe(searchListingGatewayInstructions(2));
+      expect(instructions).toContain("Resin has 2 learned tools");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("gives --full-catalog precedence over search-only listing", () => {
+    const client = createSurfaceClient({ searchOnlyListing: true, fullCatalog: true });
+    try {
+      client.send(initialize(1));
+      expect(client.forwarded[0]).not.toHaveProperty("params._meta");
+      client.respond(initializeResult(1));
+      expect(instructionsOf(client.received.at(-1))).toBe(DISABLED_SEARCH_GATEWAY_INSTRUCTIONS);
+      expect(listWithLearned(client, 2)).toEqual([
+        "get_tool_schema",
+        "invoke_tool",
+        "manage_tools",
+        "build_site",
+        "run_tests",
+        "upstream_tool",
+      ]);
     } finally {
       client.close();
     }

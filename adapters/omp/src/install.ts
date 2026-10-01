@@ -1,14 +1,34 @@
 import path from "node:path";
-import type { HarnessInstallDefinition } from "@resin/harness-contracts";
-import { planOmpMcpConfig } from "./config-planner.js";
+import {
+  type HarnessInstallDefinition,
+  type HarnessInstallExtension,
+  applyManagedBlock,
+} from "@resin/harness-contracts";
+import { OMP_RESIN_MCP_LAUNCH_FLAGS, planOmpMcpConfig } from "./config-planner.js";
 import { OMP_TESTED_VERSIONS, probeOmpInstallation } from "./discovery.js";
 import {
+  DEFAULT_APPEND_SYSTEM_FILENAME,
+  OMP_CATALOG_MARKERS,
   OMP_GUIDANCE_MARKERS,
   OMP_RESIN_GUIDANCE,
-  applyOmpCatalogInstructions,
   resolveOmpConfigHome,
   resolveOmpGuidancePath,
 } from "./instructions.js";
+
+const removeCatalogBlock: HarnessInstallExtension["install"] = async ({
+  home,
+  env,
+  fsBridge,
+  dryRun,
+}) => [
+  await applyManagedBlock(
+    fsBridge,
+    path.join(resolveOmpConfigHome(home, env), DEFAULT_APPEND_SYSTEM_FILENAME),
+    OMP_CATALOG_MARKERS,
+    null,
+    { dryRun },
+  ),
+];
 
 export const ompInstallHarness: HarnessInstallDefinition = {
   id: "omp",
@@ -37,6 +57,7 @@ export const ompInstallHarness: HarnessInstallDefinition = {
     serverKey: "resin",
     jsonContainerKeys: ["mcpServers"],
     transports: ["stdio", "sse", "websocket", "http"],
+    launchFlags: OMP_RESIN_MCP_LAUNCH_FLAGS,
     planRegistration: ({ targetPath, command, args, fsBridge }) =>
       planOmpMcpConfig({ customConfigPath: targetPath, command, args: [...args], fsBridge }),
   },
@@ -47,14 +68,12 @@ export const ompInstallHarness: HarnessInstallDefinition = {
   },
   installExtensions: [
     {
-      // The gateway writes the learned-tool catalog into OMP's appended system prompt as the
-      // catalog changes; install has nothing to write, and uninstall removes the block.
+      // OMP is registered with `--search-listing`, so the gateway writes no per-tool catalog into
+      // OMP's appended system prompt. Install removes a block an earlier full listing left there,
+      // and uninstall removes it too.
       name: "learned-tool catalog",
-      install: async () => [],
-      uninstall: async ({ home, env, dryRun }) =>
-        dryRun
-          ? []
-          : [await applyOmpCatalogInstructions({ ompHome: resolveOmpConfigHome(home, env) })],
+      install: removeCatalogBlock,
+      uninstall: removeCatalogBlock,
       verify: async () => true,
     },
   ],

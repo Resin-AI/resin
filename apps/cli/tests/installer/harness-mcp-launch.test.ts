@@ -92,7 +92,11 @@ describe("harness MCP launch on native Windows", () => {
         fsBridge,
       };
       const plan = await planHarnessRegistration(options);
-      expect(read(plan.plannedContent)).toMatchObject({ command: NODE, args: [ENTRY, "mcp"] });
+      // OMP lists only Resin's meta tools (`--search-listing`); the others take bare `mcp`.
+      expect(read(plan.plannedContent)).toMatchObject({
+        command: NODE,
+        args: [ENTRY, "mcp", ...(harnessId === "omp" ? ["--search-listing"] : [])],
+      });
 
       await applyConfigMutation(plan, fsBridge);
       expect(await verifyHarnessRegistration(options)).toBe(true);
