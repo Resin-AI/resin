@@ -51,6 +51,7 @@ import {
   type RuntimeAdapter,
   type RuntimeAdapterRegistry,
   type WorkflowPlanVerification,
+  applyComposedWorkflowBinding,
   applyConfirmedWorkflowBinding,
   createProgramAdapter,
   createRecordingCheckAdapters,
@@ -1089,18 +1090,6 @@ export function createRecordingCheckValidator(
     if (decided === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
     const verification = decided.verification;
     if (verification !== undefined) {
-      // The digest names the plan the cloud would publish, with the demonstrations it sent.
-      const published: RecordedWorkflow = {
-        ...decided.plan,
-        ...(plan.baseline === undefined ? {} : { baseline: plan.baseline }),
-        ...(plan.heldOut === undefined ? {} : { heldOut: plan.heldOut }),
-      };
-      if (verification.status === "verified") {
-        verification.replay = {
-          kind: "recording",
-          planDigest: workflowValidationPlanDigest(published),
-        };
-      }
       verification.missed = verification.missed.map(({ stepId }) => ({
         stepId,
         detail: MISSED_DETAIL,
@@ -1161,6 +1150,29 @@ export function createRecordingCheckValidator(
           decided.iterations ?? [],
           baselineInputs,
         );
+    if (verification !== undefined && verification.status === "verified") {
+      // The digest names the plan the cloud would publish, with the demonstrations it sent: the
+      // accepted bindings, each composed argument built from the inputs it follows instead of
+      // declaring its own (exactly as the cloud applies the verdicts).
+      let published: RecordedWorkflow = {
+        ...decided.plan,
+        ...(plan.baseline === undefined ? {} : { baseline: plan.baseline }),
+        ...(plan.heldOut === undefined ? {} : { heldOut: plan.heldOut }),
+      };
+      for (const [target, parts] of composed) {
+        const name = target.proposed.kind === "input" ? target.proposed.name : undefined;
+        const next = applyComposedWorkflowBinding(
+          { ...published, inputs: published.inputs.filter((input) => input.name !== name) },
+          asChecked.get(target) ?? target,
+          parts,
+        );
+        if (next !== undefined) published = next;
+      }
+      verification.replay = {
+        kind: "recording",
+        planDigest: workflowValidationPlanDigest(published),
+      };
+    }
     return {
       verdicts: final.map((outcome) => {
         const confirmedType = outcome.accepted ? typeOf.get(outcome.candidate) : undefined;

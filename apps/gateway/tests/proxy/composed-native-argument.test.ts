@@ -2,9 +2,14 @@
  * A harness write whose path is literal text around a value a later command also reads: the device
  * reports the composition when every recording shows it, so the plan can carry one input, not two.
  */
-import type { RecordedWorkflow, WorkflowBindingCandidate } from "@resin/contracts";
+import {
+  type RecordedWorkflow,
+  type WorkflowBindingCandidate,
+  workflowValidationPlanDigest,
+} from "@resin/contracts";
 import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
+import { applyComposedWorkflowBinding, applyConfirmedWorkflowBinding } from "@resin/runtime";
 import { describe, expect, it } from "vitest";
 import { createRecordingCheckValidator } from "../../src/proxy/workflow-validation.js";
 import { type RecordedTurn, localCallsFor, recordSession } from "./recorded-sessions.js";
@@ -87,7 +92,7 @@ async function verdicts(heldOutPath: string, heldOutValidated: string) {
       (verdict) =>
         verdict.candidate.proposed.kind === "input" && verdict.candidate.proposed.name === name,
     );
-  return { path: byName("path"), text: byName("text") };
+  return { path: byName("path"), text: byName("text"), answer, workflow };
 }
 
 describe("a harness argument composed from another input", () => {
@@ -99,6 +104,30 @@ describe("a harness argument composed from another input", () => {
       parts: [{ literal: "sources/" }, { input: "text" }, { literal: ".json" }],
     });
     expect(text?.composed).toBeUndefined();
+  });
+
+  it("digests the plan the cloud publishes: plain bindings first, then the composed argument", async () => {
+    const { path, text, answer, workflow } = await verdicts(
+      "sources/beta.json",
+      "sources/beta.json",
+    );
+    const textCandidate = workflow.candidates!.find(
+      (c) => c.proposed.kind === "input" && c.proposed.name === "text",
+    )!;
+    const pathCandidate = workflow.candidates!.find(
+      (c) => c.proposed.kind === "input" && c.proposed.name === "path",
+    )!;
+    const typed = {
+      ...pathCandidate,
+      proposed: { ...pathCandidate.proposed, type: path!.confirmedType! },
+    } as WorkflowBindingCandidate;
+    const plain = applyConfirmedWorkflowBinding(workflow, textCandidate)!;
+    const published = applyComposedWorkflowBinding(plain, typed, path!.composed!)!;
+    expect(text?.confirmed).toBe(true);
+    expect(answer.verification?.replay).toEqual({
+      kind: "recording",
+      planDigest: workflowValidationPlanDigest(published),
+    });
   });
 
   it("reports no composition when a recording's argument is other text around the value", async () => {
