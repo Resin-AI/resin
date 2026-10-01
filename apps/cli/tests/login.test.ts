@@ -1011,6 +1011,12 @@ describe("performPairing reuse and rollback", () => {
     expect(result.stdout).toContain("dev_existing_01");
     expect(result.stdout).not.toContain("existing-valid-access-token");
     expect(result.stdout).not.toContain("existing-valid-refresh-token");
+    // Nothing was written, so neither "saved" nor a restart instruction is true (RESIN_NO_SERVICE=1
+    // here, as under `pnpm local connect`'s foreground daemon).
+    expect(result.stdout).toContain(`Using saved credentials from ${tokenFilePath}.`);
+    expect(result.stdout).not.toContain("Credentials saved");
+    expect(result.stdout).not.toContain("Restart the foreground daemon");
+    expect(result.stdout).toContain("no daemon restart is needed");
   });
 
   it("standalone login with --force replaces existing valid credentials", async () => {
