@@ -1204,6 +1204,55 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       });
     });
 
+    it("keeps a built-in call's `i` as its intent, never as an argument", () => {
+      const toolCall = decoder.decode(
+        v18Record(3, {
+          type: "custom",
+          customType: "tool_execution_start",
+          data: {
+            toolCallId: "call-write-1",
+            toolName: "write",
+            args: { path: "sources/a.json", i: "Creating the source", content: "{}" },
+          },
+        }),
+      ) as IntermediateToolCallEvent;
+      expect(toolCall.parameters).toEqual({ path: "sources/a.json", content: "{}" });
+      expect(toolCall.metadata).toMatchObject({ intent: "Creating the source" });
+    });
+
+    it("keeps each embedded built-in call's own `i` as its intent, not its siblings'", () => {
+      const events = decoder.decode(
+        v18Record(2, {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-w-1",
+                name: "write",
+                arguments: { path: "a.json", i: "Writing a", content: "{}" },
+              },
+              {
+                type: "toolCall",
+                id: "call-b-1",
+                name: "bash",
+                arguments: { command: "python3 scripts/validate.py a.json", i: "Validating a" },
+              },
+            ],
+          },
+        }),
+      ) as IntermediateSessionEvent[];
+      const calls = events.filter(
+        (event) => event.type === "tool_call",
+      ) as IntermediateToolCallEvent[];
+      expect(calls.map((call) => call.parameters)).toEqual([
+        { path: "a.json", content: "{}" },
+        { command: "python3 scripts/validate.py a.json" },
+      ]);
+      expect(calls.map((call) => call.metadata.intent)).toEqual(["Writing a", "Validating a"]);
+    });
+
     it.each([
       ["a foreground run that finished", { wallTimeMs: 82 }, false, "omp-bash-completed"],
       ["an async run", { async: { state: "running", jobId: "j1" } }, false, undefined],

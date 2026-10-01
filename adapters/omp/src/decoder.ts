@@ -1044,6 +1044,26 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const targetPaths = editTargetPaths(parameters);
     return targetPaths.length > 0 ? { ...parameters, targetPaths } : parameters;
   }
+  /**
+   * The arguments a call is recorded with. OMP's built-in tools take `i`, a one-line statement of
+   * intent for the transcript: the harness's narration, not the call's data, so it is kept as the
+   * call's intent and never as an argument a learned tool would ask its caller for.
+   */
+  private recordedArguments(
+    toolName: string,
+    parameters: OmpTranscriptPayload,
+    metadata: OmpTranscriptPayload,
+  ): { parameters: OmpTranscriptPayload; metadata: OmpTranscriptPayload } {
+    const targeted = this.withEditTargets(toolName, parameters);
+    if (typeof targeted.i !== "string" || toolName.startsWith("mcp__")) {
+      return { parameters: targeted, metadata };
+    }
+    const { i: intent, ...rest } = targeted;
+    return {
+      parameters: rest,
+      metadata: metadata.intent === undefined ? { ...metadata, intent } : metadata,
+    };
+  }
   private withEvalSourceInterface(
     toolName: string,
     parameters: DecoderMetadataRecord,
@@ -1095,7 +1115,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       this.announcedToolCalls.set(sessionId, call.rawCallId, "assistant_message");
 
       const callId = normalizeCallId(call.rawCallId, call.rawCallId);
-      const recordedParameters = this.withEditTargets(toolName, parameters);
+      const { parameters: recordedParameters, metadata: callMetadata } = this.recordedArguments(
+        toolName,
+        parameters,
+        metadata,
+      );
       const surface = this.deviceSurfaceCallOf(toolName, recordedParameters);
       // Results may only carry the sanitized identity, so keep the name resolvable under it too.
       this.setToolCallName(sessionId, callId, surface?.identity.tool ?? toolName);
@@ -1123,7 +1147,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         timestamp,
         schemaVersion: "1.0.0",
         causalRef: { ...causalRef, stepIndex },
-        metadata: this.withEvalSourceInterface(toolName, recordedParameters, metadata),
+        metadata: this.withEvalSourceInterface(toolName, recordedParameters, callMetadata),
         type: "tool_call",
         toolName,
         callId,
@@ -1953,7 +1977,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       }
       parameters = rawParamsObj ?? {};
     }
-    parameters = this.withEditTargets(toolName, parameters);
+    const recorded = this.recordedArguments(toolName, parameters, metadata);
+    parameters = recorded.parameters;
+    if (recorded.metadata !== metadata) metadata.intent = recorded.metadata.intent;
 
     // A device-surface invocation is recorded as the tool it reached, over the connection the
     // harness's own registry resolved, not as the transport that carried it. The surface's start

@@ -550,9 +550,11 @@ text("sa\x66e-credential", token);`;
     if (origin.sourceReference === undefined) throw new Error("expected a source reference");
     expect(resolvePrivateReference(store, origin.sourceReference)).toBe(command);
     expect(carrier.program?.source).toBe(scrubbed);
-    for (const argument of ["cwd", "timeout", "i"]) {
+    for (const argument of ["cwd", "timeout"]) {
       expect(carrier.origins[argument]?.type).toBe("private");
     }
+    // OMP's `i` is the call's intent, not an argument the recording carries.
+    expect(carrier.origins.i).toBeUndefined();
     expect(JSON.stringify(carrier.origins.env)).not.toContain("env-only-value");
 
     const publicEvents = observed.map((entry) => projectEventToMetadataOnly(entry));
