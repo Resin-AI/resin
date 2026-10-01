@@ -67,6 +67,12 @@ export type WorkflowValueTemplate =
   | { type: "object"; entries: Record<string, WorkflowValueTemplate> }
   | { type: "array"; items: WorkflowValueTemplate[] }
   /**
+   * A string composed of literal text around caller inputs: the concatenation of each part rendered
+   * as a string. Parts are literal strings and string inputs only (never list inputs or inputs with
+   * a recorded default), at least one part is an input, and no two literal parts are adjacent.
+   */
+  | { type: "text"; parts: WorkflowValueTemplate[] }
+  /**
    * A recorded program with the values a replay bound inside it.
    *
    * Without projection metadata, `source` has its legacy local-source semantics. A projected
@@ -897,6 +903,9 @@ export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
       case "array":
         for (const entry of template.items) walkTemplate(entry);
         return;
+      case "text":
+        for (const part of template.parts) walkTemplate(part);
+        return;
       case "program":
         walkTemplate(template.source);
         for (const hole of template.holes) walkTemplate(hole.binding);
@@ -941,6 +950,9 @@ export function collectWorkflowPrivateReferences(workflow: RecordedWorkflow): st
         return;
       case "array":
         for (const entry of template.items) walkTemplate(entry);
+        return;
+      case "text":
+        for (const part of template.parts) walkTemplate(part);
         return;
       case "program":
         walkTemplate(template.source);
@@ -1646,6 +1658,41 @@ export function validateRecordedWorkflow(value: unknown): {
                 return;
               }
               template.items.forEach((entry, index) => walk(entry, `${where}[${index}]`));
+              return;
+            }
+            case "text": {
+              if (!Array.isArray(template.parts) || template.parts.length === 0) {
+                problems.push(`${where} text parts must be a non-empty array`);
+                return;
+              }
+              let inputParts = 0;
+              let previousLiteral = false;
+              for (const [index, part] of template.parts.entries()) {
+                const at = `${where}<part ${index}>`;
+                if (isPlainObject(part) && part.type === "literal") {
+                  if (typeof part.value !== "string") problems.push(`${at} must be a string`);
+                  if (previousLiteral) problems.push(`${at} follows another literal part`);
+                  previousLiteral = true;
+                  continue;
+                }
+                previousLiteral = false;
+                if (!isPlainObject(part) || part.type !== "input") {
+                  problems.push(`${at} must be a literal string or a string input`);
+                  continue;
+                }
+                inputParts += 1;
+                const name = part.name;
+                if (typeof name !== "string" || !inputNames.has(name)) {
+                  problems.push(`${at} reads unknown input ${String(name)}`);
+                } else if (
+                  inputTypes.get(name) !== "string" ||
+                  listInputs.has(name) ||
+                  recordedDefaults.has(name)
+                ) {
+                  problems.push(`${at} must read a plain string input, not ${name}`);
+                }
+              }
+              if (inputParts === 0) problems.push(`${where} text needs at least one input part`);
               return;
             }
             case "program": {

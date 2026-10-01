@@ -148,6 +148,9 @@ function templateBinds(template: WorkflowValueTemplate, path: WorkflowValuePath)
       const child = typeof head === "number" ? template.items[head] : undefined;
       return child !== undefined && templateBinds(child, rest);
     }
+    case "text":
+      // A composed string has no inner path; its parts are literals and inputs.
+      return path.length === 0 && template.parts.some((part) => templateBinds(part, []));
     case "program": {
       const address = programTokenPath(path);
       if (address === undefined) return false;
@@ -243,6 +246,10 @@ function templateDeviceSourced(
       const child = typeof head === "number" ? template.items[head] : undefined;
       return child !== undefined && templateDeviceSourced(child, rest, rules);
     }
+    case "text":
+      return (
+        path.length === 0 && template.parts.every((part) => templateDeviceSourced(part, [], rules))
+      );
     case "program": {
       // Recorded text comes from this device's store only through a private source reference; the
       // plan's literal source is the uploaded, redacted view or the cloud's own text.

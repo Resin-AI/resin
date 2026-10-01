@@ -172,9 +172,12 @@ function pathText(path: WorkflowValuePath): string {
   return `[${parts.join(", ")}]`;
 }
 
-/** A leaf template is one that carries a value; `object` and `array` carry structure instead. */
+/**
+ * A leaf template is one that carries a value; `object` and `array` carry structure instead, and a
+ * composed `text` is already bound to inputs a candidate cannot replace whole.
+ */
 function isLeafTemplate(template: WorkflowValueTemplate): boolean {
-  return template.type !== "object" && template.type !== "array";
+  return template.type !== "object" && template.type !== "array" && template.type !== "text";
 }
 
 function proposedTemplate(candidate: WorkflowBindingCandidate): WorkflowValueTemplate {
@@ -228,6 +231,9 @@ async function extractMasks(
         return;
       case "array":
         for (const entry of template.items) walk(entry);
+        return;
+      case "text":
+        for (const part of template.parts) walk(part);
         return;
       case "program":
         walk(template.source);
@@ -959,6 +965,10 @@ export async function demonstrationEnvironment(params: {
           );
         case "array":
           return template.items.every((child, index) => bindTemplate(child, [...path, index]));
+        case "text":
+          // A composed string is not a JSON path: its inputs are established where they are
+          // bound directly, never by splitting this text.
+          return true;
         default:
           // Program holes are token positions, not JSON paths. Their candidate-specific
           // derivation below remains authoritative; no guessed token extraction here.
@@ -1071,6 +1081,9 @@ function collectReadSteps(
     case "array":
       for (const entry of source.items) collectReadSteps(entry, into);
       return;
+    case "text":
+      for (const part of source.parts) collectReadSteps(part, into);
+      return;
     case "program":
       collectReadSteps(source.source, into);
       for (const hole of source.holes) collectReadSteps(hole.binding, into);
@@ -1129,6 +1142,9 @@ function collectReadInputs(
       return;
     case "array":
       for (const entry of source.items) collectReadInputs(entry, into);
+      return;
+    case "text":
+      for (const part of source.parts) collectReadInputs(part, into);
       return;
     case "program":
       collectReadInputs(source.source, into);

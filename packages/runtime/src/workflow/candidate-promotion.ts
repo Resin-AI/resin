@@ -10,6 +10,7 @@
 import {
   type RecordedWorkflow,
   type WorkflowBindingCandidate,
+  type WorkflowComposedArgument,
   type WorkflowValuePath,
   type WorkflowValueSource,
   type WorkflowValueTemplate,
@@ -194,6 +195,60 @@ export function applyConfirmedWorkflowBinding(
     (entry) => candidateIdentity(entry) !== candidateIdentity(candidate),
   );
   return { ...plan, steps, inputs, ...(candidates === undefined ? {} : { candidates }) };
+}
+
+/**
+ * Apply a confirmed whole-argument input proposal as the composition its verdict reported: the
+ * argument becomes literal text around inputs the plan already declares, and the proposal adds no
+ * input of its own. Refuses (undefined) anything but a whole non-program argument proposed as an
+ * input, and any part naming an input that is not a plain declared string.
+ */
+export function applyComposedWorkflowBinding(
+  plan: RecordedWorkflow,
+  candidate: WorkflowBindingCandidate,
+  composed: WorkflowComposedArgument,
+): RecordedWorkflow | undefined {
+  if (candidate.proposed.kind !== "input" || candidate.path.length !== 0) return undefined;
+  const stepIndex = plan.steps.findIndex((step) => step.id === candidate.stepId);
+  if (stepIndex < 0) return undefined;
+  const step = plan.steps[stepIndex]!;
+  if (step.callable.program?.argument === candidate.argument) return undefined;
+  const argumentIndex = step.arguments.findIndex(
+    (argument) => argument.name === candidate.argument,
+  );
+  if (argumentIndex < 0) return undefined;
+  const parts: WorkflowValueTemplate[] = [];
+  for (const part of composed.parts) {
+    if ("literal" in part) {
+      // Adjacent literals have no single reading; the verdict never reports them.
+      if (parts.at(-1)?.type === "literal") return undefined;
+      parts.push({ type: "literal", value: part.literal });
+      continue;
+    }
+    const input = plan.inputs.find((entry) => entry.name === part.input);
+    if (
+      input === undefined ||
+      input.type !== "string" ||
+      input.list !== undefined ||
+      input.recordedDefault === true
+    ) {
+      return undefined;
+    }
+    parts.push({ type: "input", name: part.input });
+  }
+  if (!parts.some((part) => part.type === "input")) return undefined;
+  const steps = [...plan.steps];
+  const args = [...step.arguments];
+  args[argumentIndex] = {
+    ...step.arguments[argumentIndex]!,
+    source: { kind: "template", template: { type: "text", parts } },
+    provenance: { standing: "derived", rule: "replay-confirmed" },
+  };
+  steps[stepIndex] = { ...step, arguments: args };
+  const candidates = plan.candidates?.filter(
+    (entry) => candidateIdentity(entry) !== candidateIdentity(candidate),
+  );
+  return { ...plan, steps, ...(candidates === undefined ? {} : { candidates }) };
 }
 
 /** Apply only caller-confirmed candidates; rejected proposals remain recorded as proposals. */

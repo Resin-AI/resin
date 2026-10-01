@@ -401,6 +401,21 @@ async function buildTemplate(
       for (const item of template.items) built.push(await resolveLeaf(item));
       return built;
     }
+    case "text": {
+      let built = "";
+      for (const part of template.parts) {
+        const value = await resolveLeaf(part);
+        if (typeof value !== "string") {
+          throw new WorkflowBindingError(
+            "a composed text argument has a part that is not a string",
+            step.id,
+            argumentName,
+          );
+        }
+        built += value;
+      }
+      return built;
+    }
     case "program": {
       // The program the step records is read in its own shell dialect: a template in another
       // grammar would render its values with another shell's quoting, and a program Resin never

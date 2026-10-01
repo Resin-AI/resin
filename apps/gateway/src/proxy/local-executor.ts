@@ -526,14 +526,26 @@ export class LocalArtifactExecutor {
         return undefined;
       }
     };
-    const templateText = (template: WorkflowValueTemplate): string | undefined =>
-      template.type === "literal"
-        ? typeof template.value === "string"
-          ? template.value
-          : undefined
-        : template.type === "private"
-          ? resolveOwned(template.reference)
-          : undefined;
+    const templateText = (template: WorkflowValueTemplate): string | undefined => {
+      switch (template.type) {
+        case "literal":
+          return typeof template.value === "string" ? template.value : undefined;
+        case "private":
+          return resolveOwned(template.reference);
+        case "text": {
+          // Composed text reads as its literals with `{input}` where each caller value goes.
+          let shown = "";
+          for (const part of template.parts) {
+            const piece = part.type === "input" ? `{${part.name}}` : templateText(part);
+            if (piece === undefined) return undefined;
+            shown += piece;
+          }
+          return shown;
+        }
+        default:
+          return undefined;
+      }
+    };
     const text = (source: WorkflowValueSource): string | undefined =>
       source.kind === "literal"
         ? typeof source.value === "string"
