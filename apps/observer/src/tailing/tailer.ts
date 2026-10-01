@@ -15,7 +15,12 @@ import { AuthRecoveryError } from "../auth-recovery.js";
 import { getDaemonPaths } from "../paths.js";
 import { SourceCursorManager } from "./cursor-manager.js";
 import { RecordDeduplicator } from "./deduplicator.js";
-import { BoundedRecordQueue, type DeadLetterRecord, type QueueMetrics } from "./queue.js";
+import {
+  BoundedRecordQueue,
+  type DeadLetterReason,
+  type DeadLetterRecord,
+  type QueueMetrics,
+} from "./queue.js";
 import { type RecoveryAssessment, SourceRecoveryEngine } from "./recovery.js";
 import { type ParsedLineRecord, TranscriptWatcher } from "./watcher.js";
 
@@ -107,6 +112,18 @@ export interface TailerSessionStatus {
   ackedCursor: SourceCursor | null;
   durablePendingCount: number;
   persistenceHealthy: boolean;
+}
+
+/**
+ * A delivered batch the record handler failed: every record in it was dead-lettered. Carries the
+ * handler's error message and counts, never record content.
+ */
+export interface TailerDeadLetterBatch {
+  sessionId: string;
+  harnessId: string;
+  recordCount: number;
+  reason: DeadLetterReason;
+  error: string;
 }
 
 /**
@@ -601,6 +618,15 @@ export class TranscriptTailer extends EventEmitter {
         for (const record of batch) {
           context.queue.nack(record.recordId, error, "UNHANDLED_ERROR");
         }
+        // The next acknowledged batch moves the cursor past these records for good: say so.
+        const deadLettered: TailerDeadLetterBatch = {
+          sessionId: context.session.sessionId,
+          harnessId: context.session.harnessId,
+          recordCount: batch.length,
+          reason: "UNHANDLED_ERROR",
+          error: error.message,
+        };
+        this.emit("deadLetter:batch", deadLettered);
         this.notifyProgress(context, error);
       }
     })();

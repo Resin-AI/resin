@@ -11,6 +11,7 @@ import type { JsonObject } from "../normalization/redaction.js";
 import type { SourceCursorManager } from "./cursor-manager.js";
 import {
   type BackfillPolicy,
+  type TailerDeadLetterBatch,
   type TailerRecordHandler,
   type TailerSessionStatus,
   TranscriptTailer,
@@ -27,6 +28,9 @@ export function isUnlinkedAgentSession(session: HarnessSession): boolean {
   const parent = session.metadata.parentSessionId;
   return !(typeof parent === "string" && parent.length > 0);
 }
+
+/** A failed batch's error message is logged at most this long. */
+const MAX_LOGGED_ERROR_LENGTH = 500;
 
 /**
  * Summary of a single workspace and session polling cycle.
@@ -52,6 +56,10 @@ export interface ObserverDiagnostics {
   activeSessions: TailerSessionStatus[];
   totalRecordsObserved: number;
   totalRecordsAcknowledged: number;
+  /** Delivered batches the capture handler failed, whose records were dead-lettered. */
+  deadLetteredBatches: number;
+  /** Records in those batches: they are not captured, and the cursor moves past them. */
+  deadLetteredRecords: number;
   pollCyclesCompleted: number;
   lastPollSummary?: PollSummary;
 }
@@ -115,6 +123,8 @@ export class ObserverCoordinator extends EventEmitter {
   private pollCyclesCompleted = 0;
   private totalRecordsObserved = 0;
   private totalRecordsAcknowledged = 0;
+  private deadLetteredBatches = 0;
+  private deadLetteredRecords = 0;
   private lastPollSummary?: PollSummary;
 
   constructor(options: ObserverCoordinatorOptions = {}) {
@@ -133,6 +143,20 @@ export class ObserverCoordinator extends EventEmitter {
         defaultBackfillPolicy: options.defaultBackfillPolicy,
         defaultMaxInFlightBatches: options.defaultMaxInFlightBatches,
       });
+    this.tailer.on("deadLetter:batch", (batch: TailerDeadLetterBatch) => {
+      this.deadLetteredBatches += 1;
+      this.deadLetteredRecords += batch.recordCount;
+      this.logger?.warn?.(
+        `Capture batch for session ${batch.sessionId} failed; ${batch.recordCount} records were dead-lettered and will not be captured`,
+        {
+          sessionId: batch.sessionId,
+          harnessId: batch.harnessId,
+          recordCount: batch.recordCount,
+          reason: batch.reason,
+          error: batch.error.slice(0, MAX_LOGGED_ERROR_LENGTH),
+        },
+      );
+    });
     if (options.autoStart) {
       void this.start();
     }
@@ -446,6 +470,8 @@ export class ObserverCoordinator extends EventEmitter {
       activeSessions: activeSessionStatuses,
       totalRecordsObserved: this.totalRecordsObserved,
       totalRecordsAcknowledged: this.totalRecordsAcknowledged,
+      deadLetteredBatches: this.deadLetteredBatches,
+      deadLetteredRecords: this.deadLetteredRecords,
       pollCyclesCompleted: this.pollCyclesCompleted,
       lastPollSummary: this.lastPollSummary,
     };

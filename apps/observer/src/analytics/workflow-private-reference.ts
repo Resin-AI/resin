@@ -30,6 +30,12 @@ export const WORKFLOW_CALL_DIALECT_SLOT = "shell-dialect:v1";
 export const WORKFLOW_CALL_DIALECT_CONFLICT_SLOT = "shell-dialect-conflict:v1";
 
 /**
+ * Set once a call received a second, different result: the first result stays stored, immutable,
+ * but is no baseline for the call any more. Nothing clears it.
+ */
+export const WORKFLOW_CALL_RESULT_CONFLICT_SLOT = "result-conflict:v1";
+
+/**
  * Demonstration slot holding where the recorder placed a call among the calls it recorded,
  * `{epoch, index}`. Written once, the first time the call is recorded, and never uploaded.
  */
