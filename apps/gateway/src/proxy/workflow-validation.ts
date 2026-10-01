@@ -19,6 +19,7 @@ import {
   type ProgramLanguage,
   type RecordedWorkflow,
   type WorkflowBindingCandidate,
+  type WorkflowComposedArgument,
   type WorkflowHeldOutDemonstration,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
@@ -45,10 +46,12 @@ import {
 import {
   type CandidateValidationOutcome,
   type DemonstrationLabel,
+  RESIN_HARNESS_TOOL_RUNTIME,
   type RecordedCall,
   type RuntimeAdapter,
   type RuntimeAdapterRegistry,
   type WorkflowPlanVerification,
+  applyComposedWorkflowBinding,
   applyConfirmedWorkflowBinding,
   createProgramAdapter,
   createRecordingCheckAdapters,
@@ -68,6 +71,11 @@ export interface LocalCandidateVerdict {
   /** The JSON type of the values a confirmed input proposal binds; never the values. */
   confirmedType?: DemonstratedType;
   reason?: string;
+  /**
+   * On a confirmed whole-argument input proposal for a harness tool's string argument: how its
+   * value was literal text around other confirmed inputs' values in every recording checked.
+   */
+  composed?: WorkflowComposedArgument;
 }
 
 type DemonstratedType = "string" | "number" | "boolean" | "object" | "array";
@@ -559,6 +567,48 @@ interface IterationDecision {
   outcomes: CandidateValidationOutcome[];
   plan: RecordedWorkflow;
   verification?: WorkflowPlanVerification;
+  /** The input values this run's demonstration supplied, by input name; never uploaded. */
+  inputs?: Readonly<Record<string, WorkflowJsonValue>>;
+  /** Across iterations: each iteration's supplied input values, in iteration order. */
+  iterations?: ReadonlyArray<Readonly<Record<string, WorkflowJsonValue>> | undefined>;
+}
+
+/** Shorter values match too readily inside unrelated text to be taken as the same value. */
+const MIN_COMPOSED_PART_LENGTH = 2;
+
+/**
+ * How `value` is literal text around `sources`' values: reading left to right, the longest source
+ * value found at each position is taken (the earlier source on a tie), and the text between is
+ * literal. Undefined when no source value occurs, or when the value has whitespace — text a caller
+ * phrases, not a name built from other values.
+ */
+function composedParts(
+  value: string,
+  sources: ReadonlyArray<{ name: string; value: string }>,
+): WorkflowComposedArgument["parts"] | undefined {
+  if (/\s/u.test(value)) return undefined;
+  const usable = sources.filter((source) => source.value.length >= MIN_COMPOSED_PART_LENGTH);
+  const parts: WorkflowComposedArgument["parts"] = [];
+  let literal = "";
+  let position = 0;
+  while (position < value.length) {
+    let best: { name: string; value: string } | undefined;
+    for (const source of usable) {
+      if (!value.startsWith(source.value, position)) continue;
+      if (best === undefined || source.value.length > best.value.length) best = source;
+    }
+    if (best === undefined) {
+      literal += value[position];
+      position += 1;
+      continue;
+    }
+    if (literal.length > 0) parts.push({ literal });
+    literal = "";
+    parts.push({ input: best.name });
+    position += best.value.length;
+  }
+  if (literal.length > 0) parts.push({ literal });
+  return parts.some((part) => "input" in part) ? parts : undefined;
 }
 
 /**
@@ -613,7 +663,7 @@ async function acrossIterations(
     });
     const verifications = decisions.map((decision) => decision.verification);
     if (!verifications.every((each) => each !== undefined)) {
-      return { outcomes, plan: first.plan };
+      return { outcomes, plan: first.plan, iterations: decisions.map((each) => each.inputs) };
     }
     const status = verifications.every((each) => each.status === "verified")
       ? "verified"
@@ -645,6 +695,7 @@ async function acrossIterations(
         dropped: [...dropped.values()],
         ...(status === "verified" && programIdentities !== undefined ? { programIdentities } : {}),
       },
+      iterations: decisions.map((each) => each.inputs),
     };
   }
 }
@@ -906,7 +957,7 @@ export function createRecordingCheckValidator(
       heldOut: LocalDemonstration | undefined,
       decide: readonly WorkflowBindingCandidate[],
       environmentCandidates: readonly WorkflowBindingCandidate[],
-    ) => {
+    ): Promise<IterationDecision | undefined> => {
       const registries = new Map<DemonstrationLabel, RuntimeAdapterRegistry>();
       if (baselineRun !== undefined) registries.set("baseline", registry(baselineRun, checked));
       if (heldOut !== undefined) registries.set("held-out", registry(heldOut, checked));
@@ -920,7 +971,30 @@ export function createRecordingCheckValidator(
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
       if (environment === undefined) return undefined;
-      return await validateAndConfirmCandidates({ plan: checked, candidates: decide, environment });
+      const decision = await validateAndConfirmCandidates({
+        plan: checked,
+        candidates: decide,
+        environment,
+      });
+      return { ...decision, inputs: environment.inputs };
+    };
+    /** The input values the plan's own recording supplied for `sources`, read as a held-out's are. */
+    const baselineInputs = async (
+      sources: readonly WorkflowBindingCandidate[],
+    ): Promise<Readonly<Record<string, WorkflowJsonValue>> | undefined> => {
+      const run =
+        baselineRun ??
+        (await localDemonstration(plan, "baseline", options.localCalls))?.iterations?.[0];
+      if (run === undefined) return undefined;
+      const environment = await demonstrationEnvironment({
+        plan: { ...plan, baseline: run.demonstration },
+        demonstration: "baseline",
+        candidates: sources,
+        adapters: () => registry(run, plan),
+        workspaceId,
+        resolvePrivate: resolveOwned,
+      });
+      return environment?.inputs;
     };
 
     const baselineOnly = label === "baseline";
@@ -1016,18 +1090,6 @@ export function createRecordingCheckValidator(
     if (decided === undefined) return { verdicts: [], unavailable: UNAVAILABLE };
     const verification = decided.verification;
     if (verification !== undefined) {
-      // The digest names the plan the cloud would publish, with the demonstrations it sent.
-      const published: RecordedWorkflow = {
-        ...decided.plan,
-        ...(plan.baseline === undefined ? {} : { baseline: plan.baseline }),
-        ...(plan.heldOut === undefined ? {} : { heldOut: plan.heldOut }),
-      };
-      if (verification.status === "verified") {
-        verification.replay = {
-          kind: "recording",
-          planDigest: workflowValidationPlanDigest(published),
-        };
-      }
       verification.missed = verification.missed.map(({ stepId }) => ({
         stepId,
         detail: MISSED_DETAIL,
@@ -1071,16 +1133,50 @@ export function createRecordingCheckValidator(
           const outcome = decided.outcomes.find((entry) => entry.candidate === checkedAs);
           return { candidate, accepted: outcome?.accepted === true, reason: NOT_CONFIRMED };
         });
+    // A binding inside a program Resin never learns (cmd.exe, an unproven shell dialect) is refused
+    // with that fixed, value-free reason, whatever the check decided.
+    const final = outcomes.map((unchecked) => {
+      const notLearnable = candidateNotLearnableReason(plan, unchecked.candidate);
+      return notLearnable === undefined
+        ? unchecked
+        : { ...unchecked, accepted: false, reason: notLearnable };
+    });
+    const composed = baselineOnly
+      ? new Map<WorkflowBindingCandidate, WorkflowComposedArgument>()
+      : await composedArguments(
+          plan,
+          final.filter((outcome) => outcome.accepted).map((outcome) => outcome.candidate),
+          (candidate) => asChecked.get(candidate) ?? candidate,
+          decided.iterations ?? [],
+          baselineInputs,
+        );
+    if (verification !== undefined && verification.status === "verified") {
+      // The digest names the plan the cloud would publish, with the demonstrations it sent: the
+      // accepted bindings, each composed argument built from the inputs it follows instead of
+      // declaring its own (exactly as the cloud applies the verdicts).
+      let published: RecordedWorkflow = {
+        ...decided.plan,
+        ...(plan.baseline === undefined ? {} : { baseline: plan.baseline }),
+        ...(plan.heldOut === undefined ? {} : { heldOut: plan.heldOut }),
+      };
+      for (const [target, parts] of composed) {
+        const name = target.proposed.kind === "input" ? target.proposed.name : undefined;
+        const next = applyComposedWorkflowBinding(
+          { ...published, inputs: published.inputs.filter((input) => input.name !== name) },
+          asChecked.get(target) ?? target,
+          parts,
+        );
+        if (next !== undefined) published = next;
+      }
+      verification.replay = {
+        kind: "recording",
+        planDigest: workflowValidationPlanDigest(published),
+      };
+    }
     return {
-      verdicts: outcomes.map((unchecked) => {
-        // A binding inside a program Resin never learns (cmd.exe, an unproven shell dialect) is
-        // refused with that fixed, value-free reason, whatever the check decided.
-        const notLearnable = candidateNotLearnableReason(plan, unchecked.candidate);
-        const outcome =
-          notLearnable === undefined
-            ? unchecked
-            : { ...unchecked, accepted: false, reason: notLearnable };
+      verdicts: final.map((outcome) => {
         const confirmedType = outcome.accepted ? typeOf.get(outcome.candidate) : undefined;
+        const composedHere = composed.get(outcome.candidate);
         return {
           candidate: {
             stepId: outcome.candidate.stepId,
@@ -1091,11 +1187,85 @@ export function createRecordingCheckValidator(
           confirmed: outcome.accepted,
           ...(confirmedType === undefined ? {} : { confirmedType }),
           ...(outcome.accepted ? {} : { reason: outcome.reason }),
+          ...(composedHere === undefined ? {} : { composed: composedHere }),
         };
       }),
       ...(verification === undefined ? {} : { verification }),
     };
   };
+}
+
+/**
+ * The confirmed whole-argument input proposals on a harness tool's string argument whose value, in
+ * the plan's own recording and in every iteration, was the same literal text around the values of
+ * other confirmed inputs. `iterations` holds what each iteration supplied by input name, and
+ * `baseline` reads what the plan's own recording supplied for the given proposals.
+ */
+async function composedArguments(
+  plan: RecordedWorkflow,
+  confirmed: readonly WorkflowBindingCandidate[],
+  checkedAs: (candidate: WorkflowBindingCandidate) => WorkflowBindingCandidate,
+  iterations: ReadonlyArray<Readonly<Record<string, WorkflowJsonValue>> | undefined>,
+  baseline: (
+    sources: readonly WorkflowBindingCandidate[],
+  ) => Promise<Readonly<Record<string, WorkflowJsonValue>> | undefined>,
+): Promise<Map<WorkflowBindingCandidate, WorkflowComposedArgument>> {
+  const composed = new Map<WorkflowBindingCandidate, WorkflowComposedArgument>();
+  // Parts are plain inputs: a recorded default keeps a token, and a list is many words.
+  const sources = confirmed.filter(
+    (candidate) =>
+      candidate.proposed.kind === "input" &&
+      candidate.proposed.recordedDefault !== true &&
+      candidate.proposed.list === undefined,
+  );
+  const targets = sources.filter((candidate) => {
+    const step = plan.steps.find((entry) => entry.id === candidate.stepId);
+    return (
+      candidate.path.length === 0 &&
+      step !== undefined &&
+      step.callable.runtime === RESIN_HARNESS_TOOL_RUNTIME &&
+      step.callable.program?.argument !== candidate.argument
+    );
+  });
+  if (targets.length === 0 || iterations.length === 0) return composed;
+  const recorded = await baseline(sources.map(checkedAs));
+  if (recorded === undefined || iterations.some((each) => each === undefined)) return composed;
+  const recordings = [recorded, ...iterations] as ReadonlyArray<
+    Readonly<Record<string, WorkflowJsonValue>>
+  >;
+  const nameOf = (candidate: WorkflowBindingCandidate): string =>
+    candidate.proposed.kind === "input" ? candidate.proposed.name : "";
+  for (const target of targets) {
+    const name = nameOf(target);
+    let agreed: WorkflowComposedArgument["parts"] | undefined;
+    for (const values of recordings) {
+      const value = values[name];
+      if (typeof value !== "string") {
+        agreed = undefined;
+        break;
+      }
+      const parts = composedParts(
+        value,
+        sources.flatMap((source) => {
+          const sourceName = nameOf(source);
+          const sourceValue = values[sourceName];
+          return source === target || sourceName === name || typeof sourceValue !== "string"
+            ? []
+            : [{ name: sourceName, value: sourceValue }];
+        }),
+      );
+      if (
+        parts === undefined ||
+        (agreed !== undefined && JSON.stringify(parts) !== JSON.stringify(agreed))
+      ) {
+        agreed = undefined;
+        break;
+      }
+      agreed = parts;
+    }
+    if (agreed !== undefined) composed.set(target, { parts: agreed });
+  }
+  return composed;
 }
 
 /**

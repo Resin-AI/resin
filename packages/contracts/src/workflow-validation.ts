@@ -67,6 +67,14 @@ export interface WorkflowValidationRequest {
   plan: RecordedWorkflow;
 }
 
+/**
+ * How a confirmed whole-argument input's string value was literal text around other confirmed
+ * inputs' values in every recording the device checked: literal runs and input names, in order.
+ */
+export interface WorkflowComposedArgument {
+  parts: Array<{ literal: string } | { input: string }>;
+}
+
 /** One proposal's outcome, in the vocabulary the generation path reads. */
 export interface WorkflowValidationVerdict {
   candidate: {
@@ -83,6 +91,11 @@ export interface WorkflowValidationVerdict {
   confirmedType?: "string" | "number" | "boolean" | "object" | "array";
   /** Why a proposal was not confirmed; recorded verbatim when the plan reports the refusal. */
   reason?: string;
+  /**
+   * Present only on a confirmed whole-argument input proposal for a harness-tool string argument
+   * whose value, in the baseline and every held-out recording, was these parts concatenated.
+   */
+  composed?: WorkflowComposedArgument;
 }
 
 /** Digest-bound proof that the plan was checked against this device's own recordings. */
@@ -220,6 +233,18 @@ const VerdictSchema = z.object({
   confirmed: z.boolean(),
   confirmedType: z.enum(["string", "number", "boolean", "object", "array"]).optional(),
   reason: z.string().optional(),
+  composed: z
+    .object({
+      parts: z
+        .array(
+          z.union([
+            z.object({ literal: z.string() }).strict(),
+            z.object({ input: NonEmptyString }).strict(),
+          ]),
+        )
+        .min(1),
+    })
+    .optional(),
 });
 
 /**

@@ -217,6 +217,9 @@ async function collectTemplatePrograms(
         );
       }
       return;
+    case "text":
+      // Composed text holds only literal and input parts, never a program.
+      return;
     case "program": {
       const identity = await identityForProgram(
         template,

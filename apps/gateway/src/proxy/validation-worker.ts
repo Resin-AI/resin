@@ -797,6 +797,7 @@ export class WorkflowValidationWorker {
       confirmed: verdict.confirmed,
       ...(verdict.confirmedType === undefined ? {} : { confirmedType: verdict.confirmedType }),
       ...(verdict.reason === undefined ? {} : { reason: verdict.reason }),
+      ...(verdict.composed === undefined ? {} : { composed: verdict.composed }),
     }));
     return {
       schemaVersion: WORKFLOW_VALIDATION_SCHEMA_VERSION,

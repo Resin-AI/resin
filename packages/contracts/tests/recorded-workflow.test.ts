@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type RecordedWorkflow,
   type WorkflowRecordedProgram,
+  type WorkflowValueTemplate,
   collectWorkflowPrivateReferences,
   validateRecordedWorkflow,
   workflowSinkStepIds,
@@ -737,6 +738,55 @@ describe("recorded-default inputs", () => {
     expect(validateRecordedWorkflow(workflow).errors).toContain(
       "input source cannot have both a default and a recorded default",
     );
+  });
+});
+
+describe("composed text arguments", () => {
+  /** `fetch` reads `source` as literal text around inputs. */
+  function composed(
+    parts: WorkflowValueTemplate[],
+    inputs: RecordedWorkflow["inputs"] = [],
+  ): string[] {
+    const workflow = fourCallWorkflow();
+    workflow.inputs.push(...inputs);
+    workflow.steps[0]!.arguments = [
+      { name: "source", source: { kind: "template", template: { type: "text", parts } } },
+    ];
+    return validateRecordedWorkflow(workflow).errors;
+  }
+  const literal = (value: string): WorkflowValueTemplate => ({ type: "literal", value });
+  const input = (name: string): WorkflowValueTemplate => ({ type: "input", name });
+
+  it("accept literal text around plain string inputs", () => {
+    expect(composed([literal("sources/"), input("source"), literal(".json")])).toEqual([]);
+    expect(composed([input("source"), literal("-"), input("target")])).toEqual([]);
+  });
+
+  it("refuse empty parts, no input part, and adjacent literals", () => {
+    expect(composed([])).toContain(
+      "step fetch argument source text parts must be a non-empty array",
+    );
+    expect(composed([literal("sources/alpha.json")])).toContain(
+      "step fetch argument source text needs at least one input part",
+    );
+    expect(composed([literal("sources/"), literal("alpha"), input("source")])).toContain(
+      "step fetch argument source<part 1> follows another literal part",
+    );
+  });
+
+  it("refuse a part reading a list or recorded-default input", () => {
+    expect(
+      composed(
+        [literal("sources/"), input("labels")],
+        [{ name: "labels", type: "array", list: { minItems: 1 } }],
+      ),
+    ).toContain("step fetch argument source<part 1> must read a plain string input, not labels");
+    expect(
+      composed(
+        [literal("sources/"), input("kept")],
+        [{ name: "kept", type: "string", recordedDefault: true }],
+      ),
+    ).toContain("step fetch argument source<part 1> must read a plain string input, not kept");
   });
 });
 

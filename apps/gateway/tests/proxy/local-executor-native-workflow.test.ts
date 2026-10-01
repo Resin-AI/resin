@@ -388,6 +388,73 @@ describe("recorded workflows of ordinary calls", () => {
     );
   });
 
+  it("describes a composed harness argument as its literals around `{input}`", async () => {
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    const installed = await installPlan(
+      {
+        id: "tool_write_composed",
+        name: "wf_write_composed",
+        version: "1.0.0",
+        description: "write a composed path",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+          additionalProperties: false,
+        },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: {},
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_write_composed",
+        inputs: [{ name: "text", type: "string" }],
+        steps: [
+          {
+            id: "step0",
+            callId: "call_w",
+            callable: { runtime: RESIN_HARNESS_TOOL_RUNTIME, name: "write" },
+            arguments: [
+              {
+                name: "path",
+                source: {
+                  kind: "template",
+                  template: {
+                    type: "text",
+                    parts: [
+                      { type: "literal", value: "sources/" },
+                      { type: "input", name: "text" },
+                      { type: "literal", value: ".json" },
+                    ],
+                  },
+                },
+              },
+            ],
+            dependsOn: [],
+            failurePolicy: { onError: "abort", policy: "default" },
+            observed: { outcome: "succeeded" },
+          },
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: new InMemoryPrivateValueStore(),
+    });
+    expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
+      "Recorded on this machine:\nStep 1 calls the harness's write tool with path = sources/{text}.json",
+    );
+  });
+
   it("describes a parameterized recorded program with each parameter's recorded value", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const program = "python3 solve.py --month 2025-01 'EU zone'";
