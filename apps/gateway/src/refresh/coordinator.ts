@@ -180,7 +180,11 @@ export class CatalogRefreshCoordinator {
   async syncConnectionInstructions(conn: McpConnection): Promise<void> {
     const adapter = this.adapters.get(conn.harnessId);
     if (!adapter?.syncCatalogInstructions || !this.gateway?.listLearnedTools) return;
-    const learned = await this.gateway.listLearnedTools(conn.workspaceContext);
+    // A search-listing client finds learned tools with search_tools: its harness gets no per-tool
+    // catalog, and an empty one removes a block an earlier full listing wrote.
+    const learned = conn.searchListing
+      ? []
+      : await this.gateway.listLearnedTools(conn.workspaceContext);
     await adapter.syncCatalogInstructions(harnessWorkspace(conn, conn.harnessId), {
       markdown: renderCatalogInstructions(learned),
       toolNames: learned.map((tool) => tool.name),
@@ -454,9 +458,9 @@ export class CatalogRefreshCoordinator {
             catalogVersion: "1.0.0",
             timestamp,
           };
-          const learned = await this.gateway
-            ?.listLearnedTools?.(conn.workspaceContext)
-            .catch(() => undefined);
+          const learned = conn.searchListing
+            ? []
+            : await this.gateway?.listLearnedTools?.(conn.workspaceContext).catch(() => undefined);
           if (learned !== undefined) {
             changeSummary.instructionsMarkdown = renderCatalogInstructions(learned);
             changeSummary.evolvedToolNames = learned.map((tool) => tool.name);

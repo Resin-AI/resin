@@ -196,6 +196,19 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: sear
 export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>); get_tool_schema(name): steps; invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /**
+ * Initialization instructions for a connection that lists only the meta tools
+ * (`resin mcp --search-listing`): learned tools are found with search_tools, not read from a list.
+ * `learnedToolCount` is omitted until the connection has seen the catalog.
+ */
+export function searchListingGatewayInstructions(learnedToolCount?: number): string {
+  const available =
+    learnedToolCount === undefined
+      ? "Resin has learned tools for this workspace"
+      : `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
+  return `${available}, not listed: before running a multi-step job by hand, call search_tools(query=<the job in a few words, e.g. the commands or scripts you are about to run>). Then get_tool_schema(name) and invoke_tool(name, parameters); learned tools rerun recorded work and omitted inputs reuse recorded values.\n${GATEWAY_USE_RULES}`;
+}
+
+/**
  * Local MCP Gateway Server implementing JSON-RPC 2.0 lifecycle and routing.
  */
 export class LocalMcpGateway {

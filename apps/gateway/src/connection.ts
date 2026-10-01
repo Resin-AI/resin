@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
-import type {
-  InitializeParams,
-  JsonRpcId,
-  McpClientCapabilities,
-  McpImplementationInfo,
-  McpServerCapabilities,
+import {
+  type InitializeParams,
+  type JsonRpcId,
+  type McpClientCapabilities,
+  type McpImplementationInfo,
+  type McpServerCapabilities,
+  RESIN_SEARCH_LISTING_META,
 } from "./protocol/types.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
 
@@ -84,6 +85,8 @@ export class McpConnection {
   isInitialized = false;
   hasReceivedInitializedNotification = false;
   isClosed = false;
+  /** The client lists only the meta tools and finds learned tools with search_tools. */
+  searchListing = false;
 
   private readonly rateLimiter: TokenBucketRateLimiter;
   private readonly inFlightRequests = new Map<string | number, InFlightRequest>();
@@ -115,6 +118,7 @@ export class McpConnection {
     this.clientInfo = params.clientInfo;
     this.clientCapabilities = params.capabilities;
     this.protocolVersion = params.protocolVersion;
+    this.searchListing = params._meta?.[RESIN_SEARCH_LISTING_META] === true;
     if (detectedHarnessId) {
       this.harnessId = detectedHarnessId;
     }

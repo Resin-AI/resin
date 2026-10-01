@@ -1,5 +1,9 @@
 import { Transform } from "node:stream";
-import { DEFAULT_GATEWAY_INSTRUCTIONS, DISABLED_SEARCH_GATEWAY_INSTRUCTIONS } from "../gateway.js";
+import {
+  DEFAULT_GATEWAY_INSTRUCTIONS,
+  DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+  searchListingGatewayInstructions,
+} from "../gateway.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../protocol/framing.js";
 import {
@@ -7,6 +11,7 @@ import {
   type JsonRpcId,
   type JsonRpcMessage,
   RESIN_LEARNED_TOOL_META,
+  RESIN_SEARCH_LISTING_META,
 } from "../protocol/types.js";
 
 export { DISABLED_SEARCH_GATEWAY_INSTRUCTIONS };
@@ -217,7 +222,19 @@ export interface ToolSearchSurface {
 export interface ToolSearchSurfaceOptions {
   enableSearch?: boolean;
   fullCatalog?: boolean;
+  /**
+   * List only the meta tools; learned tools stay callable by name and are found with search_tools.
+   * `fullCatalog` wins when both are set.
+   */
+  searchOnlyListing?: boolean;
 }
+
+const META_TOOL_NAMES: Record<string, true> = {
+  search_tools: true,
+  get_tool_schema: true,
+  invoke_tool: true,
+  manage_tools: true,
+};
 
 /** A per-stdio-client view. Never mutates the daemon's shared catalog. */
 export function createToolSearchSurface(
@@ -233,12 +250,18 @@ export function createToolSearchSurface(
     typeof optionsOrEnableSearch === "boolean"
       ? fullCatalogLegacy
       : (optionsOrEnableSearch?.fullCatalog ?? fullCatalogLegacy);
+  const searchOnlyListing =
+    typeof optionsOrEnableSearch !== "boolean" &&
+    optionsOrEnableSearch?.searchOnlyListing === true &&
+    !fullCatalog;
   const lists = new Set<JsonRpcId>();
   const initializeIds = new Set<JsonRpcId>();
   const pendingMetadataCalls = new Map<JsonRpcId, PendingMetadataCall>();
   let clientIdentified = false;
   let codexClient = false;
-  let searchEnabled = enableSearch;
+  let searchEnabled = enableSearch || searchOnlyListing;
+  // Learned tools in the daemon's last unfiltered tools/list; unknown until one is seen.
+  let learnedToolCount: number | undefined;
   const send = (message: JsonRpcMessage) => output.write(encodeMcpMessage(message));
   const transform = (filter: (message: JsonRpcMessage) => JsonRpcMessage | undefined) => {
     const decoder = new McpFrameDecoder();
@@ -278,9 +301,21 @@ export function createToolSearchSurface(
           // This is a connection-local discovery surface, never an authorization decision.
           const name = parsed.data.clientInfo.name;
           codexClient = name === "codex-mcp-client" || name === "openai-codex-cli";
-          searchEnabled = enableSearch || codexClient;
+          searchEnabled = enableSearch || searchOnlyListing || codexClient;
         }
         initializeIds.add(message.id);
+        if (searchOnlyListing) {
+          // Tells the gateway to keep the per-tool catalog out of the harness's own prompt files.
+          // Initialize params never reach the model.
+          const params = record(message.params) ?? {};
+          return {
+            ...message,
+            params: {
+              ...params,
+              _meta: { ...record(params._meta), [RESIN_SEARCH_LISTING_META]: true },
+            },
+          };
+        }
       }
       if (
         !searchEnabled &&
@@ -334,7 +369,12 @@ export function createToolSearchSurface(
     output: transform((message) => {
       if (!("method" in message) && "id" in message && message.id !== null) {
         if (initializeIds.delete(message.id)) {
-          if (!searchEnabled && "result" in message && message.error === undefined) {
+          const replacement = searchOnlyListing
+            ? searchListingGatewayInstructions(learnedToolCount)
+            : searchEnabled
+              ? undefined
+              : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS;
+          if (replacement !== undefined && "result" in message && message.error === undefined) {
             const result = record(message.result);
             if (result && typeof result.instructions === "string") {
               return {
@@ -342,11 +382,8 @@ export function createToolSearchSurface(
                 result: {
                   ...result,
                   instructions: result.instructions.includes(DEFAULT_GATEWAY_INSTRUCTIONS)
-                    ? result.instructions.replace(
-                        DEFAULT_GATEWAY_INSTRUCTIONS,
-                        DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
-                      )
-                    : `${DISABLED_SEARCH_GATEWAY_INSTRUCTIONS}\n${result.instructions}`,
+                    ? result.instructions.replace(DEFAULT_GATEWAY_INSTRUCTIONS, replacement)
+                    : `${replacement}\n${result.instructions}`,
                 },
               };
             }
@@ -359,7 +396,10 @@ export function createToolSearchSurface(
         }
         if (lists.delete(message.id) && "result" in message) {
           const result = record(message.result);
-          if (result && Array.isArray(result.tools))
+          if (result && Array.isArray(result.tools)) {
+            learnedToolCount = result.tools.filter(
+              (tool) => record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true,
+            ).length;
             return {
               jsonrpc: "2.0",
               id: message.id,
@@ -371,6 +411,9 @@ export function createToolSearchSurface(
                   if (fullCatalog) {
                     return searchEnabled ? true : !isSearch(name);
                   }
+                  // Search-only listing: the meta tools alone; learned tools are found by search
+                  // and still answer tools/call by name.
+                  if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
                   // The stable facade exposes the system meta tools and the tools Resin learned
                   // for this workspace, which an agent can call by name without searching.
                   if (
@@ -385,6 +428,7 @@ export function createToolSearchSurface(
                 }),
               },
             };
+          }
         }
       }
       return message;

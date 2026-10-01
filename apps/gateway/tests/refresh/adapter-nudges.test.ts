@@ -224,12 +224,14 @@ describe("OMP learned-tool guidance", () => {
     ompHome: string,
     learned: Array<{ name: string; description?: string }>,
     revision: number,
+    searchListing = false,
   ) {
     const conn = createMockConnection({
       connectionId: "conn-omp-guidance",
       harnessId: "omp",
       workspaceId: "ws-omp-guidance",
       supportsListChanged: true,
+      searchListing,
     });
     const coordinator = new CatalogRefreshCoordinator({
       debounceMs: 0,
@@ -278,6 +280,23 @@ describe("OMP learned-tool guidance", () => {
 
       const cleared = await refreshWith(ompHome, [], 3);
       expect(cleared).toBe("User notes\n");
+    } finally {
+      await fs.rm(ompHome, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the per-tool block for a search-listing connection and restores it for a listing one", async () => {
+    const ompHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-guidance-"));
+    try {
+      await fs.mkdir(path.join(ompHome, "agent"), { recursive: true });
+      await fs.writeFile(path.join(ompHome, "agent", "APPEND_SYSTEM.md"), "User notes\n");
+      const tools = [{ name: "release_notes", description: "Drafts release notes." }];
+      expect(await refreshWith(ompHome, tools, 1)).toContain("### `release_notes`");
+
+      // The learned tools still exist; a search-listing client finds them with search_tools.
+      expect(await refreshWith(ompHome, tools, 2, true)).toBe("User notes\n");
+
+      expect(await refreshWith(ompHome, tools, 3)).toContain("### `release_notes`");
     } finally {
       await fs.rm(ompHome, { recursive: true, force: true });
     }

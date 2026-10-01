@@ -537,7 +537,10 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({ command: resinCommand, args: ["mcp"] });
+    expect(ompJson.mcpServers.resin).toEqual({
+      command: resinCommand,
+      args: ["mcp", "--search-listing"],
+    });
     expect(ompContent).not.toContain(customGateway);
   });
 
@@ -597,7 +600,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(
       JSON.parse((await bridge.readFile(path.join(home, ".omp", "agent", "mcp.json"))) ?? "{}")
         .mcpServers.resin,
-    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"] });
+    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp", "--search-listing"] });
     expect(sourcePaths).toEqual({
       daemonPath: "/work/resin/apps/gateway/dist/bin/daemon.js",
       mcpShimPath: "/work/resin/apps/gateway/dist/bin/mcp-shim.js",

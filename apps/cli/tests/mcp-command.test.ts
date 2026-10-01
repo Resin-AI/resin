@@ -41,6 +41,7 @@ describe("resin mcp command", () => {
     expect(help).toContain("--enable-tool-search");
     expect(help).toContain("disabled by default");
     expect(help).toContain("--full-catalog");
+    expect(help).toContain("--search-listing");
     expect(help).toContain("--cwd");
   });
 
@@ -77,6 +78,19 @@ describe("resin mcp command", () => {
       mcpCommand(enabled ? ["--enable-tool-search"] : [], {
         shimFactory: (options) => {
           expect(options.enableToolSearch).toBe(enabled);
+          return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
+        },
+      }),
+    ).resolves.toBe(0);
+  });
+  it.each([false, true])("propagates searchListing=%s to the shim", async (searchListing) => {
+    expect(parseMcpArgs(searchListing ? ["--search-listing"] : []).searchListing).toBe(
+      searchListing,
+    );
+    await expect(
+      mcpCommand(searchListing ? ["--search-listing"] : [], {
+        shimFactory: (options) => {
+          expect(options.searchListing).toBe(searchListing);
           return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
         },
       }),

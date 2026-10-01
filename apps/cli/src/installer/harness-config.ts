@@ -125,14 +125,26 @@ export function resolveInstalledResinMcpCommand(
   return path.posix.join(path.posix.resolve(customHome), ".resin", "bin", "resin");
 }
 
-/** The `{ command, args }` a harness is registered with for Resin's CLI entry `command`. */
+/**
+ * The `{ command, args }` a harness is registered with for Resin's CLI entry `command`, with the
+ * harness's own `launchFlags` after `mcp` when `harnessId` is given.
+ */
 export function resolveHarnessMcpLaunch(
-  options: Pick<HarnessAdapterOperationOptions, "command" | "platform" | "nodePath">,
+  options: Pick<HarnessAdapterOperationOptions, "command" | "platform" | "nodePath"> & {
+    harnessId?: HarnessId;
+  },
 ): ResinMcpLaunch {
-  return resolveResinMcpLaunch(options.command ?? CANONICAL_RESIN_MCP_COMMAND, {
+  const launch = resolveResinMcpLaunch(options.command ?? CANONICAL_RESIN_MCP_COMMAND, {
     platform: options.platform,
     nodePath: options.nodePath,
   });
+  const flags =
+    options.harnessId === undefined
+      ? undefined
+      : getHarnessDefinition(options.harnessId).mcpConfig.launchFlags;
+  return flags === undefined || flags.length === 0
+    ? launch
+    : { command: launch.command, args: [...launch.args, ...flags] };
 }
 
 /**
