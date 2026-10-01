@@ -1,8 +1,8 @@
 # Invariant Meta-Tools Specification
 
-The Resin MCP Gateway exposes four invariant, stable **Meta-Tools** for finding, inspecting, running and managing tools. The current workspace's learned tools are also listed directly next to them, under their own names, so an agent can call one without searching first; every other tool stays reachable through the meta-tools instead of taking up prompt context upfront.
+The Resin MCP Gateway exposes four invariant, stable **Meta-Tools** for finding, inspecting, running and managing tools. `resin mcp` lists only these four: the workspace's learned tools are found with `search_tools` and run with `invoke_tool` (or by name), so they take up no prompt context upfront. `resin mcp --full-catalog` lists every tool, learned tools included, next to them; `--search-listing` is accepted for older registrations and changes nothing.
 
-On a fresh install, a connection's first tool list waits up to 5 seconds for the workspace's learned tools to sync if none are listed yet; later lists and already-synced installs never wait.
+On a fresh install, a connection's first tool list waits up to 5 seconds for the workspace's learned tools to sync if none are available yet, so `search_tools` finds them from the start; later lists and already-synced installs never wait.
 
 ---
 

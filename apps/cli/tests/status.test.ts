@@ -256,7 +256,7 @@ function healthyFiles() {
     }),
     [path.join(HOME, ".codex", "config.toml")]: CODEX_RESIN_TOML,
     [path.join(HOME, ".omp", "agent", "mcp.json")]: JSON.stringify({
-      mcpServers: { resin: { ...RESIN_LAUNCH, args: [...RESIN_LAUNCH.args, "--search-listing"] } },
+      mcpServers: { resin: RESIN_LAUNCH },
     }),
     [path.join(WORKSPACE_ROOT, "resin.json")]: JSON.stringify({
       workspaceId: "ws_project_99",
@@ -889,7 +889,7 @@ describe("unified status schema", () => {
     const files = healthyFiles();
     delete files[path.join(HOME, ".omp", "agent", "mcp.json")];
     files[path.join(HOME, ".omp", "config.json")] = JSON.stringify({
-      mcpServers: { resin: { ...RESIN_LAUNCH, args: [...RESIN_LAUNCH.args, "--search-listing"] } },
+      mcpServers: { resin: RESIN_LAUNCH },
     });
 
     const summary = await collectStatus({

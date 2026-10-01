@@ -7,7 +7,7 @@ import { renderPiResinExtension } from "../src/extension.js";
 
 // A stdio MCP server whose catalog changes when `learn` is called, like Resin's gateway after
 // it learns a tool: the new tool is added, `old` is dropped, and list_changed is sent. The
-// gateway's `manage_tools` meta-tool is always listed and must never reach Pi.
+// gateway's `manage_tools` meta-tool is always listed and reaches Pi like any other tool.
 const SERVER = `
 import { createInterface } from "node:readline";
 let tools = [
@@ -104,13 +104,25 @@ describe("Resin Pi bridge extension", () => {
   it("follows list_changed: registers learned tools and deactivates dropped ones", async () => {
     const pi = await loadBridge(SERVER);
     await pi.emit("session_start");
-    expect(pi.active).toEqual(["read", "bash", "mcp__resin__learn", "mcp__resin__old"]);
+    expect(pi.active).toEqual([
+      "read",
+      "bash",
+      "mcp__resin__learn",
+      "mcp__resin__old",
+      "mcp__resin__manage_tools",
+    ]);
 
     const refreshed = pi.nextActiveChange();
     const learned = await pi.tools.get("mcp__resin__learn")!.execute("c1", {});
     expect(learned.content).toEqual([{ type: "text", text: "learned" }]);
     await refreshed;
-    expect(pi.active).toEqual(["read", "bash", "mcp__resin__learn", "mcp__resin__greet_v2"]);
+    expect(pi.active).toEqual([
+      "read",
+      "bash",
+      "mcp__resin__learn",
+      "mcp__resin__manage_tools",
+      "mcp__resin__greet_v2",
+    ]);
     expect(pi.tools.get("mcp__resin__greet_v2")!.parameters).toEqual({
       type: "object",
       properties: { who: { type: "string" } },
@@ -120,6 +132,39 @@ describe("Resin Pi bridge extension", () => {
     await expect(
       pi.tools.get("mcp__resin__greet_v2")!.execute("c2", { who: "bob" }),
     ).rejects.toThrow("no greeting for bob");
+    await pi.emit("session_shutdown");
+    expect(pi.notices).toEqual([]);
+  });
+
+  it("registers the four meta tools `resin mcp` lists, so search_tools reaches learned tools", async () => {
+    // `resin mcp` lists only the meta tools; learned tools are found and run through them.
+    const pi = await loadBridge(`
+import { createInterface } from "node:readline";
+const meta = ["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"];
+const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id === undefined) return;
+  if (msg.method === "initialize") return send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "resin", version: "1" } } });
+  if (msg.method === "tools/list") return send({ jsonrpc: "2.0", id: msg.id, result: { tools: meta.map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} } })) } });
+  if (msg.method === "tools/call") return send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: msg.params.name + ":" + JSON.stringify(msg.params.arguments) }] } });
+});
+`);
+    await pi.emit("session_start");
+    expect(pi.active).toEqual([
+      "read",
+      "bash",
+      "mcp__resin__search_tools",
+      "mcp__resin__get_tool_schema",
+      "mcp__resin__invoke_tool",
+      "mcp__resin__manage_tools",
+    ]);
+    const found = await pi.tools
+      .get("mcp__resin__search_tools")!
+      .execute("c1", { query: "release notes" });
+    expect(found.content).toEqual([
+      { type: "text", text: 'search_tools:{"query":"release notes"}' },
+    ]);
     await pi.emit("session_shutdown");
     expect(pi.notices).toEqual([]);
   });

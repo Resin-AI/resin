@@ -32,10 +32,9 @@ Option 1. `resin init` writes `<agent-dir>/extensions/resin.ts` (first line
 format. The extension:
 
 - starts `resin mcp` on `session_start` and closes it on `session_shutdown`;
-- registers every gateway tool as `mcp__resin__<tool>` (non `[A-Za-z0-9_-]` characters become
-  `_`, 64-character limit), passing the tool's input schema through unchanged — except the
-  gateway's discovery meta-tools (`search_tools`, `get_tool_schema`, `invoke_tool`,
-  `manage_tools`), which it never registers;
+- registers every tool the gateway lists as `mcp__resin__<tool>` (non `[A-Za-z0-9_-]` characters
+  become `_`, 64-character limit), passing the tool's input schema through unchanged (see the
+  amendment below: `resin mcp` now lists only the four meta-tools);
 - follows `notifications/tools/list_changed`: new tools are registered and activated, dropped
   tools are deactivated, all without restarting Pi;
 - maps MCP `isError` results to thrown errors so Pi records `isError: true` tool results;
@@ -64,3 +63,12 @@ guidance is correspondingly short and no longer names the meta-tools.
 - Transcripts show bridged calls as ordinary Pi tool calls named `mcp__<server>__<tool>`; the Pi
   decoder reports `<server>` as the call's connection.
 - Pi runs started with `--no-extensions` / `-ne` do not load the bridge and see no Resin tools.
+
+## Amendment: search-only listing (2026-10-01)
+
+`resin mcp` now lists only the gateway's meta-tools (`search_tools`, `get_tool_schema`,
+`invoke_tool`, `manage_tools`) for every harness; learned tools are found with `search_tools` and
+run with `invoke_tool` (`--full-catalog` restores the whole listing). Hiding the meta-tools would
+leave Pi with no Resin tools at all, so the bridge registers whatever the gateway lists, and the
+per-request cost is the four meta-tool definitions instead of one definition per learned tool.
+The guidance tells the model to search before running a multi-step job by hand.

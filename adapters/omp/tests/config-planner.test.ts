@@ -68,7 +68,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     };
     expect(plannedParsed.mcpServers.resin).toEqual({
       command: "resin",
-      args: ["mcp", "--search-listing"],
+      args: ["mcp"],
     });
     expect(plannedParsed.mcpServers.resin.url).toBeUndefined();
     expect(plannedParsed.mcpServers.resin.type).toBeUndefined();
@@ -186,7 +186,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
-      args: ["mcp", "--search-listing"],
+      args: ["mcp"],
     });
     expect(plannedParsed.mcpServers?.["existing-db-server"]).toEqual({
       command: "node",
@@ -217,7 +217,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
-      args: ["mcp", "--search-listing"],
+      args: ["mcp"],
     });
     expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
     expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
@@ -245,7 +245,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     const plannedParsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
-      args: ["mcp", "--search-listing"],
+      args: ["mcp"],
     });
     expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
     expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
@@ -315,7 +315,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     const parsedDoc = JSON.parse(newContent!) as OmpConfigDoc;
     expect(parsedDoc.mcpServers?.resin).toEqual({
       command: "resin",
-      args: ["mcp", "--search-listing"],
+      args: ["mcp"],
     });
   });
 
@@ -367,7 +367,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
       expect(parsed.mcpServers?.resin_gateway).toBeUndefined();
@@ -400,7 +400,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
     });
@@ -427,7 +427,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toEqual({
         type: "sse",

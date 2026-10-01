@@ -88,93 +88,97 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     }
   });
 
-  it.each([false, true])("standalone catalog respects enableToolSearch=%s", async (enabled) => {
-    const nonExistentSocket = path.join(
-      os.tmpdir(),
-      `test-absent-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
-    );
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-home-"));
-    const stdin = new stream.PassThrough();
-    const stdout = new stream.PassThrough();
-    const stderr = new stream.PassThrough();
+  it.each([false, true])(
+    "standalone catalog lists only the meta tools (enableToolSearch=%s)",
+    async (enabled) => {
+      const nonExistentSocket = path.join(
+        os.tmpdir(),
+        `test-absent-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
+      );
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-shim-home-"));
+      const stdin = new stream.PassThrough();
+      const stdout = new stream.PassThrough();
+      const stderr = new stream.PassThrough();
 
-    const shim = new McpStdioShim({
-      enableToolSearch: enabled,
-      socketPath: nonExistentSocket,
-      standaloneFallback: true,
-      maxStartupAttempts: 0,
-      home,
-      resinHome: path.join(home, ".resin"),
-      stdin,
-      stdout,
-      stderr,
-      cwd: os.tmpdir(),
-    });
+      const shim = new McpStdioShim({
+        enableToolSearch: enabled,
+        socketPath: nonExistentSocket,
+        standaloneFallback: true,
+        maxStartupAttempts: 0,
+        home,
+        resinHome: path.join(home, ".resin"),
+        stdin,
+        stdout,
+        stderr,
+        cwd: os.tmpdir(),
+      });
 
-    const { promise: listResultPromise, resolve: resolveListResult } =
-      Promise.withResolvers<Array<{ name: string }>>();
-    let accumulated = "";
+      const { promise: listResultPromise, resolve: resolveListResult } =
+        Promise.withResolvers<Array<{ name: string }>>();
+      let accumulated = "";
 
-    stdout.on("data", (chunk: Buffer) => {
-      accumulated += chunk.toString("utf-8");
-      const lines = accumulated.split("\n");
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.id === 2 && parsed.result?.tools) {
-            resolveListResult(parsed.result.tools);
+      stdout.on("data", (chunk: Buffer) => {
+        accumulated += chunk.toString("utf-8");
+        const lines = accumulated.split("\n");
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.id === 2 && parsed.result?.tools) {
+              resolveListResult(parsed.result.tools);
+            }
+          } catch {
+            // Incomplete JSON line yet
           }
-        } catch {
-          // Incomplete JSON line yet
         }
+      });
+
+      try {
+        const status = await shim.start();
+        expect(status.mode).toBe("standalone_inprocess");
+
+        // 1. Send MCP initialize
+        stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2024-11-05",
+              clientInfo: { name: "test-client", version: "1.0.0" },
+              capabilities: {},
+            },
+          })}\n`,
+        );
+
+        // 2. Send MCP tools/list
+        stdin.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/list",
+            params: {},
+          })}\n`,
+        );
+
+        const tools = await listResultPromise;
+        const toolNames = tools.map((t) => t.name).sort();
+        expect(toolNames).toEqual([
+          "get_tool_schema",
+          "invoke_tool",
+          "manage_tools",
+          "search_tools",
+        ]);
+        expect(toolNames).not.toContain("echo");
+        expect(toolNames).not.toContain("workspace_info");
+        expect(toolNames).not.toContain("fail_tool");
+        expect(toolNames).not.toContain("slow_tool");
+      } finally {
+        await shim.stop();
+        fs.rmSync(home, { recursive: true, force: true });
       }
-    });
-
-    try {
-      const status = await shim.start();
-      expect(status.mode).toBe("standalone_inprocess");
-
-      // 1. Send MCP initialize
-      stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            clientInfo: { name: "test-client", version: "1.0.0" },
-            capabilities: {},
-          },
-        })}\n`,
-      );
-
-      // 2. Send MCP tools/list
-      stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/list",
-          params: {},
-        })}\n`,
-      );
-
-      const tools = await listResultPromise;
-      const toolNames = tools.map((t) => t.name).sort();
-      expect(toolNames).toEqual(
-        enabled
-          ? ["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]
-          : ["get_tool_schema", "invoke_tool", "manage_tools"],
-      );
-      expect(toolNames).not.toContain("echo");
-      expect(toolNames).not.toContain("workspace_info");
-      expect(toolNames).not.toContain("fail_tool");
-      expect(toolNames).not.toContain("slow_tool");
-    } finally {
-      await shim.stop();
-      fs.rmSync(home, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   // `resin init` registers OMP as plain `resin mcp`; the harness is known only from the client name.
   async function withOmpHome(
@@ -195,9 +199,14 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
   }
 
   /** Connects an OMP client to a standalone shim and returns once the connection is initialized. */
-  async function connectOmp(root: string, router?: GatewayRouter): Promise<McpStdioShim> {
+  async function connectOmp(
+    root: string,
+    router?: GatewayRouter,
+    fullCatalog = false,
+  ): Promise<McpStdioShim> {
     const stdin = new stream.PassThrough();
     const shim = new McpStdioShim({
+      fullCatalog,
       socketPath: path.join(os.tmpdir(), `test-absent-omp-${Date.now()}-${Math.random()}.sock`),
       standaloneFallback: true,
       maxStartupAttempts: 0,
@@ -242,23 +251,36 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
     };
   }
 
-  it("drops a stale OMP learned-tool block when OMP connects to an empty catalog", async () => {
-    // The tool was retired while OMP was not running, so no catalog change event will arrive.
-    await withOmpHome(async ({ root, appendSystem }) => {
-      fs.writeFileSync(
-        appendSystem,
-        "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
-      );
-      const shim = await connectOmp(root);
-      try {
-        await expect.poll(() => fs.readFileSync(appendSystem, "utf8")).toBe("User notes\n");
-      } finally {
-        await shim.stop();
-      }
-    });
-  }, 30_000);
+  it.each([
+    { catalog: "an empty catalog", tools: [] },
+    {
+      catalog: "learned tools",
+      tools: [{ name: "fast_lint", description: "Lints the workspace." }],
+    },
+  ])(
+    "drops a stale OMP learned-tool block when OMP connects by default to $catalog",
+    async ({ tools }) => {
+      // The default listing is search-only, so OMP's prompt carries no per-tool block.
+      await withOmpHome(async ({ root, appendSystem }) => {
+        fs.writeFileSync(
+          appendSystem,
+          "User notes\n<!-- resin:catalog:start -->\n### `retired_tool`\n<!-- resin:catalog:end -->\n",
+        );
+        const shim = await connectOmp(
+          root,
+          tools.length === 0 ? undefined : learnedToolsRouter(tools),
+        );
+        try {
+          await expect.poll(() => fs.readFileSync(appendSystem, "utf8")).toBe("User notes\n");
+        } finally {
+          await shim.stop();
+        }
+      });
+    },
+    30_000,
+  );
 
-  it("lists exactly the current learned tools when OMP connects, and leaves an identical block alone", async () => {
+  it("lists exactly the current learned tools when OMP connects with --full-catalog, and leaves an identical block alone", async () => {
     await withOmpHome(async ({ root, appendSystem }) => {
       fs.writeFileSync(
         appendSystem,
@@ -271,7 +293,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       const headings = () =>
         [...fs.readFileSync(appendSystem, "utf8").matchAll(/^### `([^`]+)`$/gm)].map((m) => m[1]);
 
-      const first = await connectOmp(root, router);
+      const first = await connectOmp(root, router, true);
       try {
         await expect.poll(headings).toEqual(["fast_lint", "fast_build"]);
         expect(fs.readFileSync(appendSystem, "utf8").startsWith("User notes\n")).toBe(true);
@@ -285,7 +307,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
       const before = fs.statSync(appendSystem).mtimeMs;
       const contentBefore = fs.readFileSync(appendSystem, "utf8");
 
-      const second = await connectOmp(root, router);
+      const second = await connectOmp(root, router, true);
       try {
         // An unchanged block leaves no observable signal to await, so give the connect-time sync a
         // real moment to finish before checking it wrote nothing.

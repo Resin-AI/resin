@@ -48,7 +48,6 @@ export interface McpCommandFlags {
   standaloneFallback: boolean;
   enableToolSearch: boolean;
   fullCatalog: boolean;
-  searchListing: boolean;
   socketPath?: string;
   cwd?: string;
   harnessId?: string;
@@ -66,7 +65,6 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
   let showHelp = false;
   let enableToolSearch = false;
   let fullCatalog = false;
-  let searchListing = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -77,7 +75,7 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
     } else if (arg === "--full-catalog") {
       fullCatalog = true;
     } else if (arg === "--search-listing") {
-      searchListing = true;
+      // The default since search-only listing became standard; accepted for older registrations.
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -127,7 +125,6 @@ export function parseMcpArgs(args: string[]): McpCommandFlags {
     standaloneFallback,
     enableToolSearch,
     fullCatalog,
-    searchListing,
     socketPath,
     cwd,
     harnessId,
@@ -148,10 +145,10 @@ Usage:
 Options:
   -s, --standalone       Run the in-process MCP gateway (default)
   --no-standalone        Require a daemon socket connection
-  --enable-tool-search  Expose search_tools (disabled by default)
-  --full-catalog        Expose full native tool catalog instead of stable facade
-  --search-listing      List only the meta tools; find learned tools with search_tools
-                        (--full-catalog wins when both are given)
+  --full-catalog        List every tool (learned tools included) instead of only the meta
+                        tools search_tools, get_tool_schema, invoke_tool and manage_tools
+  --enable-tool-search  With --full-catalog, also expose search_tools (disabled by default)
+  --search-listing      No-op: listing only the meta tools is the default
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -219,7 +216,6 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     standaloneFallback: parsedArgs.standaloneFallback,
     enableToolSearch: parsedArgs.enableToolSearch,
     fullCatalog: parsedArgs.fullCatalog,
-    searchListing: parsedArgs.searchListing,
     db: parsedArgs.dbPath ? new LocalDatabaseConnection({ path: parsedArgs.dbPath }) : undefined,
     socketPath: parsedArgs.standaloneMode && !parsedArgs.socketPath ? "" : parsedArgs.socketPath,
     cwd: parsedArgs.cwd,

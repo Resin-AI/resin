@@ -29,16 +29,16 @@ export const CLAUDE_GUIDANCE_MARKERS = {
 
 /**
  * Claude Code defers MCP tools behind its tool search on first-party models: the model sees only
- * their names until it loads them. The block says where Resin's learned tools are and how to use
- * them; catalog changes themselves arrive through MCP `tools/list_changed`, which Claude handles.
+ * their names until it loads them. `resin mcp` lists only Resin's meta tools, so the block says
+ * how to find learned tools with search_tools and run them with invoke_tool.
  */
 export const CLAUDE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in your projects. They are MCP tools named \`mcp__resin__<name>\` (besides Resin's own \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`), each listed with its purpose and inputs; \`get_tool_schema\` with its name shows the commands it runs and each input's recorded value.
+Resin learned tools from earlier work in your projects. They are not listed: Resin lists only \`mcp__resin__search_tools\`, \`mcp__resin__get_tool_schema\`, \`mcp__resin__invoke_tool\` and \`mcp__resin__manage_tools\` (if they are deferred, load them with tool search, query \`resin\`).
 
-- In your first step, next to your own first look at the task, list the \`mcp__resin__\` tools and their descriptions; if they are deferred, load them with tool search (query \`resin\`).
-- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.`;
+- Before running a multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- A tool that does your task is the procedure an earlier run already worked out: call \`mcp__resin__get_tool_schema\` with \`{"name": "<name>"}\` to see its commands and inputs, then run it with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Its output is the commands' current output: use it instead of running those commands yourself.`;
 
 export const claudeCodeInstallHarness: HarnessInstallDefinition = {
   id: "claude-code",

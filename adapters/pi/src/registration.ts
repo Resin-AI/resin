@@ -95,16 +95,16 @@ export const PI_GUIDANCE_MARKERS: ManagedBlockMarkers = {
 };
 
 /**
- * Guidance placed in Pi's global context file. The bridge extension already lists each tool
- * in Pi's "Available tools" prompt section; this tells the model when to prefer them.
+ * Guidance placed in Pi's global context file. `resin mcp` lists only Resin's meta tools, so the
+ * bridge extension registers just those; learned tools are found by searching.
  */
 export const PI_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are tools named \`mcp__resin__<name>\` in your tool list, each listed with its purpose and inputs; \`mcp__resin__get_tool_schema\` with its name shows the commands it runs and each input's recorded value.
+Resin learned tools from earlier work in this workspace. They are not in your tool list: find them with \`mcp__resin__search_tools\`.
 
-- In your first step, next to your own first look at the task, go through the \`mcp__resin__\` tools in your tool list and their descriptions. They are already listed there: never run a command to list or announce them, and when there are none, just do the task.
-- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.`;
+- Before running a multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- A tool that does your task is the procedure an earlier run already worked out: call \`mcp__resin__get_tool_schema\` with \`{"name": "<name>"}\` to see its commands and inputs, then run it with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
+- Its output is the commands' current output: use it instead of running those commands yourself.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
 const PI_CONTEXT_FILE_NAMES = [

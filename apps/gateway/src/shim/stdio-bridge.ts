@@ -33,9 +33,8 @@ export interface McpStdioShimOptions {
   socketPath?: string;
   standaloneFallback?: boolean;
   enableToolSearch?: boolean;
+  /** List the whole catalog instead of only the meta tools (the default). */
   fullCatalog?: boolean;
-  /** List only the meta tools; learned tools are found with search_tools. `fullCatalog` wins. */
-  searchListing?: boolean;
   cwd?: string;
   harnessId?: string;
   maxStartupAttempts?: number;
@@ -315,7 +314,6 @@ export class McpStdioShim {
     this.surface = createToolSearchSurface(this.stdout, {
       enableSearch: this.options.enableToolSearch === true,
       fullCatalog: this.options.fullCatalog === true,
-      searchOnlyListing: this.options.searchListing === true,
     });
     // `pipe()` forwards no errors: every stream in the chain needs its own listener, or a write
     // after the harness closed stdout (EPIPE) is an uncaught exception that kills the process.
@@ -512,11 +510,11 @@ export class McpStdioShim {
         name: "resin-mcp-standalone",
         version: "0.1.0",
       },
-      // An OMP connection that lists learned tools reads them only through `xd://` devices its
-      // prompt names, so a catalog change rewrites the managed block in OMP's appended system
-      // prompt; a `--search-listing` connection (how `resin init` registers OMP) gets that block
-      // removed instead. The coordinator dispatches by the harness each connection's MCP client
-      // names itself as, so this is wired whether or not the shim was started with `--harness omp`.
+      // An OMP connection that lists learned tools (`--full-catalog`) reads them only through
+      // `xd://` devices its prompt names, so a catalog change rewrites the managed block in OMP's
+      // appended system prompt; a default search-listing connection gets that block removed
+      // instead. The coordinator dispatches by the harness each connection's MCP client names
+      // itself as, so this is wired whether or not the shim was started with `--harness omp`.
       refreshCoordinatorOptions: {
         adapters: {
           omp: {

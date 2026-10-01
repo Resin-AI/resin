@@ -72,7 +72,7 @@ A captured baseline can request validation, but it cannot prove correctness or e
 
 ## Coding agent compatibility
 
-Codex CLI uses four stable MCP tools: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Newly available tools are reached through these same routes, without restarting the session. Claude Code and Oh My Pi retain their native dynamic tool catalogs.
+Every coding agent sees four stable MCP tools from Resin: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Learned tools are not listed one by one, which keeps each session's prompt small; agents find them with `search_tools`, and newly available tools are reached through these same routes without restarting the session. `resin mcp --full-catalog` lists every tool instead (`--search-listing`, the former opt-in, is accepted and does nothing).
 
 Oh My Pi supports deeply nested workspaces with bounded, deterministic workspace IDs. Existing IDs within the shared 128-character limit remain unchanged; longer paths use a readable prefix and a path-derived hash.
 

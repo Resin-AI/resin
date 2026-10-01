@@ -212,8 +212,8 @@ export const McpToolSchema = z.object({
 export const RESIN_LEARNED_TOOL_META = "resin/learned";
 
 /**
- * Initialize `params._meta` key the stdio shim sets when it lists only the meta tools
- * (`resin mcp --search-listing`): the gateway then writes no per-tool catalog into the harness.
+ * Initialize `params._meta` key the stdio shim sets when it lists only the meta tools (the
+ * default; not with `--full-catalog`): the gateway then writes no per-tool catalog into the harness.
  */
 export const RESIN_SEARCH_LISTING_META = "resin/searchListing";
 export type McpTool = z.infer<typeof McpToolSchema>;

@@ -92,7 +92,7 @@ Resin also adds a section marked by `<!-- resin:codex-guidance:start -->` and `<
 
 ### Stable Tool Gateway
 
-For Codex clients identified as `codex-mcp-client` or `openai-codex-cli`, Resin advertises only four stable MCP tools:
+`resin mcp` advertises only four stable MCP tools to every harness, Codex included:
 
 | Tool | Purpose |
 |------|---------|
@@ -102,6 +102,8 @@ For Codex clients identified as `codex-mcp-client` or `openai-codex-cli`, Resin 
 | `manage_tools` | Manage tools |
 
 Codex can discover and use newly available tools through these routes even when it does not refresh its native MCP tool list. Search and schema lookup are marked read-only; this does not grant permission to execute or manage tools. `invoke_tool` and `manage_tools` remain subject to the host's authorization, including Codex's native permission choices.
+
+Learned tools are not listed individually; the agent finds them with `search_tools` and runs them with `invoke_tool`, or by name. `resin mcp --full-catalog` lists every tool instead; with it, `search_tools` is listed only for Codex clients (`codex-mcp-client`, `openai-codex-cli`) or with `--enable-tool-search`. `--search-listing` is accepted for older registrations and changes nothing.
 
 Reconnect to the updated Resin server once after a software update to obtain this behavior. Subsequent catalog changes do not require a session restart, custom harness, extra daemon, refresh script, or repeated configuration edits.
 
@@ -366,11 +368,11 @@ Copilot writes every session, including ones started before Resin was installed,
 
 ### Native Dynamic Catalogs
 
-Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot CLI keep their native dynamic tool catalogs. The Gateway sends `notifications/tools/list_changed`; the harness invalidates its tool cache and requests the updated catalog with `tools/list`. Newly available tools can also be discovered through `search_tools`, except in Pi: its extension registers learned tools directly and leaves out the four discovery meta-tools, because Pi resends every tool definition on every model request.
+`resin mcp` lists the same four meta-tools to every harness, so a catalog change does not change any harness's tool list: newly available tools are found through `search_tools` and run through `invoke_tool` without native tool-list refresh. Pi's extension registers those four tools like any other MCP tools. Each harness's guidance block tells the model to search before running a multi-step job by hand.
 
-Codex instead uses the stable gateway described above. Its four advertised tools do not change when the underlying catalog changes, so newly available tools do not depend on native tool-list refresh.
+With `resin mcp --full-catalog`, Claude Code, Oh My Pi, Pi (through its Resin extension), Grok Build and Copilot CLI keep their native dynamic tool catalogs: the Gateway sends `notifications/tools/list_changed`, and the harness invalidates its tool cache and requests the updated catalog with `tools/list`. An Oh My Pi connection with `--full-catalog` also gets a managed block listing each learned tool in `APPEND_SYSTEM.md`; a default connection, `resin init` and `resin repair` remove that block.
 
-Cursor CLI, Muse Code and OpenCode pick up catalog changes at the next session start. cursor-agent 2026.09.26 was observed to ignore `list_changed` mid-session; for Muse Code and OpenCode it is unverified.
+With `--full-catalog`, Cursor CLI, Muse Code and OpenCode pick up catalog changes at the next session start. cursor-agent 2026.09.26 was observed to ignore `list_changed` mid-session; for Muse Code and OpenCode it is unverified.
 
 ### Catalog Notices in Tool Responses
 

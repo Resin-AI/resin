@@ -51,10 +51,10 @@ Usage:
 Options:
   -s, --standalone       Enable standalone fallback (default)
   --no-standalone        Disable standalone fallback
-  --enable-tool-search  Expose search_tools (disabled by default)
-  --full-catalog        Expose full native tool catalog instead of stable facade
-  --search-listing      List only the meta tools; find learned tools with search_tools
-                        (--full-catalog wins when both are given)
+  --full-catalog        List every tool (learned tools included) instead of only the meta
+                        tools search_tools, get_tool_schema, invoke_tool and manage_tools
+  --enable-tool-search  With --full-catalog, also expose search_tools (disabled by default)
+  --search-listing      No-op: listing only the meta tools is the default
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -74,7 +74,6 @@ function parseArgs(args: string[]) {
   let showHelp = false;
   let enableToolSearch = false;
   let fullCatalog = false;
-  let searchListing = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -85,7 +84,7 @@ function parseArgs(args: string[]) {
     } else if (arg === "--full-catalog") {
       fullCatalog = true;
     } else if (arg === "--search-listing") {
-      searchListing = true;
+      // The default since search-only listing became standard; accepted for older registrations.
     } else if (arg === "--standalone" || arg === "-s") {
       standaloneMode = true;
       standaloneFallback = true;
@@ -107,7 +106,6 @@ function parseArgs(args: string[]) {
     standaloneFallback,
     enableToolSearch,
     fullCatalog,
-    searchListing,
     socketPath,
     cwd,
     harnessId,
@@ -131,7 +129,6 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<number | un
     standaloneFallback: args.standaloneFallback,
     enableToolSearch: args.enableToolSearch,
     fullCatalog: args.fullCatalog,
-    searchListing: args.searchListing,
     db: args.dbPath ? new LocalDatabaseConnection({ path: args.dbPath }) : undefined,
     socketPath: args.standaloneMode && !args.socketPath ? "" : args.socketPath,
     cwd: args.cwd,

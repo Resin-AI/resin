@@ -67,10 +67,7 @@ describe("HarnessConfigOrchestrator", () => {
     const ompContent = await bridge.readFile(`${home}/.omp/agent/mcp.json`);
     expect(ompContent).not.toBeNull();
     const ompJson = JSON.parse(ompContent ?? "{}");
-    expect(ompJson.mcpServers.resin).toEqual({
-      ...expectedLaunch,
-      args: [...expectedLaunch.args, "--search-listing"],
-    });
+    expect(ompJson.mcpServers.resin).toEqual(expectedLaunch);
 
     // Verify Muse Code settings were written with the schema version muse requires
     const museContent = await bridge.readFile(`${home}/.config/muse/settings.json`);

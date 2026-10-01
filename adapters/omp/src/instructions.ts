@@ -16,8 +16,8 @@ export const OMP_GUIDANCE_MARKERS: ManagedBlockMarkers = {
 };
 
 /**
- * Guidance placed in OMP's user context file. OMP registers Resin with `--search-listing`, so its
- * prompt lists only Resin's meta tools as `xd://` devices; learned tools are found by searching.
+ * Guidance placed in OMP's user context file. `resin mcp` lists only Resin's meta tools, so OMP's
+ * prompt shows just those as `xd://` devices; learned tools are found by searching.
  */
 export const OMP_RESIN_GUIDANCE = `# Resin learned tools
 

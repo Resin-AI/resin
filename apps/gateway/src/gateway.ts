@@ -196,8 +196,8 @@ export const DEFAULT_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: sear
 export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>); get_tool_schema(name): steps; invoke_tool.\n${GATEWAY_USE_RULES}`;
 
 /**
- * Initialization instructions for a connection that lists only the meta tools
- * (`resin mcp --search-listing`): learned tools are found with search_tools, not read from a list.
+ * Initialization instructions for a connection that lists only the meta tools (`resin mcp`
+ * without `--full-catalog`): learned tools are found with search_tools, not read from a list.
  * `learnedToolCount` is omitted until the connection has seen the catalog.
  */
 export function searchListingGatewayInstructions(learnedToolCount?: number): string {

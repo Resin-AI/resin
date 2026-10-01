@@ -22,6 +22,7 @@ import { McpStdioShim } from "../src/shim/stdio-bridge.js";
 import {
   CONNECTION_DISABLED_SEARCH_REASON,
   DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+  type ToolSearchSurfaceOptions,
   createToolSearchSurface,
 } from "../src/shim/tool-search-surface.js";
 import { FakeGatewayRouter } from "./fixtures/fake-router.js";
@@ -29,14 +30,16 @@ import { FakeGatewayRouter } from "./fixtures/fake-router.js";
 // A fresh client view must not alter the backend router or its refreshed catalog.
 describe.each(["standalone", "fallback", "daemon"] as const)("tool search surface: %s", (mode) => {
   it.each([
-    { enabled: undefined, clientName: "test", searchable: false },
-    { enabled: true, clientName: "test", searchable: true },
-    { enabled: undefined, clientName: "codex-mcp-client", searchable: true },
-    { enabled: true, clientName: "codex-mcp-client", searchable: true },
-    { enabled: undefined, clientName: "openai-codex-cli", searchable: true },
+    { fullCatalog: false, enabled: undefined, clientName: "test", searchable: true },
+    { fullCatalog: false, enabled: undefined, clientName: "codex-mcp-client", searchable: true },
+    { fullCatalog: true, enabled: undefined, clientName: "test", searchable: false },
+    { fullCatalog: true, enabled: true, clientName: "test", searchable: true },
+    { fullCatalog: true, enabled: undefined, clientName: "codex-mcp-client", searchable: true },
+    { fullCatalog: true, enabled: true, clientName: "codex-mcp-client", searchable: true },
+    { fullCatalog: true, enabled: undefined, clientName: "openai-codex-cli", searchable: true },
   ])(
-    "respects enableToolSearch=$enabled for $clientName across calls and refreshes",
-    async ({ enabled, clientName, searchable }) => {
+    "respects fullCatalog=$fullCatalog enableToolSearch=$enabled for $clientName across calls and refreshes",
+    async ({ fullCatalog, enabled, clientName, searchable }) => {
       const codexClient = clientName !== "test";
       const router = new FakeGatewayRouter();
       let searchCalls = 0;
@@ -78,6 +81,7 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
         standaloneFallback: mode !== "daemon",
         maxStartupAttempts: 0,
         enableToolSearch: enabled,
+        fullCatalog,
         router,
         stdin: input,
         stdout: output,
@@ -129,7 +133,11 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
             ? initResult.instructions
             : undefined;
         expect(initInstructions).toBe(
-          searchable ? DEFAULT_GATEWAY_INSTRUCTIONS : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+          !fullCatalog
+            ? searchListingGatewayInstructions()
+            : searchable
+              ? DEFAULT_GATEWAY_INSTRUCTIONS
+              : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
         );
         input.write(encodeMcpMessage({ jsonrpc: "2.0", method: "notifications/initialized" }));
         for (let refresh = 0; refresh < 2; refresh++) {
@@ -143,13 +151,18 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
           expect(tools).toContain("get_tool_schema");
           expect(tools).toContain("invoke_tool");
           expect(tools).toContain("manage_tools");
-          expect(tools.sort()).toEqual(
-            searchable
-              ? ["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]
-              : ["get_tool_schema", "invoke_tool", "manage_tools"],
-          );
-          expect(tools).not.toContain("echo");
-          expect(tools).not.toContain("fresh_generated_tool");
+          if (fullCatalog) {
+            expect(tools).toContain("echo");
+            expect(tools.includes("fresh_generated_tool")).toBe(refresh === 1);
+          } else {
+            // The default lists only the meta tools; everything else is found with search_tools.
+            expect(tools.sort()).toEqual([
+              "get_tool_schema",
+              "invoke_tool",
+              "manage_tools",
+              "search_tools",
+            ]);
+          }
           router.registerTool(
             { name: "fresh_generated_tool", inputSchema: { type: "object" } },
             async () => ({ content: [] }),
@@ -235,14 +248,16 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
   );
 });
 
-function createSurfaceClient(
-  enableSearch:
-    | boolean
-    | { enableSearch?: boolean; fullCatalog?: boolean; searchOnlyListing?: boolean } = false,
-  fullCatalog = false,
-) {
+/** Disabled search only exists with `--full-catalog`, so most suites below opt into it. */
+const FULL_CATALOG: ToolSearchSurfaceOptions = { fullCatalog: true };
+const FULL_CATALOG_WITH_SEARCH: ToolSearchSurfaceOptions = {
+  fullCatalog: true,
+  enableSearch: true,
+};
+
+function createSurfaceClient(options: ToolSearchSurfaceOptions = FULL_CATALOG) {
   const output = new PassThrough();
-  const surface = createToolSearchSurface(output, enableSearch, fullCatalog);
+  const surface = createToolSearchSurface(output, options);
   const forwarded: JsonRpcMessage[] = [];
   const received: JsonRpcMessage[] = [];
   const inputDecoder = new McpFrameDecoder();
@@ -432,7 +447,7 @@ describe("connection-local metadata consistency for disabled search", () => {
 
   it("returns default instructions when search is explicitly enabled or client is Codex", () => {
     const codex = createSurfaceClient();
-    const optIn = createSurfaceClient(true);
+    const optIn = createSurfaceClient(FULL_CATALOG_WITH_SEARCH);
     try {
       codex.send({
         jsonrpc: "2.0",
@@ -1102,9 +1117,9 @@ describe("targeted regression coverage for response identity, aliases, and proto
   });
 
   it("keeps simultaneous disabled, Codex, and opt-in metadata responses isolated", () => {
-    const disabled = createSurfaceClient(false);
-    const codex = createSurfaceClient(false);
-    const optIn = createSurfaceClient(true);
+    const disabled = createSurfaceClient();
+    const codex = createSurfaceClient();
+    const optIn = createSurfaceClient(FULL_CATALOG_WITH_SEARCH);
     try {
       disabled.send({
         jsonrpc: "2.0",
@@ -1291,7 +1306,7 @@ describe("search-only listing", () => {
   };
 
   it("lists only the four meta tools and still forwards learned tool calls by name", () => {
-    const client = createSurfaceClient({ searchOnlyListing: true });
+    const client = createSurfaceClient({});
     try {
       client.send(initialize(1));
       client.respond(initializeResult(1));
@@ -1338,8 +1353,33 @@ describe("search-only listing", () => {
     }
   });
 
+  it.each(["omp-coding-agent", "claude-code", "resin-pi-bridge", "codex-mcp-client", "opencode"])(
+    "is the default for %s: tagged initialize, search-listing instructions, four meta tools",
+    (name) => {
+      const client = createSurfaceClient({});
+      try {
+        const init = initialize(1);
+        if (!("method" in init)) throw new Error("Expected initialize request");
+        client.send({ ...init, params: { ...init.params, clientInfo: { name, version: "1" } } });
+        expect(client.forwarded[0]).toMatchObject({
+          params: { _meta: { [RESIN_SEARCH_LISTING_META]: true } },
+        });
+        client.respond(initializeResult(1));
+        expect(instructionsOf(client.received.at(-1))).toBe(searchListingGatewayInstructions());
+        expect(listWithLearned(client, 2)).toEqual([
+          "search_tools",
+          "get_tool_schema",
+          "invoke_tool",
+          "manage_tools",
+        ]);
+      } finally {
+        client.close();
+      }
+    },
+  );
+
   it("tags initialize for the gateway and swaps in search-listing instructions", () => {
-    const client = createSurfaceClient({ searchOnlyListing: true });
+    const client = createSurfaceClient({});
     try {
       client.send(initialize(1));
       expect(client.forwarded[0]).toMatchObject({
@@ -1360,7 +1400,7 @@ describe("search-only listing", () => {
   });
 
   it("states the learned-tool count from the last unfiltered list it saw", () => {
-    const client = createSurfaceClient({ searchOnlyListing: true });
+    const client = createSurfaceClient({});
     try {
       listWithLearned(client, 1);
       client.send(initialize(2));
@@ -1373,8 +1413,8 @@ describe("search-only listing", () => {
     }
   });
 
-  it("gives --full-catalog precedence over search-only listing", () => {
-    const client = createSurfaceClient({ searchOnlyListing: true, fullCatalog: true });
+  it("lists the whole catalog, untagged and without search, with --full-catalog", () => {
+    const client = createSurfaceClient(FULL_CATALOG);
     try {
       client.send(initialize(1));
       expect(client.forwarded[0]).not.toHaveProperty("params._meta");

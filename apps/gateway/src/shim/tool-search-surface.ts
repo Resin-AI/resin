@@ -220,13 +220,14 @@ export interface ToolSearchSurface {
 }
 
 export interface ToolSearchSurfaceOptions {
+  /** With `fullCatalog`, list and allow search_tools (Codex clients always get it). */
   enableSearch?: boolean;
-  fullCatalog?: boolean;
   /**
-   * List only the meta tools; learned tools stay callable by name and are found with search_tools.
-   * `fullCatalog` wins when both are set.
+   * List the daemon's whole catalog instead of only the meta tools. Off by default: the client
+   * sees search_tools, get_tool_schema, invoke_tool and manage_tools, finds learned tools with
+   * search_tools, and can still call them by name.
    */
-  searchOnlyListing?: boolean;
+  fullCatalog?: boolean;
 }
 
 const META_TOOL_NAMES: Record<string, true> = {
@@ -239,21 +240,11 @@ const META_TOOL_NAMES: Record<string, true> = {
 /** A per-stdio-client view. Never mutates the daemon's shared catalog. */
 export function createToolSearchSurface(
   output: NodeJS.WritableStream,
-  optionsOrEnableSearch: boolean | ToolSearchSurfaceOptions = false,
-  fullCatalogLegacy = false,
+  options: ToolSearchSurfaceOptions = {},
 ): ToolSearchSurface {
-  const enableSearch =
-    typeof optionsOrEnableSearch === "boolean"
-      ? optionsOrEnableSearch
-      : (optionsOrEnableSearch?.enableSearch ?? false);
-  const fullCatalog =
-    typeof optionsOrEnableSearch === "boolean"
-      ? fullCatalogLegacy
-      : (optionsOrEnableSearch?.fullCatalog ?? fullCatalogLegacy);
-  const searchOnlyListing =
-    typeof optionsOrEnableSearch !== "boolean" &&
-    optionsOrEnableSearch?.searchOnlyListing === true &&
-    !fullCatalog;
+  const enableSearch = options.enableSearch === true;
+  const fullCatalog = options.fullCatalog === true;
+  const searchOnlyListing = !fullCatalog;
   const lists = new Set<JsonRpcId>();
   const initializeIds = new Set<JsonRpcId>();
   const pendingMetadataCalls = new Map<JsonRpcId, PendingMetadataCall>();
@@ -408,23 +399,10 @@ export function createToolSearchSurface(
                 tools: result.tools.filter((tool) => {
                   const name = record(tool)?.name;
                   if (typeof name !== "string") return false;
-                  if (fullCatalog) {
-                    return searchEnabled ? true : !isSearch(name);
-                  }
                   // Search-only listing: the meta tools alone; learned tools are found by search
                   // and still answer tools/call by name.
                   if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
-                  // The stable facade exposes the system meta tools and the tools Resin learned
-                  // for this workspace, which an agent can call by name without searching.
-                  if (
-                    name === "get_tool_schema" ||
-                    name === "invoke_tool" ||
-                    name === "manage_tools" ||
-                    record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true
-                  ) {
-                    return true;
-                  }
-                  return searchEnabled && name === "search_tools";
+                  return searchEnabled || !isSearch(name);
                 }),
               },
             };
