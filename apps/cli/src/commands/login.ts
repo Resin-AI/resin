@@ -211,6 +211,9 @@ function failedDaemonRefresh(
 const EXTERNAL_DAEMON_REFRESH_MESSAGE =
   "Credentials were saved, but daemon service management is external. Restart the foreground daemon through your supervisor, then verify it with `resin status`.";
 
+const REUSED_EXTERNAL_DAEMON_MESSAGE =
+  "Already signed in; the saved credentials are unchanged, so no daemon restart is needed. Check the connection with `resin status`.";
+
 async function refreshDaemonAfterCredentials(options: {
   home: string;
   resinHome: string;
@@ -711,6 +714,8 @@ function writeAuthenticatedHumanOutput(values: {
   deviceId: string;
   userId?: string;
   tokenFilePath?: string;
+  /** Valid saved credentials were reused; nothing was written. */
+  reused?: boolean;
   daemonRefresh: DaemonRefreshResult;
 }): void {
   process.stdout.write("\nAuthenticated successfully.\n");
@@ -722,7 +727,13 @@ function writeAuthenticatedHumanOutput(values: {
   if (values.userId) {
     process.stdout.write(`  User ID:      ${values.userId}\n`);
   }
-  if (values.tokenFilePath) {
+  if (values.reused) {
+    process.stdout.write(
+      values.tokenFilePath
+        ? `Using saved credentials from ${values.tokenFilePath}.\n`
+        : "Using saved credentials from the secure credential store.\n",
+    );
+  } else if (values.tokenFilePath) {
     process.stdout.write(`Credentials saved to ${values.tokenFilePath}.\n`);
   } else {
     process.stdout.write("Credentials saved to the secure credential store.\n");
@@ -827,13 +838,18 @@ export async function loginCommand(
         const workspaceId = claims.workspaceId;
         const deviceId = claims.deviceId;
         const userId = claims.userId ?? claims.subject;
-        const daemonRefresh = await refreshDaemon({
+        const refreshResult = await refreshDaemon({
           cloudUrl,
           accountId,
           workspaceId,
           deviceId,
           userId,
         });
+        // Reuse writes nothing, so an externally supervised daemon already runs these credentials.
+        const daemonRefresh: DaemonRefreshResult =
+          refreshResult.status === "externally_managed"
+            ? { ...refreshResult, message: REUSED_EXTERNAL_DAEMON_MESSAGE }
+            : refreshResult;
 
         if (daemonRefresh.status === "failed") {
           writeAuthenticatedRefreshFailure(Boolean(flags.json), daemonRefresh);
@@ -860,6 +876,7 @@ export async function loginCommand(
             deviceId,
             userId,
             tokenFilePath,
+            reused: true,
             daemonRefresh,
           });
         }
