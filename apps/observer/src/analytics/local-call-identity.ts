@@ -19,6 +19,7 @@ import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
   WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+  WORKFLOW_CALL_RESULT_CONFLICT_SLOT,
   WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
@@ -393,6 +394,21 @@ export function createLocalCallIdentity(options: {
           };
         }
       }
+      // A call that received two different results has no result to compare against.
+      const resultConflicted = PRIVATE_REPRESENTATIONS.some(
+        (representation) =>
+          ownedValue(
+            store,
+            workflowPrivateReference("demonstration", workspaceId, representation, [
+              match.sessionId,
+              callId,
+              WORKFLOW_CALL_RESULT_CONFLICT_SLOT,
+            ]),
+            representation,
+            workspaceId,
+          ) !== undefined,
+      );
+      if (resultConflicted) result = undefined;
       if (result !== undefined) {
         const flags = PRIVATE_REPRESENTATIONS.map((representation) =>
           ownedValue(

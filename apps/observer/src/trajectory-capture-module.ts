@@ -956,6 +956,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
         unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
         observationUpload: this.captureCoordinator.getBatchMetrics(),
+        captureDeadLetters: this.captureDeadLetters(),
       },
       lastCheckTime: Date.now(),
     };
@@ -976,6 +977,20 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
       unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
       observationUpload: this.captureCoordinator.getBatchMetrics(),
+      captureDeadLetters: this.captureDeadLetters(),
+    };
+  }
+
+  /** Delivered batches the capture handler failed: their records were dead-lettered, not captured. */
+  private captureDeadLetters(): { batches: number; records: number } {
+    const diagnostics =
+      "getDiagnostics" in this.observerCoordinator &&
+      this.observerCoordinator.getDiagnostics instanceof Function
+        ? this.observerCoordinator.getDiagnostics()
+        : undefined;
+    return {
+      batches: diagnostics?.deadLetteredBatches ?? 0,
+      records: diagnostics?.deadLetteredRecords ?? 0,
     };
   }
 

@@ -1237,6 +1237,8 @@ export class CodexSessionDecoder {
   private nativeUsageByThread = new Map<string, CodexNativeThreadUsage>();
   private nativeStartedThreads = new Set<string>();
   private seenNativeTerminalTurns = new Set<string>();
+  /** Direct MCP calls whose result one of their two records already gave (`claimDirectMcpResult`). */
+  private readonly directMcpResults = new Map<string, "mcp-end" | "output">();
 
   constructor(options: CodexDecoderOptions = {}) {
     this.sessionId = options.sessionId || generateEventId("sess");
@@ -2144,9 +2146,44 @@ export class CodexSessionDecoder {
       result,
       isError,
       executionDurationMs: durationMs,
-      isShadow: false,
+      isShadow: this.claimDirectMcpResult(callKey, cached, "mcp-end"),
     };
     return [event];
+  }
+
+  /**
+   * Codex 0.135–0.140 records a direct MCP call's result twice under the model's call id: the
+   * `mcp_tool_call_end` event (the server's content and error status) and the model-facing
+   * `function_call_output` (a `Wall time` header and the escaped content, different every time).
+   * The first of the two decoded is the call's result; the other is its shadow. Codex writes the
+   * end first, so the end is the result. True when `record` arrives second and is the shadow.
+   */
+  private claimDirectMcpResult(
+    callKey: string,
+    cached: { callEvent?: NormalizedToolCallEvent } | undefined,
+    record: "mcp-end" | "output",
+  ): boolean {
+    const native = asObject(
+      cached?.callEvent?.metadata?.codexNative as CodexTranscriptValue | undefined,
+    );
+    if (
+      native?.type !== "response_item" ||
+      native.itemType !== "function_call" ||
+      asString(native.namespace)?.startsWith("mcp__") !== true
+    ) {
+      return false;
+    }
+    const first = this.directMcpResults.get(callKey);
+    if (first !== undefined && first !== record) {
+      this.directMcpResults.delete(callKey);
+      return true;
+    }
+    if (first === undefined) {
+      if (this.directMcpResults.size >= 256)
+        this.directMcpResults.delete(this.directMcpResults.keys().next().value!);
+      this.directMcpResults.set(callKey, record);
+    }
+    return false;
   }
 
   /** Codex 0.156+ `compacted` record: the context was replaced by `replacement_history`. */
@@ -3622,7 +3659,10 @@ export class CodexSessionDecoder {
         result: nativeCodeModeOutput?.result ?? terminalOutput?.result ?? rawResult,
         isError,
         executionDurationMs: durationMs,
-        isShadow: false,
+        isShadow:
+          codexNative !== undefined &&
+          rawType === "function_call_output" &&
+          this.claimDirectMcpResult(callKey, exactCached, "output"),
         providerUsage,
       });
       return events;

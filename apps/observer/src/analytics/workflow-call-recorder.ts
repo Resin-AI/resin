@@ -17,6 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { recordedFileUrlPath } from "@resin/adapter-codex";
 import {
   type AgentArgumentOrigin,
@@ -68,6 +69,7 @@ import {
   WORKFLOW_CALL_IDENTITY_SLOT,
   WORKFLOW_CALL_ORDER_SLOT,
   WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+  WORKFLOW_CALL_RESULT_CONFLICT_SLOT,
   WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   workflowCallArgumentSlot,
   workflowPrivateReference,
@@ -529,6 +531,9 @@ export class WorkflowCallRecorder {
      */
     access?: PrivateValueOrigin,
   ): NormalizedSessionEvent {
+    // A shadow result restates a result its call already has (Codex 0.135–0.140 records a direct MCP
+    // call's result twice): it is no observation of its own.
+    if (event.type === "tool_result" && event.isShadow === true) return event;
     this.observeAccess = this.privateValueOwnerWorkspaceId
       ? { workspaceId: this.privateValueOwnerWorkspaceId }
       : access;
@@ -682,17 +687,27 @@ export class WorkflowCallRecorder {
         );
         if (candidates.length > 0) carrier.candidates = candidates;
         const succeeded = raw.exitCode === 0;
-        this.localReference(raw.exitCode, event.sessionId, callId, WORKFLOW_CALL_EXIT_CODE_SLOT);
-        call.result = raw.stdout;
-        call.resultReference = succeeded
-          ? this.localReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
+        this.localResultReference(
+          raw.exitCode,
+          event.sessionId,
+          callId,
+          WORKFLOW_CALL_EXIT_CODE_SLOT,
+        );
+        const reference = succeeded
+          ? this.localResultReference(raw.stdout, event.sessionId, callId, "native-result:v1:exact")
           : undefined;
         this.recordResultRedaction(
           event.sessionId,
           callId,
           event.type === "command_exec" ? event.stdout : undefined,
         );
-        call.resultComparison = undefined;
+        if (this.isResultConflicted(event.sessionId, callId)) {
+          this.revokeResultBaseline(state, call);
+        } else {
+          call.result = raw.stdout;
+          call.resultReference = reference;
+          call.resultComparison = undefined;
+        }
         if (call.resultReference !== undefined && state.executions.length > 0) {
           const execution = state.executions.find((entry) => entry.index === call!.executionIndex);
           if (execution?.accumulatedHeldOut !== undefined) {
@@ -706,7 +721,9 @@ export class WorkflowCallRecorder {
         }
         const demonstration = this.demonstrationCarrier(event.sessionId, callId);
         const result = {
-          ...(succeeded ? { baselineReference: call.resultReference } : {}),
+          ...(succeeded && call.resultReference !== undefined
+            ? { baselineReference: call.resultReference }
+            : {}),
           output: { type: "string" as const, hasContent: raw.stdout.length > 0 },
           ...(demonstration === undefined ? {} : { heldOut: demonstration }),
         };
@@ -722,7 +739,7 @@ export class WorkflowCallRecorder {
       if (association.nativeCommandId !== command.nativeId) return event;
       const reference =
         raw.exitCode === 0
-          ? this.localReference(
+          ? this.localResultReference(
               raw.stdout,
               event.sessionId,
               association.callId,
@@ -1384,7 +1401,7 @@ export class WorkflowCallRecorder {
    * redacted. An output this path has no redacted view of counts as redacted.
    */
   private recordResultRedaction(sessionId: string, callId: string, uploadedOutput: unknown): void {
-    this.localReference(
+    this.localResultReference(
       uploadedOutput === undefined ||
         containsRedactionPlaceholder(
           typeof uploadedOutput === "string" ? uploadedOutput : JSON.stringify(uploadedOutput),
@@ -1410,6 +1427,64 @@ export class WorkflowCallRecorder {
     );
     this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
     return reference;
+  }
+
+  /**
+   * Stores one value of a call's result (the result itself, whether its upload was redacted, its
+   * exit status) and returns its reference. Private references are immutable: a value for a slot
+   * that already holds a different one, from a second, different result for the same call, is never
+   * written and never replaces the first. It marks the call's result conflicted instead, as the
+   * dialect conflict slot does for a program, and capture carries on. Once the result is
+   * conflicted nothing more is stored for it and undefined is returned.
+   */
+  private localResultReference(
+    value: WorkflowJsonValue,
+    sessionId: string,
+    callId: string,
+    slot: string,
+  ): string | undefined {
+    if (this.isResultConflicted(sessionId, callId)) return undefined;
+    const reference = this.demonstrationReference(sessionId, callId, slot);
+    const stored = this.privateValues.get(reference);
+    if (
+      stored !== undefined &&
+      !isDeepStrictEqual(stored, JSON.parse(JSON.stringify(value)) as unknown)
+    ) {
+      this.localReference(true, sessionId, callId, WORKFLOW_CALL_RESULT_CONFLICT_SLOT);
+      return undefined;
+    }
+    this.privateValues.set(reference, value, this.observeAccess, this.privateRepresentation);
+    return reference;
+  }
+
+  /** Whether a call received two different results (see `localResultReference`). */
+  private isResultConflicted(sessionId: string, callId: string): boolean {
+    return (
+      this.privateValues.get(
+        this.demonstrationReference(sessionId, callId, WORKFLOW_CALL_RESULT_CONFLICT_SLOT),
+      ) !== undefined
+    );
+  }
+
+  /** A conflicted result is no baseline: the call's demonstration no longer observes it. */
+  private revokeResultBaseline(state: SessionDerivationState, call: LocalCall): void {
+    call.resultReference = undefined;
+    call.resultComparison = undefined;
+    const execution = state.executions.find((entry) => entry.index === call.executionIndex);
+    if (execution?.accumulatedHeldOut !== undefined) {
+      execution.accumulatedHeldOut.observed = execution.accumulatedHeldOut.observed.filter(
+        (entry) => entry.position !== call.position,
+      );
+    }
+  }
+
+  private demonstrationReference(sessionId: string, callId: string, slot: string): string {
+    return workflowPrivateReference(
+      "demonstration",
+      this.observeAccess?.workspaceId,
+      this.privateRepresentation,
+      [sessionId, callId, slot],
+    );
   }
 
   private storeLocalValue(
@@ -1971,8 +2046,7 @@ export class WorkflowCallRecorder {
             : wrappedComposedResult
               ? (event.result as Record<string, WorkflowJsonValue>).result
               : event.result;
-        call.result = extractResultValueOf(actual);
-        call.resultHandle = call.result === undefined ? undefined : this.resultHandle(publicEvent);
+        const value = extractResultValueOf(actual);
         if (actual !== undefined) {
           const type = actual === null ? "null" : Array.isArray(actual) ? "array" : typeof actual;
           if (
@@ -1998,19 +2072,18 @@ export class WorkflowCallRecorder {
             };
           }
         }
-        call.resultComparison = localResultObservation?.comparison;
-        call.resultReference =
-          call.result === undefined
+        const reference =
+          value === undefined
             ? undefined
-            : this.localReference(
-                call.result,
+            : this.localResultReference(
+                value,
                 event.sessionId,
                 call.callId,
                 localResultObservation === undefined
                   ? "result"
                   : `native-result:v1:${localResultObservation.comparison ?? "exact"}`,
               );
-        if (call.result !== undefined) {
+        if (value !== undefined) {
           this.recordResultRedaction(
             event.sessionId,
             call.callId,
@@ -2027,8 +2100,23 @@ export class WorkflowCallRecorder {
             ? 0
             : undefined);
         if (exitCode !== undefined) {
-          this.localReference(exitCode, event.sessionId, call.callId, WORKFLOW_CALL_EXIT_CODE_SLOT);
+          this.localResultReference(
+            exitCode,
+            event.sessionId,
+            call.callId,
+            WORKFLOW_CALL_EXIT_CODE_SLOT,
+          );
         }
+        // A second, different result for the call: the first stays the call's value, and neither
+        // is its baseline any more.
+        if (this.isResultConflicted(event.sessionId, call.callId)) {
+          this.revokeResultBaseline(state, call);
+          break;
+        }
+        call.result = value;
+        call.resultHandle = value === undefined ? undefined : this.resultHandle(publicEvent);
+        call.resultComparison = localResultObservation?.comparison;
+        call.resultReference = reference;
         if (
           event.isError === false &&
           !suppressResult &&
