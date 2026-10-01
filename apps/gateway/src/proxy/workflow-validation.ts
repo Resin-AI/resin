@@ -15,12 +15,14 @@
  * cannot supply the recording it is checked against.
  */
 
+import path from "node:path";
 import {
   type ProgramLanguage,
   type RecordedWorkflow,
   type WorkflowBindingCandidate,
   type WorkflowComposedArgument,
   type WorkflowHeldOutDemonstration,
+  type WorkflowInputForm,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
   type WorkflowStep,
@@ -58,6 +60,7 @@ import {
   demonstrationEnvironment,
   validateAndConfirmCandidates,
 } from "@resin/runtime";
+import { type RecordedInputValue, recordedInputForm } from "./input-form.js";
 
 /** A verdict on one proposal, in the vocabulary the generation path reads. */
 export interface LocalCandidateVerdict {
@@ -76,6 +79,11 @@ export interface LocalCandidateVerdict {
    * value was literal text around other confirmed inputs' values in every recording checked.
    */
   composed?: WorkflowComposedArgument;
+  /**
+   * On a confirmed input proposal: the workspace directory whose entries every recorded value
+   * named. Only the directory leaves the device, never the values.
+   */
+  form?: WorkflowInputForm;
 }
 
 type DemonstratedType = "string" | "number" | "boolean" | "object" | "array";
@@ -1150,6 +1158,31 @@ export function createRecordingCheckValidator(
           decided.iterations ?? [],
           baselineInputs,
         );
+    // What each confirmed plain input's recorded values named in the workspace: the plan's own
+    // recording, and every iteration the check decided.
+    const forms = await confirmedInputForms(
+      final
+        .filter((outcome) => outcome.accepted && !composed.has(outcome.candidate))
+        .map((outcome) => outcome.candidate),
+      [
+        {
+          inputs: baselineInputs,
+          call: async (stepId) => {
+            const callId = plan.steps.find((step) => step.id === stepId)?.callId;
+            return callId === undefined ? undefined : options.localCalls.lookup(callId);
+          },
+        },
+        ...(baselineOnly ? [] : selected.iterations).map((iteration, index) => ({
+          inputs: async () => decided.iterations?.[index],
+          call: async (stepId: string) => {
+            const callId = iteration.demonstration.calls?.find((entry) => entry.stepId === stepId)
+              ?.callIds[0];
+            return callId === undefined ? undefined : options.localCalls.lookup(callId);
+          },
+        })),
+      ],
+      (candidate) => asChecked.get(candidate) ?? candidate,
+    );
     if (verification !== undefined && verification.status === "verified") {
       // The digest names the plan the cloud would publish, with the demonstrations it sent: the
       // accepted bindings, each composed argument built from the inputs it follows instead of
@@ -1177,6 +1210,7 @@ export function createRecordingCheckValidator(
       verdicts: final.map((outcome) => {
         const confirmedType = outcome.accepted ? typeOf.get(outcome.candidate) : undefined;
         const composedHere = composed.get(outcome.candidate);
+        const formHere = forms.get(outcome.candidate);
         return {
           candidate: {
             stepId: outcome.candidate.stepId,
@@ -1188,6 +1222,7 @@ export function createRecordingCheckValidator(
           ...(confirmedType === undefined ? {} : { confirmedType }),
           ...(outcome.accepted ? {} : { reason: outcome.reason }),
           ...(composedHere === undefined ? {} : { composed: composedHere }),
+          ...(formHere === undefined ? {} : { form: formHere }),
         };
       }),
       ...(verification === undefined ? {} : { verification }),
@@ -1266,6 +1301,70 @@ async function composedArguments(
     if (agreed !== undefined) composed.set(target, { parts: agreed });
   }
   return composed;
+}
+
+/** One recording an input form is read from: the values it supplied and the calls it made. */
+interface FormRecording {
+  inputs: (
+    sources: readonly WorkflowBindingCandidate[],
+  ) => Promise<Readonly<Record<string, WorkflowJsonValue>> | undefined>;
+  call: (stepId: string) => Promise<LocalRecordedCall | undefined>;
+}
+
+/**
+ * The form each confirmed plain string input's values took in the workspace, read against the
+ * working directory of the call that used each value. An input with a value redacted as secret in
+ * any recording, or a recording whose value or call this device cannot read, has no form.
+ */
+async function confirmedInputForms(
+  confirmed: readonly WorkflowBindingCandidate[],
+  recordings: readonly FormRecording[],
+  checkedAs: (candidate: WorkflowBindingCandidate) => WorkflowBindingCandidate,
+): Promise<Map<WorkflowBindingCandidate, WorkflowInputForm>> {
+  const forms = new Map<WorkflowBindingCandidate, WorkflowInputForm>();
+  const targets = confirmed.filter(
+    (candidate) => candidate.proposed.kind === "input" && candidate.proposed.list === undefined,
+  );
+  if (targets.length === 0) return forms;
+  const supplied = await Promise.all(
+    recordings.map((recording) => recording.inputs(targets.map(checkedAs))),
+  );
+  for (const target of targets) {
+    if (target.proposed.kind !== "input") continue;
+    const values: RecordedInputValue[] = [];
+    for (const [index, recording] of recordings.entries()) {
+      const value = supplied[index]?.[target.proposed.name];
+      const call = await recording.call(target.stepId);
+      const base = call === undefined ? undefined : recordedWorkingDirectory(call);
+      if (
+        typeof value !== "string" ||
+        base === undefined ||
+        call!.privatePositions.some(
+          (position) => position.redacted && position.argument === target.argument,
+        )
+      ) {
+        values.length = 0;
+        break;
+      }
+      values.push({ value, base });
+    }
+    const form = await recordedInputForm(values);
+    if (form !== undefined) forms.set(target, form);
+  }
+  return forms;
+}
+
+/**
+ * The absolute directory a recorded call ran in: its working-directory argument (a relative one
+ * read against the session's workspace root), else that root.
+ */
+function recordedWorkingDirectory(call: LocalRecordedCall): string | undefined {
+  const named = CROSS_DIRECTORY_ARGUMENTS.map((name) => call.arguments[name]).find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  if (named === undefined) return call.workspaceRoot;
+  if (path.isAbsolute(named)) return named;
+  return call.workspaceRoot === undefined ? undefined : path.resolve(call.workspaceRoot, named);
 }
 
 /**

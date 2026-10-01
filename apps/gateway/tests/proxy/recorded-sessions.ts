@@ -87,6 +87,8 @@ export function localCallsFor(
   store: PrivateValueStore,
   workspaceId: string,
   sessionIds: readonly string[],
+  /** The workspace root the harness lists the sessions under. */
+  rootPath = "/nonexistent",
 ): LocalCallIdentity {
   return createLocalCallIdentity({
     workspaceId,
@@ -95,7 +97,7 @@ export function localCallsFor(
     adapters: [
       {
         async listWorkspaces() {
-          return [{ workspaceId: "harness-workspace", rootPath: "/nonexistent" }];
+          return [{ workspaceId: "harness-workspace", rootPath }];
         },
         async listSessions() {
           return sessionIds.map((sessionId) => ({ sessionId, workspaceId: "harness-workspace" }));

@@ -75,6 +75,38 @@ export interface WorkflowComposedArgument {
   parts: Array<{ literal: string } | { input: string }>;
 }
 
+/**
+ * What a confirmed input's recorded values named in the workspace the device recorded them in:
+ * every value was the name of an entry directly under `directory` (`name`), or a path under it
+ * (`path`). `directory` is relative to the recorded call's working directory (`.` is that directory
+ * itself). Only these directory names leave the device; the values never do.
+ */
+export interface WorkflowInputForm {
+  value: "name" | "path";
+  directory: string;
+  /** What every named entry is, when they are all the same kind. */
+  entry?: "directory" | "file";
+}
+
+/** Longest `directory` an input form carries. */
+export const WORKFLOW_INPUT_FORM_DIRECTORY_MAX_LENGTH = 160;
+
+const INPUT_FORM_SEGMENT = /^[A-Za-z0-9._@+-]+$/u;
+
+/**
+ * Whether `directory` is a relative directory an input form may name: `.`, or `/`-separated
+ * segments of plain file-name characters, none of them `.` or `..`.
+ */
+export function isWorkflowInputFormDirectory(directory: string): boolean {
+  if (directory === ".") return true;
+  if (directory.length === 0 || directory.length > WORKFLOW_INPUT_FORM_DIRECTORY_MAX_LENGTH) {
+    return false;
+  }
+  return directory
+    .split("/")
+    .every((segment) => INPUT_FORM_SEGMENT.test(segment) && segment !== "." && segment !== "..");
+}
+
 /** One proposal's outcome, in the vocabulary the generation path reads. */
 export interface WorkflowValidationVerdict {
   candidate: {
@@ -96,6 +128,11 @@ export interface WorkflowValidationVerdict {
    * whose value, in the baseline and every held-out recording, was these parts concatenated.
    */
   composed?: WorkflowComposedArgument;
+  /**
+   * Present only on a confirmed input proposal whose recorded values all named entries of one
+   * workspace directory; never the values themselves.
+   */
+  form?: WorkflowInputForm;
 }
 
 /** Digest-bound proof that the plan was checked against this device's own recordings. */
@@ -243,6 +280,17 @@ const VerdictSchema = z.object({
           ]),
         )
         .min(1),
+    })
+    .optional(),
+  form: z
+    .object({
+      value: z.enum(["name", "path"]),
+      directory: z.string().refine(isWorkflowInputFormDirectory, "not a relative directory name"),
+      entry: z.enum(["directory", "file"]).optional(),
+    })
+    .strict()
+    .refine((form) => form.value === "name" || form.directory !== ".", {
+      message: "a path form names a directory below the working directory",
     })
     .optional(),
 });
