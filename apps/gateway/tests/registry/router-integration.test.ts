@@ -10,6 +10,7 @@ import {
   type JsonRpcSuccessResponse,
   type ListToolsResult,
   RESIN_LEARNED_TOOL_META,
+  RESIN_SEARCH_LISTING_META,
 } from "../../src/protocol/types.js";
 import type { ProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
@@ -275,6 +276,63 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     expect(await list(2)).toContain("synced_tool");
     await list(3);
     expect(waits).toBe(1);
+  });
+
+  it("waits for a fresh install's catalog sync on a search-listing connection, so search_tools finds it", async () => {
+    const registry = new ToolRegistry();
+    const router = createRegistryGatewayRouter(registry);
+    let waits = 0;
+    let workspaceId = "";
+    const runtime = {
+      async onWorkspaceReady() {},
+      async catalogSettled() {
+        waits += 1;
+        await registry.registerTool(
+          makeManifest({
+            id: "tool_synced",
+            name: "synced_tool",
+            description: "Publishes the release notes",
+          }),
+          undefined,
+          { workspaceId },
+        );
+      },
+      async stop() {},
+    } as unknown as ProductionProxyRuntime;
+    const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+    const conn = gateway.createConnection();
+    await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+        rootUri: "file:///test/project-fresh-search",
+        _meta: { [RESIN_SEARCH_LISTING_META]: true },
+      },
+    });
+    expect(conn.searchListing).toBe(true);
+    workspaceId = conn.workspaceContext.workspaceId;
+
+    // The shim shows the client only the meta tools, but the gateway's first list still waits.
+    const listed = (await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    })) as JsonRpcSuccessResponse<ListToolsResult>;
+    expect(waits).toBe(1);
+    expect(listed.result.tools.map((tool) => tool.name)).toContain("synced_tool");
+
+    const searched = (await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "search_tools", arguments: { query: "release notes" } },
+    })) as JsonRpcSuccessResponse<CallToolResult>;
+    expect(JSON.stringify(searched.result.content)).toContain("synced_tool");
   });
 
   it("calls an active tool with custom handler via tools/call", async () => {

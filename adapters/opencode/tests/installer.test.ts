@@ -155,7 +155,7 @@ describe("OpenCode MCP registration on a temp HOME", () => {
     expect((await applyManagedBlock(fsBridge, file, guidance.markers, guidance.body)).action).toBe(
       "unchanged",
     );
-    expect(fs.readFileSync(file, "utf8")).toContain("`resin_<name>`");
+    expect(fs.readFileSync(file, "utf8")).toContain(guidance.body.trimEnd());
     await applyManagedBlock(fsBridge, file, guidance.markers, null);
     expect(fs.readFileSync(file, "utf8")).toBe("# My rules\n");
   });

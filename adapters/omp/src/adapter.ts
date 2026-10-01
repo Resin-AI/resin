@@ -3,6 +3,7 @@ import * as path from "node:path";
 
 import {
   type AdapterCapabilities,
+  CANONICAL_RESIN_MCP_ARGS,
   CANONICAL_RESIN_MCP_COMMAND,
   type CatalogChangeSummary,
   type ConfigBackup,
@@ -19,7 +20,6 @@ import {
   TIER1_HIGH_FIDELITY,
 } from "@resin/harness-contracts";
 import {
-  OMP_RESIN_MCP_ARGS,
   applyOmpMcpConfig,
   planOmpMcpConfig,
   rollbackOmpMcpConfig,
@@ -342,7 +342,7 @@ export class OmpHarnessAdapter implements StrictHarnessAdapter {
       gatewayUrl,
       fsBridge: this.fsBridge,
       command: CANONICAL_RESIN_MCP_COMMAND,
-      args: [...OMP_RESIN_MCP_ARGS],
+      args: [...CANONICAL_RESIN_MCP_ARGS],
     });
   }
 

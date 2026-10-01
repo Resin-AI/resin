@@ -16,15 +16,16 @@ export const GROK_GUIDANCE_MARKERS = Object.freeze({
 
 /**
  * Grok keeps MCP tools out of the model's tool list and exposes them through its `search_tool`
- * and `use_tool` meta-tools, so the model only finds Resin's tools when told to look.
+ * and `use_tool` meta-tools, so the model only finds Resin's tools when told to look. `resin mcp`
+ * lists only Resin's meta tools; learned tools are found with Resin's own search_tools.
  */
 export const GROK_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. Grok lists MCP tools through \`search_tool\` and runs them through \`use_tool\`; Resin's are named \`resin__<name>\`, each listed with its purpose and inputs, and \`resin__get_tool_schema\` with its name shows the commands one runs and each input's recorded value.
+Resin learned tools from earlier work in this workspace. Grok runs MCP tools through \`use_tool\`; Resin lists only \`resin__search_tools\`, \`resin__get_tool_schema\`, \`resin__invoke_tool\` and \`resin__manage_tools\`, and its learned tools are found with \`resin__search_tools\`.
 
-- In your first step, next to your own first look at the task, call \`search_tool\` with a few words describing the task to list the matching \`resin__\` tools.
-- A tool that does your task is the procedure an earlier run already worked out from the docs: call it next with your task's values instead of re-reading docs or \`--help\` to rediscover those steps, then check its output and the results. Call it with \`use_tool\` (\`tool_name: "resin__<name>"\`). Omitted inputs reuse the recorded values.
-- Their output is the commands' current output: use it instead of running those commands yourself.`;
+- Before running a multi-step job by hand, call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- A tool that does your task is the procedure an earlier run already worked out: \`resin__get_tool_schema\` with \`{"name": "<name>"}\` shows its commands and inputs; run it with your task's values through \`resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\` (each via \`use_tool\`), instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
+- Its output is the commands' current output: use it instead of running those commands yourself.`;
 
 export const grokBuildInstallHarness: HarnessInstallDefinition = {
   id: GROK_HARNESS_ID,

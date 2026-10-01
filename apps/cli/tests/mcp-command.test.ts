@@ -83,18 +83,9 @@ describe("resin mcp command", () => {
       }),
     ).resolves.toBe(0);
   });
-  it.each([false, true])("propagates searchListing=%s to the shim", async (searchListing) => {
-    expect(parseMcpArgs(searchListing ? ["--search-listing"] : []).searchListing).toBe(
-      searchListing,
-    );
-    await expect(
-      mcpCommand(searchListing ? ["--search-listing"] : [], {
-        shimFactory: (options) => {
-          expect(options.searchListing).toBe(searchListing);
-          return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
-        },
-      }),
-    ).resolves.toBe(0);
+  it("accepts the retired --search-listing flag as the default listing", () => {
+    expect(parseMcpArgs(["--search-listing"])).toEqual(parseMcpArgs([]));
+    expect(parseMcpArgs(["--search-listing", "--full-catalog"]).fullCatalog).toBe(true);
   });
 
   it("starts a bare invocation without selecting the daemon socket", async () => {

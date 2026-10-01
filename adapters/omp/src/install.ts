@@ -4,7 +4,7 @@ import {
   type HarnessInstallExtension,
   applyManagedBlock,
 } from "@resin/harness-contracts";
-import { OMP_RESIN_MCP_LAUNCH_FLAGS, planOmpMcpConfig } from "./config-planner.js";
+import { planOmpMcpConfig } from "./config-planner.js";
 import { OMP_TESTED_VERSIONS, probeOmpInstallation } from "./discovery.js";
 import {
   DEFAULT_APPEND_SYSTEM_FILENAME,
@@ -57,7 +57,6 @@ export const ompInstallHarness: HarnessInstallDefinition = {
     serverKey: "resin",
     jsonContainerKeys: ["mcpServers"],
     transports: ["stdio", "sse", "websocket", "http"],
-    launchFlags: OMP_RESIN_MCP_LAUNCH_FLAGS,
     planRegistration: ({ targetPath, command, args, fsBridge }) =>
       planOmpMcpConfig({ customConfigPath: targetPath, command, args: [...args], fsBridge }),
   },
@@ -68,7 +67,7 @@ export const ompInstallHarness: HarnessInstallDefinition = {
   },
   installExtensions: [
     {
-      // OMP is registered with `--search-listing`, so the gateway writes no per-tool catalog into
+      // `resin mcp` lists only the meta tools, so the gateway writes no per-tool catalog into
       // OMP's appended system prompt. Install removes a block an earlier full listing left there,
       // and uninstall removes it too.
       name: "learned-tool catalog",

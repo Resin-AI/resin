@@ -6,7 +6,7 @@ import { InMemoryConfigFsBridge } from "@resin/harness-contracts";
 import type { ConfigFsBridge, HarnessInstallation } from "@resin/harness-contracts";
 import { createPrivateDirectory } from "@resin/windows-security";
 import { describe, expect, it, vi } from "vitest";
-import { SUPPORTED_HARNESS_IDS } from "../../src/harness-registry.js";
+import { SUPPORTED_HARNESS_IDS, getHarnessDefinition } from "../../src/harness-registry.js";
 import {
   HarnessConfigOrchestrator,
   type OrchestrationResult,
@@ -49,12 +49,6 @@ const FILE_SYMLINKS_SUPPORTED = ((): boolean => {
 function resinLaunch(home: string): { command: string; args: string[] } {
   const launch = resolveHarnessMcpLaunch({ command: resolveInstalledResinMcpCommand(home) });
   return { command: launch.command, args: [...launch.args] };
-}
-
-/** The launch Resin registers OMP with: the shared launch plus `--search-listing`. */
-function ompLaunch(home: string): { command: string; args: string[] } {
-  const launch = resinLaunch(home);
-  return { command: launch.command, args: [...launch.args, "--search-listing"] };
 }
 
 /** The Codex TOML `command` line Resin writes for `home` (TOML basic-string escaped). */
@@ -254,7 +248,7 @@ describe("HarnessReconciler", () => {
     ).toMatchObject({
       mcpServers: {
         resin: {
-          ...ompLaunch(HOME),
+          ...resinLaunch(HOME),
         },
       },
     });
@@ -314,14 +308,20 @@ describe("HarnessReconciler", () => {
     });
   });
 
-  it("moves an OMP registration without --search-listing to it and drops the per-tool catalog block", async () => {
+  it("moves an OMP registration with the retired --search-listing flag to bare mcp and drops the per-tool catalog block", async () => {
     const bridge = new InMemoryConfigFsBridge();
     const targetPath = path.join(HOME, ".omp", "agent", "mcp.json");
     const appendSystemPath = path.join(HOME, ".omp", "agent", "APPEND_SYSTEM.md");
     await bridge.writeFile(
       targetPath,
       JSON.stringify({
-        mcpServers: { resin: { ...resinLaunch(HOME), env: { KEEP: "1" } } },
+        mcpServers: {
+          resin: {
+            command: resinLaunch(HOME).command,
+            args: [...resinLaunch(HOME).args, "--search-listing"],
+            env: { KEEP: "1" },
+          },
+        },
       }),
     );
     await bridge.writeFile(
@@ -346,7 +346,7 @@ describe("HarnessReconciler", () => {
       changed: true,
     });
     expect(JSON.parse((await bridge.readFile(targetPath)) ?? "").mcpServers.resin).toEqual({
-      ...ompLaunch(HOME),
+      ...resinLaunch(HOME),
       env: { KEEP: "1" },
     });
     expect(await bridge.readFile(appendSystemPath)).toBe("User notes\n");
@@ -436,8 +436,8 @@ describe("HarnessReconciler", () => {
       command: "user-mcp",
       env: { TOKEN: "keep" },
     });
-    expect(omp.mcpServers.resin.command).toBe(ompLaunch(HOME).command);
-    expect(omp.mcpServers.resin.args).toEqual(ompLaunch(HOME).args);
+    expect(omp.mcpServers.resin.command).toBe(resinLaunch(HOME).command);
+    expect(omp.mcpServers.resin.args).toEqual(resinLaunch(HOME).args);
     expect(omp.mcpServers.resin.env).toEqual({
       RESIN_USER_TOKEN: "keep-owned-env",
     });
@@ -686,7 +686,7 @@ describe("HarnessReconciler", () => {
     });
     const repaired = JSON.parse((await bridge.readFile(targetPath)) ?? "");
     expect(repaired.mcpServers.resin).toEqual({
-      ...ompLaunch(HOME),
+      ...resinLaunch(HOME),
       env: { RESIN_TOKEN: "keep" },
     });
   });
@@ -1345,7 +1345,7 @@ describe("HarnessReconciler", () => {
         (await bridge.readFile(path.join(HOME, ".omp", "agent", "mcp.json"))) ?? "{}",
       );
       expect(omp.mcpServers.resin).toEqual({
-        ...ompLaunch(HOME),
+        ...resinLaunch(HOME),
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
@@ -1433,7 +1433,7 @@ describe("HarnessReconciler", () => {
       expect(omp.settings).toEqual({ compact: true });
       expect(omp.mcpServers.user_srv).toEqual({ command: "user-bin" });
       expect(omp.mcpServers.resin).toEqual({
-        ...ompLaunch(HOME),
+        ...resinLaunch(HOME),
         env: { CUSTOM_VAR: "keep-me" },
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
@@ -1481,7 +1481,7 @@ describe("HarnessReconciler", () => {
         (await bridge.readFile(path.join(HOME, ".omp", "agent", "mcp.json"))) ?? "{}",
       );
       expect(omp.mcpServers.resin).toEqual({
-        ...ompLaunch(HOME),
+        ...resinLaunch(HOME),
         env: { TOKEN: "user-tok" },
       });
 
@@ -1522,9 +1522,7 @@ describe("Codex guidance reconciliation", () => {
     });
     const content = await bridge.readFile(agentsPath);
     expect(content?.startsWith("# User rules\n\n<!-- resin:codex-guidance:start -->")).toBe(true);
-    // Direct tool calling defers learned tools behind tool_search; Code Mode nests them in exec.
-    expect(content).toContain("call `tool_search`");
-    expect(content).toContain("text(ALL_TOOLS.filter(");
+    expect(content).toContain(getHarnessDefinition("codex-cli").guidance?.body);
 
     const again = await reconcileCodex(bridge, false);
     expect(again.results[0]).toMatchObject({ changed: false, guidance: { action: "unchanged" } });

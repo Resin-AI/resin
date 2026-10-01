@@ -149,16 +149,15 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
     { name: "echo", inputSchema: { type: "object" } },
   ];
   it.each([
-    { harness: "omp-agent", enableSearch: false, expectedSearch: false },
-    { harness: "omp-agent", enableSearch: true, expectedSearch: true },
-    { harness: "claude-code", enableSearch: false, expectedSearch: false },
-    { harness: "claude-code", enableSearch: true, expectedSearch: true },
-    { harness: "generic-mcp", enableSearch: false, expectedSearch: false },
-    { harness: "codex-mcp-client", enableSearch: false, expectedSearch: true },
-    { harness: "openai-codex-cli", enableSearch: false, expectedSearch: true },
+    { harness: "omp-agent", enableSearch: false },
+    { harness: "omp-agent", enableSearch: true },
+    { harness: "claude-code", enableSearch: false },
+    { harness: "generic-mcp", enableSearch: false },
+    { harness: "codex-mcp-client", enableSearch: false },
+    { harness: "openai-codex-cli", enableSearch: false },
   ])(
-    "exposes stable facade by default for $harness (enableSearch=$enableSearch)",
-    async ({ harness, enableSearch, expectedSearch }) => {
+    "lists only the meta tools by default for $harness (enableSearch=$enableSearch)",
+    async ({ harness, enableSearch }) => {
       const client = createTestClient({ enableSearch });
       try {
         const init = await client.initialize(harness);
@@ -182,26 +181,25 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
         expect(toolNames).toContain("get_tool_schema");
         expect(toolNames).toContain("invoke_tool");
         expect(toolNames).toContain("manage_tools");
-        expect(toolNames.includes("search_tools")).toBe(expectedSearch);
-
-        const expected = expectedSearch
-          ? ["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]
-          : ["get_tool_schema", "invoke_tool", "manage_tools"];
-        expect(toolNames.slice().sort()).toEqual(expected.slice().sort());
+        expect(toolNames.slice().sort()).toEqual([
+          "get_tool_schema",
+          "invoke_tool",
+          "manage_tools",
+          "search_tools",
+        ]);
         // Hidden evolved tools are NOT advertised
         expect(toolNames).not.toContain("git_status_diff");
         expect(toolNames).not.toContain("code_analyzer");
         expect(toolNames).not.toContain("echo");
 
-        const expectedCount = expectedSearch ? 4 : 3;
-        expect(toolNames).toHaveLength(expectedCount);
+        expect(toolNames).toHaveLength(4);
       } finally {
         client.close();
       }
     },
   );
 
-  it("lists this workspace's learned tools by name, but not the rest of the catalog", async () => {
+  it("keeps this workspace's learned tools out of the default listing", async () => {
     const client = createTestClient();
     try {
       await client.initialize("codex-mcp-client");
@@ -225,13 +223,7 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
         .parse((await listPromise).result)
         .tools.map((tool) => tool.name)
         .sort();
-      expect(names).toEqual([
-        "get_tool_schema",
-        "invoke_tool",
-        "manage_tools",
-        "read_design_document",
-        "search_tools",
-      ]);
+      expect(names).toEqual(["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]);
     } finally {
       client.close();
     }
@@ -373,9 +365,9 @@ describe("Live Hidden Invocation and Delta Discovery", () => {
   });
 });
 
-describe("Metadata Rewriting and Request-Level Exclusions for Search-Disabled Connections", () => {
+describe("Metadata Rewriting and Request-Level Exclusions for Search-Disabled (--full-catalog) Connections", () => {
   it("merges excludeToolIds into compact list_versions request arguments when includeDisabled is false", async () => {
-    const client = createTestClient({ enableSearch: false });
+    const client = createTestClient({ fullCatalog: true });
     try {
       await client.initialize("test-harness");
 
@@ -500,7 +492,7 @@ describe("Metadata Rewriting and Request-Level Exclusions for Search-Disabled Co
       { workspaceId: "ws-boundary" },
     );
 
-    const client = createTestClient({ enableSearch: false });
+    const client = createTestClient({ fullCatalog: true });
     try {
       await client.initialize("omp-agent");
       const readPage = async (offset: number) => {
@@ -563,7 +555,7 @@ describe("Metadata Rewriting and Request-Level Exclusions for Search-Disabled Co
   });
 
   it("marks search_tools as disabled in compact mode when includeDisabled is explicitly true", async () => {
-    const client = createTestClient({ enableSearch: false });
+    const client = createTestClient({ fullCatalog: true });
     try {
       await client.initialize("test-harness");
 
@@ -615,7 +607,7 @@ describe("Metadata Rewriting and Request-Level Exclusions for Search-Disabled Co
   });
 
   it("unwraps deeply nested invoke aliases when rewriting metadata", async () => {
-    const client = createTestClient({ enableSearch: false });
+    const client = createTestClient({ fullCatalog: true });
     try {
       await client.initialize("test-harness");
 

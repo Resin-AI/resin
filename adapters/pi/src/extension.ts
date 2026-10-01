@@ -1,11 +1,11 @@
 /**
  * Pi (earendil-works/pi-coding-agent) has no MCP client: its model only sees built-in tools and
  * tools that extensions register through `pi.registerTool`. Resin therefore installs a small,
- * Resin-owned extension file that speaks MCP over stdio to `resin mcp` and registers each learned
- * gateway tool as a Pi tool named `mcp__<server>__<tool>`. The extension follows
- * `notifications/tools/list_changed`, so learned tools reach the model without a Pi restart.
- * The gateway's discovery meta-tools are not registered: Pi sends every tool definition with
- * every request, and a client that registers learned tools directly never needs them.
+ * Resin-owned extension file that speaks MCP over stdio to `resin mcp` and registers each tool it
+ * lists as a Pi tool named `mcp__<server>__<tool>`. `resin mcp` lists only the gateway's meta
+ * tools (search_tools, get_tool_schema, invoke_tool, manage_tools); the model finds learned tools
+ * with search_tools and runs them through invoke_tool. The extension follows
+ * `notifications/tools/list_changed`, so a changed listing reaches the model without a Pi restart.
  */
 
 /** First line of every extension Resin writes; uninstall only deletes files that carry it. */
@@ -16,14 +16,6 @@ export const PI_RESIN_EXTENSION_FILE_NAME = "resin.ts";
 
 /** Prefix of Pi tool names that front MCP tools registered by the Resin bridge extension. */
 export const PI_MCP_TOOL_PREFIX = "mcp__";
-
-/**
- * Gateway meta-tools the bridge does not register. They exist for clients whose native catalog
- * can go stale; the bridge follows list_changed, so they would only add per-request tokens.
- * get_tool_schema stays: a learned tool is listed by its purpose and inputs only, and
- * get_tool_schema is where its recorded commands are shown.
- */
-export const PI_BRIDGE_HIDDEN_TOOLS = ["search_tools", "invoke_tool", "manage_tools"] as const;
 
 export interface PiMcpBridgeServer {
   /** MCP server name; becomes the `mcp__<name>__` tool-name segment. */
@@ -75,7 +67,6 @@ export function renderPiResinExtension(server: PiMcpBridgeServer): string {
 import { spawn } from "node:child_process";
 
 const SERVER = ${config};
-const HIDDEN_TOOLS = ${JSON.stringify(PI_BRIDGE_HIDDEN_TOOLS)};
 const CONNECT_TIMEOUT_MS = 20000;
 const PROTOCOL_VERSION = "2025-06-18";
 
@@ -239,7 +230,6 @@ export default function resinMcpBridge(pi) {
     const current = new Set();
     const added = [];
     for (const tool of tools) {
-      if (HIDDEN_TOOLS.includes(tool.name)) continue;
       const name = piToolName(tool.name);
       current.add(name);
       if (!registered.has(name)) added.push(name);

@@ -119,7 +119,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       };
       expect(parsedPlan.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
       expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
@@ -239,7 +239,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       };
       expect(parsedPlan.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
       expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
@@ -264,7 +264,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       };
       expect(parsedApplied.mcpServers?.resin).toEqual({
         command: "resin",
-        args: ["mcp", "--search-listing"],
+        args: ["mcp"],
       });
       expect(parsedApplied.mcpServers?.["resin-gateway"]).toBeUndefined();
       expect(parsedApplied.mcpServers?.["custom-tool"]).toEqual({
