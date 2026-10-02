@@ -1451,13 +1451,18 @@ export class CloudCatalogSyncCoordinator {
       while (this.inFlightSync) await this.inFlightSync.catch(() => undefined);
       await this.runSync(catalogDue, false, published);
       if (catalogDue) {
-        if (this.lastCatalogSyncAt >= startedAt && this.settledReconcile !== undefined) {
-          followed.catalogToken = published.sync.catalogToken;
-        }
+        // A due sync covers the token only if it fetched and reconciled cleanly. Anything else,
+        // including a failed safety refresh of a token already covered, leaves it uncovered, so
+        // the gateway's own interval retries it rather than the next hourly refresh.
+        followed.catalogToken =
+          this.lastCatalogSyncAt >= startedAt && this.settledReconcile !== undefined
+            ? published.sync.catalogToken
+            : undefined;
       } else {
         this.renewCatalogFreshness();
       }
     } catch (error) {
+      if (catalogDue) followed.catalogToken = undefined;
       this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
     }
     return true;

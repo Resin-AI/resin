@@ -914,6 +914,32 @@ describe("the validation worker's poll cadence", () => {
     await worker.stop();
   });
 
+  it("does not run the timer's pass when stopped during its device sync check", async () => {
+    const check = Promise.withResolvers<boolean>();
+    let checks = 0;
+    const { worker, polledAt } = polling(() => [], {
+      followsDeviceSync: () => {
+        checks += 1;
+        return check.promise;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(FAST);
+    expect(checks).toBe(1);
+
+    let stopped = false;
+    const stopping = worker.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // stop() waits for the check like for a pass in flight ...
+    expect(stopped).toBe(false);
+    // ... and the check's answer (no device sync: poll) no longer starts a pass.
+    check.resolve(false);
+    await stopping;
+    await vi.advanceTimersByTimeAsync(10 * QUIET);
+    expect(polledAt).toHaveLength(0);
+  });
+
   it("cancels a fresh pass queued behind the one in flight when stopped", async () => {
     const { worker, gate, listings } = gatedWorker();
     const running = worker.runOnce();

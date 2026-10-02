@@ -327,6 +327,55 @@ describe("following the daemon's device sync safely", () => {
     expect(cloud.toolAccessRequests).toBe(0);
   });
 
+  it("retries on its own interval when the safety refresh of a covered token fails to reconcile", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
+    const d = daemon();
+    const gw = gateway(cloud);
+    gw.coordinator.startPeriodicSync();
+    await run(d, DEVICE_SYNC_SAFETY_REFRESH_MS - 2 * QUIET_MS);
+    expect(cloud.catalogRequests).toHaveLength(1);
+
+    // The catalog changed without the token moving (a missed invalidation), and activating the new
+    // tool fails once.
+    cloud.setSnapshot(
+      catalogSnapshot("v2", [catalogTool(TOOL_ONE, "one"), catalogTool(TOOL_TWO, "two")]),
+    );
+    const activate = gw.registry.activateToolVersion.bind(gw.registry);
+    let failed = 0;
+    let attempts = 0;
+    vi.spyOn(gw.registry, "activateToolVersion").mockImplementation(
+      async (toolId, version, workspaceId) => {
+        if (toolId === TOOL_TWO) attempts += 1;
+        if (toolId === TOOL_TWO && failed === 0) {
+          failed += 1;
+          throw new Error("transient activation failure");
+        }
+        return await activate(toolId, version, workspaceId);
+      },
+    );
+    // Publish until the safety refresh fetches the changed catalog.
+    while (cloud.catalogRequests.length < 2) {
+      await d.publish();
+      await vi.advanceTimersByTimeAsync(5_000);
+      if (cloud.catalogRequests.length >= 2) break;
+      await vi.advanceTimersByTimeAsync(QUIET_MS - 5_000);
+    }
+    expect(failed).toBe(1);
+    const afterFailure = attempts;
+
+    // Same answer, same token: the gateway's own interval retries rather than waiting an hour.
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(attempts).toBeGreaterThan(afterFailure);
+    const retried = attempts;
+    // Settled again: unchanged tokens reconcile nothing more.
+    await vi.advanceTimersByTimeAsync(3 * INTERVAL_MS);
+    gw.coordinator.stopPeriodicSync();
+    expect(attempts).toBe(retried);
+    expect(gw.registry.isToolActiveForWorkspace(TOOL_TWO, "1.0.0", identityA.workspaceId)).toBe(
+      true,
+    );
+  });
+
   it("keeps held tools invocable past the cache's hard expiry while tokens stay unchanged", async () => {
     const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
     const d = daemon();

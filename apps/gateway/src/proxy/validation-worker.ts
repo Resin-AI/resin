@@ -449,6 +449,8 @@ export class WorkflowValidationWorker {
   private localRetryPending = false;
   /** When the worker last started; the device sync safety refresh counts from here at the latest. */
   private startedAt = Number.NEGATIVE_INFINITY;
+  /** The timer's device sync check in flight, which stop() waits for. */
+  private followCheck?: Promise<boolean>;
   /** Advanced by every start and stop; fences fresh passes queued before a stop. */
   private generation = 0;
   private timer?: NodeJS.Timeout;
@@ -517,6 +519,7 @@ export class WorkflowValidationWorker {
     this.timerDueAt = undefined;
     this.abortController?.abort();
     this.abortController = undefined;
+    await this.followCheck?.catch(() => undefined);
     await this.inFlight?.catch(() => undefined);
   }
 
@@ -598,22 +601,35 @@ export class WorkflowValidationWorker {
    * off to its quiet interval.
    */
   private async timedPass(): Promise<void> {
+    const generation = this.generation;
+    const followsDeviceSync = this.followsDeviceSync;
     if (
-      this.followsDeviceSync &&
+      followsDeviceSync &&
       !this.localRetryPending &&
       Date.now() - Math.max(this.lastListedAt, this.startedAt) < DEVICE_SYNC_SAFETY_REFRESH_MS
     ) {
-      let follows = false;
+      // The check reads local files; stop() waits for it like for a pass in flight.
+      const check = (async () => {
+        try {
+          return await followsDeviceSync();
+        } catch {
+          return false;
+        }
+      })();
+      this.followCheck = check;
+      let follows: boolean;
       try {
-        follows = await this.followsDeviceSync();
-      } catch {
-        follows = false;
+        follows = await check;
+      } finally {
+        if (this.followCheck === check) this.followCheck = undefined;
       }
       if (follows) {
         this.emptyPolls += 1;
         return;
       }
     }
+    // Stopped (or stopped and restarted) during the check: the timer's pass belongs to that run.
+    if (generation !== this.generation || !this.isRunning()) return;
     await this.runOnce();
   }
 
