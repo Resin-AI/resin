@@ -16,6 +16,8 @@ import type { LocalPreactivationChecker, SigningKeyStore } from "@resin/observer
 import {
   type AccountToolAccessResponse,
   type CatalogSnapshotResponse,
+  DEVICE_SYNC_SAFETY_REFRESH_MS,
+  DEVICE_SYNC_SCHEMA_VERSION,
   type StreamCatalogInvalidation,
   ValidationError,
 } from "@resin/protocol";
@@ -41,7 +43,7 @@ import type { CloudCatalogCache } from "./cache.js";
 import type { CloudCircuitBreaker } from "./circuit-breaker.js";
 import type { CatalogSnapshotFetchResult, CloudCatalogClient } from "./client.js";
 import type { CloudInvocationRouter } from "./router.js";
-import type { SharedCloudSync } from "./shared-sync.js";
+import type { PublishedDeviceSync, SharedCloudSync } from "./shared-sync.js";
 import type { ManagedToolAccess, ManagedToolConfirmation } from "./tool-access.js";
 import type { ToolCertificateReporter } from "./tool-certificate-verifier.js";
 
@@ -117,6 +119,33 @@ export interface CloudCatalogSyncOptions {
    * reporter's internal enforce mode is on.
    */
   toolCertificates?: ToolCertificateReporter;
+  /**
+   * How often the gateway checks, locally, for the daemon's device sync answer (see
+   * `followDeviceSync`). Reading it never calls the cloud. Default 5 s.
+   */
+  deviceSyncWatchIntervalMs?: number;
+}
+
+/** Default for `CloudCatalogSyncOptions.deviceSyncWatchIntervalMs`. */
+export const DEFAULT_DEVICE_SYNC_WATCH_INTERVAL_MS = 5_000;
+
+/** What a gateway last followed from the daemon's device sync. */
+interface FollowedDeviceSync {
+  accountId: string;
+  userId: string;
+  fetchedAt: number;
+  /** Catalog token the last successful catalog sync covered; undefined until one succeeds. */
+  catalogToken: string | null | undefined;
+}
+
+/** The account tool-access answer a device sync answer carries. */
+function toolAccessFromDeviceSync(published: PublishedDeviceSync): AccountToolAccessResponse {
+  return {
+    schemaVersion: DEVICE_SYNC_SCHEMA_VERSION,
+    accountId: published.sync.accountId,
+    userId: published.sync.userId,
+    toolAccess: published.sync.toolAccess,
+  };
 }
 
 export interface ToolLockTuple {
@@ -192,6 +221,12 @@ export class CloudCatalogSyncCoordinator {
   readonly allowDevKeys: boolean;
 
   private syncTimer: NodeJS.Timeout | null = null;
+  private deviceSyncTimer: NodeJS.Timeout | null = null;
+  private readonly deviceSyncWatchIntervalMs: number;
+  /** The daemon device sync answer this gateway last acted on, while it follows one. */
+  private followedDeviceSync?: FollowedDeviceSync;
+  /** When the catalog was last synced from the cloud, for the device sync safety refresh. */
+  private lastCatalogSyncAt = Number.NEGATIVE_INFINITY;
   private isRunningPeriodic = false;
   private inFlightSync: Promise<CatalogSnapshotResponse> | null = null;
   private readonly options: CloudCatalogSyncOptions;
@@ -216,6 +251,8 @@ export class CloudCatalogSyncCoordinator {
     this.workspaceId = options.workspaceId;
     this.autoRegisterInRegistry = options.autoRegisterInRegistry ?? true;
     this.intervalMs = options.intervalMs ?? 60_000;
+    this.deviceSyncWatchIntervalMs =
+      options.deviceSyncWatchIntervalMs ?? DEFAULT_DEVICE_SYNC_WATCH_INTERVAL_MS;
     this.circuitBreaker = options.circuitBreaker;
 
     this.lockManager = options.lockManager;
@@ -302,7 +339,15 @@ export class CloudCatalogSyncCoordinator {
     };
   }
 
-  private async runSync(includeCatalog: boolean, fresh = false): Promise<CatalogSnapshotResponse> {
+  /**
+   * `published`: a tool-access answer the daemon's device sync already read from the cloud; it is
+   * confirmed exactly like one this gateway fetched, and nothing is fetched for access.
+   */
+  private async runSync(
+    includeCatalog: boolean,
+    fresh = false,
+    published?: PublishedDeviceSync,
+  ): Promise<CatalogSnapshotResponse> {
     if (this.inFlightSync) return this.inFlightSync;
     this.inFlightSync = (async () => {
       const access = this.options.managedToolAccess;
@@ -316,9 +361,28 @@ export class CloudCatalogSyncCoordinator {
         const observedConfirmation = access.captureConfirmation?.();
         let confirmation: AccountToolAccessResponse | null = null;
         try {
-          confirmation = this.options.sharedSync
-            ? await this.options.sharedSync.fetchToolAccess(access.identity, this.intervalMs)
-            : await this.client.fetchToolAccess(access.identity);
+          if (published && observedConfirmation?.toolAccess === "subscription_inactive") {
+            // A publication read before this denial was recorded may predate it: an allowance it
+            // carries never clears a denial. Only a fresh read of the cloud's authority may.
+            confirmation =
+              published.sync.toolAccess === "subscription_inactive"
+                ? toolAccessFromDeviceSync(published)
+                : await this.client.fetchToolAccess(access.identity);
+          } else if (published) {
+            const expected = access.identity;
+            // An answer for another login proves nothing about this one: treat access as unknown.
+            confirmation =
+              !expected ||
+              (expected.cloudUrl === published.cloudUrl &&
+                expected.accountId === published.sync.accountId &&
+                expected.userId === published.sync.userId)
+                ? toolAccessFromDeviceSync(published)
+                : null;
+          } else {
+            confirmation = this.options.sharedSync
+              ? await this.options.sharedSync.fetchToolAccess(access.identity, this.intervalMs)
+              : await this.client.fetchToolAccess(access.identity);
+          }
         } catch (error) {
           this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
         }
@@ -364,7 +428,9 @@ export class CloudCatalogSyncCoordinator {
         }
       }
       if (includeCatalog && this.catalogSyncEnabled) {
-        return await this.syncCatalogOnce(fresh);
+        // A peer's catalog answer serves a device sync only if its cloud read began after the sync
+        // read that reported the catalog token.
+        return await this.syncCatalogOnce(fresh, published?.fetchedAt);
       }
       if (includeCatalog && this.lockManager) {
         return await this.executeOfflineSync();
@@ -383,7 +449,10 @@ export class CloudCatalogSyncCoordinator {
     return this.sync();
   }
 
-  private async syncCatalogOnce(fresh = false): Promise<CatalogSnapshotResponse> {
+  private async syncCatalogOnce(
+    fresh = false,
+    notBefore?: number,
+  ): Promise<CatalogSnapshotResponse> {
     if (this.circuitBreaker && !this.circuitBreaker.canExecute()) {
       this.options.onSyncCircuitBroken?.();
       return this.executeOfflineSync();
@@ -393,7 +462,7 @@ export class CloudCatalogSyncCoordinator {
       const cachedSnapshot = this.cache.getSnapshot(this.workspaceId) ?? undefined;
       let fetched: { snapshot: CatalogSnapshotResponse; unchanged: boolean };
       try {
-        fetched = await this.fetchCatalog(cachedSnapshot, fresh);
+        fetched = await this.fetchCatalog(cachedSnapshot, fresh, notBefore);
       } catch (fetchError: unknown) {
         this.options.onSyncError?.(
           fetchError instanceof Error ? fetchError : new Error(String(fetchError)),
@@ -427,6 +496,7 @@ export class CloudCatalogSyncCoordinator {
         await this.reconcileSnapshot(snapshot);
       }
 
+      this.lastCatalogSyncAt = Date.now();
       this.catalogLoaded.resolve();
       this.options.onSyncSuccess?.(snapshot);
 
@@ -453,12 +523,14 @@ export class CloudCatalogSyncCoordinator {
   private async fetchCatalog(
     held: CatalogSnapshotResponse | undefined,
     fresh: boolean,
+    notBefore?: number,
   ): Promise<{ snapshot: CatalogSnapshotResponse; unchanged: boolean }> {
     const result: CatalogSnapshotFetchResult = this.options.sharedSync
       ? await this.options.sharedSync.fetchCatalog({
           current: held,
           maxAgeMs: this.intervalMs,
           fresh,
+          ...(notBefore === undefined ? {} : { notBefore }),
         })
       : await this.client.fetchCatalogSnapshotResult({
           currentVersion: held?.snapshotVersion,
@@ -1295,7 +1367,9 @@ export class CloudCatalogSyncCoordinator {
   }
 
   /**
-   * Starts periodic catalog synchronization on the configured interval.
+   * Starts periodic catalog synchronization on the configured interval. With shared sync, a gateway
+   * whose daemon publishes device sync answers follows them instead (see `followDeviceSync`); the
+   * interval then only takes over again once the daemon's answers stop.
    */
   startPeriodicSync(): void {
     if (this.isRunningPeriodic) {
@@ -1305,6 +1379,7 @@ export class CloudCatalogSyncCoordinator {
     this.isRunningPeriodic = true;
     this.syncTimer = setInterval(async () => {
       try {
+        if (await this.followDeviceSync({ retry: true })) return;
         await this.sync();
       } catch {
         // Errors handled in syncOnce / onSyncError
@@ -1313,6 +1388,98 @@ export class CloudCatalogSyncCoordinator {
 
     if (this.syncTimer.unref) {
       this.syncTimer.unref();
+    }
+
+    if (this.options.sharedSync) {
+      this.deviceSyncTimer = setInterval(() => {
+        void this.followDeviceSync().catch(() => undefined);
+      }, this.deviceSyncWatchIntervalMs);
+      this.deviceSyncTimer.unref?.();
+    }
+  }
+
+  /**
+   * Acts on the daemon's latest device sync answer, if a recent one exists, and reports whether it
+   * did. Each new answer confirms tool access from the answer itself (no cloud call); the catalog is
+   * fetched only when its token moved, on the first answer this gateway follows (or after an
+   * identity change), or once the safety refresh is due. A gateway with no recent answer returns
+   * false and keeps its own interval, exactly as without a daemon.
+   */
+  async followDeviceSync(options: { retry?: boolean } = {}): Promise<boolean> {
+    const shared = this.options.sharedSync;
+    if (!shared) return false;
+    let published: PublishedDeviceSync | undefined;
+    try {
+      published = await shared.readDeviceSync();
+    } catch {
+      published = undefined;
+    }
+    if (!published) {
+      this.followedDeviceSync = undefined;
+      return false;
+    }
+    const previous = this.followedDeviceSync;
+    const sameIdentity =
+      previous !== undefined &&
+      previous.accountId === published.sync.accountId &&
+      previous.userId === published.sync.userId;
+    const covered = sameIdentity && previous.catalogToken === published.sync.catalogToken;
+    // A new answer is acted on once. The same answer is acted on again only on the gateway's own
+    // interval, and only while the catalog it names still has local work left to retry.
+    if (sameIdentity && previous.fetchedAt === published.fetchedAt && (covered || !options.retry)) {
+      return true;
+    }
+    const catalogDue =
+      !covered || Date.now() - this.lastCatalogSyncAt >= DEVICE_SYNC_SAFETY_REFRESH_MS;
+    const followed: FollowedDeviceSync = {
+      accountId: published.sync.accountId,
+      userId: published.sync.userId,
+      fetchedAt: published.fetchedAt,
+      // The token is recorded only once a catalog sync covering it succeeds and leaves nothing to
+      // retry, so a failed fetch or reconciliation is retried instead of waiting for the safety
+      // refresh.
+      catalogToken: catalogDue
+        ? sameIdentity
+          ? previous.catalogToken
+          : undefined
+        : published.sync.catalogToken,
+    };
+    this.followedDeviceSync = followed;
+    const startedAt = Date.now();
+    try {
+      // A sync already running was not given this answer; let it finish, then apply this one.
+      while (this.inFlightSync) await this.inFlightSync.catch(() => undefined);
+      await this.runSync(catalogDue, false, published);
+      if (catalogDue) {
+        // A due sync covers the token only if it fetched and reconciled cleanly. Anything else,
+        // including a failed safety refresh of a token already covered, leaves it uncovered, so
+        // the gateway's own interval retries it rather than the next hourly refresh.
+        followed.catalogToken =
+          this.lastCatalogSyncAt >= startedAt && this.settledReconcile !== undefined
+            ? published.sync.catalogToken
+            : undefined;
+      } else {
+        this.renewCatalogFreshness();
+      }
+    } catch (error) {
+      if (catalogDue) followed.catalogToken = undefined;
+      this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+    return true;
+  }
+
+  /**
+   * An answer whose catalog token matches the catalog this gateway synced attests that catalog is
+   * still current, exactly as an `unchanged` catalog answer does: its freshness windows restart, so
+   * following unchanged tokens never lets held tools reach their hard expiry. Nothing is renewed
+   * without confirmed tool access.
+   */
+  private renewCatalogFreshness(): void {
+    const access = this.options.managedToolAccess;
+    if (access && (access.isInactive() || this.activeConfirmation === undefined)) return;
+    const held = this.cache.getSnapshot(this.workspaceId);
+    if (held?.tools && held.tools.length > 0) {
+      this.cache.setSnapshot(held, { workspaceId: this.workspaceId });
     }
   }
 
@@ -1325,6 +1492,9 @@ export class CloudCatalogSyncCoordinator {
       clearInterval(this.syncTimer);
       this.syncTimer = null;
     }
+    clearInterval(this.deviceSyncTimer ?? undefined);
+    this.deviceSyncTimer = null;
+    this.followedDeviceSync = undefined;
   }
 
   /**

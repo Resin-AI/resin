@@ -43,6 +43,9 @@ export * from "./notifications.js";
 // Revisioned Cloud Desired State & Device Reconciliation Reports
 export * from "./control-plane.js";
 
+// Consolidated Device Sync Change Tokens & Capability Negotiation
+export * from "./device-sync.js";
+
 // Backward Compatibility Helpers
 export interface ProtocolMessage<T = unknown> {
   id: string;

@@ -2,6 +2,9 @@ import {
   type AccountToolAccessResponse,
   AccountToolAccessResponseSchema,
   type CatalogSnapshotResponse,
+  DEVICE_SYNC_PUBLICATION_MAX_AGE_MS,
+  type DeviceSyncResponse,
+  DeviceSyncResponseSchema,
   PROTOCOL_VERSION,
 } from "@resin/protocol";
 import {
@@ -15,6 +18,9 @@ import type { DeviceSyncEntry, DeviceSyncScope, DeviceSyncStore } from "./device
 
 const CATALOG_KIND = "catalog-snapshot";
 const TOOL_ACCESS_KIND = "tool-access";
+const DEVICE_SYNC_KIND = "device-sync";
+/** A publication stamped further ahead than this was written under a different clock. */
+const DEVICE_SYNC_FUTURE_TOLERANCE_MS = 5_000;
 
 export interface SharedCloudSyncOptions {
   store: DeviceSyncStore;
@@ -31,6 +37,8 @@ export interface SharedCatalogRequest {
   maxAgeMs: number;
   /** Only serve a peer answer whose cloud request started after this call. */
   fresh?: boolean;
+  /** Only serve a peer answer whose cloud request started at or after this time. */
+  notBefore?: number;
 }
 
 /**
@@ -49,6 +57,114 @@ function scopeOf(identity: CloudRequestIdentity): DeviceSyncScope {
   };
 }
 
+/** A device sync answer another process on this device published. */
+export interface PublishedDeviceSync {
+  readonly sync: DeviceSyncResponse;
+  /** When the cloud read behind it started. */
+  readonly fetchedAt: number;
+  /** Cloud origin of the identity it was read for. */
+  readonly cloudUrl: string;
+}
+
+export interface SharedDeviceSyncOptions {
+  store: DeviceSyncStore;
+  identityProvider: CloudIdentityProvider;
+  onError?: (error: Error) => void;
+}
+
+/**
+ * The daemon's consolidated device sync answer, relayed to the gateways of the same login.
+ *
+ * The daemon owns the device's one sync loop and publishes each answer here; a gateway that finds
+ * a recent one follows its tokens (refetching its catalog only when the catalog token moves, and
+ * confirming tool access from the answer) instead of running its own timer against the cloud. The
+ * entry is scoped exactly like every shared answer, so another login or device never reads it, and
+ * a publisher never follows its own entry.
+ */
+export class SharedDeviceSync {
+  private readonly store: DeviceSyncStore;
+  private readonly identityProvider: CloudIdentityProvider;
+  private readonly onError?: (error: Error) => void;
+
+  constructor(options: SharedDeviceSyncOptions) {
+    this.store = options.store;
+    this.identityProvider = options.identityProvider;
+    this.onError = options.onError;
+  }
+
+  /** Publishes an answer read at `requestedAt`; false when it is not this identity's or not written. */
+  async publish(sync: DeviceSyncResponse, requestedAt: number): Promise<boolean> {
+    const identity = await currentIdentity(this.identityProvider);
+    if (
+      !identity ||
+      identity.accountId !== sync.accountId ||
+      identity.userId !== sync.userId ||
+      identity.deviceId !== sync.deviceId
+    ) {
+      return false;
+    }
+    const scope = scopeOf(identity);
+    try {
+      // Never replace an answer whose cloud read started later; followers must not step back.
+      const existing = this.store.read(DEVICE_SYNC_KIND, scope);
+      if (existing && existing.fetchedAt > requestedAt) return false;
+      this.store.write(DEVICE_SYNC_KIND, scope, { fetchedAt: requestedAt, payload: sync });
+      return true;
+    } catch (error) {
+      // A follower must not keep following the answer this write meant to replace.
+      this.store.remove(DEVICE_SYNC_KIND, scope);
+      this.onError?.(error instanceof Error ? error : new Error(String(error)));
+      return false;
+    }
+  }
+
+  /** Withdraws this identity's answer so followers return to their own polling at once. */
+  async withdraw(): Promise<void> {
+    const identity = await currentIdentity(this.identityProvider);
+    if (identity) this.store.remove(DEVICE_SYNC_KIND, scopeOf(identity));
+  }
+
+  /**
+   * Another process's answer for the current identity, while it is at most `maxAgeMs` old; anything
+   * missing, foreign, unparseable or too old reads as absent.
+   */
+  async read(
+    maxAgeMs: number = DEVICE_SYNC_PUBLICATION_MAX_AGE_MS,
+  ): Promise<PublishedDeviceSync | undefined> {
+    const identity = await currentIdentity(this.identityProvider);
+    if (!identity) return undefined;
+    const entry = this.store.read(DEVICE_SYNC_KIND, scopeOf(identity));
+    if (!entry || entry.writer === this.store.writerId) return undefined;
+    const now = this.store.now();
+    if (
+      entry.fetchedAt < now - maxAgeMs ||
+      entry.fetchedAt > now + DEVICE_SYNC_FUTURE_TOLERANCE_MS
+    ) {
+      return undefined;
+    }
+    const parsed = DeviceSyncResponseSchema.safeParse(entry.payload);
+    if (
+      !parsed.success ||
+      parsed.data.accountId !== identity.accountId ||
+      parsed.data.userId !== identity.userId ||
+      parsed.data.deviceId !== identity.deviceId
+    ) {
+      return undefined;
+    }
+    return { sync: parsed.data, fetchedAt: entry.fetchedAt, cloudUrl: identity.cloudUrl };
+  }
+}
+
+async function currentIdentity(
+  identityProvider: CloudIdentityProvider,
+): Promise<CloudRequestIdentity | null> {
+  try {
+    return await identityProvider();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Lets every gateway of one OS user share a single catalog snapshot and tool-access answer per
  * sync interval. One gateway calls the cloud and publishes the answer through the
@@ -62,12 +178,19 @@ export class SharedCloudSync {
   private readonly onError?: (error: Error) => void;
   /** Body version this instance last published; unchanged answers then only refresh the entry. */
   private publishedBodyVersion?: string;
+  private readonly deviceSync: SharedDeviceSync;
 
   constructor(options: SharedCloudSyncOptions) {
     this.store = options.store;
     this.client = options.client;
     this.identityProvider = options.identityProvider;
     this.onError = options.onError;
+    this.deviceSync = new SharedDeviceSync(options);
+  }
+
+  /** The daemon's device sync answer for this gateway's identity, while recent enough to follow. */
+  async readDeviceSync(): Promise<PublishedDeviceSync | undefined> {
+    return await this.deviceSync.read();
   }
 
   /**
@@ -141,7 +264,10 @@ export class SharedCloudSync {
     return await this.store.coordinate<CatalogSnapshotFetchResult>({
       kind: CATALOG_KIND,
       scope,
-      notBefore: request.fresh ? requestedAt : requestedAt - request.maxAgeMs,
+      notBefore: Math.max(
+        request.fresh ? requestedAt : requestedAt - request.maxAgeMs,
+        request.notBefore ?? Number.NEGATIVE_INFINITY,
+      ),
       fromPeer: (entry) => {
         if (!entry.version) return undefined;
         if (current && entry.version === current.snapshotVersion) {
@@ -226,10 +352,6 @@ export class SharedCloudSync {
   }
 
   private async currentIdentity(): Promise<CloudRequestIdentity | null> {
-    try {
-      return await this.identityProvider();
-    } catch {
-      return null;
-    }
+    return await currentIdentity(this.identityProvider);
   }
 }

@@ -50,6 +50,7 @@ export * from "./cloud-runtime.js";
 
 // Cloud Desired-State Reconciliation & Applied-State Reporting
 export * from "./control-plane.js";
+export * from "./device-sync-signal.js";
 
 // Asynchronous Cloud Job Client & Artifact Download
 export * from "./cloud-job-client.js";

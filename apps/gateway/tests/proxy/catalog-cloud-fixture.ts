@@ -59,6 +59,10 @@ export interface CatalogRequestRecord {
 export class FakeCatalogCloud {
   readonly catalogRequests: CatalogRequestRecord[] = [];
   toolAccessRequests = 0;
+  /** What the account tool-access read answers. */
+  toolAccess: AccountToolAccessResponse["toolAccess"] = "allowed";
+  /** Holds tool-access responses until released. */
+  toolAccessGate?: Promise<void>;
   /** Replaces the contract's unchanged answer, to model a misbehaving server. */
   unchangedOverride?: (currentVersion: string) => unknown;
   /** Holds catalog responses until released. */
@@ -78,11 +82,13 @@ export class FakeCatalogCloud {
     const headers = new Headers(init?.headers);
     if (url.pathname === "/v1/account/tool-access") {
       this.toolAccessRequests++;
+      const toolAccess = this.toolAccess;
+      if (this.toolAccessGate) await this.toolAccessGate;
       const body: AccountToolAccessResponse = {
         schemaVersion: "1.0.0",
         accountId: headers.get("x-account-id") ?? "",
         userId: headers.get("x-user-id") ?? "",
-        toolAccess: "allowed",
+        toolAccess,
       };
       return Response.json(body);
     }

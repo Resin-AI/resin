@@ -19,12 +19,19 @@ import {
   type ControlPlaneRevisionVector,
   type ControlPlaneStateResponse,
   ControlPlaneStateResponseSchema,
+  DEVICE_SYNC_CAPABILITY,
+  DEVICE_SYNC_CAPABILITY_HEADER,
+  DEVICE_SYNC_ROUTE,
+  DEVICE_SYNC_SAFETY_REFRESH_MS,
+  type DeviceSyncResponse,
+  DeviceSyncResponseSchema,
   PROTOCOL_VERSION,
   ProtocolError,
 } from "@resin/protocol";
 import { z } from "zod";
 import type { CloudRequestIdentity } from "./cloud-credentials.js";
 import type { CloudRuntimeModule } from "./cloud-runtime.js";
+import type { DeviceSyncSignal } from "./device-sync-signal.js";
 import type {
   DaemonModule,
   ModuleContext,
@@ -60,7 +67,20 @@ interface EffectiveFetchResult {
   etag: string | null;
   notModified: boolean;
   adaptiveCadence: boolean;
+  /** The server advertised consolidated device sync on this response. */
+  deviceSync: boolean;
 }
+
+/**
+ * A device sync read: the answer, or `unsupported` when the server does not (or no longer)
+ * serve the route or answered something this client cannot trust, so the caller falls back.
+ */
+export type DeviceSyncFetchResult =
+  | { kind: "sync"; sync: DeviceSyncResponse }
+  | { kind: "unsupported"; status: number };
+
+/** Statuses that mean the route is not served, as opposed to a transient failure. */
+const DEVICE_SYNC_UNSUPPORTED_STATUSES = new Set([404, 405, 501]);
 
 async function readBoundedJson(response: Response): Promise<JsonObject | null> {
   const text = await response.text();
@@ -125,9 +145,11 @@ export class ControlPlaneClient {
     );
     const adaptiveCadence =
       response.headers.get(CONTROL_PLANE_CADENCE_HEADER) === CONTROL_PLANE_ADAPTIVE_CADENCE;
+    const deviceSync =
+      response.headers.get(DEVICE_SYNC_CAPABILITY_HEADER) === DEVICE_SYNC_CAPABILITY;
     if (response.status === 304) {
       await response.body?.cancel().catch(() => undefined);
-      return { state: null, etag: etag ?? null, notModified: true, adaptiveCadence };
+      return { state: null, etag: etag ?? null, notModified: true, adaptiveCadence, deviceSync };
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
@@ -150,7 +172,45 @@ export class ControlPlaneClient {
       etag: response.headers.get("etag"),
       notModified: false,
       adaptiveCadence,
+      deviceSync,
     };
+  }
+
+  /** Reads the consolidated device sync tokens; see `DEVICE_SYNC_ROUTE`. */
+  async getDeviceSync(deviceId: string, signal?: AbortSignal): Promise<DeviceSyncFetchResult> {
+    const response = await this.request(
+      `${DEVICE_SYNC_ROUTE}?deviceId=${encodeURIComponent(deviceId)}`,
+      { method: "GET", signal },
+    );
+    if (DEVICE_SYNC_UNSUPPORTED_STATUSES.has(response.status)) {
+      await response.body?.cancel().catch(() => undefined);
+      return { kind: "unsupported", status: response.status };
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ControlPlaneClientError(
+        `Cloud device sync read failed with HTTP ${response.status}`,
+        response.status,
+      );
+    }
+    // A transport failure while reading the body is transient and propagates. A body that is too
+    // large, not JSON, not this contract, or for another device proves nothing: fall back to reading
+    // every endpoint rather than trusting or retrying it.
+    const text = await response.text();
+    if (Buffer.byteLength(text) > MAX_CONTROL_PLANE_RESPONSE_BYTES) {
+      return { kind: "unsupported", status: 502 };
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(text);
+    } catch {
+      return { kind: "unsupported", status: 502 };
+    }
+    const parsed = DeviceSyncResponseSchema.safeParse(decoded);
+    if (!parsed.success || parsed.data.deviceId !== deviceId) {
+      return { kind: "unsupported", status: 502 };
+    }
+    return { kind: "sync", sync: parsed.data };
   }
 
   async getTargetState(
@@ -383,6 +443,12 @@ export interface ControlPlaneRuntimeModuleOptions {
   reportIntervalMs?: number;
   now?: () => Date;
   random?: () => number;
+  /**
+   * Publishes consolidated device sync answers to other daemon modules. With it, a server that
+   * advertises device sync is read through one sync route and desired state is fetched only when
+   * its revision changes; without it the module polls effective state exactly as before.
+   */
+  deviceSync?: DeviceSyncSignal;
 }
 function safeRuntimeError<E>(error: E): string {
   const message = error instanceof Error ? error.message : "Unknown control-plane failure";
@@ -415,6 +481,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   private readonly reportIntervalMs: number | undefined;
   private readonly now: () => Date;
   private readonly random: () => number;
+  private readonly deviceSync: DeviceSyncSignal | undefined;
   private state: ModuleLifecycleState = "uninitialized";
   private timer: NodeJS.Timeout | undefined;
   private context: ModuleContext | null = null;
@@ -437,6 +504,18 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
   private cycle: Promise<void> | null = null;
   private pollCount = 0;
   private reportCount = 0;
+  /** The server advertised device sync on its latest effective-state response. */
+  private deviceSyncOffered = false;
+  /** Latest device sync answer this module acted on; null outside device sync. */
+  private lastSync: DeviceSyncResponse | null = null;
+  /**
+   * After the sync route refused a read, its advertisement is ignored until this time, so a server
+   * that advertises but does not serve it costs one extra read per safety interval, not per poll.
+   */
+  private deviceSyncRefusedUntil = Number.NEGATIVE_INFINITY;
+  /** When effective state was last read successfully, for the device sync safety refresh. */
+  private lastEffectiveReadAt = Number.NEGATIVE_INFINITY;
+  private syncCount = 0;
 
   constructor(options: ControlPlaneRuntimeModuleOptions) {
     this.client = options.client;
@@ -446,6 +525,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
     this.reportIntervalMs = options.reportIntervalMs;
     this.now = options.now ?? (() => new Date());
     this.random = options.random ?? Math.random;
+    this.deviceSync = options.deviceSync;
   }
 
   getState(): ModuleLifecycleState {
@@ -478,12 +558,17 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
         this.manualRequested = false;
         clearTimeout(this.timer);
         this.timer = undefined;
+        this.leaveDeviceSync();
         if (this.state !== "stopping") this.state = "stopped";
       },
       { once: true },
     );
     this.adaptiveCadence = false;
     this.unchangedPolls = 0;
+    // Device sync is renegotiated from the first effective-state read after every start.
+    this.leaveDeviceSync();
+    this.deviceSyncRefusedUntil = Number.NEGATIVE_INFINITY;
+    this.lastEffectiveReadAt = Number.NEGATIVE_INFINITY;
     // A restarted module must reapply against its new context, not accept a 304.
     // Keep the successfully applied vector as a monotonicity guard.
     this.etag = undefined;
@@ -505,6 +590,7 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
     this.manualRequested = false;
     clearTimeout(this.timer);
     this.timer = undefined;
+    this.leaveDeviceSync();
     this.controller?.abort();
     await this.cycle;
     this.context = null;
@@ -644,14 +730,132 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
       this.lastReportAt + this.delay(this.reportInterval(), this.reportIntervalMs !== undefined);
   }
 
+  /** Stops publishing device sync answers; consumers return to their own polling. */
+  private leaveDeviceSync(): void {
+    this.deviceSyncOffered = false;
+    this.lastSync = null;
+    this.deviceSync?.clear();
+  }
+
   private async poll(context: ModuleContext, manual: boolean): Promise<void> {
+    if (this.deviceSync && this.deviceSyncOffered) {
+      const requestedAt = this.now().getTime();
+      this.syncCount += 1;
+      let fetched: DeviceSyncFetchResult;
+      try {
+        fetched = await this.client.getDeviceSync(this.deviceId, context.signal);
+      } catch (error) {
+        if (this.active) this.pollError = safeRuntimeError(error);
+        throw error;
+      }
+      if (!this.active) return;
+      if (fetched.kind === "sync") {
+        await this.followDeviceSync(fetched.sync, requestedAt, context, manual);
+        return;
+      }
+      // The server no longer serves device sync: read effective state as before, this cycle.
+      this.leaveDeviceSync();
+      this.deviceSyncRefusedUntil = this.now().getTime() + DEVICE_SYNC_SAFETY_REFRESH_MS;
+    }
+    await this.pollEffective(context, manual);
+  }
+
+  /**
+   * Acts on one device sync answer: publishes it to the daemon's other modules, then reads effective
+   * state only when its revision moved, after this module lost what it applied (start, identity
+   * change), on a manual reconcile, or once the safety refresh is due.
+   */
+  private async followDeviceSync(
+    sync: DeviceSyncResponse,
+    requestedAt: number,
+    context: ModuleContext,
+    manual: boolean,
+  ): Promise<void> {
+    const previous = this.lastSync;
+    const identityChanged =
+      previous !== null &&
+      (previous.accountId !== sync.accountId || previous.userId !== sync.userId);
+    if (identityChanged) {
+      // Another login on this device: nothing applied for the previous one may be acknowledged.
+      this.etag = undefined;
+      this.lastRevisionToken = null;
+    }
+    if (!this.adaptiveCadence) {
+      // Device sync servers keep the adaptive cadence contract.
+      this.adaptiveCadence = true;
+      this.unchangedPolls = 0;
+      if (this.lastReport) {
+        this.nextReportAt =
+          this.lastReportAt +
+          this.delay(this.reportInterval(), this.reportIntervalMs !== undefined);
+      }
+    }
+    this.lastSync = sync;
+    this.deviceSync?.publish({ sync, requestedAt });
+    // The first answer has nothing to compare with; desired state alone then decides, as before.
+    const tokensUnchanged =
+      !identityChanged &&
+      (previous === null ||
+        (previous.toolAccess === sync.toolAccess &&
+          previous.catalogToken === sync.catalogToken &&
+          previous.validationToken === sync.validationToken &&
+          previous.desired?.revisionToken === sync.desired?.revisionToken));
+    const desired = sync.desired;
+    if (desired === null) {
+      // Without tool access no desired state is served, so there is nothing to read or acknowledge.
+      this.unchangedPolls =
+        !manual && tokensUnchanged
+          ? Math.min(this.unchangedPolls + 1, CONTROL_PLANE_QUIET_POLL_THRESHOLD)
+          : 0;
+      this.pollError = null;
+      return;
+    }
+    const staleReply = !isCurrentRevision(desired.revisions, this.lastRevisions);
+    const readDue =
+      !staleReply &&
+      (manual ||
+        desired.revisionToken !== this.lastRevisionToken ||
+        this.now().getTime() - this.lastEffectiveReadAt >= DEVICE_SYNC_SAFETY_REFRESH_MS);
+    if (readDue) {
+      await this.pollEffective(context, manual);
+      if (!tokensUnchanged) this.unchangedPolls = 0;
+      return;
+    }
+    if (
+      !manual &&
+      tokensUnchanged &&
+      !staleReply &&
+      this.lastRevisionToken !== null &&
+      this.lastReport?.revisionToken === this.lastRevisionToken &&
+      isCurrentRevision(this.lastReport.revisions, this.lastRevisions)
+    ) {
+      this.unchangedPolls = Math.min(this.unchangedPolls + 1, CONTROL_PLANE_QUIET_POLL_THRESHOLD);
+    } else {
+      this.unchangedPolls = 0;
+    }
+    if (!staleReply) this.pollError = null;
+  }
+
+  private async pollEffective(context: ModuleContext, manual: boolean): Promise<void> {
     this.pollCount += 1;
     let reporting = false;
     try {
       const fetched = await this.client.getEffectiveState(this.deviceId, this.etag, context.signal);
       if (!this.active) return;
-      if (this.adaptiveCadence !== fetched.adaptiveCadence) {
-        this.adaptiveCadence = fetched.adaptiveCadence;
+      this.lastEffectiveReadAt = this.now().getTime();
+      if (
+        this.deviceSync &&
+        fetched.deviceSync &&
+        this.lastEffectiveReadAt >= this.deviceSyncRefusedUntil
+      ) {
+        this.deviceSyncOffered = true;
+      } else if (this.deviceSyncOffered) {
+        this.leaveDeviceSync();
+      }
+      // Device sync servers keep the adaptive cadence contract.
+      const adaptiveCadence = fetched.adaptiveCadence || this.deviceSyncOffered;
+      if (this.adaptiveCadence !== adaptiveCadence) {
+        this.adaptiveCadence = adaptiveCadence;
         this.unchangedPolls = 0;
         if (this.lastReport) {
           this.nextReportAt =
@@ -767,6 +971,8 @@ export class ControlPlaneRuntimeModule implements DaemonModule {
       lastSuccessAt: this.lastSuccessAt,
       lastError: this.lastError,
       cadence: this.adaptiveCadence ? CONTROL_PLANE_ADAPTIVE_CADENCE : "legacy",
+      deviceSync: this.deviceSyncOffered ? DEVICE_SYNC_CAPABILITY : "off",
+      syncCount: this.syncCount,
       pollIntervalMs: this.pollInterval(),
       reportIntervalMs: this.reportInterval(),
       unchangedPolls: this.unchangedPolls,

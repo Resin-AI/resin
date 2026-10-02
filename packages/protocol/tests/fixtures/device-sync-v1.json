@@ -1,0 +1,150 @@
+{
+  "capability": {
+    "route": "/v1/device/sync",
+    "header": "Resin-Device-Sync",
+    "value": "sync-v1"
+  },
+  "valid": [
+    {
+      "name": "allowed account with every token",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "allowed",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": {
+          "revisions": { "workspace": 3, "device": 1 },
+          "revisionToken": "w:3:d:1"
+        },
+        "catalogToken": "c:12:g:2026.09.01",
+        "validationToken": "v:7"
+      }
+    },
+    {
+      "name": "allowed account that has never been configured",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "allowed",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": {
+          "revisions": { "workspace": 0, "device": 0 },
+          "revisionToken": "w:0:d:0"
+        },
+        "catalogToken": "c:0:g:1",
+        "validationToken": "v:0"
+      }
+    },
+    {
+      "name": "account without tool access",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "subscription_inactive",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": null,
+        "catalogToken": null,
+        "validationToken": null
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "inactive account given a catalog token",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "subscription_inactive",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": null,
+        "catalogToken": "c:12:g:1",
+        "validationToken": null
+      }
+    },
+    {
+      "name": "inactive account given a desired revision",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "subscription_inactive",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": {
+          "revisions": { "workspace": 1, "device": 0 },
+          "revisionToken": "w:1:d:0"
+        },
+        "catalogToken": null,
+        "validationToken": null
+      }
+    },
+    {
+      "name": "unknown field",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "allowed",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": null,
+        "catalogToken": null,
+        "validationToken": null,
+        "plan": "pro"
+      }
+    },
+    {
+      "name": "malformed revision token",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "allowed",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": {
+          "revisions": { "workspace": 1, "device": 0 },
+          "revisionToken": "c:1|v:2"
+        },
+        "catalogToken": null,
+        "validationToken": null
+      }
+    },
+    {
+      "name": "unknown tool access",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "unknown",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": null,
+        "catalogToken": null,
+        "validationToken": null
+      }
+    },
+    {
+      "name": "token with whitespace",
+      "response": {
+        "schemaVersion": "1.0.0",
+        "deviceId": "device-1",
+        "accountId": "account-1",
+        "userId": "user-1",
+        "toolAccess": "allowed",
+        "checkedAt": "2026-09-01T00:00:00.000Z",
+        "desired": null,
+        "catalogToken": "c 1",
+        "validationToken": null
+      }
+    }
+  ]
+}
