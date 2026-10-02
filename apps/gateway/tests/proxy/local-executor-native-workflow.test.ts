@@ -286,7 +286,9 @@ describe("recorded workflows of ordinary calls", () => {
 
   it("describes a harness tool step by its tool and the arguments a caller sees", async () => {
     // A job that writes a file and then validates it: the write is the first step the tool covers,
-    // so the description shows it, with `{input}` where a caller's value goes.
+    // so the description shows it, with `{input}` where a caller's value goes — whether the input
+    // is a whole argument (an accepted whole-argument binding) or a template leaf — and without
+    // OMP's `i` narration, which old recordings still carry as an argument.
     const privateValues = new InMemoryPrivateValueStore();
     const context = resolveWorkspaceContext({ cwd: workspaceDir });
     privateValues.set("private:sess:2", "python3 scripts/validate.py sources/orders_001.json", {
@@ -303,8 +305,8 @@ describe("recorded workflows of ordinary calls", () => {
         description: "write then validate",
         parameters: {
           type: "object",
-          properties: { content: { type: "string" } },
-          required: ["content"],
+          properties: { content: { type: "string" }, target: { type: "string" } },
+          required: ["content", "target"],
           additionalProperties: false,
         },
         runtime: {
@@ -319,7 +321,10 @@ describe("recorded workflows of ordinary calls", () => {
       {
         schemaVersion: 1,
         workflowId: "wf_write_then_validate",
-        inputs: [{ name: "content", type: "string" }],
+        inputs: [
+          { name: "content", type: "string" },
+          { name: "target", type: "string" },
+        ],
         privateReferences: ["private:sess:2", "private:sess:3"],
         steps: [
           {
@@ -331,12 +336,12 @@ describe("recorded workflows of ordinary calls", () => {
                 name: "path",
                 source: {
                   kind: "template",
-                  template: { type: "literal", value: "sources/orders_001.json" },
+                  template: { type: "input", name: "target" },
                 },
               },
               {
                 name: "content",
-                source: { kind: "template", template: { type: "input", name: "content" } },
+                source: { kind: "input", name: "content" },
               },
               {
                 name: "i",
@@ -383,7 +388,7 @@ describe("recorded workflows of ordinary calls", () => {
     });
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
       "Recorded on this machine:\n" +
-        "Step 1 calls the harness's write tool with path = sources/orders_001.json, content = {content}, i = Creating the source\n" +
+        "Step 1 calls the harness's write tool with path = {target}, content = {content}\n" +
         "Step 2 runs this recorded shell program:\npython3 scripts/validate.py sources/orders_001.json",
     );
   });
@@ -455,7 +460,7 @@ describe("recorded workflows of ordinary calls", () => {
     );
   });
 
-  it("describes a parameterized recorded program with each parameter's recorded value", async () => {
+  it("lists the recorded value only of a parameter that runs it when omitted", async () => {
     const privateValues = new InMemoryPrivateValueStore();
     const program = "python3 solve.py --month 2025-01 'EU zone'";
     const context = resolveWorkspaceContext({ cwd: workspaceDir });
@@ -469,6 +474,7 @@ describe("recorded workflows of ordinary calls", () => {
         parameters: {
           type: "object",
           properties: { month: { type: "string" }, text: { type: "string" } },
+          required: ["text"],
           additionalProperties: false,
         },
         runtime: {
@@ -485,7 +491,7 @@ describe("recorded workflows of ordinary calls", () => {
         workflowId: "wf_process_parameterized",
         inputs: [
           { name: "month", type: "string", recordedDefault: true },
-          { name: "text", type: "string", recordedDefault: true },
+          { name: "text", type: "string" },
         ],
         privateReferences: ["private:sess:1"],
         steps: [
@@ -530,9 +536,13 @@ describe("recorded workflows of ordinary calls", () => {
     });
 
     const description = executor.describeRecordedWorkflow(installed.artifactDigest, context);
-    // Each bound token reads as its input, and each input's recorded value is listed once.
+    // Each bound token reads as its input. Only `month` falls back on its recorded value; `text`
+    // is required, so its recorded value is never claimed as one that runs.
     expect(description).toContain("python3 solve.py --month {month} {text}\n");
-    expect(description).toContain("month = 2025-01; text = EU zone");
+    expect(description).toContain(
+      "\nParameters (each replaces its {name} above; omitted, the recorded value runs): month = 2025-01",
+    );
+    expect(description).not.toContain("EU zone");
   });
 
   it("names the printing step at a token bound to an earlier step's output", async () => {

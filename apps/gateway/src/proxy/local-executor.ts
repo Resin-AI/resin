@@ -38,6 +38,7 @@ import {
   type CompiledWorkflowArtifact,
   DEFAULT_BUNDLE_LIMITS,
   type KeyStore,
+  RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   type RuntimeAdapter,
@@ -151,6 +152,11 @@ const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 const RECORDED_PATCH_PREVIEW_LINES = 12;
 /** Characters of a harness tool argument's recorded text shown in a tool description. */
 const RECORDED_NATIVE_ARGUMENT_CHARS = 120;
+/**
+ * OMP's built-in tools take `i`, a one-line statement of intent for the transcript: narration, not
+ * the call's data. Recordings made before the decoder kept it as metadata still carry it.
+ */
+const OMP_INTENT_ARGUMENT = "i";
 /**
  * Characters of recorded steps one tool description may carry. Tool listings leave the recorded
  * steps out; get_tool_schema and search_tools return them, and each result stays in the agent's
@@ -556,9 +562,15 @@ export class LocalArtifactExecutor {
           : source.kind === "template"
             ? templateText(source.template)
             : undefined;
+    // Only an input that keeps its recorded token when omitted may be shown with that value: a
+    // required input has no value a caller can fall back on, and showing one would claim it does.
+    const recordedDefaults = new Set(
+      plan.inputs.filter((input) => input.recordedDefault === true).map((input) => input.name),
+    );
     /**
      * A program whose tokens are bound to caller inputs: its recorded text with each bound token
-     * shown as `{input}`, so a caller sees where a value goes, and each input's recorded value.
+     * shown as `{input}`, so a caller sees where a value goes, and the recorded value of each input
+     * that runs it when omitted.
      */
     const parameterized = (
       source: WorkflowValueSource,
@@ -592,7 +604,14 @@ export class LocalArtifactExecutor {
             raw: recorded.slice(first.start, last.end),
             value: JSON.stringify(words),
           };
-          return [{ token: run, name: hole.binding.name, span: undefined, parameter: true }];
+          return [
+            {
+              token: run,
+              name: hole.binding.name,
+              span: undefined,
+              parameter: recordedDefaults.has(hole.binding.name),
+            },
+          ];
         }
         const token =
           hole.embedded === undefined
@@ -606,7 +625,14 @@ export class LocalArtifactExecutor {
           return [];
         }
         if (hole.binding.type === "input") {
-          return [{ token, name: hole.binding.name, span: hole.span, parameter: true }];
+          return [
+            {
+              token,
+              name: hole.binding.name,
+              span: hole.span,
+              parameter: recordedDefaults.has(hole.binding.name),
+            },
+          ];
         }
         // A value an earlier step printed: the recorded one is stale, so name where it comes from.
         if (hole.binding.type === "extract") {
@@ -719,12 +745,25 @@ export class LocalArtifactExecutor {
       if (program === undefined) {
         // A harness tool call (a file write, an edit): the tool and each argument a caller can
         // see — its recorded text, or `{input}` where a caller's value goes — so the block shows
-        // every step the tool covers, not only the commands.
+        // every step the tool covers, not only the commands. OMP's `i` is the harness's one-line
+        // narration of the call, never its data, so it is not shown.
         const shown = step.arguments.flatMap((argument) => {
-          const source = argument.source;
-          if (source.kind === "template" && source.template.type === "input") {
-            return [`${argument.name} = {${source.template.name}}`];
+          if (
+            step.callable.runtime === RESIN_HARNESS_TOOL_RUNTIME &&
+            argument.name === OMP_INTENT_ARGUMENT
+          ) {
+            return [];
           }
+          const source = argument.source;
+          // A whole argument bound to an input is the bare `input` source; a leaf of a template is
+          // the `input` template. Both read as `{input}`.
+          const input =
+            source.kind === "input"
+              ? source.name
+              : source.kind === "template" && source.template.type === "input"
+                ? source.template.name
+                : undefined;
+          if (input !== undefined) return [`${argument.name} = {${input}}`];
           const value = text(source);
           if (value === undefined) return [];
           const oneLine = value.replace(/\s+/gu, " ").trim();
