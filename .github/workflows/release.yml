@@ -32,6 +32,16 @@ on:
         required: false
         default: false
         type: boolean
+      emergency:
+        description: Production only. Promote stable even though the previous stable promotion was less than 7 days ago (requires emergency_reason)
+        required: false
+        default: false
+        type: boolean
+      emergency_reason:
+        description: Required when emergency is true. Single-line reason the promotion cannot wait for the weekly stable cadence; recorded in the run summary
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: release-${{ inputs.environment || 'production' }}
@@ -113,6 +123,110 @@ jobs:
             exit 1
           fi
           echo "Manual confirmation validated for target environment: $TARGET_ENV"
+
+      - name: Enforce weekly stable promotion cadence
+        id: promotion_cadence
+        shell: bash
+        env:
+          EMERGENCY: ${{ inputs.emergency }}
+          EMERGENCY_REASON: ${{ inputs.emergency_reason }}
+        run: |
+          set -euo pipefail
+          # Stable promotion happens at most once per week; only an explicit emergency with a
+          # recorded reason may go sooner. The previous promotion time is the publication time of the
+          # newest published GitHub release, which this workflow publishes only after a production
+          # promotion and its post-promotion smoke verification succeed.
+          min_interval_seconds=604800
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          if [ "$TARGET_ENV" != "production" ]; then
+            echo "Weekly stable promotion cadence applies only to production; $TARGET_ENV promotion is not gated."
+            exit 0
+          fi
+
+          case "${EMERGENCY:-false}" in
+            true) emergency=true ;;
+            false | "") emergency=false ;;
+            *)
+              echo "::error::Invalid emergency input (must be true or false)"
+              exit 1
+              ;;
+          esac
+          if [[ "${EMERGENCY_REASON:-}" == *[[:cntrl:]]* ]]; then
+            echo "::error::emergency_reason must be a single line without control characters"
+            exit 1
+          fi
+          reason="${EMERGENCY_REASON:-}"
+          reason="${reason#"${reason%%[![:space:]]*}"}"
+          reason="${reason%"${reason##*[![:space:]]}"}"
+          if [ "${#reason}" -gt 500 ]; then
+            echo "::error::emergency_reason must be at most 500 characters"
+            exit 1
+          fi
+          if [ "$emergency" = "true" ] && [ -z "$reason" ]; then
+            echo "::error::emergency=true requires a non-empty emergency_reason"
+            exit 1
+          fi
+          if [ "$emergency" = "false" ] && [ -n "$reason" ]; then
+            echo "::error::emergency_reason is only accepted together with emergency=true"
+            exit 1
+          fi
+
+          published="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r -s --arg tag "$RELEASE_TAG" '.[][] | select(.draft == false and .prerelease == false and .tag_name != $tag and (.published_at | type) == "string") | [.tag_name, .published_at] | @tsv')"
+          previous_tag=""
+          previous_at=""
+          previous_epoch=""
+          while IFS=$'\t' read -r tag published_at; do
+            [ -n "$tag" ] || continue
+            epoch="$(date -u -d "$published_at" +%s)"
+            if [ -z "$previous_epoch" ] || [ "$epoch" -gt "$previous_epoch" ]; then
+              previous_tag="$tag"
+              previous_at="$published_at"
+              previous_epoch="$epoch"
+            fi
+          done <<<"$published"
+
+          now_epoch="$(date -u +%s)"
+          if [ -z "$previous_epoch" ]; then
+            decision="allowed"
+            detail="No previous published stable release was found."
+          else
+            elapsed=$((now_epoch - previous_epoch))
+            next_window="$(date -u -d "@$((previous_epoch + min_interval_seconds))" +%Y-%m-%dT%H:%M:%SZ)"
+            detail="Previous stable promotion ${previous_tag} was published at ${previous_at} ($((elapsed / 3600))h ago); the next weekly window opens at ${next_window}."
+            if [ "$elapsed" -ge "$min_interval_seconds" ]; then
+              decision="allowed"
+            elif [ "$emergency" = "true" ]; then
+              decision="emergency"
+            else
+              decision="refused"
+            fi
+          fi
+
+          {
+            echo "### Stable promotion cadence"
+            echo ""
+            echo "- Release: \`${RELEASE_TAG}\`"
+            echo "- Decision: **${decision}**"
+            echo "- ${detail}"
+            if [ "$emergency" = "true" ]; then
+              echo "- Emergency promotion requested. Reason: ${reason}"
+            fi
+          } >> "$summary"
+
+          case "$decision" in
+            refused)
+              echo "::error::Production stable promotion refused: stable promotion happens at most once every 7 days. ${detail} Re-dispatch with emergency=true and an emergency_reason only for an urgent fix."
+              exit 1
+              ;;
+            emergency)
+              echo "::warning::Emergency stable promotion inside the weekly window. ${detail} Reason: ${reason}"
+              ;;
+            *)
+              echo "Stable promotion cadence satisfied. ${detail}"
+              ;;
+          esac
 
       - name: Verify release-candidate qualification run identity and status
         id: candidate_gate

@@ -26,6 +26,7 @@ Release signing secrets and configuration are bound exclusively to the `producti
 - **Auditability & Machine Verification Receipts**:
   - Workflow strictly enforces exact 40-character commit SHA matching against protected release tags.
   - Production promotion requires `confirm_promotion=PROMOTE_PRODUCTION`; manual channel operations retain their own explicit confirmation inputs. The scheduled renewal path accepts only its exact schedule event and never selects restoration.
+  - Production stable promotion follows a weekly cadence (see §1.4): `release.yml` refuses a production promotion when the previous stable promotion was less than 7 days ago unless the dispatch sets `emergency=true` with a non-empty single-line `emergency_reason`, which is recorded in the run summary and as a warning annotation.
   - Automated cryptographic qualification gates must pass 100% of checks before signing keys are loaded into runner memory.
   - Immutable GitHub Actions audit logs track the executing operator's identity, dispatch parameters, and timestamp.
 
@@ -36,6 +37,15 @@ The channel renewal schedule is `47 */12 * * *` (00:47 and 12:47 UTC). It uses t
 The independent credential-free monitor remains on `17 */3 * * *` and fails at six hours or less of remaining validity or on any verification failure. Either monitoring or renewal failure submits the existing incident notification. GitHub schedules can be delayed or disabled: the schedule is not a delivery guarantee, and failures still require operator attention.
 
 Expired metadata is never restored automatically. Investigate it and explicitly dispatch `operation=restore` with `confirmation=RESTORE_EXPIRED_CHANNEL_PRODUCTION` when restoration is authorized. Manual `operation=renew` continues to require `confirmation=RENEW_CHANNEL_PRODUCTION`.
+
+### 1.4 Weekly Stable Promotion Cadence
+
+Stable is promoted to production at most once every 7 days. Release candidates can still be built and qualified as often as needed; only the production promotion is paced, so every installation receives at most one stable update per week through its regular update checks.
+
+- **Previous promotion time**: the newest published (non-draft, non-prerelease) GitHub release, excluding the tag being promoted. `release.yml` publishes that GitHub release only after the production channel promotion and post-promotion smoke verification succeed, so a promotion that was frozen after a smoke failure leaves its release as a draft and does not start a new window.
+- **Guard**: the `Enforce weekly stable promotion cadence` step runs right after confirmation validation, before the candidate is downloaded and before any publication side effect. It fails closed when release history cannot be read. Staging dry runs are not paced.
+- **Emergency exception**: for urgent security or breakage fixes, re-dispatch with `emergency=true` and `emergency_reason` describing why the release cannot wait (single line, at most 500 characters). The decision, the previous release and the reason are written to the run summary. An emergency promotion starts a new 7-day window.
+- **Channel renewal is unaffected**: scheduled and manual channel-only renewal (§1.3) re-signs the current channel without advancing the release and is not subject to the cadence.
 
 ---
 
