@@ -11,9 +11,11 @@ import { fileURLToPath } from "node:url";
 import { registerDaemonModuleProvider } from "@resin/observer";
 import { runDaemonCli } from "@resin/observer/daemon";
 import { resolveDaemonReleaseVersion } from "../daemon-release-version.js";
+import { createDeviceSyncRelayDaemonModule } from "../proxy/device-sync-daemon-module.js";
 import { createWorkflowValidationDaemonModule } from "../proxy/validation-daemon-module.js";
 
 registerDaemonModuleProvider((context) => createWorkflowValidationDaemonModule(context));
+registerDaemonModuleProvider((context) => createDeviceSyncRelayDaemonModule(context));
 
 const entryFile = fileURLToPath(import.meta.url);
 await runDaemonCli({ entryFile, version: resolveDaemonReleaseVersion(entryFile) });

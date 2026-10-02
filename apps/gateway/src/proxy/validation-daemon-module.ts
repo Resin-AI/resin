@@ -2,6 +2,8 @@ import path from "node:path";
 import {
   type DaemonModule,
   type DaemonModuleProviderContext,
+  type DeviceSyncSignal,
+  type DeviceSyncSnapshot,
   FilePrivateValueStore,
   type ModuleContext,
   type ModuleHealth,
@@ -41,10 +43,20 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   readonly critical = false;
 
   private readonly worker: WorkflowValidationWorker;
+  private readonly deviceSync?: DeviceSyncSignal;
   private state: ModuleLifecycleState = "uninitialized";
+  private unsubscribe?: () => void;
+  /** Identity and pending-ask token of the last device sync answer a pass was run for. */
+  private followedToken?: string;
 
-  constructor(worker: WorkflowValidationWorker) {
+  /**
+   * `deviceSync`: the daemon's consolidated sync. While it publishes answers, a pass runs at once
+   * whenever the pending-ask token changes, and the worker's own timer only retries local work
+   * (the worker must be built with `followsDeviceSync` reading the same signal).
+   */
+  constructor(worker: WorkflowValidationWorker, deviceSync?: DeviceSyncSignal) {
     this.worker = worker;
+    this.deviceSync = deviceSync;
   }
 
   getState(): ModuleLifecycleState {
@@ -54,13 +66,38 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   async start(_context: ModuleContext): Promise<void> {
     this.state = "starting";
     this.worker.start();
+    this.followedToken = undefined;
+    this.unsubscribe ??= this.deviceSync?.subscribe((snapshot) => this.follow(snapshot));
+    const current = this.deviceSync?.current();
+    if (current) this.follow(current);
     this.state = "ready";
   }
 
   async stop(_context: ModuleContext): Promise<void> {
     this.state = "stopping";
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
     await this.worker.stop();
     this.state = "stopped";
+  }
+
+  /** Runs a pass now when the pending-ask token (or the identity it is for) changed. */
+  private follow(snapshot: DeviceSyncSnapshot | null): void {
+    if (snapshot === null) {
+      // Answers stopped; the worker's own timer polls again, and the next answer starts afresh.
+      this.followedToken = undefined;
+      return;
+    }
+    const { accountId, userId, validationToken } = snapshot.sync;
+    if (validationToken === null) {
+      // No asks are served without tool access; remember that so regaining it runs a pass.
+      this.followedToken = `${accountId}\u0000${userId}\u0000-`;
+      return;
+    }
+    const token = `${accountId}\u0000${userId}\u0000${validationToken}`;
+    if (token === this.followedToken || !this.worker.isRunning()) return;
+    this.followedToken = token;
+    void this.worker.runFresh().catch(() => undefined);
   }
 
   async healthCheck(): Promise<ModuleHealth> {
@@ -96,8 +133,12 @@ export function createWorkflowValidationDaemonModule(
         filePath: path.join(context.paths.stateDir, WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME),
       }),
       log: (message) => context.logger.info(message),
+      ...(context.deviceSync
+        ? { followsDeviceSync: () => context.deviceSync?.current() !== null }
+        : {}),
       ...overrides,
       identity: { workspaceId, deviceId: context.credentials.deviceId },
     }),
+    context.deviceSync,
   );
 }

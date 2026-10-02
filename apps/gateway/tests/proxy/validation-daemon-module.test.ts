@@ -16,11 +16,16 @@ import {
 import {
   CloudCredentialStore,
   type DaemonModuleProviderContext,
+  DeviceSyncSignal,
+  type DeviceSyncSnapshot,
   InMemoryPrivateValueStore,
   type ModuleContext,
   resolvePaths,
 } from "@resin/observer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeviceSyncRelayDaemonModule } from "../../src/proxy/device-sync-daemon-module.js";
+import { DeviceSyncStore } from "../../src/proxy/device-sync-store.js";
+import { SharedDeviceSync } from "../../src/proxy/shared-sync.js";
 import { createWorkflowValidationDaemonModule } from "../../src/proxy/validation-daemon-module.js";
 import {
   FileWorkflowValidationPassLease,
@@ -326,6 +331,107 @@ describe("the daemon's validation module", () => {
     }
 
     expect(cloud.decisions).toHaveLength(1);
+  });
+
+  function syncAnswer(validationToken: string | null): DeviceSyncSnapshot {
+    return {
+      requestedAt: Date.now(),
+      sync: {
+        schemaVersion: "1.0.0",
+        deviceId: DEVICE_ID,
+        accountId: "acct_daemon_01",
+        userId: "user_daemon_01",
+        toolAccess: validationToken === null ? "subscription_inactive" : "allowed",
+        checkedAt: new Date().toISOString(),
+        desired: null,
+        catalogToken: validationToken === null ? null : "c:1",
+        validationToken,
+      },
+    };
+  }
+
+  it("runs a pass at once whenever the device sync's ask token changes, and only then", async () => {
+    const recorded = recording();
+    const cloud = fakeCloud(askFor(recorded.plan));
+    vi.stubGlobal("fetch", cloud.fetchImpl);
+    const deviceSync = new DeviceSyncSignal();
+    const module = createWorkflowValidationDaemonModule(
+      { ...context, deviceSync },
+      {
+        privateValues: recorded.store,
+        localCalls: localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]),
+        // Far beyond the test: every listing below comes from the device sync.
+        pollIntervalMs: 3_600_000,
+      },
+    );
+    const listings = () =>
+      vi.mocked(cloud.fetchImpl).mock.calls.filter(([, init]) => init?.method !== "POST").length;
+
+    await module.start(moduleContext());
+    try {
+      deviceSync.publish(syncAnswer("v:1"));
+      await vi.waitFor(() => expect(cloud.decisions).toHaveLength(1));
+      expect(listings()).toBe(1);
+
+      // The same token again lists nothing.
+      deviceSync.publish(syncAnswer("v:1"));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(listings()).toBe(1);
+
+      // The decision moved the token: the next answer runs another pass.
+      deviceSync.publish(syncAnswer("v:2"));
+      await vi.waitFor(() => expect(listings()).toBe(2));
+
+      // Without tool access there is no token and nothing is listed; regaining it runs a pass.
+      deviceSync.publish(syncAnswer(null));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(listings()).toBe(2);
+      deviceSync.publish(syncAnswer("v:2"));
+      await vi.waitFor(() => expect(listings()).toBe(3));
+    } finally {
+      await module.stop(moduleContext());
+    }
+  });
+
+  it("publishes the device sync for gateways and withdraws it on stop", async () => {
+    const deviceSync = new DeviceSyncSignal();
+    const relay = createDeviceSyncRelayDaemonModule({ ...context, deviceSync });
+    if (!relay) throw new Error("the relay needs a device sync signal");
+    const syncDir = path.join(
+      path.dirname(context.credentialStore.getTokenFilePath()),
+      "cloud-sync",
+    );
+    const identity = await context.credentialStore.getRequestIdentity();
+    if (!identity) throw new Error("the fixture identity did not load");
+    const gatewayView = new SharedDeviceSync({
+      store: new DeviceSyncStore({ dir: syncDir }),
+      identityProvider: async () => identity,
+    });
+
+    await relay.start(moduleContext());
+    try {
+      const answer = syncAnswer("v:7");
+      deviceSync.publish(answer);
+      await vi.waitFor(async () =>
+        expect((await gatewayView.read())?.sync.validationToken).toBe("v:7"),
+      );
+      expect((await gatewayView.read())?.fetchedAt).toBe(answer.requestedAt);
+
+      // A stopped sync loop withdraws its answer at once.
+      deviceSync.clear();
+      await vi.waitFor(async () => expect(await gatewayView.read()).toBeUndefined());
+      deviceSync.publish(syncAnswer("v:8"));
+      await vi.waitFor(async () =>
+        expect((await gatewayView.read())?.sync.validationToken).toBe("v:8"),
+      );
+    } finally {
+      await relay.stop(moduleContext());
+    }
+    expect(await gatewayView.read()).toBeUndefined();
+  });
+
+  it("adds no relay to a daemon without a device sync loop", () => {
+    expect(createDeviceSyncRelayDaemonModule(context)).toBeUndefined();
   });
 });
 

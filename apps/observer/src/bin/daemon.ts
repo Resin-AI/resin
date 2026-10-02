@@ -27,6 +27,7 @@ import {
   FileControlPlaneApplyAdapter,
 } from "../control-plane.js";
 import { registeredDaemonModuleProviders } from "../daemon-extensions.js";
+import { DeviceSyncSignal } from "../device-sync-signal.js";
 import {
   bridgeErrorLogs,
   configureErrorReporting,
@@ -1238,10 +1239,13 @@ async function runForeground(options: {
     const controlPlaneClient = new ControlPlaneClient({
       identityProvider: (identityOptions) => credentialStore.getRequestIdentity(identityOptions),
     });
+    // The control-plane module owns the device's one cloud sync loop; providers' modules follow it.
+    const deviceSync = new DeviceSyncSignal();
     supervisor.registerModule(
       new ControlPlaneRuntimeModule({
         client: controlPlaneClient,
         deviceId: deviceCredentials.credentials.deviceId,
+        deviceSync,
         applyAdapter: new FileControlPlaneApplyAdapter({
           reloadConfig: async () => {
             const result = await reloadConfig();
@@ -1259,6 +1263,7 @@ async function runForeground(options: {
         logger,
         credentialStore,
         credentials: deviceCredentials.credentials,
+        deviceSync,
       });
       if (module) supervisor.registerModule(module);
     }

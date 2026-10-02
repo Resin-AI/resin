@@ -23,7 +23,7 @@ import {
   InMemoryPrivateValueStore,
   LocalSessionDiscoveryUnavailableError,
 } from "@resin/observer";
-import { PROTOCOL_VERSION } from "@resin/protocol";
+import { DEVICE_SYNC_SAFETY_REFRESH_MS, PROTOCOL_VERSION } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
 import {
@@ -816,6 +816,68 @@ describe("the validation worker's poll cadence", () => {
     expect(quiet.gaps().slice(5, 7)).toEqual([QUIET * factor, QUIET * factor]);
     fast.worker.stop();
     quiet.worker.stop();
+  });
+
+  it("lists only once the safety refresh is due while a device sync follows the ask token", async () => {
+    const { worker, polledAt } = polling(() => [], { followsDeviceSync: () => true });
+
+    // The first timed pass lists: nothing has been listed since the worker started.
+    await vi.advanceTimersByTimeAsync(FAST);
+    expect(polledAt).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(DEVICE_SYNC_SAFETY_REFRESH_MS - FAST);
+    expect(polledAt).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(polledAt).toHaveLength(2);
+    worker.stop();
+  });
+
+  it("keeps its own cadence for asks the last pass left to retry locally", async () => {
+    const { worker, gaps } = polling(
+      () => [ask("req-foreign", { workspaceId: OTHER_WORKSPACE_ID })],
+      { followsDeviceSync: () => true },
+    );
+
+    await vi.advanceTimersByTimeAsync(FAST + sum(BACKING_OFF));
+
+    expect(gaps()).toEqual([FAST, ...BACKING_OFF]);
+    worker.stop();
+  });
+
+  it("returns to its own polling as soon as the device sync stops", async () => {
+    let follows = true;
+    const { worker, polledAt } = polling(() => [], { followsDeviceSync: () => follows });
+    await vi.advanceTimersByTimeAsync(FAST + 10 * QUIET);
+    expect(polledAt).toHaveLength(1);
+
+    follows = false;
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(polledAt).toHaveLength(2);
+    worker.stop();
+  });
+
+  it("runs a fresh pass after the one already listing", async () => {
+    const gate = Promise.withResolvers<void>();
+    let listings = 0;
+    const worker = new WorkflowValidationWorker({
+      client: {
+        listPending: async () => {
+          listings += 1;
+          if (listings === 1) await gate.promise;
+          return [];
+        },
+        submitDecision: async () => ({ status: "recorded" }),
+      },
+      identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+    });
+
+    const running = worker.runOnce();
+    const fresh = worker.runFresh();
+    const joined = worker.runFresh();
+    expect(listings).toBe(1);
+    gate.resolve();
+    await Promise.all([running, fresh, joined]);
+
+    expect(listings).toBe(2);
   });
 });
 

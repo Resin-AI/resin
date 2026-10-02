@@ -1,4 +1,5 @@
 import type { CloudCredentialStore, StoredCloudCredentials } from "./cloud-credentials.js";
+import type { DeviceSyncSignal } from "./device-sync-signal.js";
 import type { DaemonModule, Logger } from "./lifecycle.js";
 import type { DaemonPaths } from "./paths.js";
 
@@ -8,6 +9,11 @@ export interface DaemonModuleProviderContext {
   readonly logger: Logger;
   readonly credentialStore: CloudCredentialStore;
   readonly credentials: StoredCloudCredentials;
+  /**
+   * The daemon's consolidated device sync, when the cloud offers it. Modules that would poll the
+   * cloud for their own state subscribe and refetch only when their change token moves.
+   */
+  readonly deviceSync?: DeviceSyncSignal;
 }
 
 /**

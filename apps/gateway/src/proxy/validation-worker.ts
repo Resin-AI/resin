@@ -32,7 +32,7 @@ import {
   type PrivateValueStore,
   createLocalCallIdentity,
 } from "@resin/observer";
-import { PROTOCOL_VERSION } from "@resin/protocol";
+import { DEVICE_SYNC_SAFETY_REFRESH_MS, PROTOCOL_VERSION } from "@resin/protocol";
 import { z } from "zod";
 import type { FileValidationAskLedger } from "./validation-ask-ledger.js";
 import type {
@@ -373,6 +373,13 @@ export interface WorkflowValidationWorkerOptions {
    * daemon and gateway pass the owner-only ledger under the Resin state directory.
    */
   askLedger?: Pick<FileValidationAskLedger, "admit">;
+  /**
+   * True while the device's consolidated sync is following this device's pending-ask token and
+   * runs a pass (`runOnce`) whenever it changes. The timer then lists asks only to retry what the
+   * last pass left undecided or undelivered, or once `DEVICE_SYNC_SAFETY_REFRESH_MS` has passed
+   * since the last listing; otherwise it keeps its own adaptive polling, exactly as without it.
+   */
+  followsDeviceSync?: () => boolean | Promise<boolean>;
 }
 
 /** How long an ask without an expiry stays remembered as another device's to answer. */
@@ -435,6 +442,11 @@ export class WorkflowValidationWorker {
   private readonly log: (message: string) => void;
   private readonly passLease?: WorkflowValidationPassLease;
   private readonly askLedger?: Pick<FileValidationAskLedger, "admit">;
+  private readonly followsDeviceSync?: () => boolean | Promise<boolean>;
+  /** When asks were last listed successfully, in `Date.now()` time. */
+  private lastListedAt = Number.NEGATIVE_INFINITY;
+  /** The last pass left asks this device must retry locally (deferred or not yet decidable). */
+  private localRetryPending = false;
   private timer?: NodeJS.Timeout;
   /** When the armed timer fires, in `Date.now()` time; lets a wake pull it earlier. */
   private timerDueAt?: number;
@@ -474,6 +486,7 @@ export class WorkflowValidationWorker {
     this.log = options.log ?? (() => undefined);
     this.passLease = options.passLease;
     this.askLedger = options.askLedger;
+    this.followsDeviceSync = options.followsDeviceSync;
   }
 
   /** Arms the poll, on the fast cadence. Passes never hold the process open: the timer is unref'd. */
@@ -528,10 +541,22 @@ export class WorkflowValidationWorker {
     const pass = this.runLeasedPass(signal);
     this.inFlight = pass;
     try {
-      return await pass;
+      const summary = await pass;
+      // A pass another process ran leaves nothing for this one to retry.
+      this.localRetryPending = !summary.skipped && (summary.deferred > 0 || summary.refused > 0);
+      return summary;
     } finally {
       if (this.inFlight === pass) this.inFlight = undefined;
     }
+  }
+
+  /**
+   * Runs a pass whose listing starts after this call: one already running may have listed before
+   * whatever prompted the call, so it is waited out first, then `runOnce` runs (or joins) the next.
+   */
+  async runFresh(): Promise<WorkflowValidationPassSummary> {
+    await this.inFlight?.catch(() => undefined);
+    return await this.runOnce();
   }
 
   private armTimer(delay: number = this.nextDelay()): void {
@@ -540,12 +565,37 @@ export class WorkflowValidationWorker {
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.timerDueAt = undefined;
-      void this.runOnce()
+      void this.timedPass()
         // A pass reports its own failures; the poll must survive every one of them.
         .catch(() => undefined)
         .finally(() => this.armTimer());
     }, delay);
     this.timer.unref?.();
+  }
+
+  /**
+   * The timer's pass. While a device sync follows the pending-ask token, a pass with nothing to
+   * retry locally and no safety refresh due lists nothing and counts as empty, so the timer backs
+   * off to its quiet interval.
+   */
+  private async timedPass(): Promise<void> {
+    if (
+      this.followsDeviceSync &&
+      !this.localRetryPending &&
+      Date.now() - this.lastListedAt < DEVICE_SYNC_SAFETY_REFRESH_MS
+    ) {
+      let follows = false;
+      try {
+        follows = await this.followsDeviceSync();
+      } catch {
+        follows = false;
+      }
+      if (follows) {
+        this.emptyPolls += 1;
+        return;
+      }
+    }
+    await this.runOnce();
   }
 
   /** The interval the cadence is at: fast, then doubling per empty poll past the threshold, capped. */
@@ -623,6 +673,7 @@ export class WorkflowValidationWorker {
     let requests: WorkflowValidationRequest[];
     try {
       requests = await this.client.listPending(this.deviceId, signal);
+      this.lastListedAt = Date.now();
     } catch (error) {
       this.log(`workflow validation: could not list pending asks (${describe(error)})`);
       summary.deferred += 1;
