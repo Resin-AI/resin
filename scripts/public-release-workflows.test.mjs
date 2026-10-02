@@ -972,13 +972,27 @@ describe("Public Release Workflows Contract", () => {
     const inputs = production.doc.on.workflow_dispatch.inputs;
     const guard = job.steps.find((step) => step.id === "promotion_cadence");
     const DAY_MS = 24 * 60 * 60 * 1000;
+    const NOW_MS = Date.parse("2026-10-02T12:00:00Z");
+    // The workflow runs on Linux and uses GNU `date -d`; the shim answers exactly the three forms
+    // the step uses, against a fixed clock, so the harness behaves the same on every host.
+    const DATE_SHIM = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const at = args.indexOf("-d");
+const value = at >= 0 ? args[at + 1] : undefined;
+const ms = value === undefined ? Number(process.env.FAKE_NOW_MS) : value.startsWith("@") ? Number(value.slice(1)) * 1000 : Date.parse(value);
+const format = args.find((arg) => arg.startsWith("+"));
+if (!args.includes("-u") || !Number.isFinite(ms)) { process.stderr.write("date shim: unsupported input\\n"); process.exit(1); }
+if (format === "+%s") process.stdout.write(Math.floor(ms / 1000) + "\\n");
+else if (format === "+%Y-%m-%dT%H:%M:%SZ") process.stdout.write(new Date(ms).toISOString().replace(/\\.\\d{3}Z$/, "Z") + "\\n");
+else { process.stderr.write("date shim: unsupported format\\n"); process.exit(1); }
+`;
 
     function release(tagName, ageMs, overrides = {}) {
       return {
         tag_name: tagName,
         draft: false,
         prerelease: false,
-        published_at: new Date(Date.now() - ageMs).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        published_at: new Date(NOW_MS - ageMs).toISOString().replace(/\.\d{3}Z$/, "Z"),
         ...overrides,
       };
     }
@@ -995,6 +1009,7 @@ describe("Public Release Workflows Contract", () => {
           '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CALLS"\n[ "$GH_EXIT" = 0 ] || exit "$GH_EXIT"\ncat "$GH_PAGES"\n',
           { mode: 0o700 },
         );
+        fs.writeFileSync(path.join(directory, "date"), DATE_SHIM, { mode: 0o700 });
         const result = spawnSync("bash", ["-c", guard.run], {
           encoding: "utf8",
           env: {
@@ -1008,6 +1023,7 @@ describe("Public Release Workflows Contract", () => {
             GH_CALLS: calls,
             GH_EXIT: String(ghExit),
             GH_PAGES: pagesPath,
+            FAKE_NOW_MS: String(NOW_MS),
             ...env,
           },
         });
@@ -1068,7 +1084,9 @@ describe("Public Release Workflows Contract", () => {
       });
       expect(result.status).toBe(1);
       expect(result.stdout).toContain("::error::Production stable promotion refused");
-      expect(result.stdout).toContain("Previous stable promotion v1.3.0");
+      expect(result.stdout).toContain(
+        "Previous stable promotion v1.3.0 was published at 2026-09-30T12:00:00Z (48h ago); the next weekly window opens at 2026-10-07T12:00:00Z.",
+      );
       expect(result.summary).toContain("Decision: **refused**");
     });
 
