@@ -39,6 +39,9 @@ export * from "./qualification.js";
 // V1 Canonical Contracts & Schemas
 export * from "./v1.js";
 
+// Cloud-issued tool certificates (signed artifact/manifest bindings)
+export * from "./tool-certificate.js";
+
 // Computation Semantic Evidence (analysis-only) IR, digests and fail-closed reader
 export * from "./computation-evidence.js";
 

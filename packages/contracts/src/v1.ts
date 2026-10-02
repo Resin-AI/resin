@@ -38,6 +38,7 @@ export const V1_SCHEMA_KINDS = {
   ACTIVATION_CERTIFICATE: "activation_certificate",
   REVOCATION_METADATA: "revocation_metadata",
   SAVINGS_EVIDENCE: "savings_evidence",
+  TOOL_CERTIFICATE: "tool_certificate",
 } as const;
 
 export type V1SchemaKind = (typeof V1_SCHEMA_KINDS)[keyof typeof V1_SCHEMA_KINDS];

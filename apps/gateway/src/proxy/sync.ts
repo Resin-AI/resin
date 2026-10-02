@@ -43,6 +43,7 @@ import type { CatalogSnapshotFetchResult, CloudCatalogClient } from "./client.js
 import type { CloudInvocationRouter } from "./router.js";
 import type { SharedCloudSync } from "./shared-sync.js";
 import type { ManagedToolAccess, ManagedToolConfirmation } from "./tool-access.js";
+import type { ToolCertificateReporter } from "./tool-certificate-verifier.js";
 
 export interface LockedSyncIdentity extends TrustIdentity {
   keyStore?: SigningKeyStore;
@@ -110,6 +111,12 @@ export interface CloudCatalogSyncOptions {
    * call per interval serves all of them. Without it every sync calls the cloud directly.
    */
   sharedSync?: SharedCloudSync;
+  /**
+   * Report-only verification of cloud-issued tool certificates for every locked artifact that
+   * passed its digest check. Outcomes are recorded; activation is never affected unless the
+   * reporter's internal enforce mode is on.
+   */
+  toolCertificates?: ToolCertificateReporter;
 }
 
 export interface ToolLockTuple {
@@ -973,10 +980,20 @@ export class CloudCatalogSyncCoordinator {
       releaseOwners?.();
     }
 
+    // Report-only: outcomes are recorded, never acted on (see ToolCertificateReporter).
+    const certificatePass = this.options.toolCertificates?.beginPass({
+      online: isOnline,
+      projectId: lock.projectId,
+    });
+
     for (const [toolName, entry] of eligible) {
       try {
+        // Digest the artifact bytes on disk were verified against, when they are available.
+        let verifiedArtifactDigest: string | undefined;
         if (this.artifactCache) {
           let isArtifactCached = this.artifactCache.isArtifactCached(entry.artifactDigest);
+          // Cached artifacts were digest-verified when they were committed to the cache.
+          if (isArtifactCached) verifiedArtifactDigest = entry.artifactDigest;
 
           if (!isArtifactCached) {
             if (isOnline && this.transferClient) {
@@ -1004,6 +1021,7 @@ export class CloudCatalogSyncCoordinator {
                   `Artifact digest mismatch for '${entry.name}': expected ${entry.artifactDigest}, got ${computedDigest}`,
                 );
               }
+              verifiedArtifactDigest = computedDigest;
 
               const stagingDir = await this.artifactCache.createStagingDirectory(
                 entry.artifactDigest,
@@ -1069,6 +1087,18 @@ export class CloudCatalogSyncCoordinator {
               this.options.onOfflineDegraded?.(toolName, "Artifact bytes not cached locally");
               continue;
             }
+          }
+        }
+
+        if (certificatePass && verifiedArtifactDigest) {
+          const outcome = await certificatePass.check(entry, verifiedArtifactDigest);
+          if (certificatePass.blocks(outcome)) {
+            failed.push(toolName);
+            this.options.onToolSyncError?.(
+              toolName,
+              new Error(`Tool certificate check did not verify '${entry.name}'`),
+            );
+            continue;
           }
         }
 
@@ -1260,6 +1290,7 @@ export class CloudCatalogSyncCoordinator {
       }
     }
 
+    await certificatePass?.finish();
     return { activated, failed, degraded, newerAvailable: [] };
   }
 

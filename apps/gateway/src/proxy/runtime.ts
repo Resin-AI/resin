@@ -56,6 +56,11 @@ import {
   type LockedSyncIdentity,
 } from "./sync.js";
 import { ManagedToolAccess } from "./tool-access.js";
+import { ToolCertificateReporter } from "./tool-certificate-verifier.js";
+import {
+  TOOL_SIGNATURES_STATE_FILE_NAME,
+  ToolSignatureStateStore,
+} from "./tool-signature-state.js";
 import {
   FileValidationAskLedger,
   WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME,
@@ -439,6 +444,32 @@ export async function createProductionProxyRuntime(
         return { bytes: downloaded.bytes };
       },
     };
+
+    // Report-only tool certificate checks against the compiled-in pinned keys. The binding
+    // identity is the device credential: the current one when online, the one this runtime
+    // started with when a pass must stay offline.
+    const startupIdentity = identity;
+    const toolCertificates = new ToolCertificateReporter({
+      identity: async (online) => {
+        let current: CloudRequestIdentity | null = startupIdentity;
+        if (online) {
+          try {
+            current = (await identityProvider()) ?? startupIdentity;
+          } catch {
+            current = startupIdentity;
+          }
+        }
+        return {
+          cloudUrl: current.cloudUrl,
+          accountId: current.accountId,
+          workspaceId: current.workspaceId,
+        };
+      },
+      fetchCertificates: () => client.fetchToolCertificates(),
+      store: new ToolSignatureStateStore({
+        filePath: path.join(paths.stateDir, TOOL_SIGNATURES_STATE_FILE_NAME),
+      }),
+    });
     const bindWorkspaceLocks = options.bindWorkspaceLocks ?? true;
 
     const coordinator = new CloudCatalogSyncCoordinator({
@@ -462,6 +493,7 @@ export async function createProductionProxyRuntime(
       onToolSyncError: options.onToolSyncError,
       onOfflineDegraded: options.onOfflineDegraded,
       isPinned: options.isPinned,
+      toolCertificates,
       ...(options.sharedCloudSync === false
         ? {}
         : {

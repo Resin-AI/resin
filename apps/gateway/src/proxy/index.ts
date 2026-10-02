@@ -13,3 +13,4 @@ export * from "./validation-daemon-module.js";
 export * from "./validation-lease.js";
 export * from "./validation-worker.js";
 export * from "./workflow-validation.js";
+export * from "./tool-signature-state.js";
