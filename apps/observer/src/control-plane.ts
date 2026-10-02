@@ -193,9 +193,20 @@ export class ControlPlaneClient {
         response.status,
       );
     }
-    const parsed = DeviceSyncResponseSchema.safeParse(await readBoundedJson(response));
-    // An answer for another device, or one this client cannot parse, proves nothing: fall back to
-    // reading every endpoint rather than trusting or retrying it.
+    // A transport failure while reading the body is transient and propagates. A body that is too
+    // large, not JSON, not this contract, or for another device proves nothing: fall back to reading
+    // every endpoint rather than trusting or retrying it.
+    const text = await response.text();
+    if (Buffer.byteLength(text) > MAX_CONTROL_PLANE_RESPONSE_BYTES) {
+      return { kind: "unsupported", status: 502 };
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(text);
+    } catch {
+      return { kind: "unsupported", status: 502 };
+    }
+    const parsed = DeviceSyncResponseSchema.safeParse(decoded);
     if (!parsed.success || parsed.data.deviceId !== deviceId) {
       return { kind: "unsupported", status: 502 };
     }

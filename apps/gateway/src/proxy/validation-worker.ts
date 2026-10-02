@@ -447,6 +447,10 @@ export class WorkflowValidationWorker {
   private lastListedAt = Number.NEGATIVE_INFINITY;
   /** The last pass left asks this device must retry locally (deferred or not yet decidable). */
   private localRetryPending = false;
+  /** When the worker last started; the device sync safety refresh counts from here at the latest. */
+  private startedAt = Number.NEGATIVE_INFINITY;
+  /** Advanced by every start and stop; fences fresh passes queued before a stop. */
+  private generation = 0;
   private timer?: NodeJS.Timeout;
   /** When the armed timer fires, in `Date.now()` time; lets a wake pull it earlier. */
   private timerDueAt?: number;
@@ -493,7 +497,11 @@ export class WorkflowValidationWorker {
   start(): void {
     if (this.abortController) return;
     this.abortController = new AbortController();
+    this.generation += 1;
     this.emptyPolls = 0;
+    // While a device sync follows the ask token, its owner runs the passes a token change calls for;
+    // the timer's own listing is then only the hourly safety refresh, counted from start.
+    this.startedAt = Date.now();
     this.armTimer();
   }
 
@@ -502,6 +510,8 @@ export class WorkflowValidationWorker {
    * already running has finished, so no ledger, lease or store write outlives the stop.
    */
   async stop(): Promise<void> {
+    // Fresh passes queued behind the one in flight belong to the run being stopped.
+    this.generation += 1;
     clearTimeout(this.timer);
     this.timer = undefined;
     this.timerDueAt = undefined;
@@ -542,8 +552,9 @@ export class WorkflowValidationWorker {
     this.inFlight = pass;
     try {
       const summary = await pass;
-      // A pass another process ran leaves nothing for this one to retry.
-      this.localRetryPending = !summary.skipped && (summary.deferred > 0 || summary.refused > 0);
+      // A pass skipped because another process held the lease listed nothing: what it was run for
+      // is still owed, so it stays pending for the timer to retry.
+      this.localRetryPending = summary.skipped || summary.deferred > 0 || summary.refused > 0;
       return summary;
     } finally {
       if (this.inFlight === pass) this.inFlight = undefined;
@@ -554,9 +565,17 @@ export class WorkflowValidationWorker {
    * Runs a pass whose listing starts after this call: one already running may have listed before
    * whatever prompted the call, so it is waited out first, then `runOnce` runs (or joins) the next.
    */
-  async runFresh(): Promise<WorkflowValidationPassSummary> {
+  async runFresh(): Promise<WorkflowValidationPassSummary | undefined> {
+    const generation = this.generation;
     await this.inFlight?.catch(() => undefined);
+    // Stopped (or stopped and restarted) while waiting: the fresh pass is cancelled.
+    if (generation !== this.generation || !this.isRunning()) return undefined;
     return await this.runOnce();
+  }
+
+  /** When asks were last listed successfully, in `Date.now()` time; -Infinity before the first. */
+  listedAt(): number {
+    return this.lastListedAt;
   }
 
   private armTimer(delay: number = this.nextDelay()): void {
@@ -582,7 +601,7 @@ export class WorkflowValidationWorker {
     if (
       this.followsDeviceSync &&
       !this.localRetryPending &&
-      Date.now() - this.lastListedAt < DEVICE_SYNC_SAFETY_REFRESH_MS
+      Date.now() - Math.max(this.lastListedAt, this.startedAt) < DEVICE_SYNC_SAFETY_REFRESH_MS
     ) {
       let follows = false;
       try {

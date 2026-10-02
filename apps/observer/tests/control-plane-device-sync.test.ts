@@ -81,6 +81,8 @@ describe("consolidated device sync", () => {
     const server = {
       offer: true as boolean,
       syncStatus: 200,
+      /** Replaces the sync answer's body with this raw text (status 200). */
+      syncRaw: null as string | null,
       revision: 1,
       accountId: "account-1",
       toolAccess: "allowed" as "allowed" | "subscription_inactive",
@@ -117,6 +119,7 @@ describe("consolidated device sync", () => {
         }
         if (url.pathname === "/v1/device/sync") {
           if (server.syncStatus !== 200) return new Response(null, { status: server.syncStatus });
+          if (server.syncRaw !== null) return new Response(server.syncRaw, { status: 200 });
           const allowed = server.toolAccess === "allowed";
           return Response.json({
             schemaVersion: "1.0.0",
@@ -300,6 +303,24 @@ describe("consolidated device sync", () => {
       expect(f.published.at(-1)).not.toBeNull();
     },
   );
+
+  it.each([
+    ["an HTML page", "<html><body>gateway error</body></html>"],
+    ["a truncated body", '{"schemaVersion":"1.0.0","deviceId":"device-1"'],
+    ["an oversized body", `{"pad":"${"x".repeat(600 * 1024)}"}`],
+  ])("falls back instead of retrying forever when the sync read answers %s", async (_name, raw) => {
+    const f = await fixture();
+    await f.module.start(f.context);
+    await vi.advanceTimersByTimeAsync(30_000);
+    f.server.syncRaw = raw;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.routes().slice(-2)).toEqual([SYNC, EFFECTIVE]);
+    expect(f.published.at(-1)).toBeNull();
+    const syncs = f.count(SYNC);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(f.count(SYNC)).toBe(syncs);
+    expect(f.count(EFFECTIVE)).toBeGreaterThan(2);
+  });
 
   it("falls back when the server stops advertising the capability", async () => {
     const f = await fixture();

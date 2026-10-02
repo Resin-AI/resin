@@ -19,6 +19,7 @@ import {
   WORKFLOW_VALIDATION_LEASE_FILE_NAME,
 } from "./validation-lease.js";
 import {
+  DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS,
   DEFAULT_WORKFLOW_VALIDATION_TIMEOUT_MS,
   WorkflowValidationClient,
   WorkflowValidationWorker,
@@ -45,18 +46,33 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   private readonly worker: WorkflowValidationWorker;
   private readonly deviceSync?: DeviceSyncSignal;
   private state: ModuleLifecycleState = "uninitialized";
+  private readonly retryDelayMs: number;
   private unsubscribe?: () => void;
-  /** Identity and pending-ask token of the last device sync answer a pass was run for. */
+  /**
+   * Identity and pending-ask token a pass has listed asks for. Recorded only once a listing that
+   * started after the token was seen succeeded, so a pass skipped on the shared lease or a failed
+   * listing leaves the token owed.
+   */
   private followedToken?: string;
+  /** The token a pass is owed for, while it is not yet listed. */
+  private owedToken?: string;
+  private retryTimer?: NodeJS.Timeout;
 
   /**
    * `deviceSync`: the daemon's consolidated sync. While it publishes answers, a pass runs at once
    * whenever the pending-ask token changes, and the worker's own timer only retries local work
-   * (the worker must be built with `followsDeviceSync` reading the same signal).
+   * (the worker must be built with `followsDeviceSync` reading the same signal). A pass that could
+   * not list (another process held the lease, or the listing failed) is retried every
+   * `retryDelayMs` until one lists or the token moves on.
    */
-  constructor(worker: WorkflowValidationWorker, deviceSync?: DeviceSyncSignal) {
+  constructor(
+    worker: WorkflowValidationWorker,
+    deviceSync?: DeviceSyncSignal,
+    options: { retryDelayMs?: number } = {},
+  ) {
     this.worker = worker;
     this.deviceSync = deviceSync;
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS;
   }
 
   getState(): ModuleLifecycleState {
@@ -67,6 +83,7 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
     this.state = "starting";
     this.worker.start();
     this.followedToken = undefined;
+    this.owedToken = undefined;
     this.unsubscribe ??= this.deviceSync?.subscribe((snapshot) => this.follow(snapshot));
     const current = this.deviceSync?.current();
     if (current) this.follow(current);
@@ -77,27 +94,56 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
     this.state = "stopping";
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.owedToken = undefined;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     await this.worker.stop();
     this.state = "stopped";
   }
 
   /** Runs a pass now when the pending-ask token (or the identity it is for) changed. */
   private follow(snapshot: DeviceSyncSnapshot | null): void {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     if (snapshot === null) {
       // Answers stopped; the worker's own timer polls again, and the next answer starts afresh.
       this.followedToken = undefined;
+      this.owedToken = undefined;
       return;
     }
     const { accountId, userId, validationToken } = snapshot.sync;
     if (validationToken === null) {
       // No asks are served without tool access; remember that so regaining it runs a pass.
       this.followedToken = `${accountId}\u0000${userId}\u0000-`;
+      this.owedToken = undefined;
       return;
     }
     const token = `${accountId}\u0000${userId}\u0000${validationToken}`;
     if (token === this.followedToken || !this.worker.isRunning()) return;
-    this.followedToken = token;
-    void this.worker.runFresh().catch(() => undefined);
+    this.owedToken = token;
+    void this.listFor(token);
+  }
+
+  /** Runs a pass whose listing starts now; records `token` only once such a listing succeeded. */
+  private async listFor(token: string): Promise<void> {
+    const seenAt = Date.now();
+    try {
+      await this.worker.runFresh();
+    } catch {
+      // A pass reports its own failures; whether it listed is read below.
+    }
+    if (this.owedToken !== token) return;
+    if (this.worker.listedAt() >= seenAt) {
+      this.followedToken = token;
+      this.owedToken = undefined;
+      return;
+    }
+    if (!this.worker.isRunning()) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      if (this.owedToken === token) void this.listFor(token);
+    }, this.retryDelayMs);
+    this.retryTimer.unref?.();
   }
 
   async healthCheck(): Promise<ModuleHealth> {
@@ -114,6 +160,7 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
 export function createWorkflowValidationDaemonModule(
   context: DaemonModuleProviderContext,
   overrides: Partial<Omit<WorkflowValidationWorkerOptions, "identity">> = {},
+  moduleOptions: { retryDelayMs?: number } = {},
 ): WorkflowValidationDaemonModule {
   const privateValues = overrides.privateValues ?? FilePrivateValueStore.default();
   const workspaceId = context.credentials.workspaceId;
@@ -140,5 +187,6 @@ export function createWorkflowValidationDaemonModule(
       identity: { workspaceId, deviceId: context.credentials.deviceId },
     }),
     context.deviceSync,
+    moduleOptions,
   );
 }

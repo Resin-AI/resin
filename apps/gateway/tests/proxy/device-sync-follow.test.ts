@@ -76,7 +76,7 @@ function gateway(cloud: FakeCatalogCloud, identity: CloudRequestIdentity = ident
       identityProvider: async () => identity,
     }),
   });
-  return { coordinator, cache, registry, errors };
+  return { coordinator, cache, registry, errors, access };
 }
 
 /** The daemon side: its own store instance (another writer) over the same directory. */
@@ -236,6 +236,121 @@ describe("a gateway following the daemon's device sync", () => {
     // Exactly the legacy cadence: one cloud read of each per interval.
     expect(cloud.toolAccessRequests).toBe(10);
     expect(cloud.catalogRequests).toHaveLength(10);
+  });
+});
+
+describe("following the daemon's device sync safely", () => {
+  it("never lets a published allowance clear a denial recorded after it", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
+    const d = daemon();
+    const gw = gateway(cloud);
+    gw.coordinator.startPeriodicSync();
+    const allowedAt = Date.now();
+    await d.publish();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(gw.access.isInactive()).toBe(false);
+
+    // The account is revoked and this gateway learns it from the cloud directly.
+    cloud.toolAccess = "subscription_inactive";
+    await gw.coordinator.checkToolAccess();
+    expect(gw.access.isInactive()).toBe(true);
+    const reads = cloud.toolAccessRequests;
+
+    // A publication of an allowance read before the revocation arrives afterwards.
+    await d.shared.publish(d.answer(), allowedAt + 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(gw.access.isInactive()).toBe(true);
+    // Only a fresh read of the cloud's authority could have cleared the denial; it confirmed it.
+    expect(cloud.toolAccessRequests).toBe(reads + 1);
+    expect(gw.registry.isToolActiveForWorkspace(TOOL_ONE, "1.0.0", identityA.workspaceId)).toBe(
+      false,
+    );
+
+    // Once the cloud really allows access again, the fresh read restores it.
+    cloud.toolAccess = "allowed";
+    await d.publish();
+    await vi.advanceTimersByTimeAsync(5_000);
+    gw.coordinator.stopPeriodicSync();
+    expect(gw.access.isInactive()).toBe(false);
+  });
+
+  it("does not apply an old allowance queued behind a sync that recorded a revocation", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
+    const d = daemon();
+    const gw = gateway(cloud);
+    await d.publish();
+    await gw.coordinator.followDeviceSync();
+    expect(gw.access.isInactive()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    cloud.toolAccess = "subscription_inactive";
+    const gate = Promise.withResolvers<void>();
+    cloud.toolAccessGate = gate.promise;
+    const revoking = gw.coordinator.checkToolAccess();
+    await vi.advanceTimersByTimeAsync(0);
+    // An allowance read before the revocation is published while the revoking sync is in flight.
+    await d.shared.publish(d.answer(), Date.now());
+    const queued = gw.coordinator.followDeviceSync();
+    cloud.toolAccessGate = undefined;
+    gate.resolve();
+    await Promise.all([revoking, queued]);
+
+    expect(gw.access.isInactive()).toBe(true);
+  });
+
+  it("retries a catalog whose reconciliation failed on its own interval, not after an hour", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
+    const d = daemon();
+    const gw = gateway(cloud);
+    const activate = gw.registry.activateToolVersion.bind(gw.registry);
+    const activations = vi
+      .spyOn(gw.registry, "activateToolVersion")
+      .mockRejectedValueOnce(new Error("transient activation failure"))
+      .mockImplementation(activate);
+    gw.coordinator.startPeriodicSync();
+    await d.publish();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(activations).toHaveBeenCalledTimes(1);
+
+    // Same answer, same tokens: the gateway's own interval retries the unsettled catalog.
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(activations).toHaveBeenCalledTimes(2);
+    expect(gw.registry.isToolActiveForWorkspace(TOOL_ONE, "1.0.0", identityA.workspaceId)).toBe(
+      true,
+    );
+    const requests = cloud.catalogRequests.length;
+
+    // Settled now: unchanged tokens fetch nothing more.
+    await run(d, 600_000);
+    gw.coordinator.stopPeriodicSync();
+    expect(cloud.catalogRequests).toHaveLength(requests);
+    expect(cloud.toolAccessRequests).toBe(0);
+  });
+
+  it("keeps held tools invocable past the cache's hard expiry while tokens stay unchanged", async () => {
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [catalogTool(TOOL_ONE, "one")]));
+    const d = daemon();
+    const gw = gateway(cloud);
+    gw.coordinator.startPeriodicSync();
+    // Quiet syncs at their longest jitter (125 s). The catalog was fetched once, at 5 s; its hard
+    // expiry (1 h) falls at 3,605 s, before the safety refresh the 3,625 s answer would trigger.
+    const startedAt = Date.now();
+    for (let at = 0; at < 3_500_000; at += 125_000) {
+      await d.publish();
+      await vi.advanceTimersByTimeAsync(125_000);
+    }
+    await d.publish();
+    await vi.advanceTimersByTimeAsync(startedAt + 3_610_000 - Date.now());
+    expect(cloud.catalogRequests).toHaveLength(1);
+    expect(gw.cache.getSnapshot(identityA.workspaceId)?.snapshotVersion).toBe("v1");
+    expect(gw.cache.getToolAvailability(TOOL_ONE, identityA.workspaceId).availability).toBe(
+      "fresh",
+    );
+    await run(d, 600_000);
+    gw.coordinator.stopPeriodicSync();
+    expect(gw.cache.getToolAvailability(TOOL_ONE, identityA.workspaceId).availability).toBe(
+      "fresh",
+    );
   });
 });
 

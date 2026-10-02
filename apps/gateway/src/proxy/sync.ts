@@ -361,7 +361,14 @@ export class CloudCatalogSyncCoordinator {
         const observedConfirmation = access.captureConfirmation?.();
         let confirmation: AccountToolAccessResponse | null = null;
         try {
-          if (published) {
+          if (published && observedConfirmation?.toolAccess === "subscription_inactive") {
+            // A publication read before this denial was recorded may predate it: an allowance it
+            // carries never clears a denial. Only a fresh read of the cloud's authority may.
+            confirmation =
+              published.sync.toolAccess === "subscription_inactive"
+                ? toolAccessFromDeviceSync(published)
+                : await this.client.fetchToolAccess(access.identity);
+          } else if (published) {
             const expected = access.identity;
             // An answer for another login proves nothing about this one: treat access as unknown.
             confirmation =
@@ -1372,7 +1379,7 @@ export class CloudCatalogSyncCoordinator {
     this.isRunningPeriodic = true;
     this.syncTimer = setInterval(async () => {
       try {
-        if (await this.followDeviceSync()) return;
+        if (await this.followDeviceSync({ retry: true })) return;
         await this.sync();
       } catch {
         // Errors handled in syncOnce / onSyncError
@@ -1398,7 +1405,7 @@ export class CloudCatalogSyncCoordinator {
    * identity change), or once the safety refresh is due. A gateway with no recent answer returns
    * false and keeps its own interval, exactly as without a daemon.
    */
-  async followDeviceSync(): Promise<boolean> {
+  async followDeviceSync(options: { retry?: boolean } = {}): Promise<boolean> {
     const shared = this.options.sharedSync;
     if (!shared) return false;
     let published: PublishedDeviceSync | undefined;
@@ -1416,17 +1423,21 @@ export class CloudCatalogSyncCoordinator {
       previous !== undefined &&
       previous.accountId === published.sync.accountId &&
       previous.userId === published.sync.userId;
-    if (sameIdentity && previous.fetchedAt === published.fetchedAt) return true;
+    const covered = sameIdentity && previous.catalogToken === published.sync.catalogToken;
+    // A new answer is acted on once. The same answer is acted on again only on the gateway's own
+    // interval, and only while the catalog it names still has local work left to retry.
+    if (sameIdentity && previous.fetchedAt === published.fetchedAt && (covered || !options.retry)) {
+      return true;
+    }
     const catalogDue =
-      !sameIdentity ||
-      previous.catalogToken !== published.sync.catalogToken ||
-      Date.now() - this.lastCatalogSyncAt >= DEVICE_SYNC_SAFETY_REFRESH_MS;
+      !covered || Date.now() - this.lastCatalogSyncAt >= DEVICE_SYNC_SAFETY_REFRESH_MS;
     const followed: FollowedDeviceSync = {
       accountId: published.sync.accountId,
       userId: published.sync.userId,
       fetchedAt: published.fetchedAt,
-      // The token is recorded only once a catalog sync covering it succeeds, so a failed fetch is
-      // retried on the next answer instead of waiting for the safety refresh.
+      // The token is recorded only once a catalog sync covering it succeeds and leaves nothing to
+      // retry, so a failed fetch or reconciliation is retried instead of waiting for the safety
+      // refresh.
       catalogToken: catalogDue
         ? sameIdentity
           ? previous.catalogToken
@@ -1439,13 +1450,32 @@ export class CloudCatalogSyncCoordinator {
       // A sync already running was not given this answer; let it finish, then apply this one.
       while (this.inFlightSync) await this.inFlightSync.catch(() => undefined);
       await this.runSync(catalogDue, false, published);
-      if (catalogDue && this.lastCatalogSyncAt >= startedAt) {
-        followed.catalogToken = published.sync.catalogToken;
+      if (catalogDue) {
+        if (this.lastCatalogSyncAt >= startedAt && this.settledReconcile !== undefined) {
+          followed.catalogToken = published.sync.catalogToken;
+        }
+      } else {
+        this.renewCatalogFreshness();
       }
     } catch (error) {
       this.options.onSyncError?.(error instanceof Error ? error : new Error(String(error)));
     }
     return true;
+  }
+
+  /**
+   * An answer whose catalog token matches the catalog this gateway synced attests that catalog is
+   * still current, exactly as an `unchanged` catalog answer does: its freshness windows restart, so
+   * following unchanged tokens never lets held tools reach their hard expiry. Nothing is renewed
+   * without confirmed tool access.
+   */
+  private renewCatalogFreshness(): void {
+    const access = this.options.managedToolAccess;
+    if (access && (access.isInactive() || this.activeConfirmation === undefined)) return;
+    const held = this.cache.getSnapshot(this.workspaceId);
+    if (held?.tools && held.tools.length > 0) {
+      this.cache.setSnapshot(held, { workspaceId: this.workspaceId });
+    }
   }
 
   /**

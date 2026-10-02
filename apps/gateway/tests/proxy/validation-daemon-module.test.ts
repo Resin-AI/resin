@@ -393,6 +393,57 @@ describe("the daemon's validation module", () => {
     }
   });
 
+  it("keeps a token owed while another process holds the shared lease, and lists once it frees", async () => {
+    const recorded = recording();
+    const cloud = fakeCloud(askFor(recorded.plan));
+    vi.stubGlobal("fetch", cloud.fetchImpl);
+    const leasePath = path.join(context.paths.stateDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME);
+    await fsPromises.mkdir(path.dirname(leasePath), { recursive: true });
+    const other = await new FileWorkflowValidationPassLease({ filePath: leasePath }).tryAcquire();
+    if (!other) throw new Error("the test could not take the shared lease");
+    const deviceSync = new DeviceSyncSignal();
+    let skips = 0;
+    const daemonLease = new FileWorkflowValidationPassLease({ filePath: leasePath });
+    const module = createWorkflowValidationDaemonModule(
+      { ...context, deviceSync },
+      {
+        privateValues: recorded.store,
+        localCalls: localCallsFor(recorded.store, WORKSPACE_ID, [SESSION_ID]),
+        // Far beyond the test: only the module's retry may list.
+        pollIntervalMs: 3_600_000,
+        passLease: {
+          maxHoldMs: daemonLease.maxHoldMs,
+          async tryAcquire() {
+            const handle = await daemonLease.tryAcquire();
+            if (handle === undefined) skips += 1;
+            return handle;
+          },
+        },
+      },
+      { retryDelayMs: 20 },
+    );
+    const listings = () =>
+      vi.mocked(cloud.fetchImpl).mock.calls.filter(([, init]) => init?.method !== "POST").length;
+
+    await module.start(moduleContext());
+    try {
+      deviceSync.publish(syncAnswer("v:1"));
+      // Skipped passes list nothing, and the token stays owed: the module keeps retrying.
+      await vi.waitFor(() => expect(skips).toBeGreaterThanOrEqual(2));
+      expect(listings()).toBe(0);
+
+      await other.release();
+      await vi.waitFor(() => expect(cloud.decisions).toHaveLength(1));
+      const listed = listings();
+      // Listed once the lease freed; the same token then lists nothing more.
+      deviceSync.publish(syncAnswer("v:1"));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(listings()).toBe(listed);
+    } finally {
+      await module.stop(moduleContext());
+    }
+  });
+
   it("publishes the device sync for gateways and withdraws it on stop", async () => {
     const deviceSync = new DeviceSyncSignal();
     const relay = createDeviceSyncRelayDaemonModule({ ...context, deviceSync });

@@ -25,7 +25,10 @@ import {
 } from "@resin/observer";
 import { DEVICE_SYNC_SAFETY_REFRESH_MS, PROTOCOL_VERSION } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DeviceSyncStore } from "../../src/proxy/device-sync-store.js";
 import { createProductionProxyRuntime } from "../../src/proxy/runtime.js";
+import { SharedDeviceSync } from "../../src/proxy/shared-sync.js";
+import { FileWorkflowValidationPassLease } from "../../src/proxy/validation-lease.js";
 import {
   DEFAULT_WORKFLOW_VALIDATION_ENVIRONMENT,
   DEFAULT_WORKFLOW_VALIDATION_POLL_INTERVAL_MS,
@@ -821,13 +824,12 @@ describe("the validation worker's poll cadence", () => {
   it("lists only once the safety refresh is due while a device sync follows the ask token", async () => {
     const { worker, polledAt } = polling(() => [], { followsDeviceSync: () => true });
 
-    // The first timed pass lists: nothing has been listed since the worker started.
-    await vi.advanceTimersByTimeAsync(FAST);
+    // The device sync's owner runs the passes a token change calls for; the timer waits out the
+    // safety refresh, counted from start.
+    await vi.advanceTimersByTimeAsync(DEVICE_SYNC_SAFETY_REFRESH_MS - 1);
+    expect(polledAt).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(QUIET * 1.2);
     expect(polledAt).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(DEVICE_SYNC_SAFETY_REFRESH_MS - FAST);
-    expect(polledAt).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(QUIET);
-    expect(polledAt).toHaveLength(2);
     worker.stop();
   });
 
@@ -836,26 +838,51 @@ describe("the validation worker's poll cadence", () => {
       () => [ask("req-foreign", { workspaceId: OTHER_WORKSPACE_ID })],
       { followsDeviceSync: () => true },
     );
+    // The owner's pass leaves an ask this device cannot answer yet; the timer retries it.
+    await worker.runOnce();
+    await vi.advanceTimersByTimeAsync(sum(BACKING_OFF));
 
-    await vi.advanceTimersByTimeAsync(FAST + sum(BACKING_OFF));
-
-    expect(gaps()).toEqual([FAST, ...BACKING_OFF]);
+    expect(gaps()).toEqual([0, ...BACKING_OFF]);
     worker.stop();
   });
 
   it("returns to its own polling as soon as the device sync stops", async () => {
     let follows = true;
     const { worker, polledAt } = polling(() => [], { followsDeviceSync: () => follows });
-    await vi.advanceTimersByTimeAsync(FAST + 10 * QUIET);
-    expect(polledAt).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10 * QUIET);
+    expect(polledAt).toHaveLength(0);
 
     follows = false;
-    await vi.advanceTimersByTimeAsync(QUIET);
-    expect(polledAt).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(QUIET * 1.2);
+    expect(polledAt.length).toBeGreaterThan(0);
     worker.stop();
   });
 
-  it("runs a fresh pass after the one already listing", async () => {
+  it("keeps a pass skipped on the shared lease owed, and retries it on its own timer", async () => {
+    const leasePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "resin-lease-")), "lease");
+    const holder = new FileWorkflowValidationPassLease({ filePath: leasePath });
+    const held = await holder.tryAcquire();
+    if (!held) throw new Error("the test could not take the lease");
+    const { worker, polledAt } = polling(() => [], {
+      followsDeviceSync: () => true,
+      passLease: new FileWorkflowValidationPassLease({ filePath: leasePath }),
+    });
+
+    const before = worker.listedAt();
+    const skipped = await worker.runOnce();
+    expect(skipped.skipped).toBe(true);
+    expect(polledAt).toHaveLength(0);
+    expect(worker.listedAt()).toBe(before);
+
+    await held.release();
+    // The lease is file-backed: its I/O completes between timer steps.
+    await vi.advanceTimersByTimeAsync(FAST * 1.2);
+    await vi.waitFor(() => expect(polledAt.length).toBeGreaterThan(0), { timeout: 5_000 });
+    expect(worker.listedAt()).toBeGreaterThan(before);
+    await worker.stop();
+  });
+
+  function gatedWorker() {
     const gate = Promise.withResolvers<void>();
     let listings = 0;
     const worker = new WorkflowValidationWorker({
@@ -868,16 +895,35 @@ describe("the validation worker's poll cadence", () => {
         submitDecision: async () => ({ status: "recorded" }),
       },
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
+      pollIntervalMs: 3_600_000,
     });
+    worker.start();
+    return { worker, gate, listings: () => listings };
+  }
 
+  it("runs a fresh pass after the one already listing", async () => {
+    const { worker, gate, listings } = gatedWorker();
     const running = worker.runOnce();
     const fresh = worker.runFresh();
     const joined = worker.runFresh();
-    expect(listings).toBe(1);
+    expect(listings()).toBe(1);
     gate.resolve();
     await Promise.all([running, fresh, joined]);
 
-    expect(listings).toBe(2);
+    expect(listings()).toBe(2);
+    await worker.stop();
+  });
+
+  it("cancels a fresh pass queued behind the one in flight when stopped", async () => {
+    const { worker, gate, listings } = gatedWorker();
+    const running = worker.runOnce();
+    const fresh = worker.runFresh();
+    const stopping = worker.stop();
+    gate.resolve();
+    await Promise.all([running, stopping]);
+
+    expect(await fresh).toBeUndefined();
+    expect(listings()).toBe(1);
   });
 });
 
@@ -965,6 +1011,67 @@ describe("the validation worker's place in the runtime", () => {
       announce(6);
       expect(wake).toHaveBeenCalledTimes(2);
     } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves pending asks to the daemon while it publishes device sync, and polls once it stops", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-validation-worker-follow-"));
+    vi.useFakeTimers();
+    try {
+      const store = await validCredentials(tempDir);
+      let listings = 0;
+      const runtime = await createProductionProxyRuntime({
+        credentialStore: store,
+        fetchFn: async (input) => {
+          const url = String(input instanceof Request ? input.url : input);
+          if (url.includes("/workflow-validation/pending")) {
+            listings += 1;
+            return jsonResponse({ requests: [] });
+          }
+          return jsonResponse({ error: "not served in this test" }, 404);
+        },
+      });
+      // The daemon side: the relay's view of the same per-user shared store.
+      const identity = await store.getRequestIdentity();
+      if (!identity) throw new Error("the fixture identity did not load");
+      const daemon = new SharedDeviceSync({
+        store: new DeviceSyncStore({
+          dir: path.join(path.dirname(store.getTokenFilePath()), "cloud-sync"),
+        }),
+        identityProvider: async () => identity,
+      });
+      const publish = () =>
+        daemon.publish(
+          {
+            schemaVersion: "1.0.0",
+            deviceId: identity.deviceId,
+            accountId: identity.accountId,
+            userId: identity.userId,
+            toolAccess: "allowed",
+            checkedAt: new Date().toISOString(),
+            desired: null,
+            catalogToken: "c:1",
+            validationToken: "v:1",
+          },
+          Date.now(),
+        );
+
+      await publish();
+      await runtime.start();
+      for (let elapsed = 0; elapsed < 900_000; elapsed += 120_000) {
+        await publish();
+        await vi.advanceTimersByTimeAsync(120_000);
+      }
+      expect(listings).toBe(0);
+
+      // The daemon goes away: the gateway's own polling takes over.
+      await daemon.withdraw();
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(listings).toBeGreaterThan(0);
+      await runtime.stop();
+    } finally {
+      vi.useRealTimers();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

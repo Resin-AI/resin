@@ -409,7 +409,26 @@ export async function createProductionProxyRuntime(
       ...(resolveConnection === undefined ? {} : { connectionResolver: resolveConnection }),
     });
     routerBox.current.setManagedToolAccess(managedToolAccess);
+    const sharedSync =
+      options.sharedCloudSync === false
+        ? undefined
+        : new SharedCloudSync({
+            // Gateways that share a credential file share its identity, so they share answers.
+            store: new DeviceSyncStore({
+              dir: path.join(path.dirname(credentialStore.getTokenFilePath()), "cloud-sync"),
+            }),
+            client,
+            identityProvider,
+          });
     const validationWorker = new WorkflowValidationWorker({
+      // While the daemon publishes device sync answers it runs the passes their ask token calls for
+      // (one process at a time, under the shared lease); this worker then lists only to retry its
+      // own local work or for the hourly safety refresh, and polls as before once answers stop.
+      ...(sharedSync === undefined
+        ? {}
+        : {
+            followsDeviceSync: async () => (await sharedSync.readDeviceSync()) !== undefined,
+          }),
       client: new WorkflowValidationClient({
         identityProvider,
         fetchImpl: fetchWithLifecycle,
@@ -494,18 +513,7 @@ export async function createProductionProxyRuntime(
       onOfflineDegraded: options.onOfflineDegraded,
       isPinned: options.isPinned,
       toolCertificates,
-      ...(options.sharedCloudSync === false
-        ? {}
-        : {
-            sharedSync: new SharedCloudSync({
-              // Gateways that share a credential file share its identity, so they share answers.
-              store: new DeviceSyncStore({
-                dir: path.join(path.dirname(credentialStore.getTokenFilePath()), "cloud-sync"),
-              }),
-              client,
-              identityProvider,
-            }),
-          }),
+      ...(sharedSync === undefined ? {} : { sharedSync }),
     });
     const backgroundTasks = new Set<Promise<unknown>>();
 
