@@ -50,18 +50,28 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
  * per-event writes. Flushing on every turn boundary produced ~88 uploads per active user-hour at
  * ~6 events each, so the fixed per-request cost dominated. A longer window amortizes it over more
  * events while bounded latency is kept for detection:
- * - `windowMs`: a batch is sent at most 15 s after its first buffered event.
+ * - `windowMs`: a batch is sent at most 45 s after its first buffered event. Replaying local OMP
+ *   and Codex sessions with the 15 s window gave ~116-158 uploads per active session-hour at ~5
+ *   events each; continuous agent work sends one batch per window, so the window sets the rate.
  * - `turnHintWindowMs`: turn boundaries no longer force a send. A settled turn (an assistant reply
  *   that requests no tool call, i.e. the agent now waits on the user) shortens the remaining
  *   window to at most 5 s so the cloud's detection gate sees it promptly. Assistant steps that
  *   request tools are mid-turn and keep the full window: in agent sessions nearly every step is
  *   an assistant message, and replaying local sessions showed hinting on every step would keep
  *   ~62% of today's uploads versus ~40% when only settled turns hint.
+ * - `settledTurnMinIntervalMs`: a settled turn never pulls a send closer than 45 s after the
+ *   session's previous send. Harnesses that write assistant text between tool calls (Codex
+ *   commentary, for example) look settled many times per turn; without this bound they kept
+ *   ~65% of the uploads under the 45 s window, with it ~45%. The hold never exceeds the window,
+ *   and a settled turn after a quiet period still sends within 5 s.
+ *   Replay of the same sessions, 15 s window → this policy: OMP 115.9 → 57.0 and Codex 158.0 →
+ *   71.3 uploads per active session-hour (−54% overall); events uploaded are unchanged.
  * - Session end, terminal lifecycle events and shutdown/stop (`waitForIdle`/`flush`) still send
  *   immediately; unsent records are never acknowledged to the tailer, so nothing is lost.
  * - `maxEvents`/`maxBytes`: send early once a batch is large. Cloud ingestion allows at most 1,000
  *   events and 10 MiB of wire bytes (50 MiB decompressed) per request (ingestion validator and
- *   quota limiter), so 250 events / 2 MiB of uncompressed JSON leaves ≥4x margin on both.
+ *   quota limiter), so 500 events / 4 MiB of uncompressed JSON leaves ≥2x margin on both, and an
+ *   early send always fits a single request.
  * - `maxPendingDeliveries`: the tailer stops delivering a session after 100 unacknowledged
  *   deliveries (`defaultMaxInFlightBatches` in trajectory-capture-module), so a batch is sent
  *   before it could stall the tailer for the rest of its window.
@@ -70,10 +80,11 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
  *   server's event limit and at half its byte limit, before compression.
  */
 export const OBSERVATION_UPLOAD_POLICY = {
-  windowMs: 15_000,
+  windowMs: 45_000,
   turnHintWindowMs: 5_000,
-  maxEvents: 250,
-  maxBytes: 2 * 1024 * 1024,
+  settledTurnMinIntervalMs: 45_000,
+  maxEvents: 500,
+  maxBytes: 4 * 1024 * 1024,
   maxPendingDeliveries: 100,
   requestMaxEvents: 1_000,
   requestMaxBytes: 5 * 1024 * 1024,
@@ -251,6 +262,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
    */
   turnHintDwellMs?: number;
   /**
+   * Minimum time between a session's previous send and a send pulled forward by a settled turn.
+   * Defaults to `OBSERVATION_UPLOAD_POLICY.settledTurnMinIntervalMs`. Set to 0 to let every
+   * settled turn shorten the window.
+   */
+  settledTurnMinIntervalMs?: number;
+  /**
    * Maximum batch size (number of observations) before an immediate flush occurs.
    * Defaults to `OBSERVATION_UPLOAD_POLICY.maxEvents`.
    */
@@ -353,6 +370,12 @@ export class TrajectoryCaptureCoordinator {
   private readonly sessionActivityAtMs = new Map<string, number>();
   private readonly coalesceDwellMs: number;
   private readonly turnHintDwellMs: number;
+  private readonly settledTurnMinIntervalMs: number;
+  /**
+   * When each generic session last sent a batch. Only entries younger than
+   * `settledTurnMinIntervalMs` matter; older ones are pruned whenever a send is recorded.
+   */
+  private readonly genericLastSendAtMs = new Map<string, number>();
   private readonly maxBatchSize: number;
   private readonly maxBatchBytes: number;
   private readonly telemetry?: TelemetryAggregator;
@@ -404,6 +427,7 @@ export class TrajectoryCaptureCoordinator {
       this.minimumRecordTimestampMs = 0;
       this.coalesceDwellMs = OBSERVATION_UPLOAD_POLICY.windowMs;
       this.turnHintDwellMs = OBSERVATION_UPLOAD_POLICY.turnHintWindowMs;
+      this.settledTurnMinIntervalMs = OBSERVATION_UPLOAD_POLICY.settledTurnMinIntervalMs;
       this.maxBatchSize = OBSERVATION_UPLOAD_POLICY.maxEvents;
       this.maxBatchBytes = OBSERVATION_UPLOAD_POLICY.maxBytes;
       this.telemetry = undefined;
@@ -427,6 +451,11 @@ export class TrajectoryCaptureCoordinator {
       this.turnHintDwellMs = Math.max(
         0,
         pipelineOrOptions.turnHintDwellMs ?? OBSERVATION_UPLOAD_POLICY.turnHintWindowMs,
+      );
+      this.settledTurnMinIntervalMs = Math.max(
+        0,
+        pipelineOrOptions.settledTurnMinIntervalMs ??
+          OBSERVATION_UPLOAD_POLICY.settledTurnMinIntervalMs,
       );
       this.maxBatchSize = Math.max(
         1,
@@ -1212,7 +1241,11 @@ export class TrajectoryCaptureCoordinator {
         } else {
           this.scheduleGenericFlush(sessionId, buffer, "window", this.coalesceDwellMs);
           if (this.isSettledTurn(records, validEvents)) {
-            this.shortenGenericFlushWindow(sessionId, buffer, this.turnHintDwellMs);
+            this.shortenGenericFlushWindow(
+              sessionId,
+              buffer,
+              this.settledTurnRemainingMs(sessionId),
+            );
           }
         }
       }
@@ -1349,6 +1382,38 @@ export class TrajectoryCaptureCoordinator {
   }
 
   /**
+   * How soon a settled turn may send: within `turnHintDwellMs`, but not sooner than
+   * `settledTurnMinIntervalMs` after the session's previous send, so assistant text written
+   * between tool calls, or a quick reply from the user, shares the next upload instead of
+   * sending one per message. It only ever shortens the window, never lengthens it.
+   */
+  private settledTurnRemainingMs(sessionId: string): number {
+    const lastSendAtMs = this.genericLastSendAtMs.get(sessionId);
+    if (lastSendAtMs === undefined) {
+      return this.turnHintDwellMs;
+    }
+    return Math.max(
+      this.turnHintDwellMs,
+      lastSendAtMs + this.settledTurnMinIntervalMs - Date.now(),
+    );
+  }
+
+  /** Remembers a session's send time; entries that can no longer delay a send are dropped. */
+  private recordGenericSend(sessionId: string, isTerminal: boolean): void {
+    const nowMs = Date.now();
+    for (const [trackedSessionId, atMs] of this.genericLastSendAtMs) {
+      if (nowMs - atMs >= this.settledTurnMinIntervalMs) {
+        this.genericLastSendAtMs.delete(trackedSessionId);
+      }
+    }
+    if (isTerminal || this.settledTurnMinIntervalMs === 0) {
+      this.genericLastSendAtMs.delete(sessionId);
+    } else {
+      this.genericLastSendAtMs.set(sessionId, nowMs);
+    }
+  }
+
+  /**
    * Pulls a pending window timer forward so it fires within `maxRemainingMs`. Retry timers keep
    * their backoff.
    */
@@ -1468,6 +1533,7 @@ export class TrajectoryCaptureCoordinator {
       await this.pipeline.commitCloudAcknowledgedEvents(validEvents);
       this.sessionBackoffs.delete(sessionId);
       this.genericResourceForbiddenRetries.delete(sessionId);
+      this.recordGenericSend(sessionId, buffer.isTerminal);
     } catch (err) {
       if (err instanceof ResourceForbiddenError) {
         const retries = (this.genericResourceForbiddenRetries.get(sessionId) ?? 0) + 1;

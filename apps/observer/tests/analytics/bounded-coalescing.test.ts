@@ -658,10 +658,20 @@ function createLifecycleRecord(
   };
 }
 
-function createUploadRecorder(options: { maxBatchSize?: number; maxBatchBytes?: number } = {}) {
+interface UploadRecorderOptions {
+  coalesceDwellMs?: number;
+  turnHintDwellMs?: number;
+  settledTurnMinIntervalMs?: number;
+  maxBatchSize?: number;
+  maxBatchBytes?: number;
+}
+
+function createUploadRecorder(options: UploadRecorderOptions = {}) {
+  const sendTimes: number[] = [];
   const batches: NormalizedSessionEvent[][] = [];
   const sendObservationBatch = vi.fn(async (input: { observations: NormalizedSessionEvent[] }) => {
     batches.push([...input.observations]);
+    sendTimes.push(Date.now());
     return {
       batchId: `batch_${batches.length}`,
       acceptedCount: input.observations.length,
@@ -679,7 +689,7 @@ function createUploadRecorder(options: { maxBatchSize?: number; maxBatchBytes?: 
     attributionResolver: async () => null,
     ...options,
   });
-  return { batches, sendObservationBatch, coordinator };
+  return { batches, sendTimes, sendObservationBatch, coordinator };
 }
 
 function causalSequences(batch: readonly NormalizedSessionEvent[]): number[] {
@@ -752,16 +762,20 @@ describe("Observation upload policy (default window, caps and immediate triggers
     // Cloud ingestion: 1,000 events and 10 MiB wire bytes (50 MiB decompressed) per request.
     const serverMaxEvents = 1_000;
     const serverMaxBytes = 10 * 1024 * 1024;
-    expect(OBSERVATION_UPLOAD_POLICY.maxEvents * 4).toBeLessThanOrEqual(serverMaxEvents);
-    expect(OBSERVATION_UPLOAD_POLICY.maxBytes * 4).toBeLessThanOrEqual(serverMaxBytes);
-    expect(OBSERVATION_UPLOAD_POLICY.requestMaxEvents).toBeLessThanOrEqual(serverMaxEvents);
-    expect(OBSERVATION_UPLOAD_POLICY.requestMaxBytes * 2).toBeLessThanOrEqual(serverMaxBytes);
-    expect(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs).toBeLessThan(
-      OBSERVATION_UPLOAD_POLICY.windowMs,
-    );
+    const policy = OBSERVATION_UPLOAD_POLICY;
+    expect(policy.maxEvents * 2).toBeLessThanOrEqual(serverMaxEvents);
+    expect(policy.maxBytes * 2).toBeLessThanOrEqual(serverMaxBytes);
+    // An early send fits one request: it is never split by the per-request ceilings.
+    expect(policy.maxEvents).toBeLessThanOrEqual(policy.requestMaxEvents);
+    expect(policy.maxBytes).toBeLessThanOrEqual(policy.requestMaxBytes);
+    expect(policy.requestMaxEvents).toBeLessThanOrEqual(serverMaxEvents);
+    expect(policy.requestMaxBytes * 2).toBeLessThanOrEqual(serverMaxBytes);
+    expect(policy.turnHintWindowMs).toBeLessThan(policy.windowMs);
+    // A settled turn is never held longer than an ordinary window.
+    expect(policy.settledTurnMinIntervalMs).toBeLessThanOrEqual(policy.windowMs);
   });
 
-  it("holds a batch for 15 s from its first event, not from its latest", async () => {
+  it("holds a batch for the full window from its first event, not from its latest", async () => {
     const { batches, sendObservationBatch, coordinator } = createUploadRecorder();
     const session = createMockHarnessSession("sess_policy_window", "active");
 
@@ -869,7 +883,7 @@ describe("Observation upload policy (default window, caps and immediate triggers
       [createPromptRecord(session.sessionId, 1)],
       async () => {},
     );
-    await vi.advanceTimersByTimeAsync(12_000);
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.windowMs - 3_000);
     await coordinator.handleRecords(
       session,
       [createCompletionRecord(session.sessionId, 2)],
@@ -883,7 +897,7 @@ describe("Observation upload policy (default window, caps and immediate triggers
     expect(sendObservationBatch).toHaveBeenCalledTimes(1);
   });
 
-  it("sends as soon as a batch reaches 250 events", async () => {
+  it("sends as soon as a batch reaches the event cap", async () => {
     const { batches, sendObservationBatch, coordinator } = createUploadRecorder();
     const session = createMockHarnessSession("sess_policy_event_cap", "active");
     const maxEvents = OBSERVATION_UPLOAD_POLICY.maxEvents;
@@ -1014,7 +1028,10 @@ describe("Observation upload policy (default window, caps and immediate triggers
   });
 
   it("preserves event and acknowledgement order across cap, hint and window sends", async () => {
-    const { batches, coordinator } = createUploadRecorder({ maxBatchSize: 3 });
+    const { batches, coordinator } = createUploadRecorder({
+      maxBatchSize: 3,
+      settledTurnMinIntervalMs: 0,
+    });
     const session = createMockHarnessSession("sess_policy_order", "active");
     const ackOrder: number[] = [];
     const ackFor = (sequence: number) => async () => {
@@ -1053,6 +1070,137 @@ describe("Observation upload policy (default window, caps and immediate triggers
     expect(ackOrder).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
+  it("a settled turn soon after a send waits for the session's minimum interval", async () => {
+    const { sendTimes, sendObservationBatch, coordinator } = createUploadRecorder();
+    const session = createMockHarnessSession("sess_policy_min_interval", "active");
+    const { settledTurnMinIntervalMs, turnHintWindowMs } = OBSERVATION_UPLOAD_POLICY;
+    const startMs = Date.now();
+
+    // First settled turn: no earlier send, so it goes out within the hint bound.
+    await coordinator.handleRecords(
+      session,
+      [createPromptRecord(session.sessionId, 1)],
+      async () => {},
+    );
+    await coordinator.handleRecords(
+      session,
+      [createCompletionRecord(session.sessionId, 2)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+
+    // A quick follow-up turn settles 5 s after that send: it is held until the interval ends.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await coordinator.handleRecords(
+      session,
+      [createPromptRecord(session.sessionId, 3)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    const ack = vi.fn(async () => {});
+    await coordinator.handleRecords(session, [createCompletionRecord(session.sessionId, 4)], ack);
+    const intervalEndsAt = sendTimes[0] + settledTurnMinIntervalMs;
+    await vi.advanceTimersByTimeAsync(intervalEndsAt - Date.now() - 1);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+    expect(ack).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(2);
+    expect(sendTimes[1] - sendTimes[0]).toBe(settledTurnMinIntervalMs);
+    expect(ack).toHaveBeenCalledTimes(1);
+
+    // Once the interval has passed, a settled turn again sends within the hint bound.
+    await vi.advanceTimersByTimeAsync(settledTurnMinIntervalMs);
+    await coordinator.handleRecords(
+      session,
+      [createCompletionRecord(session.sessionId, 5)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(3);
+    expect(Date.now() - startMs).toBeGreaterThan(settledTurnMinIntervalMs);
+  });
+
+  it("the minimum interval is per session", async () => {
+    const { sendObservationBatch, coordinator } = createUploadRecorder();
+    const first = createMockHarnessSession("sess_policy_interval_a", "active");
+    const second = createMockHarnessSession("sess_policy_interval_b", "active");
+
+    await coordinator.handleRecords(
+      first,
+      [createCompletionRecord(first.sessionId, 1)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+
+    // Another session that never sent settles right away and is not held by the first's send.
+    await coordinator.handleRecords(
+      second,
+      [createCompletionRecord(second.sessionId, 1)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("session end, caps and shutdown still send immediately inside the minimum interval", async () => {
+    const { batches, sendObservationBatch, coordinator } = createUploadRecorder({
+      maxBatchSize: 3,
+    });
+    const session = createMockHarnessSession("sess_policy_interval_immediate", "active");
+
+    await coordinator.handleRecords(
+      session,
+      [createCompletionRecord(session.sessionId, 1)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    expect(sendObservationBatch).toHaveBeenCalledTimes(1);
+
+    // Cap: three events right after a send go out at once.
+    for (const sequence of [2, 3, 4]) {
+      await coordinator.handleRecords(
+        session,
+        [createToolCallRecord(session.sessionId, sequence)],
+        async () => {},
+      );
+    }
+    expect(sendObservationBatch).toHaveBeenCalledTimes(2);
+
+    // Settled turn held by the interval, then the session ends: sent now, nothing waits.
+    await coordinator.handleRecords(
+      session,
+      [createCompletionRecord(session.sessionId, 5)],
+      async () => {},
+    );
+    expect(sendObservationBatch).toHaveBeenCalledTimes(2);
+    await coordinator.handleRecords(
+      session,
+      [createLifecycleRecord(session.sessionId, 6, "end")],
+      async () => {},
+    );
+    expect(sendObservationBatch).toHaveBeenCalledTimes(3);
+    expect(causalSequences(batches[2])).toEqual([5, 6]);
+
+    // Shutdown flushes a held settled turn of another session without waiting.
+    const other = createMockHarnessSession("sess_policy_interval_shutdown", "active");
+    await coordinator.handleRecords(
+      other,
+      [createCompletionRecord(other.sessionId, 1)],
+      async () => {},
+    );
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.turnHintWindowMs);
+    await coordinator.handleRecords(
+      other,
+      [createCompletionRecord(other.sessionId, 2)],
+      async () => {},
+    );
+    expect(sendObservationBatch).toHaveBeenCalledTimes(4);
+    await coordinator.waitForIdle();
+    expect(sendObservationBatch).toHaveBeenCalledTimes(5);
+  });
+
   it("splits an oversized buffer into ordered requests under the per-request byte ceiling", () => {
     const { requestMaxBytes, requestMaxEvents } = OBSERVATION_UPLOAD_POLICY;
     const padding = "x".repeat(1024 * 1024);
@@ -1078,5 +1226,117 @@ describe("Observation upload policy (default window, caps and immediate triggers
       requestMaxEvents,
       5,
     ]);
+  });
+});
+
+type AgentStep = { atMs: number; kind: "user" | "toolStep" | "toolResult" | "reply" };
+
+/**
+ * A deterministic hour of interactive agent work: a prompt, a loop of tool steps and results a
+ * few seconds apart, a settled reply, then the user reads and answers (sometimes quickly).
+ */
+function syntheticAgentHour(seed: number): AgentStep[] {
+  let state = seed >>> 0;
+  const random = () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const between = (min: number, max: number) => Math.round(min + random() * (max - min));
+  const steps: AgentStep[] = [];
+  let atMs = 0;
+  while (atMs < 3_600_000) {
+    steps.push({ atMs, kind: "user" });
+    for (let calls = between(2, 20); calls > 0; calls--) {
+      atMs += between(2_000, 12_000);
+      steps.push({ atMs, kind: "toolStep" });
+      atMs += between(100, 8_000);
+      steps.push({ atMs, kind: "toolResult" });
+    }
+    atMs += between(2_000, 10_000);
+    steps.push({ atMs, kind: "reply" });
+    atMs += random() < 0.3 ? between(5_000, 25_000) : between(30_000, 240_000);
+  }
+  return steps;
+}
+
+describe("Observation upload policy replay (uploads per active session-hour)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The policy before uploads were spaced out: 15 s window, every settled turn sent in 5 s. */
+  const PREVIOUS_POLICY = {
+    coalesceDwellMs: 15_000,
+    turnHintDwellMs: 5_000,
+    settledTurnMinIntervalMs: 0,
+    maxBatchSize: 250,
+    maxBatchBytes: 2 * 1024 * 1024,
+  };
+
+  async function replay(steps: AgentStep[], options: UploadRecorderOptions) {
+    const { batches, sendTimes, coordinator } = createUploadRecorder(options);
+    const session = {
+      ...createMockHarnessSession("sess_policy_replay", "active"),
+      harnessId: "omp",
+    };
+    const startMs = Date.now();
+    let acked = 0;
+    let settledDelayMaxMs = 0;
+    const settledAtMs: number[] = [];
+    for (const [index, step] of steps.entries()) {
+      await vi.advanceTimersByTimeAsync(startMs + step.atMs - Date.now());
+      const sequence = index + 1;
+      const message =
+        step.kind === "user"
+          ? { role: "user", content: [{ type: "text", text: "Continue." }] }
+          : step.kind === "toolStep"
+            ? ompAssistantRequestingTool(`call_${sequence}`)
+            : step.kind === "toolResult"
+              ? ompToolResult(`call_${sequence - 1}`)
+              : ompAssistantReply();
+      if (step.kind === "reply") settledAtMs.push(Date.now());
+      await coordinator.handleRecords(
+        session,
+        [createOmpRecord(session.sessionId, sequence, message)],
+        async () => {
+          acked += 1;
+        },
+      );
+    }
+    await vi.advanceTimersByTimeAsync(OBSERVATION_UPLOAD_POLICY.windowMs);
+    for (const settledAt of settledAtMs) {
+      const sentAt = sendTimes.find((at) => at >= settledAt);
+      if (sentAt !== undefined) settledDelayMaxMs = Math.max(settledDelayMaxMs, sentAt - settledAt);
+    }
+    return {
+      uploads: batches.length,
+      events: batches.reduce((sum, batch) => sum + batch.length, 0),
+      acked,
+      settledDelayMaxMs,
+    };
+  }
+
+  it("roughly halves uploads without losing events or delaying settled turns past one window", async () => {
+    let previousUploads = 0;
+    let currentUploads = 0;
+    for (const seed of [1, 2, 3]) {
+      const steps = syntheticAgentHour(seed);
+      const previous = await replay(steps, PREVIOUS_POLICY);
+      const current = await replay(steps, {});
+      expect(current.acked).toBe(steps.length);
+      expect(previous.acked).toBe(steps.length);
+      expect(current.events).toBe(previous.events);
+      expect(current.settledDelayMaxMs).toBeLessThanOrEqual(OBSERVATION_UPLOAD_POLICY.windowMs);
+      previousUploads += previous.uploads;
+      currentUploads += current.uploads;
+    }
+    expect(currentUploads / previousUploads).toBeLessThanOrEqual(0.55);
   });
 });
