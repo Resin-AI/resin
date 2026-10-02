@@ -13899,6 +13899,198 @@ var EvidenceSetRecordSchema = external_exports.discriminatedUnion("visibility", 
   WorkspaceEvidenceSetRecordSchema
 ]);
 
+// packages/contracts/dist/tool-certificate.js
+init_zod();
+init_common();
+
+// packages/contracts/dist/v1.js
+init_zod();
+init_common();
+var V1_SCHEMA_VERSION = "1.0.0";
+var V1_SCHEMA_KINDS = {
+  OWNER_AUTHORIZATION: "owner_authorization",
+  PROJECT_METADATA: "project_metadata",
+  TOOL_LOCK: "tool_lock",
+  ACTIVATION_CERTIFICATE: "activation_certificate",
+  REVOCATION_METADATA: "revocation_metadata",
+  SAVINGS_EVIDENCE: "savings_evidence",
+  TOOL_CERTIFICATE: "tool_certificate"
+};
+var V1Sha256DigestSchema = external_exports.string().regex(/^(sha256:)?[a-f0-9]{64}$/i, "Invalid SHA-256 digest format (expected 64 hex characters with optional sha256: prefix)").transform((val) => normalizeSha256(val, false));
+var V1ExactSemVerSchema = external_exports.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/, "Invalid semantic version string").refine((val) => !/[*^~><=]/.test(val), {
+  message: "Version ranges and wildcards (^, ~, *, >, <) are prohibited in exact pinned versions"
+});
+var V1OwnerTypeSchema = external_exports.enum(["user", "workspace", "account", "organization"]);
+var V1RoleSchema = external_exports.enum(["owner", "admin", "member", "viewer"]);
+var V1OwnerReferenceSchema = external_exports.object({
+  ownerType: V1OwnerTypeSchema,
+  ownerId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1PersonalScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("personal"),
+  userId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1WorkspaceScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("workspace"),
+  workspaceId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1AccountScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("account"),
+  accountId: UUIDSchema
+}).strict();
+var V1OrganizationScopeSchema = external_exports.object({
+  scopeType: external_exports.literal("organization"),
+  organizationId: UUIDSchema,
+  accountId: UUIDSchema
+}).strict();
+var V1AuthorizationScopeSchema = external_exports.discriminatedUnion("scopeType", [
+  V1PersonalScopeSchema,
+  V1WorkspaceScopeSchema,
+  V1AccountScopeSchema,
+  V1OrganizationScopeSchema
+]);
+var V1SubjectTypeSchema = external_exports.enum(["user", "service_account", "device", "mcp_client"]);
+var V1OwnerAuthorizationSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.OWNER_AUTHORIZATION),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  authorizationId: UUIDSchema,
+  subjectId: UUIDSchema,
+  subjectType: V1SubjectTypeSchema,
+  owner: V1OwnerReferenceSchema,
+  scope: V1AuthorizationScopeSchema,
+  roles: external_exports.array(V1RoleSchema).min(1),
+  permissions: external_exports.array(external_exports.string().min(1)),
+  issuedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema.optional()
+}).strict();
+var V1ProjectSettingsSchema = external_exports.object({
+  defaultRuntimeVersion: V1ExactSemVerSchema.optional(),
+  environment: external_exports.string().min(1).max(64).optional(),
+  tags: external_exports.array(external_exports.string().min(1).max(64)).optional()
+}).strict();
+var V1ProjectMetadataSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.PROJECT_METADATA),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  projectId: UUIDSchema,
+  name: external_exports.string().min(1).max(128),
+  settings: V1ProjectSettingsSchema.optional(),
+  createdAt: ISOTimestampSchema,
+  updatedAt: ISOTimestampSchema.optional()
+}).strict();
+var V1LockSignatureIdentitySchema = external_exports.object({
+  keyId: external_exports.string().min(1),
+  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
+  signer: external_exports.string().min(1).optional()
+}).strict();
+var V1LockedToolEntrySchema = external_exports.object({
+  toolId: UUIDSchema,
+  name: IdentifierSchema,
+  version: V1ExactSemVerSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  envelopeDigest: Sha256DigestSchema.optional(),
+  signatureIdentity: V1LockSignatureIdentitySchema.optional(),
+  status: external_exports.enum(["active", "pinned", "disabled"]).default("active")
+}).strict();
+var V1ToolLockSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.TOOL_LOCK),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  projectId: UUIDSchema,
+  updatedAt: ISOTimestampSchema,
+  tools: external_exports.record(IdentifierSchema, V1LockedToolEntrySchema)
+}).strict();
+var V1CertificateSubjectSchema = external_exports.object({
+  userId: UUIDSchema,
+  accountId: UUIDSchema,
+  deviceId: UUIDSchema.optional()
+}).strict();
+var V1ActivationCertificateSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  certificateId: UUIDSchema,
+  subject: V1CertificateSubjectSchema,
+  projectId: UUIDSchema,
+  toolId: UUIDSchema,
+  toolName: IdentifierSchema,
+  version: V1ExactSemVerSchema,
+  manifestDigest: Sha256DigestSchema,
+  artifactDigest: Sha256DigestSchema,
+  capabilityEnvelopeDigest: Sha256DigestSchema,
+  qualificationEvidenceDigest: Sha256DigestSchema,
+  counter: external_exports.number().int().nonnegative(),
+  nonce: external_exports.string().min(8),
+  issuedAt: ISOTimestampSchema,
+  notBefore: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  status: external_exports.enum(["active", "suspended", "revoked"]).default("active"),
+  signature: SignatureMetadataSchema
+}).strict().refine((data) => {
+  const issued = new Date(data.issuedAt).getTime();
+  const notBefore = new Date(data.notBefore).getTime();
+  const expires = new Date(data.expiresAt).getTime();
+  return !Number.isNaN(issued) && !Number.isNaN(notBefore) && !Number.isNaN(expires) && notBefore <= expires && issued <= expires;
+}, {
+  message: "Certificate validity window invalid: issuedAt and notBefore must be before or equal to expiresAt"
+});
+var V1RevokedToolEntrySchema = external_exports.object({
+  toolId: UUIDSchema,
+  version: V1ExactSemVerSchema.optional(),
+  revokedAt: ISOTimestampSchema,
+  reason: external_exports.string().min(1)
+}).strict();
+var V1RevokedCertificateEntrySchema = external_exports.object({
+  certificateId: UUIDSchema,
+  revokedAt: ISOTimestampSchema,
+  reason: external_exports.string().min(1)
+}).strict();
+var V1RevocationMetadataSchema = external_exports.object({
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.REVOCATION_METADATA),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  revocationListId: UUIDSchema,
+  authorityId: external_exports.string().min(1),
+  accountId: UUIDSchema,
+  sequenceNumber: external_exports.number().int().nonnegative(),
+  issuedAt: ISOTimestampSchema,
+  expiresAt: ISOTimestampSchema,
+  revokedTools: external_exports.array(V1RevokedToolEntrySchema).default([]),
+  revokedCertificates: external_exports.array(V1RevokedCertificateEntrySchema).default([]),
+  revokedKeys: external_exports.array(external_exports.string().min(1)).default([]),
+  signature: SignatureMetadataSchema
+}).strict().refine((data) => {
+  const issued = new Date(data.issuedAt).getTime();
+  const expires = new Date(data.expiresAt).getTime();
+  return !Number.isNaN(issued) && !Number.isNaN(expires) && issued <= expires;
+}, {
+  message: "Revocation metadata timestamps invalid: issuedAt must be before or equal to expiresAt"
+});
+
+// packages/contracts/dist/tool-certificate.js
+var ToolCertificateEntityIdentifierSchema = IdentifierSchema.max(64, "Certificate identifier exceeds the 64-character authentication identifier limit");
+var V1ToolCertificateSignatureSchema = external_exports.object({
+  keyId: external_exports.string().min(1).max(256).regex(/^\S+$/, "Key id must not contain whitespace"),
+  algorithm: external_exports.literal("ed25519"),
+  signature: external_exports.string().regex(/^[0-9a-f]{128}$/, "Signature must be 128 lowercase hex characters (64 bytes)"),
+  signedAt: ISOTimestampSchema
+}).strict();
+var toolCertificateFields = {
+  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.TOOL_CERTIFICATE),
+  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
+  certificateId: UUIDSchema,
+  accountId: ToolCertificateEntityIdentifierSchema,
+  workspaceId: ToolCertificateEntityIdentifierSchema,
+  toolId: UUIDSchema,
+  toolName: IdentifierSchema,
+  version: V1ExactSemVerSchema,
+  artifactDigest: Sha256DigestSchema,
+  manifestDigest: Sha256DigestSchema,
+  issuedAt: ISOTimestampSchema
+};
+var V1UnsignedToolCertificateSchema = external_exports.object(toolCertificateFields).strict();
+var V1ToolCertificateSchema = external_exports.object({ ...toolCertificateFields, signature: V1ToolCertificateSignatureSchema }).strict();
+
 // packages/protocol/dist/http.js
 init_zod();
 var InstallationRegisterRequestSchema = external_exports.object({
@@ -13986,6 +14178,11 @@ var CatalogSnapshotResultSchema = external_exports.union([
   CatalogSnapshotResponseSchema,
   CatalogSnapshotUnchangedResponseSchema
 ]);
+var CATALOG_CERTIFICATES_PATH = "/v1/catalog/certificates";
+var MAX_CATALOG_CERTIFICATES = 2e3;
+var CatalogCertificatesResponseSchema = external_exports.object({
+  certificates: external_exports.array(V1ToolCertificateSchema).max(MAX_CATALOG_CERTIFICATES)
+});
 var ArtifactDownloadRequestSchema = external_exports.object({
   digest: Sha256DigestSchema,
   workspaceId: IdentifierSchema,
@@ -14319,6 +14516,29 @@ var OPENAPI_V1_SPEC = {
         }
       }
     },
+    [CATALOG_CERTIFICATES_PATH]: {
+      get: {
+        summary: "Fetch signed tool certificates for the caller's account workspace",
+        operationId: "getCatalogCertificates",
+        security: [{ BearerAuth: ["catalog:read"] }],
+        parameters: [
+          { name: "workspaceId", in: "query", required: true, schema: { type: "string" } }
+        ],
+        responses: {
+          "200": {
+            description: "Tool certificates issued for the workspace's published tools",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CatalogCertificatesResponse" }
+              }
+            }
+          },
+          "404": {
+            description: "The cloud does not issue tool certificates (clients report-only)"
+          }
+        }
+      }
+    },
     "/v1/artifacts/{digest}/download": {
       get: {
         summary: "Download compiled tool artifact package with checksum validation",
@@ -14461,6 +14681,7 @@ var OPENAPI_V1_SPEC = {
       ObservationBatchRequest: { type: "object" },
       ObservationBatchResponse: { type: "object" },
       CatalogSnapshotResponse: { type: "object" },
+      CatalogCertificatesResponse: { type: "object", required: ["certificates"] },
       CatalogSnapshotUnchangedResponse: {
         type: "object",
         additionalProperties: false,
@@ -14591,171 +14812,6 @@ var StreamMessageSchema = external_exports.object({
 
 // packages/protocol/dist/projects.js
 init_common();
-
-// packages/contracts/dist/v1.js
-init_zod();
-init_common();
-var V1_SCHEMA_VERSION = "1.0.0";
-var V1_SCHEMA_KINDS = {
-  OWNER_AUTHORIZATION: "owner_authorization",
-  PROJECT_METADATA: "project_metadata",
-  TOOL_LOCK: "tool_lock",
-  ACTIVATION_CERTIFICATE: "activation_certificate",
-  REVOCATION_METADATA: "revocation_metadata",
-  SAVINGS_EVIDENCE: "savings_evidence"
-};
-var V1Sha256DigestSchema = external_exports.string().regex(/^(sha256:)?[a-f0-9]{64}$/i, "Invalid SHA-256 digest format (expected 64 hex characters with optional sha256: prefix)").transform((val) => normalizeSha256(val, false));
-var V1ExactSemVerSchema = external_exports.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/, "Invalid semantic version string").refine((val) => !/[*^~><=]/.test(val), {
-  message: "Version ranges and wildcards (^, ~, *, >, <) are prohibited in exact pinned versions"
-});
-var V1OwnerTypeSchema = external_exports.enum(["user", "workspace", "account", "organization"]);
-var V1RoleSchema = external_exports.enum(["owner", "admin", "member", "viewer"]);
-var V1OwnerReferenceSchema = external_exports.object({
-  ownerType: V1OwnerTypeSchema,
-  ownerId: UUIDSchema,
-  accountId: UUIDSchema
-}).strict();
-var V1PersonalScopeSchema = external_exports.object({
-  scopeType: external_exports.literal("personal"),
-  userId: UUIDSchema,
-  accountId: UUIDSchema
-}).strict();
-var V1WorkspaceScopeSchema = external_exports.object({
-  scopeType: external_exports.literal("workspace"),
-  workspaceId: UUIDSchema,
-  accountId: UUIDSchema
-}).strict();
-var V1AccountScopeSchema = external_exports.object({
-  scopeType: external_exports.literal("account"),
-  accountId: UUIDSchema
-}).strict();
-var V1OrganizationScopeSchema = external_exports.object({
-  scopeType: external_exports.literal("organization"),
-  organizationId: UUIDSchema,
-  accountId: UUIDSchema
-}).strict();
-var V1AuthorizationScopeSchema = external_exports.discriminatedUnion("scopeType", [
-  V1PersonalScopeSchema,
-  V1WorkspaceScopeSchema,
-  V1AccountScopeSchema,
-  V1OrganizationScopeSchema
-]);
-var V1SubjectTypeSchema = external_exports.enum(["user", "service_account", "device", "mcp_client"]);
-var V1OwnerAuthorizationSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.OWNER_AUTHORIZATION),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  authorizationId: UUIDSchema,
-  subjectId: UUIDSchema,
-  subjectType: V1SubjectTypeSchema,
-  owner: V1OwnerReferenceSchema,
-  scope: V1AuthorizationScopeSchema,
-  roles: external_exports.array(V1RoleSchema).min(1),
-  permissions: external_exports.array(external_exports.string().min(1)),
-  issuedAt: ISOTimestampSchema,
-  expiresAt: ISOTimestampSchema.optional()
-}).strict();
-var V1ProjectSettingsSchema = external_exports.object({
-  defaultRuntimeVersion: V1ExactSemVerSchema.optional(),
-  environment: external_exports.string().min(1).max(64).optional(),
-  tags: external_exports.array(external_exports.string().min(1).max(64)).optional()
-}).strict();
-var V1ProjectMetadataSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.PROJECT_METADATA),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  projectId: UUIDSchema,
-  name: external_exports.string().min(1).max(128),
-  settings: V1ProjectSettingsSchema.optional(),
-  createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema.optional()
-}).strict();
-var V1LockSignatureIdentitySchema = external_exports.object({
-  keyId: external_exports.string().min(1),
-  algorithm: external_exports.enum(["ed25519", "ecdsa_p256_sha256", "rsa_pss_sha256"]),
-  signer: external_exports.string().min(1).optional()
-}).strict();
-var V1LockedToolEntrySchema = external_exports.object({
-  toolId: UUIDSchema,
-  name: IdentifierSchema,
-  version: V1ExactSemVerSchema,
-  manifestDigest: Sha256DigestSchema,
-  artifactDigest: Sha256DigestSchema,
-  envelopeDigest: Sha256DigestSchema.optional(),
-  signatureIdentity: V1LockSignatureIdentitySchema.optional(),
-  status: external_exports.enum(["active", "pinned", "disabled"]).default("active")
-}).strict();
-var V1ToolLockSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.TOOL_LOCK),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  projectId: UUIDSchema,
-  updatedAt: ISOTimestampSchema,
-  tools: external_exports.record(IdentifierSchema, V1LockedToolEntrySchema)
-}).strict();
-var V1CertificateSubjectSchema = external_exports.object({
-  userId: UUIDSchema,
-  accountId: UUIDSchema,
-  deviceId: UUIDSchema.optional()
-}).strict();
-var V1ActivationCertificateSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.ACTIVATION_CERTIFICATE),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  certificateId: UUIDSchema,
-  subject: V1CertificateSubjectSchema,
-  projectId: UUIDSchema,
-  toolId: UUIDSchema,
-  toolName: IdentifierSchema,
-  version: V1ExactSemVerSchema,
-  manifestDigest: Sha256DigestSchema,
-  artifactDigest: Sha256DigestSchema,
-  capabilityEnvelopeDigest: Sha256DigestSchema,
-  qualificationEvidenceDigest: Sha256DigestSchema,
-  counter: external_exports.number().int().nonnegative(),
-  nonce: external_exports.string().min(8),
-  issuedAt: ISOTimestampSchema,
-  notBefore: ISOTimestampSchema,
-  expiresAt: ISOTimestampSchema,
-  status: external_exports.enum(["active", "suspended", "revoked"]).default("active"),
-  signature: SignatureMetadataSchema
-}).strict().refine((data) => {
-  const issued = new Date(data.issuedAt).getTime();
-  const notBefore = new Date(data.notBefore).getTime();
-  const expires = new Date(data.expiresAt).getTime();
-  return !Number.isNaN(issued) && !Number.isNaN(notBefore) && !Number.isNaN(expires) && notBefore <= expires && issued <= expires;
-}, {
-  message: "Certificate validity window invalid: issuedAt and notBefore must be before or equal to expiresAt"
-});
-var V1RevokedToolEntrySchema = external_exports.object({
-  toolId: UUIDSchema,
-  version: V1ExactSemVerSchema.optional(),
-  revokedAt: ISOTimestampSchema,
-  reason: external_exports.string().min(1)
-}).strict();
-var V1RevokedCertificateEntrySchema = external_exports.object({
-  certificateId: UUIDSchema,
-  revokedAt: ISOTimestampSchema,
-  reason: external_exports.string().min(1)
-}).strict();
-var V1RevocationMetadataSchema = external_exports.object({
-  schemaKind: external_exports.literal(V1_SCHEMA_KINDS.REVOCATION_METADATA),
-  schemaVersion: external_exports.literal(V1_SCHEMA_VERSION),
-  revocationListId: UUIDSchema,
-  authorityId: external_exports.string().min(1),
-  accountId: UUIDSchema,
-  sequenceNumber: external_exports.number().int().nonnegative(),
-  issuedAt: ISOTimestampSchema,
-  expiresAt: ISOTimestampSchema,
-  revokedTools: external_exports.array(V1RevokedToolEntrySchema).default([]),
-  revokedCertificates: external_exports.array(V1RevokedCertificateEntrySchema).default([]),
-  revokedKeys: external_exports.array(external_exports.string().min(1)).default([]),
-  signature: SignatureMetadataSchema
-}).strict().refine((data) => {
-  const issued = new Date(data.issuedAt).getTime();
-  const expires = new Date(data.expiresAt).getTime();
-  return !Number.isNaN(issued) && !Number.isNaN(expires) && issued <= expires;
-}, {
-  message: "Revocation metadata timestamps invalid: issuedAt must be before or equal to expiresAt"
-});
-
-// packages/protocol/dist/projects.js
 init_zod();
 var ProjectVisibilitySchema = external_exports.enum(["personal", "workspace"]);
 var ProjectRegistrationOutcomeSchema = external_exports.enum([
