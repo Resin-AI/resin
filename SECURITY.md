@@ -87,7 +87,7 @@ Resin is designed with a strict local-first architecture where the local develop
 │                           REMOTE CLOUD SERVICES                           │
 │                                                                           │
 │  - Redacted evidence events and validation decisions                      │
-│  - Tool artifacts with signatures and activation certificates             │
+│  - Tool artifacts and signed tool certificates                            │
 │  - Account and workspace identity                                         │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -97,10 +97,10 @@ Resin is designed with a strict local-first architecture where the local develop
 1. **Worker Isolation (ADR 0002):**
    - Generated tool code runs in a Deno child process started as the same OS user, with network, environment, subprocess and FFI access denied, reads limited to its bundle, import map and a scratch directory, and writes limited to that scratch directory. Its JavaScript heap is capped (128 MB by default) and it is stopped after a wall-clock timeout (30 s by default). There is no CPU quota.
    - Derivation steps run in a separate Deno process with Pyodide; see [Derivation steps](#derivation-steps).
-   - Capability envelopes (ADR 0007) are a manifest policy check: a tool's declared capabilities are checked against workspace policy before activation and dispatch. The envelope does not isolate processes. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
+   - Capability envelopes (ADR 0007) are declarations in a tool's manifest, which arrives from the cloud with the tool; they are not an independent policy. Generated tool code gets only the permissions its manifest declares, and a recorded-workflow tool that runs programs on the host is refused unless its manifest declares command execution. No separate workspace policy is evaluated, and the envelope does not isolate processes. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
 2. **Local Authority & Fail-Closed Enforcement:**
    - The local Gateway and Runtime are authoritative. Cloud-sent workflow validation executes nothing recorded (see [Workflow Validation](#workflow-validation)); the only cloud-authored code it runs is sandboxed derivation steps.
-   - Tool manifests, safety attestations, artifact signatures and activation certificates from the cloud are checked before a tool is activated; a failed check rejects the tool.
+   - A downloaded tool artifact is activated only if its bytes match the SHA-256 digest in the catalog, which is fetched over HTTPS; a mismatch rejects the tool. The gateway also checks each tool version's signed certificate (see [Tool Certificates](#tool-certificates)); that check is currently report-only.
 3. **Local IPC:**
    - The gateway talks to the observer daemon over a Unix domain socket (named pipe on Windows). On POSIX the socket is created in a directory with mode `0700` and set to mode `0600`, so only the owning user can connect; there is no additional authentication. Workers exchange messages with the gateway over their stdio pipes.
    - IPC frames are length-framed JSON typed by `@resin/protocol`.
@@ -137,7 +137,7 @@ When cloud connectivity is configured, what crosses the network boundary is defi
 | ------------- | ------------- | --------- |
 | **Evidence events** | Tool names, success/error flags, durations, output sizes, token counts, command profiles, path patterns, secret-scrubbed command lines and recorded-program views, opaque private references, harness call ids | Outbound HTTPS |
 | **Validation decisions** | Step ids, verdicts, fixed reason strings, `{ kind: "recording", planDigest }` | Outbound HTTPS |
-| **Tools & activation** | Signed tool artifacts, activation certificates, active-tool lists | Inbound HTTPS |
+| **Tools & activation** | Tool artifacts, signed tool certificates, active-tool lists | Inbound HTTPS |
 | **Account & workspace** | Sign-in identity, workspace and project identifiers | Bidirectional HTTPS |
 
 ### Pre-Dispatch Local Validation
@@ -149,9 +149,15 @@ Every observation batch is checked before it is sent: payloads containing prohib
 ## Hostile Cloud Authority Rejection
 
 The local Resin installation does not trust remote cloud endpoints as an execution authority:
-- **Limited Remote Code**: Cloud services cannot instruct the local runtime to run arbitrary scripts or recorded commands, alter capability envelopes, or disable security gates. Validation asks are answered from local recordings without running recorded programs or dispatching tool calls. Model-written derivation steps do run on the device, at validation and at invocation, but only inside the Deno + Pyodide sandbox described below. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
-- **Signature & Certificate Verification**: Downloaded tool artifacts must carry an Ed25519 signature from a known, unrevoked, trusted signing key, and their activation certificate must match the tool's id, name, version, project and digests.
-- **Fail-Closed on Tampering**: An artifact or certificate that fails verification is rejected and the tool is not activated.
+- **Limited Remote Code**: Cloud services cannot directly instruct the local runtime to run scripts or recorded commands, alter capability envelopes, or disable security gates. Validation asks are answered from local recordings without running recorded programs or dispatching tool calls. Model-written derivation steps do run on the device, at validation and at invocation, but only inside the Deno + Pyodide sandbox described below. Invoking a published tool runs its recorded commands directly, by design; the calling harness's own permission policy governs that tool call, as for any MCP tool, and Resin adds no approval or consent step of its own.
+- **What a published tool runs comes from the cloud**: a tool's recorded commands and manifest are delivered by the cloud, so whoever can publish tools to your workspace, including the cloud itself if it were compromised, decides what that tool runs when your agent invokes it. Tool certificates are the control being introduced to bound this.
+- **Integrity of downloaded tools**: an artifact whose bytes do not match the catalog's SHA-256 digest is rejected and the tool is not activated.
+
+### Tool Certificates
+
+Each published tool version carries a certificate the Resin cloud signs with an Ed25519 key that cannot be exported and that only the cloud's publishing service may use. The certificate binds the account and workspace, the tool's id, name and version, and the digests of its manifest and artifact. The gateway checks it against public keys pinned in the Resin CLI for each Resin cloud (keys are never taken from the cloud, the workspace or environment variables), against the device's own account and workspace, and against the digest of the bytes it downloaded.
+
+This check is **report-only** today: `resin status` and `resin doctor` show how many tools verified, were missing a certificate, or failed, but a missing or failed certificate does not yet block a tool. Enforcement will follow once certificate issuance is confirmed across workspaces. A certificate shows that the Resin cloud published that exact tool version to your workspace; it does not attest that the tool is safe.
 
 ---
 
