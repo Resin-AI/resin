@@ -306,7 +306,30 @@ export interface DaemonStatusSummary {
   };
   remediations: StatusRemediation[];
   notifications?: ActionableNotification[];
+  /**
+   * Report-only verification of cloud tool signature certificates, as the MCP gateway last
+   * recorded it. Absent from reports written before this existed.
+   */
+  toolSignatures?: ToolSignaturesStatus;
 }
+
+export interface ToolSignaturesStatus {
+  /** False when the gateway has recorded no checks yet (or the record is unreadable). */
+  available: boolean;
+  mode: "report-only" | "enforce";
+  verified: number;
+  missing: number;
+  /** Checks against a cloud origin with no pinned signing key. */
+  unpinned: number;
+  failed: number;
+  updatedAt: string | null;
+}
+
+/**
+ * The gateway's tool signature state file in the daemon state directory. Mirrors
+ * `TOOL_SIGNATURES_STATE_FILE_NAME` in @resin/gateway (not imported: status must not load it).
+ */
+export const TOOL_SIGNATURES_STATE_FILE_NAME = "tool-signatures.json";
 
 export interface StatusCommandFlags {
   json?: boolean;
@@ -600,6 +623,7 @@ export async function fetchDaemonStatusSummary(
     if (options.stateReader === undefined) stateReader.close();
   });
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
+  const toolSignatures = await readToolSignaturesStatus(fsBridge, daemonPaths.stateDir);
   const update = await readUpdateStatus(fsBridge, {
     home,
     resinHome,
@@ -693,6 +717,7 @@ export async function fetchDaemonStatusSummary(
     },
     remediations,
     notifications: reportedNotifications,
+    toolSignatures,
   };
 }
 
@@ -794,6 +819,9 @@ export function formatStatusForTerminal(
   } else if (gate && !gate.isOpen) {
     row("Production", gate.status === "uninitialized" ? "Not verified" : "Blocked");
   }
+  if (summary.toolSignatures?.available) {
+    row("Signatures", formatToolSignatureCounts(summary.toolSignatures));
+  }
 
   const automaticUpdateNotice = formatAutomaticUpdateNotice(summary.update?.lastAutomaticUpdate);
   if (automaticUpdateNotice) lines.push("", automaticUpdateNotice);
@@ -811,6 +839,57 @@ export function formatStatusForTerminal(
 
   lines.push("", "Details: resin status --verbose");
   return `${notificationHeader}${lines.join("\n")}\n`;
+}
+
+function formatToolSignatureCounts(status: ToolSignaturesStatus): string {
+  const counts = `${status.verified} verified, ${status.missing} missing, ${status.failed} failed`;
+  const unpinned = status.unpinned > 0 ? `, ${status.unpinned} unchecked (unpinned cloud)` : "";
+  return `${counts}${unpinned} (${status.mode})`;
+}
+
+/** One line, e.g. `Tool signatures (report-only): 3 verified, 1 missing, 0 failed`. */
+export function formatToolSignatureSummary(status: ToolSignaturesStatus | undefined): string {
+  if (!status?.available) return "Tool signatures (report-only): no checks recorded yet";
+  const unpinned = status.unpinned > 0 ? `, ${status.unpinned} unchecked (unpinned cloud)` : "";
+  return `Tool signatures (${status.mode}): ${status.verified} verified, ${status.missing} missing, ${status.failed} failed${unpinned}`;
+}
+
+function emptyToolSignatures(): ToolSignaturesStatus {
+  return {
+    available: false,
+    mode: "report-only",
+    verified: 0,
+    missing: 0,
+    unpinned: 0,
+    failed: 0,
+    updatedAt: null,
+  };
+}
+
+/** Reads the gateway's recorded tool signature summary. Never throws; unreadable reads as none. */
+export async function readToolSignaturesStatus(
+  fsBridge: ConfigFsBridge,
+  stateDir: string,
+): Promise<ToolSignaturesStatus> {
+  const raw = await safeReadFile(fsBridge, path.join(stateDir, TOOL_SIGNATURES_STATE_FILE_NAME));
+  const summary = asRecord(asRecord(parseJson(raw))?.summary);
+  if (summary === null) return emptyToolSignatures();
+  const verified = safeNonnegativeInteger(summary.verified);
+  const missing = safeNonnegativeInteger(summary.missing);
+  const unpinned = safeNonnegativeInteger(summary.unpinned);
+  const failed = safeNonnegativeInteger(summary.failed);
+  if (verified === null || missing === null || unpinned === null || failed === null) {
+    return emptyToolSignatures();
+  }
+  return {
+    available: true,
+    mode: summary.mode === "enforce" ? "enforce" : "report-only",
+    verified,
+    missing,
+    unpinned,
+    failed,
+    updatedAt: safeIsoTimestamp(summary.updatedAt),
+  };
 }
 
 function formatMembershipType(membershipType: MembershipType | null | undefined): string {
@@ -971,6 +1050,14 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
     lines.push(
       `  Status:     ${summary.safetyGate.isOpen ? (summary.safetyGate.unsafeOverrideActive ? "OVERRIDE (unsafe dev mode)" : "PASS (open)") : "BLOCKED (fail-closed)"}`,
     );
+  }
+
+  if (summary.toolSignatures) {
+    lines.push("\n[Tool Signatures]");
+    lines.push(`  ${formatToolSignatureSummary(summary.toolSignatures)}`);
+    if (summary.toolSignatures.updatedAt) {
+      lines.push(`  Checked:    ${summary.toolSignatures.updatedAt}`);
+    }
   }
 
   lines.push("\n[Tools & MCP Catalog]");

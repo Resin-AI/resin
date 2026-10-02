@@ -5,6 +5,8 @@ import {
   ToolArtifactSchema,
   type ToolManifest,
   ToolManifestSchema,
+  type V1ToolCertificate,
+  V1ToolCertificateSchema,
   hashCanonicalContent,
   normalizeSha256,
 } from "@resin/contracts";
@@ -12,11 +14,13 @@ import {
   type AccountToolAccessResponse,
   AccountToolAccessResponseSchema,
   CATALOG_CAPABILITIES_HEADER,
+  CATALOG_CERTIFICATES_PATH,
   CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
   type CatalogSnapshotRequest,
   type CatalogSnapshotResponse,
   CatalogSnapshotResponseSchema,
   CatalogSnapshotResultSchema,
+  MAX_CATALOG_CERTIFICATES,
   PROTOCOL_VERSION,
   type ProjectRegistrationRequest,
   type ProjectRegistrationResponse,
@@ -106,6 +110,16 @@ export interface CatalogSnapshotFetchOptions {
 export type CatalogSnapshotFetchResult =
   | { kind: "snapshot"; snapshot: CatalogSnapshotResponse }
   | { kind: "unchanged"; snapshotVersion: string };
+
+/**
+ * The cloud's tool certificates for the credential's workspace, or its statement (404) that it
+ * does not issue them. Certificates that fail the contract schema are dropped and counted.
+ */
+export type ToolCertificatesFetchResult =
+  | { kind: "certificates"; certificates: V1ToolCertificate[]; rejected: number }
+  | { kind: "not-issued" };
+
+const CertificatesEnvelopeSchema = z.object({ certificates: z.array(z.unknown()) });
 
 function invalidSnapshotSchema(error: z.ZodError): ValidationError {
   return new ValidationError("Invalid catalog snapshot response schema from cloud", {
@@ -789,6 +803,96 @@ export class CloudCatalogClient {
       this.circuitBreaker.recordFailure(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
+  }
+
+  /**
+   * Fetches the tool certificates the cloud issued for this credential's workspace from
+   * `GET /v1/catalog/certificates`. A 404 means the cloud does not issue certificates yet.
+   *
+   * Report-only: this never pauses the client or touches the catalog circuit breaker, so a cloud
+   * without (or failing) this endpoint cannot affect catalog sync. Errors are thrown for the caller
+   * to swallow.
+   */
+  async fetchToolCertificates(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ToolCertificatesFetchResult> {
+    if (this.isPaused) {
+      throw new ProtocolError("terminal", "Cloud catalog client is paused", { status: 401 });
+    }
+    let identity = this.identityProvider ? await this.identityProvider() : null;
+    if (this.identityProvider && !identity) {
+      throw new ProtocolError("terminal", "Cloud credentials unavailable", { status: 401 });
+    }
+    const targetBaseUrl = (identity?.cloudUrl ?? this.baseUrl)?.replace(/\/+$/, "");
+    if (!targetBaseUrl) {
+      throw new Error("No baseUrl or identity cloudUrl configured for CloudCatalogClient");
+    }
+    const workspaceId = identity?.workspaceId ?? this.workspaceId ?? "";
+    const url = new URL(`${targetBaseUrl}${CATALOG_CERTIFICATES_PATH}`);
+    if (workspaceId) url.searchParams.set("workspaceId", workspaceId);
+
+    const buildHeaders = (id: CloudRequestIdentity | null): Record<string, string> => {
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "Cache-Control": "no-store",
+        "x-protocol-version": PROTOCOL_VERSION,
+      };
+      if (id) {
+        headers.Authorization = `Bearer ${id.accessToken}`;
+        headers["x-account-id"] = id.accountId;
+        headers["x-workspace-id"] = id.workspaceId;
+        headers["x-device-id"] = id.deviceId;
+        headers["x-installation-id"] = id.installationId;
+        if (id.userId) headers["x-user-id"] = id.userId;
+      } else {
+        if (this.authToken) headers.Authorization = `Bearer ${this.authToken}`;
+        if (workspaceId) headers["x-workspace-id"] = workspaceId;
+        if (this.deviceId) headers["x-device-id"] = this.deviceId;
+      }
+      return headers;
+    };
+    const request = (id: CloudRequestIdentity | null) =>
+      this.fetchFn(url.toString(), {
+        method: "GET",
+        redirect: "error",
+        headers: buildHeaders(id),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(10_000)])
+          : AbortSignal.timeout(10_000),
+      });
+
+    let response = await request(identity);
+    if (response.status === 401 && this.identityProvider) {
+      identity = await this.identityProvider({ forceRefresh: true });
+      if (!identity) {
+        throw new ProtocolError("terminal", "Cloud credentials revoked or invalid", {
+          status: 401,
+        });
+      }
+      response = await request(identity);
+    }
+    if (response.status === 404) {
+      return { kind: "not-issued" };
+    }
+    if (!response.ok) {
+      throw new ProtocolError(
+        response.status === 429 || response.status >= 500 ? "retryable" : "terminal",
+        `Cloud tool certificates request failed with HTTP ${response.status}`,
+        { status: response.status },
+      );
+    }
+    const envelope = CertificatesEnvelopeSchema.safeParse(await response.json());
+    if (!envelope.success || envelope.data.certificates.length > MAX_CATALOG_CERTIFICATES) {
+      throw new ValidationError("Invalid tool certificates response from cloud");
+    }
+    const certificates: V1ToolCertificate[] = [];
+    let rejected = 0;
+    for (const raw of envelope.data.certificates) {
+      const parsed = V1ToolCertificateSchema.safeParse(raw);
+      if (parsed.success) certificates.push(parsed.data);
+      else rejected += 1;
+    }
+    return { kind: "certificates", certificates, rejected };
   }
 
   private isOfflineOrNetworkError(

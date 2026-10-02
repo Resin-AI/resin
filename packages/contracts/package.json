@@ -68,6 +68,11 @@
       "import": "./dist/tools.js",
       "default": "./dist/tools.js"
     },
+    "./tool-certificate": {
+      "types": "./dist/tool-certificate.d.ts",
+      "import": "./dist/tool-certificate.js",
+      "default": "./dist/tool-certificate.js"
+    },
     "./v1": {
       "types": "./dist/v1.d.ts",
       "import": "./dist/v1.js",

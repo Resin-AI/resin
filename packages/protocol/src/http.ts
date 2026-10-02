@@ -8,6 +8,7 @@ import {
 import { DeploymentRecordSchema, DeploymentStateSchema } from "@resin/contracts/deployments";
 import { NormalizedSessionEventSchema } from "@resin/contracts/events";
 import { InvocationRecordSchema } from "@resin/contracts/records";
+import { V1ToolCertificateSchema } from "@resin/contracts/tool-certificate";
 import { ToolManifestSchema } from "@resin/contracts/tools";
 import { z } from "zod";
 import {
@@ -204,6 +205,27 @@ export function isCatalogSnapshotUnchanged(
 ): result is CatalogSnapshotUnchangedResponse {
   return "unchanged" in result && result.unchanged === true;
 }
+
+/**
+ * 4b. Tool Certificates.
+ * Endpoint: GET /v1/catalog/certificates?workspaceId=<credential workspaceId>
+ *
+ * The signed tool certificates the cloud issued for the tools published to the caller's account
+ * workspace (the credential's `accountId`/`workspaceId`). Served separately from the catalog
+ * snapshot so certificates are fetched and cached independently of snapshot versioning and the
+ * unchanged-snapshot reply. A cloud that does not issue certificates yet answers 404; clients treat
+ * that as "no certificates" and never fail a sync over this endpoint.
+ */
+export const CATALOG_CERTIFICATES_PATH = "/v1/catalog/certificates";
+
+/** Upper bound on certificates in one response; clients ignore a longer list. */
+export const MAX_CATALOG_CERTIFICATES = 2000;
+
+export const CatalogCertificatesResponseSchema = z.object({
+  certificates: z.array(V1ToolCertificateSchema).max(MAX_CATALOG_CERTIFICATES),
+});
+
+export type CatalogCertificatesResponse = z.infer<typeof CatalogCertificatesResponseSchema>;
 
 /**
  * 5. Artifact Download & Verification.
@@ -592,6 +614,29 @@ export const OPENAPI_V1_SPEC = {
         },
       },
     },
+    [CATALOG_CERTIFICATES_PATH]: {
+      get: {
+        summary: "Fetch signed tool certificates for the caller's account workspace",
+        operationId: "getCatalogCertificates",
+        security: [{ BearerAuth: ["catalog:read"] }],
+        parameters: [
+          { name: "workspaceId", in: "query", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": {
+            description: "Tool certificates issued for the workspace's published tools",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CatalogCertificatesResponse" },
+              },
+            },
+          },
+          "404": {
+            description: "The cloud does not issue tool certificates (clients report-only)",
+          },
+        },
+      },
+    },
     "/v1/artifacts/{digest}/download": {
       get: {
         summary: "Download compiled tool artifact package with checksum validation",
@@ -734,6 +779,7 @@ export const OPENAPI_V1_SPEC = {
       ObservationBatchRequest: { type: "object" },
       ObservationBatchResponse: { type: "object" },
       CatalogSnapshotResponse: { type: "object" },
+      CatalogCertificatesResponse: { type: "object", required: ["certificates"] },
       CatalogSnapshotUnchangedResponse: {
         type: "object",
         additionalProperties: false,

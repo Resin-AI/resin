@@ -3,7 +3,9 @@ import {
   ArtifactDownloadMetadataSchema,
   ArtifactDownloadRequestSchema,
   CATALOG_CAPABILITIES_HEADER,
+  CATALOG_CERTIFICATES_PATH,
   CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
+  CatalogCertificatesResponseSchema,
   CatalogSnapshotRequestSchema,
   CatalogSnapshotResponseSchema,
   CatalogSnapshotResultSchema,
@@ -17,6 +19,7 @@ import {
   HealthNegotiateResponseSchema,
   InstallationRegisterRequestSchema,
   InstallationRegisterResponseSchema,
+  MAX_CATALOG_CERTIFICATES,
   OPENAPI_V1_SPEC,
   ObservationBatchRequestSchema,
   ObservationBatchResponseSchema,
@@ -376,5 +379,64 @@ describe("HTTP OpenAPI & Request/Response Contracts", () => {
     const parsedHealthRes = HealthNegotiateResponseSchema.parse(healthRes);
     expect(parsedHealthRes.status).toBe("healthy");
     expect(parsedHealthRes.clockSkewMs).toBe(12);
+  });
+});
+
+describe("Catalog certificates contract", () => {
+  const certificate = {
+    schemaKind: "tool_certificate",
+    schemaVersion: "1.0.0",
+    certificateId: "0b9d2f0e-6a8b-4c39-9d43-5d0a3c1e7f21",
+    accountId: "acc_123",
+    workspaceId: "ws_456",
+    toolId: "33333333-3333-4333-8333-333333333333",
+    toolName: "calc_tool",
+    version: "1.2.3",
+    artifactDigest: "a".repeat(64),
+    manifestDigest: "b".repeat(64),
+    issuedAt: "2026-10-01T12:00:00.000Z",
+    signature: {
+      keyId: "production-tool-signing-2026-10",
+      algorithm: "ed25519",
+      signature: "c".repeat(128),
+      signedAt: "2026-10-01T12:00:01.000Z",
+    },
+  };
+
+  it("serves certificates from a dedicated, documented route", () => {
+    expect(CATALOG_CERTIFICATES_PATH).toBe("/v1/catalog/certificates");
+    const route = OPENAPI_V1_SPEC.paths[CATALOG_CERTIFICATES_PATH].get;
+    expect(route.operationId).toBe("getCatalogCertificates");
+    expect(Object.keys(route.responses)).toEqual(["200", "404"]);
+  });
+
+  it("parses a certificate list and rejects malformed or oversized lists", () => {
+    expect(CatalogCertificatesResponseSchema.parse({ certificates: [certificate] })).toEqual({
+      certificates: [certificate],
+    });
+    expect(CatalogCertificatesResponseSchema.parse({ certificates: [] }).certificates).toEqual([]);
+    expect(
+      CatalogCertificatesResponseSchema.safeParse({
+        certificates: [{ ...certificate, signature: { ...certificate.signature, keyId: "" } }],
+      }).success,
+    ).toBe(false);
+    expect(CatalogCertificatesResponseSchema.safeParse({}).success).toBe(false);
+    expect(
+      CatalogCertificatesResponseSchema.safeParse({
+        certificates: Array.from({ length: MAX_CATALOG_CERTIFICATES + 1 }, () => certificate),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps the snapshot body tolerant of top-level fields a newer cloud adds", () => {
+    const snapshot = {
+      snapshotVersion: "v7",
+      generatedAt: "2026-09-01T00:00:00.000Z",
+      checksum: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      tools: [],
+      activeDeployments: [],
+    };
+    const parsed = CatalogSnapshotResultSchema.parse({ ...snapshot, certificates: [certificate] });
+    expect(parsed).toEqual(snapshot);
   });
 });

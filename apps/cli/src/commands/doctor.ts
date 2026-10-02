@@ -60,7 +60,12 @@ import {
   readUpdateStatusSnapshot,
 } from "../updates/engine.js";
 import type { UpdatePolicy } from "../updates/policy.js";
-import { formatAutomaticUpdateNotice, readLastAutomaticUpdate } from "./status.js";
+import {
+  formatAutomaticUpdateNotice,
+  formatToolSignatureSummary,
+  readLastAutomaticUpdate,
+  readToolSignaturesStatus,
+} from "./status.js";
 
 export interface DoctorCommandFlags {
   fix?: boolean;
@@ -685,6 +690,23 @@ export async function runDiagnostics(options: {
       fixable: true,
     });
   }
+
+  // 6b. Cloud tool signature certificates (report-only: never blocks a tool)
+  const toolSignatures = await readToolSignaturesStatus(fsBridge, daemonPaths.stateDir);
+  items.push({
+    id: "tool_signatures",
+    name: "Tool Signature Certificates",
+    category: "security",
+    status: toolSignatures.available && toolSignatures.failed > 0 ? "warn" : "pass",
+    message: formatToolSignatureSummary(toolSignatures),
+    ...(toolSignatures.available && toolSignatures.failed > 0
+      ? {
+          remediation:
+            "Report-only: affected tools still run. If this persists, report it with `resin feedback`.",
+        }
+      : {}),
+    fixable: false,
+  });
 
   // 7. Automatic Updates
   items.push(
