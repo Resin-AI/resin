@@ -765,7 +765,7 @@ describe("Observation upload policy (default window, caps and immediate triggers
     const policy = OBSERVATION_UPLOAD_POLICY;
     expect(policy.maxEvents * 2).toBeLessThanOrEqual(serverMaxEvents);
     expect(policy.maxBytes * 2).toBeLessThanOrEqual(serverMaxBytes);
-    // An early send fits one request: it is never split by the per-request ceilings.
+    // The flush thresholds never exceed the per-request ceilings that split an oversized buffer.
     expect(policy.maxEvents).toBeLessThanOrEqual(policy.requestMaxEvents);
     expect(policy.maxBytes).toBeLessThanOrEqual(policy.requestMaxBytes);
     expect(policy.requestMaxEvents).toBeLessThanOrEqual(serverMaxEvents);

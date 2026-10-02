@@ -68,10 +68,12 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
  *   71.3 uploads per active session-hour (−54% overall); events uploaded are unchanged.
  * - Session end, terminal lifecycle events and shutdown/stop (`waitForIdle`/`flush`) still send
  *   immediately; unsent records are never acknowledged to the tailer, so nothing is lost.
- * - `maxEvents`/`maxBytes`: send early once a batch is large. Cloud ingestion allows at most 1,000
- *   events and 10 MiB of wire bytes (50 MiB decompressed) per request (ingestion validator and
- *   quota limiter), so 500 events / 4 MiB of uncompressed JSON leaves ≥2x margin on both, and an
- *   early send always fits a single request.
+ * - `maxEvents`/`maxBytes`: flush thresholds. A batch is sent as soon as a delivery brings it to
+ *   500 events or 4 MiB of uncompressed JSON. Cloud ingestion allows at most 1,000 events and
+ *   10 MiB of wire bytes (50 MiB decompressed) per request (ingestion validator and quota
+ *   limiter), so the thresholds sit at half of those limits. Whole deliveries are buffered, so a
+ *   batch can overshoot a threshold; one that outgrows a request is split by the per-request
+ *   ceilings below.
  * - `maxPendingDeliveries`: the tailer stops delivering a session after 100 unacknowledged
  *   deliveries (`defaultMaxInFlightBatches` in trajectory-capture-module), so a batch is sent
  *   before it could stall the tailer for the rest of its window.
