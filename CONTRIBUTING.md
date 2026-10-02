@@ -25,6 +25,8 @@ Speed targets: PR CI ≤ 90 s, merge to `main` → published release ≤ 5 min. 
 2. Right away, dispatch `release-candidate.yml` with `commit_sha` (the merge commit), `release_tag` and `ci_run_id` (the ID of that `ci.yml` push run; it may still be running). The RC runs platform qualification (linux-x64 and linux-arm64 natively, darwin-x64/darwin-arm64/wsl artifact validation, windows-x64 and windows-arm64 natively in PowerShell including install, service, second-user isolation and uninstall) and system qualification in parallel on GitHub-hosted runners, then the signing job audits production dependencies, generates the qualification evidence, and builds, signs and verifies the candidate.
 3. When the RC and the CI run have both succeeded, dispatch `release.yml` with `commit_sha`, `release_tag`, `candidate_run_id`, `confirm_promotion=PROMOTE_PRODUCTION` and `environment=production`. It fails before publishing anything unless the CI run recorded in the candidate evidence completed successfully on the exact SHA, then publishes and verifies the channel.
 
+Stable is promoted to production at most once every 7 days. `release.yml` refuses a production promotion when the newest published GitHub release is less than 7 days old; for an urgent fix, dispatch with `emergency=true` and a single-line `emergency_reason`, which is recorded in the run summary. Candidates can be cut as often as needed. See [Weekly Stable Promotion Cadence](docs/release/signing-trust.md#14-weekly-stable-promotion-cadence).
+
 ### Complete Local Verification Gate
 
 Run the full verification sequence by hand when a change touches release, security or packaging paths:
