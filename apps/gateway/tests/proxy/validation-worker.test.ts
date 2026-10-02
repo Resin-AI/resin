@@ -1065,10 +1065,18 @@ describe("the validation worker's place in the runtime", () => {
       }
       expect(listings).toBe(0);
 
-      // The daemon goes away: the gateway's own polling takes over.
+      // The daemon goes away: the gateway's own polling takes over. The worker's pass reads the
+      // shared store, the credential file and the pass lease from disk, which completes in real
+      // time rather than on the fake clock, so wait for it while the clock keeps moving.
       await daemon.withdraw();
       await vi.advanceTimersByTimeAsync(300_000);
-      expect(listings).toBeGreaterThan(0);
+      await vi.waitFor(
+        async () => {
+          await vi.advanceTimersByTimeAsync(15_000);
+          expect(listings).toBeGreaterThan(0);
+        },
+        { timeout: 20_000, interval: 20 },
+      );
       await runtime.stop();
     } finally {
       vi.useRealTimers();
