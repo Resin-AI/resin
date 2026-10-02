@@ -65,6 +65,7 @@ Resin manages data through explicit state transitions for revocation, export, re
   - Kept longer, until you delete the workspace or account or request deletion:
     - Records that an upload batch was received, used to prevent the same batch from being processed twice.
     - The evidence behind tools you have published or that are still in progress, so their provenance stays complete; it returns to the 90-day policy once the tool is retired or deleted.
+    - Small index records for an evidence set: which session events it contains (event identifiers, content fingerprints and their order), plus the set's name, description and descriptive metadata. They don't contain the events themselves, which expire as described above unless protected.
     - Archived copies of uploaded batches.
   - A legal hold keeps everything it covers, regardless of age, until it is released.
   - Age-based expiry does not change deletion requests: deleting an account or workspace, or requesting deletion, removes the data on its own schedule regardless of age.
