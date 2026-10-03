@@ -129,43 +129,43 @@ describe("Public Release Workflows Contract", () => {
       const getUse = (steps, prefix) => steps.find((s) => s.uses?.startsWith(prefix))?.uses;
 
       expect(getUse(productionSteps, "aws-actions/configure-aws-credentials")).toBe(
-        "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a",
+        "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
       );
       expect(getUse(candidateSteps, "actions/checkout")).toBe(
-        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       );
       expect(getUse(candidateSteps, "actions/setup-node")).toBe(
-        "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       );
       expect(getUse(candidateSteps, "pnpm/action-setup")).toBe(
-        "pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
       );
       expect(getUse(candidateSteps, "actions/upload-artifact")).toBe(
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
       );
       expect(getUse(candidateSteps, "actions/download-artifact")).toBe(
-        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
       );
     });
 
     it("verifies human-readable version comments accompany pinned actions in workflow YAML", () => {
       expect(production.raw).toMatch(
-        /uses:\s+aws-actions\/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a\s+#\s+v4/,
+        /uses:\s+aws-actions\/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd\s+#\s+v6\.3\.0/,
       );
       expect(candidate.raw).toMatch(
-        /uses:\s+actions\/checkout@11d5960a326750d5838078e36cf38b85af677262\s+#\s+v4/,
+        /uses:\s+actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+#\s+v7\.0\.1/,
       );
       expect(candidate.raw).toMatch(
-        /uses:\s+actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\s+#\s+v4/,
+        /uses:\s+actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\s+#\s+v7\.0\.0/,
       );
       expect(candidate.raw).toMatch(
-        /uses:\s+pnpm\/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1\s+#\s+v4/,
+        /uses:\s+pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413\s+#\s+v6\.1\.0/,
       );
       expect(candidate.raw).toMatch(
-        /uses:\s+actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\s+#\s+v4/,
+        /uses:\s+actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s+#\s+v7\.0\.1/,
       );
       expect(candidate.raw).toMatch(
-        /uses:\s+actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093\s+#\s+v4/,
+        /uses:\s+actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\s+#\s+v8\.0\.1/,
       );
     });
   });
