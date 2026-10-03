@@ -1,3 +1,5 @@
+# The public repository has no self-hosted runners: a fork pull request can rewrite a
+# workflow's runs-on, so any registered self-hosted runner would run untrusted code.
+# Every job runs on GitHub-hosted runners; actionlint rejects any other label.
 self-hosted-runner:
-  labels:
-    - resin-ovh-linux-x64
+  labels: []

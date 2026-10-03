@@ -17,6 +17,8 @@ const CANDIDATE_WORKFLOW_PATH = path.join(
 const PRODUCTION_WORKFLOW_PATH = path.join(ROOT_DIR, ".github", "workflows", "release.yml");
 const CI_WORKFLOW_PATH = path.join(ROOT_DIR, ".github", "workflows", "ci.yml");
 const PACKAGE_JSON_PATH = path.join(ROOT_DIR, "package.json");
+// Release signing and promotion run on a pinned, ephemeral GitHub-hosted image.
+const RELEASE_RUNNER = "ubuntu-24.04";
 
 function loadWorkflow(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -46,7 +48,7 @@ describe("Public Release Workflows Contract", () => {
       expect(production.doc.jobs).toBeDefined();
     });
 
-    it("signs on the OVH x64 self-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
+    it("signs on a pinned GitHub-hosted runner and keeps secret-free qualification on GitHub-hosted runners", () => {
       const qualificationJobs = [
         "platform-qualification",
         "windows-qualification",
@@ -69,19 +71,40 @@ describe("Public Release Workflows Contract", () => {
             );
           }
         } else {
-          expect(job["runs-on"], `Job ${jobId} must run on resin-ovh-linux-x64`).toBe(
-            "resin-ovh-linux-x64",
-          );
+          expect(job["runs-on"], `Job ${jobId} must run on ${RELEASE_RUNNER}`).toBe(RELEASE_RUNNER);
         }
       }
     });
 
-    it("requires the OVH x64 self-hosted runner for every production job", () => {
+    it("runs every production job on the pinned GitHub-hosted runner", () => {
       for (const [jobId, job] of Object.entries(production.doc.jobs)) {
-        expect(job["runs-on"], `Job ${jobId} must run on resin-ovh-linux-x64`).toBe(
-          "resin-ovh-linux-x64",
-        );
+        expect(job["runs-on"], `Job ${jobId} must run on ${RELEASE_RUNNER}`).toBe(RELEASE_RUNNER);
       }
+    });
+
+    // A public repository's self-hosted runners are reachable from fork pull requests (a fork can
+    // rewrite any workflow's runs-on), and they persist between jobs. Every job, including release
+    // signing and promotion, runs on a fresh GitHub-hosted VM instead.
+    it("uses no self-hosted runner in any workflow", () => {
+      const workflowDir = path.join(ROOT_DIR, ".github", "workflows");
+      const hosted = /^(?:ubuntu-|windows-|macos-)/;
+      for (const name of fs.readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file))) {
+        const doc = YAML.parse(fs.readFileSync(path.join(workflowDir, name), "utf8"));
+        for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
+          const matrixRunners = job.strategy?.matrix?.include?.map((entry) => entry.runner);
+          const runners = matrixRunners ?? [job["runs-on"]];
+          for (const runner of runners) {
+            expect(typeof runner, `${name}: ${jobId} runs-on must be a single label`).toBe(
+              "string",
+            );
+            expect(runner, `${name}: ${jobId} must run on a GitHub-hosted runner`).toMatch(hosted);
+          }
+        }
+      }
+      const actionlint = YAML.parse(
+        fs.readFileSync(path.join(ROOT_DIR, ".github", "actionlint.yaml"), "utf8"),
+      );
+      expect(actionlint["self-hosted-runner"]?.labels ?? []).toEqual([]);
     });
 
     it("pins all workflow actions to exact 40-hex commit SHAs with major-version comments", () => {
