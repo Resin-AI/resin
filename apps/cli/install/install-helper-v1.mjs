@@ -8715,7 +8715,8 @@ function createClient(cwd, onToolsChanged) {
       if (closed) return;
       closed = true;
       child.stdin.end();
-      child.kill();
+      // A child that failed to spawn has no pid; kill() on it would signal an arbitrary process.
+      if (child.pid !== undefined) child.kill();
     },
   };
 }
@@ -19425,7 +19426,7 @@ async function defaultHealthCheckRunner(cliPath, args = ["version"], options = {
     };
     timer = setTimeout(() => {
       try {
-        child.kill("SIGKILL");
+        if (child.pid !== void 0) child.kill("SIGKILL");
       } catch {
       }
       finish({
@@ -19443,7 +19444,7 @@ Health check timed out after ${timeoutMs}ms` : `Health check timed out after ${t
       stdout += chunk.toString("utf8");
       if (totalBytes > maxOutputBytes) {
         try {
-          child.kill("SIGKILL");
+          if (child.pid !== void 0) child.kill("SIGKILL");
         } catch {
         }
         finish({
@@ -19461,7 +19462,7 @@ Health check timed out after ${timeoutMs}ms` : `Health check timed out after ${t
       stderr += chunk.toString("utf8");
       if (totalBytes > maxOutputBytes) {
         try {
-          child.kill("SIGKILL");
+          if (child.pid !== void 0) child.kill("SIGKILL");
         } catch {
         }
         finish({
@@ -19593,10 +19594,10 @@ async function defaultOnboardingRunner(cliPath, args = ["init", "--auto-approve"
     if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
       timer = setTimeout(() => {
         try {
-          child.kill("SIGTERM");
+          if (child.pid !== void 0) child.kill("SIGTERM");
           setTimeout(() => {
             try {
-              child.kill("SIGKILL");
+              if (child.pid !== void 0) child.kill("SIGKILL");
             } catch {
             }
           }, 2e3).unref();
