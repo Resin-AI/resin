@@ -1,3 +1,4 @@
+import { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +64,32 @@ describe("WorkerProcess", () => {
     const scratchDir = worker.getScratchDir();
     if (scratchDir) {
       expect(fs.existsSync(scratchDir)).toBe(false);
+    }
+  });
+
+  it("never signals anything when the Deno worker failed to spawn", async () => {
+    // A child without a pid has a never-initialised libuv handle: kill() on it signals whatever pid
+    // that memory holds, which once terminated the CI runner's process group.
+    const childKill = vi.spyOn(ChildProcess.prototype, "kill");
+    const processKill = vi.spyOn(process, "kill");
+    try {
+      const worker = new WorkerProcess({
+        manifest: { id: "t1", name: "tool", version: "1.0.0" },
+        bundleEntrypoint: "/nonexistent/entry.ts",
+        denoExecutable: "nonexistent-deno-binary-12345",
+        timeoutMs: 1000,
+      });
+
+      const res = await worker.execute("inv-1", {});
+      worker.forceKill();
+      worker.cleanup();
+
+      expect(res.status).toBe("error");
+      expect(childKill).not.toHaveBeenCalled();
+      expect(processKill).not.toHaveBeenCalled();
+    } finally {
+      childKill.mockRestore();
+      processKill.mockRestore();
     }
   });
 

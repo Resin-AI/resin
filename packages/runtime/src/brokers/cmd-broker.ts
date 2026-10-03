@@ -1179,7 +1179,8 @@ export class CommandBroker extends BaseCapabilityBroker {
     }
 
     const killProcessGroup = (signal: NodeJS.Signals = "SIGKILL") => {
-      if (child.killed) return;
+      // A child whose spawn failed has no pid; kill() on it signals an arbitrary process.
+      if (child.killed || child.pid === undefined) return;
       if (isPosix && child.pid) {
         try {
           process.kill(-child.pid, signal);
