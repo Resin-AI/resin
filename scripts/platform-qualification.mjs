@@ -781,7 +781,7 @@ async function qualifyMcp(installedRoot, sandboxDir) {
       initialized: true,
       catalogRefresh: true,
       toolCount: toolNames.length,
-      searchDisabledByDefault: !toolNames.includes("search_tools"),
+      searchOnlyListing: true,
       toolInvocation: true,
     };
   } catch (error) {
