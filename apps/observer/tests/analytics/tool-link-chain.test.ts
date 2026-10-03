@@ -145,8 +145,8 @@ describe("tool link capture through the real coordinator", () => {
     const call = calls[0]!;
     const result = results[0]!;
 
-    // The announcement carried no arguments, so the computation recorder can only have produced this
-    // carrier from the handoff that the tool link recorder left for it.
+    // The start marker carried no arguments; the call is recorded from the assistant record that
+    // carries the cell, and the result still receives the handoff both recorders consume.
     const computation = readComputationEvidence(result.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]);
     expect(computation?.observation).toMatchObject({
       callId: call.type === "tool_call" ? call.callId : "",
@@ -162,9 +162,12 @@ describe("tool link capture through the real coordinator", () => {
       contentKinds: ["markdown_checklist"],
       observation: { callEventId: call.eventId, resultEventId: result.eventId, status: "success" },
     });
-    // The call side announced no arguments at all, so it carries no pending carrier: the proof came
-    // from the result's embedded copy.
-    expect(call.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY]).toBeUndefined();
+    // The call is recorded with the cell the assistant record carried, so its own carrier is the
+    // pending one the result completes.
+    expect(readToolLinkEvidence(call.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY])).toMatchObject({
+      operation: "file.transform",
+      observation: { callEventId: call.eventId, status: "pending" },
+    });
 
     // Exactly one strip, and it happens before anything is projected: the local sink events and the
     // cloud rows carry the carriers but never the handoff or the authored source.
