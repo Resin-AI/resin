@@ -635,6 +635,12 @@ describe("Public Release Workflows Contract", () => {
         }
       }
     });
+
+    it("names the repository for gh, since the job has no checkout to infer it from", () => {
+      expect(job.env.GH_REPO).toBe("${{ github.repository }}");
+      expect(job.env.GH_TOKEN).toBe("${{ github.token }}");
+    });
+
     it("keeps GitHub release side effects production-only and publishes only after verification", () => {
       const steps = job.steps;
       const createStep = steps.find((s) => s.name === "Create draft GitHub release");
