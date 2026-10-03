@@ -1238,7 +1238,8 @@ class PythonFrameAnalyzer {
             !this.importBindings.has(name) &&
             !this.authoredImportNames.has(name) &&
             !this.moduleScope.defs.has(name) &&
-            !(this.context?.definitions ?? []).some((entry) => entry.name === name)
+            !(this.context?.definitions ?? []).some((entry) => entry.name === name) &&
+            this.context?.preludeNames?.includes(name) !== true
           ) {
             // A dynamically resolved callable may mutate interpreter state. It is not enough to
             // keep the surrounding source: without a qualified observed definition this cell cannot
@@ -3229,6 +3230,7 @@ class PythonFrameAnalyzer {
       pythonBuiltinApi(name) !== undefined ||
       pythonConstructorApi(name) !== undefined ||
       isPythonReflectionName(name) ||
+      this.context?.preludeNames?.includes(name) === true ||
       this.requiredNameSet.has(name)
     ) {
       return;

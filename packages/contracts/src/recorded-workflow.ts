@@ -571,6 +571,19 @@ function validateProgramArgumentLanguage(
   }
 }
 
+/**
+ * Output-only helpers the Python Eval kernel binds before every cell. A recorded `python-eval` cell
+ * calls them without defining them, so they are never a name the cell needs from an earlier cell,
+ * and replay binds equivalents: `display(value)` writes the value's `repr` as a line of output, and
+ * `log(message)` / `phase(title)` only report progress, so they write nothing. Helpers with effects
+ * (`read`, `write`, `tool`, …) are deliberately absent: a cell that calls one stays unresolved.
+ */
+export const PYTHON_EVAL_OUTPUT_PRELUDE_NAMES: readonly string[] = Object.freeze([
+  "display",
+  "log",
+  "phase",
+]);
+
 /** Rejects interface/language mismatches rather than silently replaying under different semantics. */
 export function validateWorkflowProgramSourceInterface(
   program: { kind?: unknown; sourceInterface?: unknown },

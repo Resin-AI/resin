@@ -104,6 +104,10 @@ function recordWorkflowRecipeInternal(
   observations: readonly RecordedCallObservation[],
   candidates?: readonly WorkflowBindingCandidate[],
 ): RecordedRecipe | undefined {
+  // Every reference the capture made to a step (a result origin, an established dependency, a
+  // candidate) names it by its place among these observations, so a step keeps that id even when an
+  // earlier observation does not become a step.
+  const stepIdOf = new Map(observations.map((observation, index) => [observation, `step${index}`]));
   const sortedObservations = [...observations].sort(
     (left, right) =>
       (left.causalSequence ?? Number.MAX_SAFE_INTEGER) -
@@ -234,7 +238,8 @@ function recordWorkflowRecipeInternal(
       // Repeated delivery of one execution is not a second step.
       continue;
     }
-    const stepId = `step${steps.length}`;
+    // `ordered` only holds entries of `observations`, each of which has an id.
+    const stepId = stepIdOf.get(observation) as string;
     if (observation.isPrivateValue) privatePredicates.push(observation.isPrivateValue);
     const sources: Record<string, WorkflowValueTemplate> = {};
     for (const [name, value] of Object.entries(observation.arguments)) {

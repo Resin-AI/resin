@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
+  PYTHON_EVAL_OUTPUT_PRELUDE_NAMES,
   type RecordedWorkflow,
   type WorkflowArgument,
   type WorkflowJsonValue,
@@ -434,6 +435,37 @@ describe("recorded program adapters", () => {
     expect(none.value).toBe("");
     expect(whitespace.stdout).toBe(`  output  ${pythonEol}`);
     expect(whitespace.value).toBe("output");
+  });
+
+  it("binds the Python Eval kernel's output prelude during replay", async () => {
+    const workspace = await makeWorkspace();
+    const reported = await runRecordedProgram(
+      {
+        kind: "python",
+        source:
+          "phase('total')\nlog('summing')\nvalues = [3, 4, 5]\ndisplay(sum(values))\ndisplay('done')",
+        sourceInterface: "python-eval",
+      },
+      { cwd: workspace },
+    );
+    expect(reported.exitCode).toBe(0);
+    expect(reported.stdout).toBe(`12${pythonEol}'done'${pythonEol}`);
+    expect(reported.value).toBe("12\n'done'");
+
+    const bound = await runRecordedProgram(
+      {
+        kind: "python",
+        source: `sorted(name for name in ${JSON.stringify(PYTHON_EVAL_OUTPUT_PRELUDE_NAMES)} if callable(globals().get(name)))`,
+        sourceInterface: "python-eval",
+      },
+      { cwd: workspace },
+    );
+    expect(bound.value).toBe(
+      `[${[...PYTHON_EVAL_OUTPUT_PRELUDE_NAMES]
+        .sort()
+        .map((name) => `'${name}'`)
+        .join(", ")}]`,
+    );
   });
 
   it("replays native JavaScript Eval completion values and structured display text", async () => {

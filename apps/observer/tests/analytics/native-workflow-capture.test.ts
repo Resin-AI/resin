@@ -38,6 +38,7 @@ import {
   readWorkflowResultCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
+import { recordCallsFromEvents as recordDerivedCallsFromEvents } from "../../src/analytics/workflow-recording.js";
 import {
   RESIN_LOCAL_WORKFLOW_RESULT_SUPPRESSED_METADATA_KEY,
   isLocalWorkflowResultSuppressed,
@@ -485,7 +486,9 @@ describe("native capture of ordinary calls", () => {
     ]);
 
     expect(recipe?.workflow.steps).toHaveLength(1);
-    expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step0"]);
+    // The folded setup cell keeps no step; the target keeps the id the capture gave it.
+    expect(recipe?.workflow.steps.map((step) => step.id)).toEqual(["step1"]);
+    expect(recipe?.workflow.baseline?.observed.map((entry) => entry.stepId)).toEqual(["step1"]);
     expect(validateRecordedWorkflow(recipe!.workflow)).toEqual({ valid: true, errors: [] });
   });
   it("marks a successful Python target unresolved when its predecessor was not captured", () => {
@@ -504,6 +507,84 @@ describe("native capture of ordinary calls", () => {
       unresolvedReadCount: expect.any(Number),
       setup: [],
     });
+  });
+  it("closes Python Eval cells that use the kernel's output prelude over the earlier cells they read", () => {
+    // The decoder marks a native OMP Eval call; only that interface binds `display` without a cell.
+    const evalCall = (sequence: number, code: string): NormalizedSessionEvent => {
+      const entry = call(sequence, "eval", { language: "py", code });
+      return {
+        ...entry,
+        metadata: { ...entry.metadata, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "python-eval" },
+      };
+    };
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = [
+      evalCall(21, "import json\nvalues = [3, 4, 5]\ndisplay(len(values))\nlog('loaded')"),
+      result(21, "eval", "3"),
+      evalCall(22, "phase('total')\ndisplay(json.dumps(sum(values)))"),
+      result(22, "eval", "'12'"),
+      call(23, "eval", { language: "python", code: "display(sum([1, 2]))" }),
+      result(23, "eval", "3"),
+    ].map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+
+    expect(carrierOf(observed[0]!)?.program?.pythonState).toMatchObject({
+      status: "closed",
+      setup: [],
+    });
+    expect(carrierOf(observed[2]!)?.program?.pythonState).toMatchObject({
+      status: "closed",
+      unresolvedReadCount: 0,
+      setup: [expect.objectContaining({ callId: "call_21" })],
+    });
+    // Outside the Eval interface nothing binds `display`, so the cell still needs it from somewhere.
+    expect(carrierOf(observed[4]!)?.program?.pythonState).toMatchObject({
+      status: "unresolved",
+      setup: [],
+    });
+  });
+  it("keeps candidate steps addressable when Python setup cells fold into a later cell", () => {
+    const evalCall = (sequence: number, code: string): NormalizedSessionEvent => {
+      const entry = call(sequence, "eval", { language: "py", code });
+      return {
+        ...entry,
+        metadata: { ...entry.metadata, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "python-eval" },
+      };
+    };
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = [
+      // The setup cell's file path is a candidate value of a call that will not be a step.
+      evalCall(
+        31,
+        "import json\nfrom pathlib import Path\nvalues = json.loads(Path('reports/values.json').read_text())",
+      ),
+      result(31, "eval", ""),
+      evalCall(32, "display(json.dumps(sum(values)))"),
+      result(32, "eval", "'12'"),
+      call(33, "read", { path: "reports/summary.md" }),
+      result(33, "read", "# Summary"),
+    ].map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+
+    const workflow = recordDerivedCallsFromEvents("wf_python_setup_candidates", observed)?.workflow;
+    expect(workflow?.steps.map((step) => [step.id, step.callable.name])).toEqual([
+      ["step1", "eval"],
+      ["step2", "read"],
+    ]);
+    expect(workflow?.candidates?.length ?? 0).toBeGreaterThan(0);
+    for (const candidate of workflow?.candidates ?? []) {
+      const step = workflow?.steps.find((entry) => entry.id === candidate.stepId);
+      expect(step?.arguments.some((argument) => argument.name === candidate.argument)).toBe(true);
+    }
+    expect(validateRecordedWorkflow(workflow!)).toEqual({ valid: true, errors: [] });
   });
   it("carries only decoder-proven OMP Python Eval semantics into the recorded program", async () => {
     const sessionId = "session-native-python-eval-interface";
