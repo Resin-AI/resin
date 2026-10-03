@@ -62,8 +62,10 @@ function pythonSourceReferenceOf(event: NormalizedSessionEvent): string | undefi
   if (program?.kind !== "python" || program.argument === undefined) {
     return undefined;
   }
+  // A source the workflow recorder could project keeps its private reference beside the projection.
   const origin = carrier?.origins[program.argument];
-  return origin?.type === "private" ? origin.reference : undefined;
+  if (origin?.type === "private") return origin.reference;
+  return origin?.type === "program" ? origin.sourceReference : undefined;
 }
 
 /**
