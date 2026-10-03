@@ -702,15 +702,22 @@ export function reconstructWorkflowFromEvents(
     recipe.workflow.steps.map((step) => step.id),
   );
   if (heldOut !== undefined) recipe.workflow.heldOut = heldOut;
-  if (carrierCandidates.length > 0) {
+  // A candidate for a call that did not become a step (a folded Python setup cell) has no argument
+  // to bind: its value stays in the setup source the target replays.
+  const stepIds = new Set(recipe.workflow.steps.map((step) => step.id));
+  const addressable = (candidate: WorkflowBindingCandidate): boolean =>
+    stepIds.has(candidate.stepId) &&
+    (candidate.proposed.kind === "input" || stepIds.has(candidate.proposed.stepId));
+  const derived = (recipe.workflow.candidates ?? []).filter(addressable);
+  if (derived.length > 0) recipe.workflow.candidates = derived;
+  else delete recipe.workflow.candidates;
+  const recorded = carrierCandidates.filter(addressable);
+  if (recorded.length > 0) {
     const reserved = new Set([
       ...recipe.workflow.inputs.map((input) => input.name),
       ...recordedInputTypes.keys(),
     ]);
-    recipe.workflow.candidates = [
-      ...(recipe.workflow.candidates ?? []),
-      ...withRecordingInputNames(carrierCandidates, reserved),
-    ];
+    recipe.workflow.candidates = [...derived, ...withRecordingInputNames(recorded, reserved)];
   }
   const privateReferences = collectWorkflowPrivateReferences(recipe.workflow);
   if (privateReferences.length > 0) recipe.workflow.privateReferences = privateReferences;

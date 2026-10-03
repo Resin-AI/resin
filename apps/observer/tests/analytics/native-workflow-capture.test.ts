@@ -560,7 +560,11 @@ describe("native capture of ordinary calls", () => {
     });
     const computationRecorder = createComputationEvidenceRecorder();
     const observed = [
-      evalCall(31, "import json\nvalues = [3, 4, 5]"),
+      // The setup cell's file path is a candidate value of a call that will not be a step.
+      evalCall(
+        31,
+        "import json\nfrom pathlib import Path\nvalues = json.loads(Path('reports/values.json').read_text())",
+      ),
       result(31, "eval", ""),
       evalCall(32, "display(json.dumps(sum(values)))"),
       result(32, "eval", "'12'"),
