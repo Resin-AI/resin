@@ -13,6 +13,7 @@ import {
   type NormalizedSessionEvent,
   type NormalizedToolCallEvent,
   type NormalizedToolResultEvent,
+  PYTHON_EVAL_OUTPUT_PRELUDE_NAMES,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   type ResinComputationEvidenceV1,
   type WorkflowPythonState,
@@ -66,6 +67,16 @@ function pythonSourceReferenceOf(event: NormalizedSessionEvent): string | undefi
   const origin = carrier?.origins[program.argument];
   if (origin?.type === "private") return origin.reference;
   return origin?.type === "program" ? origin.sourceReference : undefined;
+}
+
+/** Kernel helpers a call may use without defining them; only a decoder-proven Python Eval has any. */
+function preludeNamesOf(event: NormalizedToolCallEvent): readonly string[] | undefined {
+  const program = readWorkflowCallCarrier(
+    event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY],
+  )?.program;
+  return program?.kind === "python" && program.sourceInterface === "python-eval"
+    ? PYTHON_EVAL_OUTPUT_PRELUDE_NAMES
+    : undefined;
 }
 
 /**
@@ -452,7 +463,7 @@ export class ComputationEvidenceRecorder {
       // The frame source is retained while the call is unresolved; released on settlement.
       retainedBytes: 0,
     };
-    const prepared = this.prepareFrame(frame, session);
+    const prepared = this.prepareFrame(frame, session, preludeNamesOf(event));
     if (prepared !== undefined) {
       pending.prepared = prepared;
       pending.retainedBytes =
@@ -880,6 +891,7 @@ export class ComputationEvidenceRecorder {
   private parseContext(
     frame: ComputationSourceFrame,
     session: RecordedSession,
+    preludeNames: readonly string[] | undefined,
   ): ComputationParseContext {
     const persistent = frame.executionScope === "persistent";
     const kernel = persistent ? this.kernel(session, frame.language) : undefined;
@@ -899,12 +911,14 @@ export class ComputationEvidenceRecorder {
       modules: Array.from(this.knownFiles(session).values()),
       ...(frame.path === undefined ? {} : { sourcePath: frame.path }),
       ...(frame.sourceInterface === undefined ? {} : { sourceInterface: frame.sourceInterface }),
+      ...(preludeNames === undefined ? {} : { preludeNames }),
     };
   }
 
   private prepareFrame(
     frame: ComputationSourceFrame,
     session: RecordedSession,
+    preludeNames?: readonly string[],
   ): PreparedFrame | undefined {
     if (typeof frame.source !== "string" || frame.source.length === 0) {
       return undefined;
@@ -912,7 +926,7 @@ export class ComputationEvidenceRecorder {
     if (byteLength(frame.source) > this.maxFrameBytes) {
       return undefined;
     }
-    const context = this.parseContext(frame, session);
+    const context = this.parseContext(frame, session, preludeNames);
     const parsed = parseFrame(frame.language, frame.source, context);
     return this.assemblePrepared(frame, frame.source, parsed, context.definitions ?? []);
   }

@@ -853,6 +853,15 @@ function composePythonEvalReplaySource(
     "def __resin_run():",
     `    __resin_sources = __resin_json.loads(${serializedSources})`,
     "    __resin_namespace = {'__name__': '__main__', '__builtins__': __resin_builtins.__dict__}",
+    // The Eval kernel's output-only prelude (PYTHON_EVAL_OUTPUT_PRELUDE_NAMES): display writes the
+    // value's repr as a line of output; log and phase only report progress.
+    "    def __resin_display(value):",
+    "        __resin_builtins.print(__resin_builtins.repr(value))",
+    "    def __resin_progress(_text):",
+    "        return None",
+    "    __resin_namespace['display'] = __resin_display",
+    "    __resin_namespace['log'] = __resin_progress",
+    "    __resin_namespace['phase'] = __resin_progress",
     "    __resin_exec = __resin_builtins.exec",
     "    __resin_compile = __resin_builtins.compile",
     "    __resin_eval = __resin_builtins.eval",

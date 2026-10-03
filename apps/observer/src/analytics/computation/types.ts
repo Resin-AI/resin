@@ -200,6 +200,11 @@ export interface ComputationParseContext {
   sourcePath?: string;
   /** Adapter-established native builtins, never inferred from a JavaScript callee name. */
   sourceInterface?: "codex-exec";
+  /**
+   * Names the harness's eval kernel binds before every cell, established by the cell's recorded
+   * interface. A cell that only uses them still needs nothing from an earlier cell.
+   */
+  preludeNames?: readonly string[];
 }
 
 /**
