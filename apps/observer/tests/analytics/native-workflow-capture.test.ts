@@ -570,6 +570,12 @@ describe("native capture of ordinary calls", () => {
     const computationObserved = createComputationEvidenceRecorder().observe(observed);
     expect(computationObserved.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBeUndefined();
     expect(carrierOf(computationObserved)?.program?.sourceInterface).toBe("python-eval");
+    // The projected source keeps its private reference, so the cell still gets its state closure.
+    expect(carrierOf(observed)?.origins.code?.type).toBe("program");
+    expect(carrierOf(computationObserved)?.program?.pythonState).toMatchObject({
+      status: "closed",
+      setup: [],
+    });
   });
 
   it("carries only decoder-proven OMP JavaScript Eval semantics into the recorded program", async () => {

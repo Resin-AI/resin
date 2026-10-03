@@ -2570,6 +2570,98 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(repeatedResult).toBeNull();
     });
 
+    // OMP writes an eval's execution start before the assistant record and without the cell's
+    // arguments (bash and read starts carry theirs). These records keep OMP's own shape.
+    const ompEvalCallId = "call_eval_cell|fc_0123456789abcdef";
+    const ompEvalStart = {
+      type: "custom",
+      customType: "tool_execution_start",
+      data: {
+        toolCallId: ompEvalCallId,
+        toolName: "eval",
+        startedAt: "2026-07-08T00:59:10.742Z",
+        intent: "Compute run totals",
+      },
+    };
+    const ompEvalArguments = {
+      language: "py",
+      code: "values = [3, 4, 5]\nprint(sum(values))",
+      title: "Compute run totals",
+      timeout: 10,
+      reset: false,
+    };
+    const ompEvalAssistant = {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Computing the totals." },
+          { type: "toolCall", id: ompEvalCallId, name: "eval", arguments: ompEvalArguments },
+        ],
+      },
+    };
+    const ompEvalResult = {
+      type: "message",
+      message: {
+        role: "toolResult",
+        toolCallId: ompEvalCallId,
+        toolName: "eval",
+        content: [{ type: "text", text: "12" }],
+        isError: false,
+      },
+    };
+
+    it("records an OMP eval with the code its assistant record carries after an argument-less start", () => {
+      const sessionId = "session-omp-eval-start-first";
+
+      expect(decoder.decode(makeRecord(sessionId, 1, ompEvalStart))).toBeNull();
+
+      const assistant = decoder.decode(
+        makeRecord(sessionId, 2, ompEvalAssistant),
+      ) as IntermediateSessionEvent[];
+      const calls = assistant.filter(
+        (entry): entry is IntermediateToolCallEvent => entry.type === "tool_call",
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        toolName: "eval",
+        callId: "call_eval_cell_fc_0123456789abcdef",
+        parameters: ompEvalArguments,
+      });
+      expect(calls[0]?.metadata?.intent).toBe("Compute run totals");
+      expect(calls[0]?.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe("python-eval");
+
+      const result = decoder.decode(
+        makeRecord(sessionId, 3, ompEvalResult),
+      ) as IntermediateToolResultEvent;
+      expect(result).toMatchObject({ type: "tool_result", toolName: "eval", result: "12" });
+      expect(result.metadata?.[RESIN_LOCAL_OMP_NATIVE_CALL_KEY]).toEqual({
+        callId: "call_eval_cell_fc_0123456789abcdef",
+        toolName: "eval",
+        parameters: { language: "py", code: ompEvalArguments.code },
+      });
+    });
+
+    it("records an argument-less OMP eval start at its result when no assistant record carries it", () => {
+      const sessionId = "session-omp-eval-start-only";
+
+      expect(decoder.decode(makeRecord(sessionId, 1, ompEvalStart))).toBeNull();
+      const events = decoder.decode(
+        makeRecord(sessionId, 2, ompEvalResult),
+      ) as IntermediateSessionEvent[];
+      expect(events.map((entry) => entry.type)).toEqual(["tool_call", "tool_result"]);
+      expect(events[0]).toMatchObject({
+        toolName: "eval",
+        callId: "call_eval_cell_fc_0123456789abcdef",
+        parameters: {},
+        metadata: { intent: "Compute run totals" },
+      });
+
+      // The held call is recorded once: a repeated result does not announce it again.
+      const replay = decoder.decode(makeRecord(sessionId, 2, ompEvalResult));
+      expect(Array.isArray(replay)).toBe(false);
+    });
+
     it("deduplicates an embedded request that follows its own execution start", () => {
       const sessionId = "session-start-first-1";
 
@@ -2577,12 +2669,13 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
         makeRecord(sessionId, 1, {
           type: "tool_execution_start",
           callId: "call_start_first",
-          toolName: "eval",
+          toolName: "read",
+          args: { path: "src/a.ts" },
         }),
       ) as IntermediateToolCallEvent;
       expect(startResult).toMatchObject({
         type: "tool_call",
-        toolName: "eval",
+        toolName: "read",
         callId: "call_start_first",
       });
 
@@ -2593,12 +2686,12 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
           message: {
             role: "assistant",
             content: [
-              { type: "text", text: "Running the check." },
+              { type: "text", text: "Reading the file." },
               {
                 type: "toolCall",
                 id: "call_start_first",
-                name: "eval",
-                arguments: { language: "py", code: "print(1)" },
+                name: "read",
+                arguments: { path: "src/a.ts" },
               },
             ],
           },
@@ -2609,7 +2702,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       expect(msgResult).toMatchObject({
         type: "message",
         role: "assistant",
-        content: "Running the check.\n",
+        content: "Reading the file.\n",
       });
     });
 

@@ -870,6 +870,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private readonly pendingDeviceSurfaceCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /**
+   * Eval calls whose start marker carried no arguments, held for the assistant record that carries
+   * the cell's code. The value keeps the intent the marker recorded.
+   */
+  private readonly pendingArgumentlessEvalCalls = new BoundedSessionCallMap<{
+    intent: DecoderMetadataValue | undefined;
+  }>(OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES);
   /** Confirmed device-surface calls awaiting their result payload. */
   private readonly deviceSurfaceResultCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
@@ -918,6 +925,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.callToolArguments.clearSession(sessionId);
     this.announcedToolCalls.clearSession(sessionId);
     this.pendingDeviceSurfaceCalls.clearSession(sessionId);
+    this.pendingArgumentlessEvalCalls.clearSession(sessionId);
     this.deviceSurfaceResultCalls.clearSession(sessionId);
   }
 
@@ -1115,11 +1123,17 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       this.announcedToolCalls.set(sessionId, call.rawCallId, "assistant_message");
 
       const callId = normalizeCallId(call.rawCallId, call.rawCallId);
-      const { parameters: recordedParameters, metadata: callMetadata } = this.recordedArguments(
+      const { parameters: recordedParameters, metadata: recordedMetadata } = this.recordedArguments(
         toolName,
         parameters,
         metadata,
       );
+      // An eval held at its argument-less start marker keeps the intent that marker recorded.
+      const heldEval = this.pendingArgumentlessEvalCalls.getAndClear(sessionId, call.rawCallId);
+      const callMetadata =
+        heldEval?.intent !== undefined && recordedMetadata.intent === undefined
+          ? { ...recordedMetadata, intent: heldEval.intent }
+          : recordedMetadata;
       const surface = this.deviceSurfaceCallOf(toolName, recordedParameters);
       // Results may only carry the sanitized identity, so keep the name resolvable under it too.
       this.setToolCallName(sessionId, callId, surface?.identity.tool ?? toolName);
@@ -1955,17 +1969,30 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       ? this.getAndClearToolCallArguments(sessionId, cacheCallId)
       : undefined;
 
+    const declaredParams =
+      toolCallObj.parameters ??
+      toolCallObj.params ??
+      toolCallObj.input ??
+      toolCallObj.arguments ??
+      toolCallObj.args;
+
+    // OMP appends an eval's start marker before the assistant record and writes it without the
+    // cell's arguments. Announcing the call here would record an eval with no code and then
+    // deduplicate the assistant record that carries it, so the call is held for that record. Its
+    // result records it argument-less if no assistant record comes.
+    if (cachedArgs === undefined && declaredParams === undefined && toolName === "eval") {
+      this.announcedToolCalls.getAndClear(sessionId, cacheCallId);
+      this.pendingArgumentlessEvalCalls.set(sessionId, cacheCallId, {
+        intent: toolCallObj.intent,
+      });
+      return null;
+    }
+
     let parameters: DecoderMetadataRecord;
     if (cachedArgs !== undefined) {
       parameters = cachedArgs;
     } else {
-      const rawParams =
-        toolCallObj.parameters ??
-        toolCallObj.params ??
-        toolCallObj.input ??
-        toolCallObj.arguments ??
-        toolCallObj.args ??
-        {};
+      const rawParams = declaredParams ?? {};
 
       let rawParamsObj = asObject(rawParams);
       if (!rawParamsObj && typeof rawParams === "string") {
@@ -2047,6 +2074,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
     const pendingSurface = rawCallId
       ? this.pendingDeviceSurfaceCalls.getAndClear(sessionId, rawCallId)
+      : undefined;
+    const heldEval = rawCallId
+      ? this.pendingArgumentlessEvalCalls.getAndClear(sessionId, rawCallId)
       : undefined;
     const resultSurface = this.deviceSurfaceResultCalls.getAndClear(sessionId, callId);
     // OMP may append the argument-less start marker before the assistant record. At result time,
@@ -2191,6 +2221,28 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
           pendingSurface,
           undefined,
         ),
+        evt,
+      ];
+    }
+    // An eval held at its argument-less start marker whose assistant record never came is still
+    // recorded when its result is, with the only arguments any record carried: none.
+    if (heldEval !== undefined) {
+      return [
+        {
+          sessionId,
+          timestamp,
+          schemaVersion: "1.0.0",
+          causalRef,
+          metadata:
+            heldEval.intent !== undefined && unproven.intent === undefined
+              ? { ...unproven, intent: heldEval.intent }
+              : unproven,
+          type: "tool_call",
+          toolName,
+          callId,
+          toolCallId: callId,
+          parameters: {},
+        },
         evt,
       ];
     }
