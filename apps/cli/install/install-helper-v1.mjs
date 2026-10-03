@@ -15129,6 +15129,8 @@ var NotificationInboxStateSchema = external_exports.object({
 // packages/protocol/dist/control-plane.js
 init_common();
 init_zod();
+var CONTROL_PLANE_QUIET_POLL_INTERVAL_MS = 12e4;
+var CONTROL_PLANE_CADENCE_JITTER_RATIO = 0.05;
 var ControlPlaneTargetSchema = external_exports.discriminatedUnion("scope", [
   external_exports.object({ scope: external_exports.literal("workspace") }).strict(),
   external_exports.object({ scope: external_exports.literal("device"), deviceId: IdentifierSchema }).strict()
@@ -15250,6 +15252,46 @@ var ControlPlaneFieldDescriptorSchema = external_exports.object({
   description: external_exports.string().min(1)
 }).strict();
 var ControlPlaneInventoryResponseSchema = external_exports.object({ fields: external_exports.array(ControlPlaneFieldDescriptorSchema) }).strict();
+
+// packages/protocol/dist/device-sync.js
+init_common();
+init_zod();
+var DEVICE_SYNC_SCHEMA_VERSION = "1.0.0";
+var DEVICE_SYNC_SAFETY_REFRESH_MS = 60 * 60 * 1e3;
+var DEVICE_SYNC_PUBLICATION_MAX_AGE_MS = Math.ceil(2 * CONTROL_PLANE_QUIET_POLL_INTERVAL_MS * (1 + CONTROL_PLANE_CADENCE_JITTER_RATIO));
+var DeviceSyncTokenSchema = external_exports.string().min(1).max(256).regex(/^[\x21-\x7e]+$/);
+var DeviceSyncDesiredSchema = external_exports.object({
+  revisions: ControlPlaneRevisionVectorSchema,
+  revisionToken: external_exports.string().regex(/^w:\d+:d:\d+$/)
+}).strict();
+var DeviceSyncResponseSchema = external_exports.object({
+  schemaVersion: external_exports.literal(DEVICE_SYNC_SCHEMA_VERSION),
+  deviceId: IdentifierSchema,
+  accountId: external_exports.string().min(1),
+  userId: external_exports.string().min(1),
+  /** Same values as the account tool-access read. */
+  toolAccess: external_exports.enum(["allowed", "subscription_inactive"]),
+  /** When the server read the plan behind `toolAccess`. */
+  checkedAt: ISOTimestampSchema,
+  /** Revision vector of the effective desired state, in its acknowledgement format. */
+  desired: DeviceSyncDesiredSchema.nullable(),
+  /** Changes whenever the catalog snapshot this identity is served may have changed. */
+  catalogToken: DeviceSyncTokenSchema.nullable(),
+  /** Changes whenever the pending validation asks listed for this device may have changed. */
+  validationToken: DeviceSyncTokenSchema.nullable()
+}).strict().superRefine((value, context) => {
+  if (value.toolAccess === "allowed")
+    return;
+  for (const key of ["desired", "catalogToken", "validationToken"]) {
+    if (value[key] !== null) {
+      context.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [key],
+        message: "An account without tool access receives no paid-data tokens"
+      });
+    }
+  }
+});
 
 // apps/observer/dist/cloud-credentials.js
 init_zod();
