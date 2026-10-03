@@ -293,7 +293,8 @@ function createStdioTransport(transport: {
     async close() {
       failEverything(new Error(`${label} was closed`));
       lines.close();
-      if (child.exitCode === null && child.signalCode === null) {
+      // A child that failed to spawn has no pid; kill() on it would signal an arbitrary process.
+      if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
         child.kill("SIGTERM");
         const escalate = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

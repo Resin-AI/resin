@@ -251,7 +251,8 @@ export async function runDerivation(
     let failure: string | undefined;
     const stop = (reason: string): void => {
       failure ??= reason;
-      child.kill("SIGKILL");
+      // A child that failed to spawn has no pid; kill() on it would signal an arbitrary process.
+      if (child.pid !== undefined) child.kill("SIGKILL");
     };
     const onAbort = (): void => stop("derivation was cancelled");
     options.signal?.addEventListener("abort", onAbort, { once: true });

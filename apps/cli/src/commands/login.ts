@@ -48,7 +48,7 @@ function runBrowserLauncher(command: string, args: string[]): Promise<boolean> {
     const timeout = setTimeout(() => {
       resolve(false);
       try {
-        child.kill("SIGKILL");
+        if (child.pid !== undefined) child.kill("SIGKILL");
       } catch {
         // Dispatch remains best-effort even if the launcher cannot be killed.
       }

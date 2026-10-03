@@ -1432,7 +1432,7 @@ async function runBackground(
     console.log(`Resin daemon started in background (PID: ${childPid})`);
   } catch (err) {
     if (child.connected) child.disconnect();
-    if (child.exitCode === null && child.signalCode === null) {
+    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
       child.kill();
     }
     child.unref();

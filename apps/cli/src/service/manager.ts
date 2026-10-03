@@ -371,10 +371,11 @@ function createStopRequestFileWatcher(
 
 /** Kills a child and, on Windows, every process it started. */
 function killChildTree(child: ChildProcess, platform: NodeJS.Platform): void {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  // A child that failed to spawn has no pid; kill() on it would signal an arbitrary process.
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
-  if (platform === "win32" && child.pid !== undefined) {
+  if (platform === "win32") {
     const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
     const taskkill = spawn(
       path.win32.join(systemRoot, "System32", "taskkill.exe"),

@@ -164,7 +164,8 @@ function createClient(cwd, onToolsChanged) {
       if (closed) return;
       closed = true;
       child.stdin.end();
-      child.kill();
+      // A child that failed to spawn has no pid; kill() on it would signal an arbitrary process.
+      if (child.pid !== undefined) child.kill();
     },
   };
 }
