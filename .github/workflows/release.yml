@@ -55,7 +55,7 @@ env:
 jobs:
   release:
     name: Public Release Publication
-    runs-on: resin-ovh-linux-x64
+    runs-on: ubuntu-24.04
     environment:
       name: ${{ inputs.environment || 'production' }}
     permissions:

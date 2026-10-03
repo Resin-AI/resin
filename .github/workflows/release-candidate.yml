@@ -608,7 +608,7 @@ jobs:
   build-and-sign:
     name: Build and Sign Candidate
     needs: [platform-qualification, windows-qualification, windows-suites, system-qualification]
-    runs-on: resin-ovh-linux-x64
+    runs-on: ubuntu-24.04
     environment: production
     permissions:
       contents: read
