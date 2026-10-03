@@ -182,15 +182,15 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
 
     it("verifies canonical action SHAs are pinned across release family workflows", () => {
       const canonicalPins = {
-        "actions/checkout": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-        "actions/setup-node": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-        "pnpm/action-setup": "pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "actions/checkout": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/setup-node": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+        "pnpm/action-setup": "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
         "actions/upload-artifact":
-          "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/download-artifact":
-          "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
         "aws-actions/configure-aws-credentials":
-          "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a",
+          "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
         "aquasecurity/trivy-action":
           "aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8",
       };
@@ -466,17 +466,17 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
       };
 
       expect(
-        isCheckoutSafe({ uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }),
+        isCheckoutSafe({ uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" }),
       ).toBe(false);
       expect(
         isCheckoutSafe({
-          uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
           with: { "persist-credentials": true },
         }),
       ).toBe(false);
       expect(
         isCheckoutSafe({
-          uses: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
           with: { "persist-credentials": false },
         }),
       ).toBe(true);
