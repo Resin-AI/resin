@@ -267,7 +267,7 @@ export async function defaultHealthCheckRunner(
 
     timer = setTimeout(() => {
       try {
-        child.kill("SIGKILL");
+        if (child.pid !== undefined) child.kill("SIGKILL");
       } catch {}
       finish({
         passed: false,
@@ -286,7 +286,7 @@ export async function defaultHealthCheckRunner(
       stdout += chunk.toString("utf8");
       if (totalBytes > maxOutputBytes) {
         try {
-          child.kill("SIGKILL");
+          if (child.pid !== undefined) child.kill("SIGKILL");
         } catch {}
         finish({
           passed: false,
@@ -304,7 +304,7 @@ export async function defaultHealthCheckRunner(
       stderr += chunk.toString("utf8");
       if (totalBytes > maxOutputBytes) {
         try {
-          child.kill("SIGKILL");
+          if (child.pid !== undefined) child.kill("SIGKILL");
         } catch {}
         finish({
           passed: false,
@@ -503,10 +503,10 @@ export async function defaultOnboardingRunner(
     if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
       timer = setTimeout(() => {
         try {
-          child.kill("SIGTERM");
+          if (child.pid !== undefined) child.kill("SIGTERM");
           setTimeout(() => {
             try {
-              child.kill("SIGKILL");
+              if (child.pid !== undefined) child.kill("SIGKILL");
             } catch {}
           }, 2000).unref();
         } catch {}

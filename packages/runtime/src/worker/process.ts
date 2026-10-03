@@ -663,6 +663,10 @@ export class WorkerProcess {
    */
   private terminateProcessTree(signal: NodeJS.Signals): void {
     if (!this.childProcess || this.childProcess.killed) return;
+    // A child whose spawn failed (e.g. ENOENT) has no pid and no process to stop. Node still
+    // forwards kill() to libuv, which signals whatever pid its never-initialised handle holds:
+    // that has terminated the test runner's own process group.
+    if (this.childProcess.pid === undefined) return;
     try {
       if (process.platform !== "win32" && this.childProcess.pid) {
         process.kill(-this.childProcess.pid, signal);

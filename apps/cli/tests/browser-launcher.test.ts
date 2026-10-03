@@ -15,6 +15,8 @@ const URL_TO_OPEN = "http://127.0.0.1:3100/device?user_code=TEST-CODE&approval_n
 const WINDOWS_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 
 class LauncherProcess extends EventEmitter {
+  // A launched process has a pid; only a child that failed to spawn lacks one.
+  pid = 4242;
   kill = vi.fn(() => true);
 }
 

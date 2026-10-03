@@ -271,7 +271,7 @@ export class WorkerSupervisor {
             `Worker ${child.pid} exceeded timeout of ${timeoutMs}ms, sending SIGTERM`,
           );
           try {
-            child.kill("SIGTERM");
+            if (child.pid !== undefined) child.kill("SIGTERM");
           } catch {
             // Ignore
           }
@@ -281,7 +281,7 @@ export class WorkerSupervisor {
             if (!isSettled) {
               this.logger?.error(`Worker ${child.pid} did not exit after SIGTERM, sending SIGKILL`);
               try {
-                child.kill("SIGKILL");
+                if (child.pid !== undefined) child.kill("SIGKILL");
               } catch {
                 // Ignore
               }
