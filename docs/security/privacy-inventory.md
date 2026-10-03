@@ -11,7 +11,7 @@ Resin enforces a strict local-first architecture: raw interactive coding agent s
 | Data Category | Data Elements | Classification | Storage Location | Retention & Lifecycle | Cloud Transmission |
 |---|---|---|---|---|---|
 | **Local Raw Sessions** | Raw user prompts, assistant reasoning / thoughts, raw tool calls, local source files | Highly Confidential | Local filesystem (`~/.resin/state/local.db` or configured local path) | Retained per local retention policy (default 30 days, auto-pruned); local purge on workspace deletion or CLI clear | ❌ **Never** (remains local) |
-| **Sanitized Cloud Evidence** | Allowlisted tool invocation metadata, sanitized execution metrics, structural capability profiles, verification digests | Confidential | Cloud Database / Object Storage | Retained per workspace policy (default 90 days); deleted upon user/workspace deletion | ✅ Allowlisted and redacted evidence only |
+| **Sanitized Cloud Evidence** | Allowlisted tool invocation metadata, sanitized execution metrics, structural capability profiles, verification digests | Confidential | Cloud Database / Object Storage | Session event records, finished generation attempt records, and temporary upload copies are deleted 90 days after the cloud stores them, unless protected (see §3 *Cloud Evidence Retention*); records kept longer are deleted upon user/workspace deletion or a deletion request | ✅ Allowlisted and redacted evidence only |
 | **Account & Identity** | User identifier, email address, display name, OAuth provider link metadata (Google, GitHub), profile image URL | Confidential | Cloud Auth Database | Active account lifetime; retained during legal hold; hard-deleted upon account deletion | ✅ Authentication & Console management |
 | **Workspace & Project Metadata** | Workspace ID, project root hash, repo slug, member role bindings | Internal | Cloud Database | Active workspace lifetime; transferred or purged upon workspace deprovisioning | ✅ Workspace collaboration |
 | **Credentials & Auth Tokens** | Device session tokens, OAuth refresh tokens, API keys | Restricted | OS Keyring / Local Vault / Encrypted Auth DB | Active session lifetime; immediate revocation on `logout` / token expiry; separate from durable data deletion | ❌ Provider secret tokens never stored; session tokens encrypted |
@@ -60,6 +60,17 @@ Resin manages data through explicit state transitions for revocation, export, re
   - Triggers local cleanup notifications for CLI daemons to remove local caches and state databases.
 - **Legal Hold (`active` → `released`)**:
   - Overrides automated retention pruning and deletion jobs, preserving designated records in immutable storage until the legal hold is formally released.
+- **Cloud Evidence Retention (90 days)**:
+  - Deleted 90 days after the cloud stores them: privacy-projected session event records, records of finished tool-generation attempts that a newer generation has replaced, temporary copies of large uploads made while they are processed, and detected workflow opportunities that have not been updated within the window and are not behind an active tool candidate.
+  - Kept longer, until you delete the workspace or account or request deletion:
+    - Records that an upload batch was received, used to prevent the same batch from being processed twice.
+    - The evidence behind tools you have published or that are still in progress, so their provenance stays complete; it returns to the 90-day policy once the tool is retired or deleted.
+    - Small index records for an evidence set: which session events it contains (event identifiers, content fingerprints and their order), plus the set's name, description and descriptive metadata. They don't contain the events themselves, which expire as described above unless protected.
+    - Archived copies of uploaded batches.
+  - A legal hold keeps everything it covers, regardless of age, until it is released.
+  - Age-based expiry does not change deletion requests: deleting an account or workspace, or requesting deletion, removes the data on its own schedule regardless of age.
+  - Once events have expired, cloud counts and drilldowns cover only retained events, and corrections to expired events are no longer possible.
+  - Local retention is unchanged (see *Local Raw Sessions* above).
 - **Shared Data Transfer (`transfer_pending` → `transferred` | `orphaned_cleanup`)**:
   - On workspace member removal, team-owned tool qualifications and historical metrics are either transferred to an active workspace admin or transitioned to organization-owned records.
 
