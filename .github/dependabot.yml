@@ -9,6 +9,11 @@ updates:
         update-types:
           - minor
           - patch
+        # The OMP SDK is pinned to the OMP release Resin qualified (OMP_TESTED_VERSIONS in
+        # adapters/omp/src/discovery.ts). A bump needs that release's recorded fixtures, so it gets
+        # its own pull request instead of riding along with unrelated updates.
+        exclude-patterns:
+          - "@oh-my-pi/*"
     ignore:
       - dependency-name: "*"
         update-types:

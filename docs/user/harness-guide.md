@@ -12,7 +12,7 @@ Every harness below is registered by `resin init` and removed by `resin uninstal
 |---------|-----------------|---------------------|---------------|----------------|----------------|-----------------|--------------------------|
 | **Claude Code CLI** | `2.1.283` | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json`) | `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR/CLAUDE.md`) | `~/.claude/projects/<project>/<session>.jsonl` + `<session>/subagents/agent-<id>.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | Learns; with the guidance the model checked the learned tools but called none (11→15 calls) |
 | **Codex CLI** | `0.156.1`, `0.157.1` | `$CODEX_HOME/config.toml` (`~/.codex/config.toml`) | `$CODEX_HOME/AGENTS.md` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` | JSONL rollout tailing | Stable meta-tools + response catalog notices | Learns; learned tool called (8→2 calls, −65% input tokens; the tool's step failed) |
-| **Oh My Pi (OMP)** | `18.3.2` | `$OMP_HOME/agent/mcp.json` (`~/.omp/agent/mcp.json`; legacy `~/.omp/config.json` cleaned on uninstall) | `$OMP_HOME/agent/AGENTS.md` (`~/.omp/agent/AGENTS.md`) | `~/.omp/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl` + subagent dirs | JSONL transcript tailing | Native `tools/list_changed` | Learns and invokes (one learned-tool call succeeded, one failed; 14→17 calls) |
+| **Oh My Pi (OMP)** | `18.3.2`, `18.6.0` | `$OMP_HOME/agent/mcp.json` (`~/.omp/agent/mcp.json`; legacy `~/.omp/config.json` cleaned on uninstall) | `$OMP_HOME/agent/AGENTS.md` (`~/.omp/agent/AGENTS.md`) | `~/.omp/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl` + subagent dirs | JSONL transcript tailing | Native `tools/list_changed` | Learns and invokes (one learned-tool call succeeded, one failed; 14→17 calls) |
 | **Pi** (`@earendil-works/pi-coding-agent`) | `0.87.1` | `<agent-dir>/extensions/resin.ts` (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) | `<agent-dir>/AGENTS.md` (or the first existing context file) | `<agent-dir>/sessions/--<cwd>--/*.jsonl`, `$PI_CODING_AGENT_SESSION_DIR`, `sessionDir` setting | JSONL transcript tailing | Native `tools/list_changed` via the extension | Learns; learned tool called but its step failed (4→10 calls) |
 | **Cursor CLI** (`cursor-agent`) | `2026.9.26-dd393fe` | `~/.cursor/mcp.json`, `~/.cursor/hooks.json` | `~/.cursor/rules/resin.mdc` | `~/.resin/capture/cursor-cli/<conversation_id>.jsonl` | Hook spool (`~/.resin/hooks/cursor-capture.mjs`) | Next session (ignores list_changed mid-session) | Learns and invokes (2 successful learned-tool calls; 8→8 calls) |
 | **Grok Build** (`grok`) | `1.0.13` | `$GROK_HOME/config.toml` (`~/.grok/config.toml`) | `$GROK_HOME/AGENTS.md` | `~/.grok/sessions/<encoded cwd>/<id>/updates.jsonl` | JSONL transcript tailing | Native `tools/list_changed` | Learns; the model searched and inspected Resin tools but called none (6→13 calls) |
@@ -157,7 +157,7 @@ Every candidate stays the recorded value until local validation confirms it. Val
 
 ### Tested versions
 
-Resin qualifies OMP against real sessions recorded with that release (`adapters/omp/tests/fixtures/recorded/<version>/`). OMP `18.3.2` is tested. Any other installed version still registers and is captured, but `resin status` reports it as untested.
+Resin qualifies OMP against real sessions recorded with that release (`adapters/omp/tests/fixtures/recorded/<version>/`). OMP `18.3.2` and `18.6.0` are tested. Any other installed version still registers and is captured, but `resin status` reports it as untested.
 
 ### Automated Registration
 
@@ -199,7 +199,7 @@ As a result, a workflow whose steps are split between a parent and its subagents
 
 ### Built-in tool replay
 
-Learned tools can repeat OMP built-ins (`read`, `write`, `edit`, `bash`, `eval`, and others) by running them from the OMP SDK that Resin pins to the tested version (`@oh-my-pi/pi-coding-agent` `18.3.2`), under Bun. A step that names a built-in the SDK does not export fails with `OMP native tool '<name>' is not available in the installed harness SDK`, followed by the list of built-ins it does export. For example, earlier 18.x sessions recorded a `search` built-in that `18.3.2` exports as `grep`.
+Learned tools can repeat OMP built-ins (`read`, `write`, `edit`, `bash`, `eval`, and others) by running them from the OMP SDK that Resin pins to a tested version (`@oh-my-pi/pi-coding-agent` `18.6.0`), under Bun. A step that names a built-in the SDK does not export fails with `OMP native tool '<name>' is not available in the installed harness SDK`, followed by the list of built-ins it does export. For example, earlier 18.x sessions recorded a `search` built-in that `18.6.0` exports as `grep`.
 
 ### Shared decoder with Pi (decision)
 
@@ -394,7 +394,7 @@ Every decoder is tested against transcripts recorded from a real install of the 
 |---------|-------------------|---------------|
 | Claude Code | `adapters/claude-code/tests/fixtures/recorded/2.1.283/` | `adapters/claude-code/tests/fixtures/recorded/CAPTURE.md` |
 | Codex CLI | `adapters/codex-cli/tests/fixtures/recorded/{0.156.1,0.157.1}/` | `adapters/codex-cli/tests/fixtures/recorded/CAPTURE.md` (+ `capture.sh`) |
-| OMP | `adapters/omp/tests/fixtures/recorded/18.3.2/` | `adapters/omp/tests/fixtures/recorded/CAPTURE.md` |
+| OMP | `adapters/omp/tests/fixtures/recorded/<version>/` (`18.3.2`, `18.6.0`) | `adapters/omp/tests/fixtures/recorded/CAPTURE.md` |
 | Pi | `adapters/pi/tests/fixtures/recorded/0.87.1/` | `adapters/pi/tests/fixtures/recorded/CAPTURE.md` |
 | Cursor CLI | `adapters/cursor-cli/tests/fixtures/recorded/2026.9.26-dd393fe/` | `adapters/cursor-cli/tests/fixtures/recorded/CAPTURE.md` (+ `capture-tools/`) |
 | Grok Build | `adapters/grok-build/tests/fixtures/recorded/1.0.13/` | `adapters/grok-build/tests/fixtures/recorded/CAPTURE.md` |

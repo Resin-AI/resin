@@ -304,4 +304,104 @@ describe("recorded grok 1.0.13 sessions", () => {
     });
     expect(markers).toEqual(["shell-exited-0", undefined]);
   });
+
+  it("records an argument-less tool_call with the input a later update carries", () => {
+    const decoder = new GrokRecordDecoder();
+    let sequence = 0;
+    const decode = (update: object) =>
+      decoder.decode({
+        recordId: `r${sequence}`,
+        sessionId: "s",
+        harnessId: "grok-build",
+        sequenceNumber: sequence,
+        recordType: "transcript_line" as const,
+        timestamp: "2026-09-28T00:00:00.000Z",
+        rawPayload: { method: "session/update", params: { sessionId: "s", update } },
+        cursor: { offset: sequence, line: sequence, sequence: sequence++, timestamp: "" },
+        metadata: {},
+      }) ?? [];
+    const shellMeta = { "x.ai/tool": { name: "run_terminal_command", namespace: "grok_build" } };
+    const useToolMeta = { "x.ai/tool": { name: "use_tool", namespace: "grok_build" } };
+    const opened = [
+      decode({
+        sessionUpdate: "tool_call",
+        toolCallId: "sh",
+        title: "run_terminal_command",
+        _meta: shellMeta,
+      }),
+      decode({
+        sessionUpdate: "tool_call",
+        toolCallId: "mcp",
+        title: "use_tool",
+        _meta: useToolMeta,
+      }),
+      decode({ sessionUpdate: "tool_call", toolCallId: "bare", title: "list_dir", _meta: {} }),
+    ];
+    expect(opened).toEqual([[], [], []]);
+
+    // Grok's updates restate the input with its serde tag (`variant`) and filled defaults.
+    const shellCall = decode({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "sh",
+      _meta: shellMeta,
+      rawInput: { variant: "Bash", command: "ls", is_background: false },
+    });
+    const mcpCall = decode({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "mcp",
+      _meta: useToolMeta,
+      rawInput: { variant: "UseTool", tool_name: "fixture__echo", tool_input: { text: "ping" } },
+    });
+    const shellDone = decode({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "sh",
+      status: "completed",
+      rawOutput: { type: "Bash", output: [], exit_code: 0 },
+    });
+    const bareDone = decode({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "bare",
+      status: "completed",
+      rawOutput: { text: "a.py" },
+    });
+
+    expect(shellCall).toEqual([
+      expect.objectContaining({
+        type: "tool_call",
+        callId: "sh",
+        toolName: "run_terminal_command",
+        parameters: { command: "ls", is_background: false },
+        metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "grok-shell" },
+      }),
+    ]);
+    expect(mcpCall).toEqual([
+      expect.objectContaining({
+        type: "tool_call",
+        callId: "mcp",
+        toolName: "fixture__echo",
+        connection: "fixture",
+        parameters: { text: "ping" },
+      }),
+    ]);
+    expect(shellDone.map((e) => e.type)).toEqual(["tool_result"]);
+    expect(shellDone[0]).toMatchObject({
+      toolName: "run_terminal_command",
+      metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" },
+    });
+    // A call no update ever completed is still recorded, with its result, and no arguments.
+    expect(bareDone).toEqual([
+      expect.objectContaining({
+        type: "tool_call",
+        callId: "bare",
+        toolName: "list_dir",
+        parameters: {},
+      }),
+      expect.objectContaining({
+        type: "tool_result",
+        callId: "bare",
+        toolName: "list_dir",
+        result: "a.py",
+      }),
+    ]);
+  });
 });

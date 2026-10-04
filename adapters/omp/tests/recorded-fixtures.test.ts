@@ -13,10 +13,32 @@ import { OmpSessionEventSource, getOmpProgramObservation } from "../src/source.j
 
 // Scrubbed sessions recorded with `omp -p` on the release named by the directory; see CAPTURE.md.
 const RECORDED = path.join(__dirname, "fixtures", "recorded");
-const MAIN = "2026-09-26T23-01-05-051Z_01a0dff3-639b-700f-bb45-3939a09bf46a";
-const SUBAGENT = `${MAIN}/HumanBlackbird.jsonl`;
-const EVAL_SPILL = "2026-09-26T23-04-33-426Z_01a0dff6-9192-74b3-9bc2-e25cb0b7f7ab";
-const ABORTED = "2026-09-26T23-04-49-530Z_01a0dff6-d07a-73d4-9e72-d5d7c7eeedff.jsonl";
+
+interface Recording {
+  /** The main session: bash, reads, edit, write, an MCP call through the device surface, task, wait. */
+  main: string;
+  /** The `task` subagent the main session spawned. */
+  agentName: string;
+  /** An Eval whose display OMP truncated, with its full output spilled to `0.eval.log`. */
+  evalSpill: string;
+  /** A bash call aborted by `--max-time`. */
+  aborted: string;
+}
+
+const RECORDINGS: Record<string, Recording> = {
+  "18.3.2": {
+    main: "2026-09-26T23-01-05-051Z_01a0dff3-639b-700f-bb45-3939a09bf46a",
+    agentName: "HumanBlackbird",
+    evalSpill: "2026-09-26T23-04-33-426Z_01a0dff6-9192-74b3-9bc2-e25cb0b7f7ab",
+    aborted: "2026-09-26T23-04-49-530Z_01a0dff6-d07a-73d4-9e72-d5d7c7eeedff.jsonl",
+  },
+  "18.6.0": {
+    main: "2026-10-04T09-32-09-996Z_01a10641-ad8b-71c3-9df4-4c46f26b9702",
+    agentName: "FederalPython",
+    evalSpill: "2026-10-04T09-31-03-015Z_01a10640-a7e7-74f3-8415-1b9e7d91c930",
+    aborted: "2026-10-04T09-31-20-882Z_01a10640-edb2-74c0-a7bc-d6a71955670a.jsonl",
+  },
+};
 
 interface Decoded {
   records: RawHarnessRecord[];
@@ -46,6 +68,13 @@ function toolEvents(events: IntermediateSessionEvent[], type: "tool_call" | "too
 }
 
 describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
+  const recording = RECORDINGS[version];
+  if (!recording) throw new Error(`OMP ${version} is tested but has no recorded sessions`);
+  const MAIN = recording.main;
+  const SUBAGENT = `${MAIN}/${recording.agentName}.jsonl`;
+  const EVAL_SPILL = recording.evalSpill;
+  const ABORTED = recording.aborted;
+
   it("pairs every recorded tool call with its result", async () => {
     const root = path.join(RECORDED, version, "sessions");
     const transcripts = (await fsp.readdir(root, { recursive: true }))
@@ -81,6 +110,12 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
     const shout = calls.find((call) => call.toolName === "shout");
     expect(shout?.connection).toBe("fixture-echo");
     expect(shout?.parameters).toEqual({ text: "resin fixture" });
+    // OMP 18.6.0 writes the edit's and the task's start markers without arguments; each call is
+    // recorded with the arguments its assistant record carries, not `{}`.
+    const edit = calls.find((call) => call.toolName === "edit");
+    expect(JSON.stringify(edit?.parameters)).toContain("Hi, ");
+    const task = calls.find((call) => call.toolName === "task");
+    expect(JSON.stringify(task?.parameters)).toContain("ls");
   });
 
   it("keeps a subagent transcript as its own agent session under the parent", async () => {
@@ -106,7 +141,7 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
       expect(child?.metadata).toMatchObject({
         sessionKind: "agent",
         parentSessionId: parent?.sessionId,
-        agentName: "HumanBlackbird",
+        agentName: recording.agentName,
       });
       expect(child?.sessionId).not.toBe(parent?.sessionId);
 
