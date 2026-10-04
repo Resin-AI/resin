@@ -21,10 +21,10 @@ export const GROK_GUIDANCE_MARKERS = Object.freeze({
  */
 export const GROK_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. Grok runs MCP tools through \`use_tool\`; Resin lists only \`resin__search_tools\`, \`resin__get_tool_schema\`, \`resin__invoke_tool\` and \`resin__manage_tools\`, and its learned tools are found with \`resin__search_tools\`. Grok's tool search shows the \`resin__search_tools\` description, and that description says how many learned tools this workspace has; search only when that count is above zero.
+Resin may have learned tools from earlier work in this workspace. Grok runs MCP tools through \`use_tool\`; Resin lists only \`resin__search_tools\`, \`resin__get_tool_schema\`, \`resin__invoke_tool\` and \`resin__manage_tools\`, and its learned tools are found with \`resin__search_tools\`. Grok's tool search shows the \`resin__search_tools\` description, and that description says how many learned tools this workspace has and names the commands they run; search only when that count is above zero.
 
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
-- Otherwise, before running a multi-step job by hand, call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- Otherwise, before running one of those commands or another multi-step job by hand, call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\` (via \`use_tool\`), instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.`;
 

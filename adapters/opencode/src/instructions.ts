@@ -12,10 +12,10 @@ export const OPENCODE_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  */
 export const OPENCODE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. They are not listed: Resin lists only \`resin_search_tools\`, \`resin_get_tool_schema\`, \`resin_invoke_tool\` and \`resin_manage_tools\`. The \`resin_search_tools\` description says how many learned tools this workspace has.
+Resin may have learned tools from earlier work in this workspace. They are not listed: Resin lists only \`resin_search_tools\`, \`resin_get_tool_schema\`, \`resin_invoke_tool\` and \`resin_manage_tools\`. The \`resin_search_tools\` description says how many learned tools this workspace has and names the commands they run.
 
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
-- Otherwise, before running a multi-step job by hand, call \`resin_search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- Otherwise, before running one of those commands or another multi-step job by hand, call \`resin_search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`resin_invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.
 `;

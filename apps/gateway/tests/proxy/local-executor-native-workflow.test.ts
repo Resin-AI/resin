@@ -279,11 +279,16 @@ describe("recorded workflows of ordinary calls", () => {
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
       `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}`,
     );
+    // The command it runs is named for discovery, under the same ownership rule as the program.
+    expect(executor.recordedWorkflowCommands(installed.artifactDigest, context)).toEqual([
+      "python3 -m pytest",
+    ]);
     const otherDir = path.join(tempDir, "other-workspace");
     fs.mkdirSync(otherDir);
     const other = resolveWorkspaceContext({ cwd: otherDir });
     expect(other.workspaceId).not.toBe(context.workspaceId);
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, other)).toBeUndefined();
+    expect(executor.recordedWorkflowCommands(installed.artifactDigest, other)).toEqual([]);
   });
 
   it("describes a harness tool step by its tool and the arguments a caller sees", async () => {

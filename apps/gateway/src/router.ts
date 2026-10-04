@@ -72,13 +72,19 @@ export type ToolHandler = (
 /** Same active native catalog, with internal-only metadata for notice comparison. */
 export interface CatalogNoticeTool extends McpTool {
   catalogOutputSchema?: McpTool["outputSchema"];
+  /** The commands a learned tool's recorded programs run, resolved on this machine. */
+  localCommands?: string[];
 }
 
-/** Internal notice metadata must never advertise an unsupported MCP output contract. */
+/** Internal metadata must never reach a harness: no unsupported output contract, no local detail. */
 export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
   return tools.map((tool) => {
-    if (!("catalogOutputSchema" in tool)) return tool;
-    const { catalogOutputSchema: _catalogOutputSchema, ...nativeTool } = tool;
+    if (!("catalogOutputSchema" in tool) && !("localCommands" in tool)) return tool;
+    const {
+      catalogOutputSchema: _catalogOutputSchema,
+      localCommands: _localCommands,
+      ...nativeTool
+    } = tool;
     return nativeTool;
   });
 }
@@ -288,18 +294,19 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const listed = (tool: CatalogEntry | RegistryTool, catalog: string) => {
       const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
       if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
-        return { description: catalog, inputSchema: schema, _meta: undefined };
+        return { description: catalog, inputSchema: schema, _meta: undefined, localCommands: [] };
       }
       return {
         description: listedPurpose(catalog, Object.keys(schema.properties ?? {})),
         inputSchema: listedInputSchema(schema),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
+        localCommands: this.registry.learnedToolCommands(tool, context),
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
-        const { description, inputSchema, _meta } = listed(
+        const { description, inputSchema, _meta, localCommands } = listed(
           entry,
           entry.description || entry.manifest?.description || `Tool ${entry.name}`,
         );
@@ -310,6 +317,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           catalogOutputSchema: entry.outputSchema ?? entry.manifest?.outputSchema,
           annotations: discoveryAnnotations(entry),
           ...(_meta === undefined ? {} : { _meta }),
+          ...(localCommands.length === 0 ? {} : { localCommands }),
         });
       }
     } else {
@@ -320,7 +328,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           context.sessionId,
         );
         if (tool) {
-          const { description, inputSchema, _meta } = listed(
+          const { description, inputSchema, _meta, localCommands } = listed(
             tool,
             tool.description || tool.manifest?.description || `Tool ${tool.name}`,
           );
@@ -331,6 +339,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
             catalogOutputSchema: tool.outputSchema ?? tool.manifest?.outputSchema,
             annotations: discoveryAnnotations(tool),
             ...(_meta === undefined ? {} : { _meta }),
+            ...(localCommands.length === 0 ? {} : { localCommands }),
           });
         }
       }

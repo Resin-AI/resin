@@ -10,6 +10,7 @@ import {
   type JsonRpcNotification,
   type JsonRpcSuccessResponse,
   type ListToolsResult,
+  RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
@@ -422,6 +423,54 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         params: {},
       })) as JsonRpcSuccessResponse<ListToolsResult>;
       expect(countOf(listed.result)).toBe(0);
+    });
+
+    it("reports the commands the learned tools run, never exposing them on listed tools", async () => {
+      const registry = new ToolRegistry();
+      // What the local executor resolves from each tool's recorded programs.
+      registry.setLocalToolCommands((tool) =>
+        tool.artifactDigest === undefined ? ["vitest", "gh pr checks"] : [],
+      );
+      const router = createRegistryGatewayRouter(registry);
+      let workspaceId = "";
+      const runtime = {
+        async onWorkspaceReady(workspace: { workspaceId: string }) {
+          workspaceId = workspace.workspaceId;
+          for (const name of ["run_vitest_tests", "check_pull_request_checks"]) {
+            await registry.registerTool(makeManifest({ id: `tool_${name}`, name }), undefined, {
+              workspaceId,
+            });
+          }
+        },
+        async whenCatalogLoaded() {},
+        async catalogSettled() {},
+        async stop() {},
+      } as unknown as ProductionProxyRuntime;
+      const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+      const conn = gateway.createConnection();
+
+      const initialized = (await gateway.handleMessage(
+        conn.connectionId,
+        searchListingInitialize("project-commands"),
+      )) as JsonRpcSuccessResponse<InitializeResult>;
+      expect(countOf(initialized.result)).toBe(2);
+      expect(initialized.result._meta?.[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual([
+        "vitest",
+        "gh pr checks",
+      ]);
+
+      const listed = (await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      })) as JsonRpcSuccessResponse<ListToolsResult>;
+      expect(listed.result._meta?.[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual([
+        "vitest",
+        "gh pr checks",
+      ]);
+      // Local program detail stays out of what the harness receives for each tool.
+      expect(JSON.stringify(listed.result.tools)).not.toContain("localCommands");
     });
 
     it("omits the count when the catalog could not be loaded, so nothing claims zero", async () => {

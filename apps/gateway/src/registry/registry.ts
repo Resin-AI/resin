@@ -33,6 +33,7 @@ import {
   createSystemMetaTools,
   isSystemMetaTool,
 } from "../meta/index.js";
+import type { LocalToolCommands } from "../meta/learned-commands.js";
 import {
   type CallToolResult,
   type JsonRpcParamValue,
@@ -470,6 +471,7 @@ export class ToolRegistry {
   private invocationRouter?: ToolInvocationRouter;
   private safetyGateEvaluator?: SafetyGateEvaluator;
   private localToolDescriber?: LocalToolDescriber;
+  private localToolCommands?: LocalToolCommands;
   // Scope activations: scopeKey -> Map<toolId, version>
   // System scope
   private readonly systemActiveTools = new Map<string, string>();
@@ -707,6 +709,19 @@ export class ToolRegistry {
   setLocalToolDescriber(describer: LocalToolDescriber): void {
     this.localToolDescriber = describer;
     this.initSystemMetaTools();
+  }
+
+  /** Installs the local-only lister of the commands a learned tool's recorded programs run. */
+  setLocalToolCommands(lister: LocalToolCommands): void {
+    this.localToolCommands = lister;
+  }
+
+  /** The commands a learned tool runs on this machine; none without a lister or a program. */
+  learnedToolCommands(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+  ): string[] {
+    return this.localToolCommands?.(tool, context) ?? [];
   }
 
   getSafetyGateEvaluator(): SafetyGateEvaluator | undefined {

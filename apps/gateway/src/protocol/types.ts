@@ -226,6 +226,14 @@ export const RESIN_SEARCH_LISTING_META = "resin/searchListing";
 export const RESIN_LEARNED_TOOL_COUNT_META = "resin/learnedToolCount";
 
 /**
+ * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META}: the commands the workspace's
+ * learned tools run most widely (`vitest`, `gh pr checks`), resolved from recorded programs on this
+ * machine. The stdio shim names them to the model so it can tell a command it is about to type is
+ * covered; absent when no learned tool runs a recognised command.
+ */
+export const RESIN_LEARNED_TOOL_COMMANDS_META = "resin/learnedToolCommands";
+
+/**
  * Tool-result `_meta` key a recorded workflow sets when it returns several steps' outputs: which
  * plan step produced each output (`steps`, 1-based, in output order) and how many steps the plan
  * has (`total`). The result's content stays the outputs array, so composition reads the same value.
