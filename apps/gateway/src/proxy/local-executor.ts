@@ -243,6 +243,8 @@ const RECORDED_PROGRAM_PREVIEW_CHARS = 600;
 const RECORDED_PATCH_PREVIEW_LINES = 12;
 /** Characters of a harness tool argument's recorded text shown in a tool description. */
 const RECORDED_NATIVE_ARGUMENT_CHARS = 120;
+/** Where a private value sits in projected program text: no command name can be read from it. */
+const PROJECTED_PRIVATE_VALUE = "[private]";
 /**
  * OMP's built-in tools take `i`, a one-line statement of intent for the transcript: narration, not
  * the call's data. Recordings made before the decoder kept it as metadata still carry it.
@@ -597,7 +599,9 @@ export class LocalArtifactExecutor {
   /**
    * The commands a cached recorded workflow's shell programs run (`gh pr checks`, `vitest`), so
    * an agent can tell from those names alone that a learned tool covers a command it is about to
-   * type. Local-only, like {@link describeRecordedWorkflow}.
+   * type. Unlike {@link describeRecordedWorkflow}, these names reach summaries every harness shows
+   * (server instructions, search_tools' description), so they are read only from the projected
+   * program text, never from a resolved private value.
    */
   recordedWorkflowCommands(artifactDigest: string, context: WorkspaceContext): string[] {
     return this.recordedWorkflowSummary(artifactDigest, context)?.commands ?? [];
@@ -672,6 +676,61 @@ export class LocalArtifactExecutor {
           : source.kind === "template"
             ? templateText(source.template)
             : undefined;
+    // Command names reach every harness-visible summary, so they come from the projected program:
+    // the recording's sanitized source, with any private value left unresolved.
+    const projectedTemplateText = (template: WorkflowValueTemplate): string | undefined => {
+      switch (template.type) {
+        case "literal":
+          return typeof template.value === "string" ? template.value : undefined;
+        case "private":
+          return PROJECTED_PRIVATE_VALUE;
+        case "text": {
+          let shown = "";
+          for (const part of template.parts) {
+            const piece = part.type === "input" ? `{${part.name}}` : projectedTemplateText(part);
+            if (piece === undefined) return undefined;
+            shown += piece;
+          }
+          return shown;
+        }
+        case "program":
+          return typeof template.sourceReference === "string"
+            ? template.source.type === "literal" && typeof template.source.value === "string"
+              ? template.source.value
+              : undefined
+            : projectedTemplateText(template.source);
+        default:
+          return undefined;
+      }
+    };
+    const projectedText = (source: WorkflowValueSource): string | undefined =>
+      source.kind === "literal"
+        ? typeof source.value === "string"
+          ? source.value
+          : undefined
+        : source.kind === "template"
+          ? projectedTemplateText(source.template)
+          : undefined;
+    // Defense in depth: a command naming any of the plan's private values is never listed. A
+    // projected program's whole original source is not such a value; it is the program itself.
+    const programSources = new Set<string>();
+    const collectProgramSources = (template: WorkflowValueTemplate): void => {
+      if (template.type === "text") template.parts.forEach(collectProgramSources);
+      if (template.type !== "program") return;
+      if (typeof template.sourceReference === "string")
+        programSources.add(template.sourceReference);
+      collectProgramSources(template.source);
+    };
+    for (const step of plan.steps) {
+      for (const argument of step.arguments) {
+        if (argument.source.kind === "template") collectProgramSources(argument.source.template);
+      }
+    }
+    const privateValues = [...declared].flatMap((reference) => {
+      if (programSources.has(reference)) return [];
+      const value = resolveOwned(reference);
+      return value === undefined ? [] : [value];
+    });
     // Only an input that keeps its recorded token when omitted may be shown with that value: a
     // required input has no value a caller can fall back on, and showing one would claim it does.
     const recordedDefaults = new Set(
@@ -923,8 +982,11 @@ export class LocalArtifactExecutor {
         });
         continue;
       }
-      if (program.kind === "shell") {
-        for (const command of programCommands(programText)) {
+      if (program.kind === "shell" && source !== undefined) {
+        const projected = projectedText(source);
+        for (const command of projected === undefined
+          ? []
+          : programCommands(projected, privateValues)) {
           if (!commands.includes(command)) commands.push(command);
         }
       }
