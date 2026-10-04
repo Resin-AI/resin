@@ -16,7 +16,12 @@
  *   jointly against a demonstration that changed all of them (`backups/<dir>/<name>-<date>.tar.gz`);
  * - `cross-harness-shell-heldout-v1`: a held-out recorded by another harness's built-in shell than
  *   the plan's step (Claude `Bash` for Codex `exec_command`) is checked through the program
- *   argument alone; segment steps additionally need the same recorded shell dialect.
+ *   argument alone; segment steps additionally need the same recorded shell dialect;
+ * - `display-filter-v1`: plan steps marked `WorkflowStep.displayFilter` run their recorded program
+ *   without its trailing `tail`/`head`/`grep` display filter (`splitDisplayFilter`, version 1),
+ *   returning the command's whole output and exit status; replay confirmation pipes that output
+ *   through the dropped stages before comparing it with the recording; a step's boolean
+ *   `displayFilter.input`, when the caller sets it, runs the whole recorded pipeline instead.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -27,4 +32,5 @@ export const WORKFLOW_CAPABILITIES = [
   "and-chain-segments-v2",
   "joint-token-spans-v1",
   "cross-harness-shell-heldout-v1",
+  "display-filter-v1",
 ].join(",");

@@ -564,6 +564,8 @@ async function replayStep(
     adapters: environment.adapters,
     ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
+    // Compared with the recording: a display-filter step's output goes through what it drops.
+    applyDisplayFilters: true,
   };
   const execution = await withDeadline(
     (signal) => executeRecordedWorkflow(replayed, { ...options, signal }),
@@ -1167,6 +1169,7 @@ function replayedPlan(plan: RecordedWorkflow): RecordedWorkflow {
   for (const step of pruned.steps) {
     for (const argument of step.arguments) collectReadInputs(argument.source, kept);
     if (step.optional !== undefined) kept.add(step.optional.input);
+    if (step.displayFilter?.input !== undefined) kept.add(step.displayFilter.input);
   }
   const removedReads = new Set<string>();
   for (const step of plan.steps) {
@@ -1645,6 +1648,7 @@ async function evaluateDerivationCandidates(
               ...(replay.workspaceId ? { access: { workspaceId: replay.workspaceId } } : {}),
               resolvePrivate: resolvePrivate,
               signal,
+              applyDisplayFilters: true,
             }),
           replay.timeoutMs,
         );
@@ -1722,6 +1726,8 @@ async function replayPlanOnce(
     adapters: environment.adapters,
     ...(environment.workspaceId ? { access: { workspaceId: environment.workspaceId } } : {}),
     ...(environment.resolvePrivate ? { resolvePrivate: environment.resolvePrivate } : {}),
+    // Compared with the recording: a display-filter step's output goes through what it drops.
+    applyDisplayFilters: true,
   };
   const execution = await withDeadline(
     (signal) => executeRecordedWorkflow(plan, { ...options, signal }),

@@ -23,7 +23,9 @@ import {
   WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
+  displayFilterShell,
   programNotLearnableReason,
+  splitDisplayFilter,
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
@@ -41,6 +43,8 @@ export interface RecordedProgramRun {
   stderr: string;
   /** Raw stdout for ordinary programs, rendered text for Eval, or authored content for Codex exec. */
   value: WorkflowJsonValue;
+  /** The signal that ended the process, when one did. */
+  signal?: NodeJS.Signals;
 }
 
 export interface ProgramRunnerOptions {
@@ -570,6 +574,7 @@ interface CapturedRun {
   exitCode: number;
   stdout: string;
   stderr: string;
+  signal?: NodeJS.Signals;
 }
 
 function isRecordedProgram(value: unknown): value is WorkflowRecordedProgram {
@@ -680,15 +685,18 @@ function invocationFor(
     case "shell":
       // The shell the recording proved runs the whole text: `&&`, `||`, pipes and redirections are
       // what the recorded call did, and exit status is the program's exit status.
-      return shellProgramInvocation(program, source, {
-        platform,
-        env,
-        bashLogin: options.shellInvocation === "bash-login",
-        bashLoginPrelude: CODEX_SHELL_PRELUDE,
-        ...(options.executableExists === undefined
-          ? {}
-          : { executableExists: options.executableExists }),
-      });
+      return {
+        ...shellProgramInvocation(program, source, {
+          platform,
+          env,
+          bashLogin: options.shellInvocation === "bash-login",
+          bashLoginPrelude: CODEX_SHELL_PRELUDE,
+          ...(options.executableExists === undefined
+            ? {}
+            : { executableExists: options.executableExists }),
+        }),
+        ...(input === undefined ? {} : { input }),
+      };
     case "python": {
       // On Windows `python3` is usually only the Microsoft Store's installer alias.
       const interpreter = resolveInterpreter(
@@ -1332,6 +1340,7 @@ function runChild(
         exitCode: code ?? 1,
         stdout: stdout.text(),
         stderr: stderrText,
+        ...(signal ? { signal } : {}),
       });
     });
   });
@@ -1495,13 +1504,15 @@ function codexExecResultValue(output: string, bounds: CodexExecOutputBounds): Wo
  * Runs a recorded program exactly once, through the family its record names. Shell programs keep
  * shell semantics. Python state replay sends composed source through stdin; JavaScript Eval and
  * Codex exec send their source through bounded stdin/private-result channels. Ordinary programs
- * receive their source as an argument. A non-zero exit code is left for the caller to
- * refuse: this function never invents a value for a program that failed.
+ * receive their source as an argument. A shell program reads `shellInput` on its stdin when given
+ * (a display filter's input), and no stdin otherwise. A non-zero exit code is left for the caller
+ * to refuse: this function never invents a value for a program that failed.
  */
 export async function runRecordedProgram(
   program: WorkflowRecordedProgram,
   options: ProgramRunnerOptions = {},
   targetCallId?: string,
+  shellInput?: string,
 ): Promise<RecordedProgramRun> {
   assertRunnable(program);
   if (program.kind === "patch") {
@@ -1598,7 +1609,9 @@ export async function runRecordedProgram(
         ? codexExecReplayInput
         : isJavaScriptEval
           ? javascriptReplayInput
-          : pythonReplayInput,
+          : runnable.kind === "shell"
+            ? shellInput
+            : pythonReplayInput,
       isJavaScriptEval || isCodexExec ? outputFile?.fd : undefined,
     );
     const captured = await runChild(invocation, options, childEnv);
@@ -1644,6 +1657,7 @@ export async function runRecordedProgram(
       stdout: captured.stdout,
       stderr: captured.stderr,
       value,
+      ...(captured.signal === undefined ? {} : { signal: captured.signal }),
     };
   } finally {
     try {
@@ -1841,7 +1855,25 @@ export async function runRecordedCall(
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   };
-  const run = await runRecordedProgram({ ...program, source }, replayOptions, step.callId);
+  // A display-filter step runs its command alone: the caller gets its whole output and exit status.
+  // A caller who switched the filter on through its input runs the recorded pipeline instead.
+  let filter: string | undefined;
+  let command = source;
+  if (step.displayFilter !== undefined && request.displayFilter !== "whole") {
+    const shell = displayFilterShell(step.callable.name, request.arguments, program);
+    const split =
+      shell === undefined
+        ? undefined
+        : splitDisplayFilter(shell, source, step.displayFilter.version);
+    if (split === undefined) {
+      throw new Error(
+        `step '${step.id}' cannot run: the program does not end in the display filter this step drops`,
+      );
+    }
+    command = split.command;
+    filter = split.filter;
+  }
+  const run = await runRecordedProgram({ ...program, source: command }, replayOptions, step.callId);
   if (run.exitCode !== 0) {
     // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
     const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);
@@ -1850,5 +1882,20 @@ export async function runRecordedCall(
       `step '${step.id}' failed: recorded ${program.kind} program exited with code ${run.exitCode}${detail}`,
     );
   }
-  return run.value;
+  if (filter === undefined || request.displayFilter !== "replay") return run.value;
+  // A replay compared with the recording passes the output through the dropped stages, in the
+  // same shell, directory and environment. Their exit status is ignored as the recorded pipeline's
+  // was (grep exits 1 printing nothing when nothing matches); a filter killed by a signal fails.
+  const filtered = await runRecordedProgram(
+    { ...program, source: filter },
+    replayOptions,
+    step.callId,
+    run.stdout,
+  );
+  if (filtered.signal !== undefined || filtered.exitCode > 128) {
+    throw new Error(
+      `step '${step.id}' failed: its display filter was terminated (${filtered.signal ?? `exit code ${filtered.exitCode}`})`,
+    );
+  }
+  return filtered.value;
 }
