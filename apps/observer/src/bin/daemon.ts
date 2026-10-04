@@ -47,6 +47,10 @@ import {
 } from "../notifications.js";
 import { OpportunityTrackingModule } from "../opportunity-module.js";
 import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
+import {
+  PrivateValueRetentionModule,
+  daemonPrivateValueReferenceRoots,
+} from "../private-value-retention-module.js";
 import { StateDbMaintenanceModule } from "../state-db-maintenance-module.js";
 import { narrowSafetyAttestationKeyMode, pruneStaleStateFiles } from "../state-hygiene.js";
 import {
@@ -1145,6 +1149,13 @@ async function runForeground(options: {
   });
   supervisor.enableNotificationPersistence(paths.stateDir);
   supervisor.registerModule(new StateDbMaintenanceModule({ conn: stateStore.conn }));
+  supervisor.registerModule(
+    new PrivateValueRetentionModule({
+      dataDir: paths.dataDir,
+      referenceRoots: daemonPrivateValueReferenceRoots(paths),
+      logger,
+    }),
+  );
   const credentialStore = new CloudCredentialStore({
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),

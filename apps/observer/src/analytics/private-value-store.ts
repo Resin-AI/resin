@@ -34,6 +34,25 @@ const STORE_DIR = "private-values";
 const MAX_ENTRIES = 4096;
 const REDACTION_KEY_FILE = "redaction-key";
 const REDACTION_KEY_BYTES = 32;
+/** Immutable V2 entries, one file per reference: `<dir>/<first two hex digits>/<sha256>.json`. */
+export function privateValueEntriesDir(dataDir: string): string {
+  return path.join(dataDir, STORE_DIR, "entries-v2");
+}
+/**
+ * Re-recording an existing V2 entry refreshes its modification time at most this often, so
+ * retention, which ages entries by mtime, keeps values that are still being observed.
+ */
+const IMMUTABLE_REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** A V2 reference's entry file name: its SHA-256, so names never reveal the reference. */
+export function privateValueEntryName(key: string): string {
+  return `${createHash("sha256").update(key).digest("hex")}.json`;
+}
+
+/** Where an entry file name lives under the entries directory, sharded by its first byte. */
+export function privateValueEntryPath(entriesDir: string, name: string): string {
+  return path.join(entriesDir, name.slice(0, 2), name);
+}
 /**
  * Legacy aliases are written back at most this often. Rewriting the whole file per new alias made
  * capture O(n^2) in the store size: a heavy transcript mints thousands of aliases in seconds.
@@ -177,12 +196,14 @@ export class FilePrivateValueStore implements PrivateValueStore {
   private static shared: FilePrivateValueStore | undefined;
   private static readonly legacyStates = new Map<string, LegacyFileState>();
   private readonly file: string;
+  private readonly entriesDir: string;
   private readonly legacy: LegacyFileState;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
   private deviceRedactionKey: Buffer | undefined;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
+    this.entriesDir = privateValueEntriesDir(dataDir);
     let legacy = FilePrivateValueStore.legacyStates.get(this.file);
     if (!legacy) {
       legacy = {
@@ -243,24 +264,26 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return key;
   }
 
-  private immutablePath(key: string): string {
-    return path.join(
-      path.dirname(this.file),
-      "entries-v2",
-      `${createHash("sha256").update(key).digest("hex")}.json`,
-    );
+  /** The sharded entry path, then the flat path entries used before sharding (still read). */
+  private immutablePaths(key: string): [sharded: string, legacy: string] {
+    const name = privateValueEntryName(key);
+    return [privateValueEntryPath(this.entriesDir, name), path.join(this.entriesDir, name)];
   }
 
   private readImmutable(key: string): ImmutableEntry | undefined {
     const cached = this.immutableEntries.get(key);
     if (cached !== undefined) return cached;
-    let text: string;
-    try {
-      text = fs.readFileSync(this.immutablePath(key), "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw new Error(`Cannot read local private reference '${key}'`);
+    let text: string | undefined;
+    for (const candidate of this.immutablePaths(key)) {
+      try {
+        text = fs.readFileSync(candidate, "utf8");
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw new Error(`Cannot read local private reference '${key}'`);
+      }
     }
+    if (text === undefined) return undefined;
     let value: unknown;
     try {
       value = JSON.parse(text);
@@ -284,13 +307,41 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return entry;
   }
 
+  /**
+   * Marks an existing entry as still observed (see IMMUTABLE_REFRESH_AFTER_MS). False when no file
+   * holds it any more: retention removed it after this process cached it.
+   */
+  private refreshImmutable(key: string): boolean {
+    for (const candidate of this.immutablePaths(key)) {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        return true;
+      }
+      if (Date.now() - stat.mtimeMs >= IMMUTABLE_REFRESH_AFTER_MS) {
+        try {
+          const now = new Date();
+          fs.utimesSync(candidate, now, now);
+        } catch {
+          // An entry this user cannot touch keeps its age; retention may then remove it.
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
   private writeImmutable(key: string, entry: PrivateEntry): void {
     const current = this.readImmutable(key);
     if (current !== undefined) {
       assertSameEntry(current, entry, key);
-      return;
+      if (this.refreshImmutable(key)) return;
+      // Retention removed the file this process had cached: publish it again.
+      this.immutableEntries.delete(key);
     }
-    const target = this.immutablePath(key);
+    const [target] = this.immutablePaths(key);
     ensurePrivateDirectorySync(path.dirname(target));
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
     try {
