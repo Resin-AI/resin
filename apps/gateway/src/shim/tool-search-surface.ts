@@ -11,6 +11,7 @@ import {
   InitializeParamsSchema,
   type JsonRpcId,
   type JsonRpcMessage,
+  RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_SEARCH_LISTING_META,
 } from "../protocol/types.js";
@@ -26,20 +27,35 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** The learned-tool count the gateway put in a result's `_meta`: only once the catalog is known. */
-function learnedToolCountOf(result: Record<string, unknown>): number | undefined {
-  const count = record(result._meta)?.[RESIN_LEARNED_TOOL_COUNT_META];
-  return typeof count === "number" && Number.isInteger(count) && count >= 0 ? count : undefined;
+/** A workspace's learned tools as the gateway reports them: how many, and the commands they run. */
+interface LearnedTools {
+  count: number;
+  commands: string[];
+}
+
+/** The learned tools the gateway put in a result's `_meta`: only once the catalog is known. */
+function learnedToolsOf(result: Record<string, unknown>): LearnedTools | undefined {
+  const meta = record(result._meta);
+  const count = meta?.[RESIN_LEARNED_TOOL_COUNT_META];
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return undefined;
+  const commands = meta?.[RESIN_LEARNED_TOOL_COMMANDS_META];
+  return {
+    count,
+    commands: Array.isArray(commands)
+      ? commands.filter((command): command is string => typeof command === "string")
+      : [],
+  };
 }
 
 /**
  * search_tools as a search-listing connection lists it: its description opens with how many learned
- * tools there are, because harnesses show tool descriptions even where they drop server instructions.
+ * tools there are and the commands they run, because harnesses show tool descriptions even where
+ * they drop server instructions.
  */
-function withLearnedToolCount(tool: unknown, learnedToolCount: number | undefined): unknown {
+function withLearnedTools(tool: unknown, learned: LearnedTools | undefined): unknown {
   const listed = record(tool);
-  if (learnedToolCount === undefined || !listed || !isSearch(listed.name)) return tool;
-  const sentence = learnedToolCountSentence(learnedToolCount);
+  if (learned === undefined || !listed || !isSearch(listed.name)) return tool;
+  const sentence = learnedToolCountSentence(learned.count, learned.commands);
   return {
     ...listed,
     description:
@@ -277,7 +293,7 @@ export function createToolSearchSurface(
   let searchEnabled = enableSearch || searchOnlyListing;
   // Learned tools in the workspace's catalog, as the gateway last reported them; unknown until it
   // reports a count, which it does only once the catalog is known.
-  let learnedToolCount: number | undefined;
+  let learnedTools: LearnedTools | undefined;
   const send = (message: JsonRpcMessage) => output.write(encodeMcpMessage(message));
   const transform = (filter: (message: JsonRpcMessage) => JsonRpcMessage | undefined) => {
     const decoder = new McpFrameDecoder();
@@ -386,9 +402,9 @@ export function createToolSearchSurface(
       if (!("method" in message) && "id" in message && message.id !== null) {
         if (initializeIds.delete(message.id)) {
           const initialized = "result" in message ? record(message.result) : undefined;
-          if (initialized) learnedToolCount = learnedToolCountOf(initialized) ?? learnedToolCount;
+          if (initialized) learnedTools = learnedToolsOf(initialized) ?? learnedTools;
           const replacement = searchOnlyListing
-            ? searchListingGatewayInstructions(learnedToolCount)
+            ? searchListingGatewayInstructions(learnedTools?.count, learnedTools?.commands)
             : searchEnabled
               ? undefined
               : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS;
@@ -415,7 +431,7 @@ export function createToolSearchSurface(
         if (lists.delete(message.id) && "result" in message) {
           const result = record(message.result);
           if (result && Array.isArray(result.tools)) {
-            learnedToolCount = learnedToolCountOf(result);
+            learnedTools = learnedToolsOf(result);
             return {
               jsonrpc: "2.0",
               id: message.id,
@@ -430,9 +446,7 @@ export function createToolSearchSurface(
                     if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
                     return searchEnabled || !isSearch(name);
                   })
-                  .map((tool) =>
-                    searchOnlyListing ? withLearnedToolCount(tool, learnedToolCount) : tool,
-                  ),
+                  .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool)),
               },
             };
           }

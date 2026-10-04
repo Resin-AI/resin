@@ -73,6 +73,7 @@ import {
   composedResultValue,
   presentStepSections,
 } from "../meta/invoke-tool.js";
+import { programCommands } from "../meta/learned-commands.js";
 
 /** A completed step's output as text: printed text as is, any other value as JSON. */
 function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
@@ -543,8 +544,11 @@ export class LocalArtifactExecutor {
   private readonly privateValueStore?: LocalArtifactExecutorOptions["privateValueStore"];
   private readonly privateValueOwnerWorkspaceId?: string;
   private managedToolAccess?: ManagedToolAccess;
-  /** Resolved local descriptions by artifact and owning workspace; both are immutable inputs. */
-  private readonly recordedWorkflowDescriptions = new Map<string, string>();
+  /** Resolved local summaries by artifact and owning workspace; both are immutable inputs. */
+  private readonly recordedWorkflowSummaries = new Map<
+    string,
+    { description: string; commands: string[] }
+  >();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -587,9 +591,25 @@ export class LocalArtifactExecutor {
    * as execution and is returned only to the local caller, never uploaded.
    */
   describeRecordedWorkflow(artifactDigest: string, context: WorkspaceContext): string | undefined {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.description;
+  }
+
+  /**
+   * The commands a cached recorded workflow's shell programs run (`gh pr checks`, `vitest`), so
+   * an agent can tell from those names alone that a learned tool covers a command it is about to
+   * type. Local-only, like {@link describeRecordedWorkflow}.
+   */
+  recordedWorkflowCommands(artifactDigest: string, context: WorkspaceContext): string[] {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.commands ?? [];
+  }
+
+  private recordedWorkflowSummary(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): { description: string; commands: string[] } | undefined {
     const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
     const key = `${artifactDigest}\u0000${owner}`;
-    const cached = this.recordedWorkflowDescriptions.get(key);
+    const cached = this.recordedWorkflowSummaries.get(key);
     if (cached !== undefined) return cached;
     if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
       return undefined;
@@ -790,6 +810,7 @@ export class LocalArtifactExecutor {
     };
     const steps: RecordedStep[] = [];
     const parameters = new Set<string>();
+    const commands: string[] = [];
     for (const [index, step] of plan.steps.entries()) {
       // A derivation is model-written code: describe what it computes, never the code itself.
       if (step.origin === "derivation") {
@@ -902,6 +923,11 @@ export class LocalArtifactExecutor {
         });
         continue;
       }
+      if (program.kind === "shell") {
+        for (const command of programCommands(programText)) {
+          if (!commands.includes(command)) commands.push(command);
+        }
+      }
       steps.push({
         head: `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:`,
         body: programText,
@@ -912,9 +938,12 @@ export class LocalArtifactExecutor {
       parameters.size === 0
         ? ""
         : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${[...parameters].join("; ")}`;
-    const description = `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}`;
-    this.recordedWorkflowDescriptions.set(key, description);
-    return description;
+    const summary = {
+      description: `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}`,
+      commands,
+    };
+    this.recordedWorkflowSummaries.set(key, summary);
+    return summary;
   }
 
   setWorkspaceRoot(root: string): void {

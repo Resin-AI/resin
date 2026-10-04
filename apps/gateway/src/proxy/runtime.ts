@@ -36,6 +36,7 @@ import {
   createToolProtocolAdapter,
 } from "@resin/runtime";
 import { composedResultValue } from "../meta/invoke-tool.js";
+import type { LocalToolCommands } from "../meta/learned-commands.js";
 import type { LocalToolDescriber } from "../meta/search-tools.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
@@ -204,6 +205,14 @@ function recordedProgramDescriber(executor: LocalArtifactExecutor): LocalToolDes
     tool.artifactDigest === undefined
       ? undefined
       : executor.describeRecordedWorkflow(tool.artifactDigest, context);
+}
+
+/** Local discovery detail for cached learned tools: the commands each one's programs run. */
+function recordedProgramCommands(executor: LocalArtifactExecutor): LocalToolCommands {
+  return (tool, context) =>
+    tool.artifactDigest === undefined
+      ? []
+      : executor.recordedWorkflowCommands(tool.artifactDigest, context);
 }
 
 function workspaceRootFromContext(workspace: WorkspaceContext | undefined): string | undefined {
@@ -422,6 +431,7 @@ export async function createProductionProxyRuntime(
       });
     executor.setManagedToolAccess(managedToolAccess);
     options.registry?.setLocalToolDescriber(recordedProgramDescriber(executor));
+    options.registry?.setLocalToolCommands(recordedProgramCommands(executor));
     routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
@@ -736,6 +746,7 @@ export async function createProductionProxyRuntime(
     });
   localExecutor.setManagedToolAccess(managedToolAccess);
   options.registry?.setLocalToolDescriber(recordedProgramDescriber(localExecutor));
+  options.registry?.setLocalToolCommands(recordedProgramCommands(localExecutor));
 
   // Persisted positive denial remains effective even if credentials are now unavailable.
   try {

@@ -15,6 +15,7 @@ import {
   type JsonRpcMessage,
   type JsonRpcParams,
   type JsonRpcResponse,
+  RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
@@ -1474,6 +1475,65 @@ describe("search-only listing", () => {
       listWithLearned(client, 3, 1);
       expect(firstSentence(searchDescriptionOf(client, 3))).toMatch(
         /^Resin has 1 learned tool for/,
+      );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("names the commands learned tools run in the instructions and search_tools' first sentence", () => {
+    // Agents skip a search for what they judge "just a command" (a real OMP session ran
+    // `stylua --check` and `selene` itself beside a learned tool that runs exactly those). Named
+    // commands let the model see, before it types one, that a search will find a tool.
+    const commands = ["vitest", "gh pr checks", "stylua"];
+    const withCommands = (id: number, count: number): JsonRpcMessage => {
+      const message = initializeResult(id, count);
+      if (!("result" in message)) throw new Error("Expected a result");
+      const result = message.result as Record<string, unknown>;
+      return {
+        ...message,
+        result: {
+          ...result,
+          _meta: {
+            [RESIN_LEARNED_TOOL_COUNT_META]: count,
+            [RESIN_LEARNED_TOOL_COMMANDS_META]: commands,
+          },
+        },
+      };
+    };
+    const client = createSurfaceClient({});
+    try {
+      client.send(initialize(1));
+      client.respond(withCommands(1, 92));
+      const instructions = instructionsOf(client.received.at(-1));
+      expect(instructions).toBe(searchListingGatewayInstructions(92, commands));
+      expect(instructions).toContain(
+        "Resin has 92 learned tools for this workspace, not listed; they run commands such as `vitest`, `gh pr checks`, `stylua`.",
+      );
+      expect(instructions).toContain("Before running one of those commands");
+      expect(instructions).toContain("search_tools(query=<the command line or job");
+
+      client.send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+      client.respond({
+        jsonrpc: "2.0",
+        id: 2,
+        result: {
+          tools: [
+            {
+              name: "search_tools",
+              description: SEARCH_DESCRIPTION,
+              inputSchema: { type: "object" },
+            },
+          ],
+          _meta: {
+            [RESIN_LEARNED_TOOL_COUNT_META]: 92,
+            [RESIN_LEARNED_TOOL_COMMANDS_META]: commands,
+          },
+        },
+      });
+      const first = firstSentence(searchDescriptionOf(client, 2));
+      expect(first).toBe(
+        "Resin has 92 learned tools for this workspace: search them before running a multi-step job or one of the commands they run (`vitest`, `gh pr checks`, `stylua`) by hand.",
       );
     } finally {
       client.close();

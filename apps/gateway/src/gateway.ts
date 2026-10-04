@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { McpConnection, type McpConnectionOptions } from "./connection.js";
+import { summarizeLearnedCommands } from "./meta/learned-commands.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   JSON_RPC_ERROR_CODES,
@@ -30,6 +31,7 @@ import {
   type McpImplementationInfo,
   type McpTool,
   type ProgressNotificationParams,
+  RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_META,
 } from "./protocol/types.js";
@@ -38,6 +40,7 @@ import { CatalogResponseNotices } from "./refresh/catalog-response-notices.js";
 import { CatalogRefreshCoordinator, type RefreshCoordinatorOptions } from "./refresh/index.js";
 import { ToolRegistry } from "./registry/registry.js";
 import {
+  type CatalogNoticeTool,
   type GatewayRouter,
   RegistryGatewayRouter,
   createRegistryGatewayRouter,
@@ -174,16 +177,21 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
 /** How long a connection's first tool list waits for a fresh install's initial catalog sync. */
 export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
 
-/** How many of a workspace's listed tools Resin learned. */
-function countLearnedTools(tools: readonly McpTool[]): number {
-  return tools.filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true).length;
-}
-
-/** Result `_meta` carrying a known learned-tool count; nothing while the catalog is unknown. */
-function learnedToolCountMeta(learnedToolCount: number | undefined) {
-  return learnedToolCount === undefined
-    ? {}
-    : { _meta: { [RESIN_LEARNED_TOOL_COUNT_META]: learnedToolCount } };
+/**
+ * Result `_meta` describing a workspace's learned tools once its catalog is known: how many there
+ * are, and the commands their recorded programs run most widely, so search-listing instructions can
+ * name them. Nothing while the catalog is unknown.
+ */
+function learnedToolsMeta(tools: readonly CatalogNoticeTool[] | undefined) {
+  if (tools === undefined) return {};
+  const learned = tools.filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true);
+  const commands = summarizeLearnedCommands(learned.map((tool) => tool.localCommands ?? []));
+  return {
+    _meta: {
+      [RESIN_LEARNED_TOOL_COUNT_META]: learned.length,
+      ...(commands.length === 0 ? {} : { [RESIN_LEARNED_TOOL_COMMANDS_META]: commands }),
+    },
+  };
 }
 
 /**
@@ -217,22 +225,34 @@ const INVOKE_FROM_SEARCH =
 
 /**
  * The first sentence of search_tools' description on a search-listing connection: how many
- * learned tools the workspace has, and whether to search at all. Harnesses that ignore server
- * instructions still show tool descriptions, so this is the one channel every harness gets.
+ * learned tools the workspace has, which commands they run, and whether to search at all.
+ * Harnesses that ignore server instructions still show tool descriptions, so this is the one
+ * channel every harness gets.
  */
-export function learnedToolCountSentence(learnedToolCount: number): string {
-  return learnedToolCount === 0
-    ? "Resin has no learned tools for this workspace yet, so do not search: do the task directly (tools Resin learns from it reach later sessions)."
-    : `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace: search them before running a multi-step job by hand.`;
+export function learnedToolCountSentence(
+  learnedToolCount: number,
+  commands: readonly string[] = [],
+): string {
+  if (learnedToolCount === 0) {
+    return "Resin has no learned tools for this workspace yet, so do not search: do the task directly (tools Resin learns from it reach later sessions).";
+  }
+  const tools = `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
+  return commands.length === 0
+    ? `${tools}: search them before running a multi-step job by hand.`
+    : `${tools}: search them before running a multi-step job or one of the commands they run (${commands.map((command) => `\`${command}\``).join(", ")}) by hand.`;
 }
 
 /**
  * Initialization instructions for a connection that lists only the meta tools (`resin mcp`
  * without `--full-catalog`): learned tools are found with search_tools, not read from a list.
  * `learnedToolCount` is omitted while the workspace's catalog is unknown; with none learned yet,
- * the agent is told not to search.
+ * the agent is told not to search. `commands` names what the learned tools run, so an agent about
+ * to type one of them knows a search will find a tool.
  */
-export function searchListingGatewayInstructions(learnedToolCount?: number): string {
+export function searchListingGatewayInstructions(
+  learnedToolCount?: number,
+  commands: readonly string[] = [],
+): string {
   if (learnedToolCount === 0) {
     return `${learnedToolCountSentence(0)}\n${GATEWAY_USE_RULES}`;
   }
@@ -240,7 +260,10 @@ export function searchListingGatewayInstructions(learnedToolCount?: number): str
     learnedToolCount === undefined
       ? "Resin may have learned tools for this workspace"
       : `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
-  return `${available}, not listed: before running a multi-step job by hand, call search_tools(query=<the job in a few words, e.g. the commands or scripts you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
+  if (commands.length === 0) {
+    return `${available}, not listed: before running a multi-step job by hand, call search_tools(query=<the job in a few words, e.g. the commands or scripts you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
+  }
+  return `${available}, not listed; they run commands such as ${commands.map((command) => `\`${command}\``).join(", ")}. Before running one of those commands or another multi-step job by hand, call search_tools(query=<the command line or job you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
 }
 
 /**
@@ -657,18 +680,19 @@ export class LocalMcpGateway {
       );
     });
 
-    // A search-listing connection states the workspace's learned-tool count to the model. The
-    // count is reported only once the catalog is known; a fresh install's background sync gets
-    // the same bounded wait as a first tool list, and an already-loaded catalog adds none.
-    const learnedToolCount = connection.searchListing
-      ? await this.knownLearnedToolCount(connection.workspaceContext, true)
+    // A search-listing connection states the workspace's learned-tool count, and the commands those
+    // tools run, to the model. They are reported only once the catalog is known; a fresh install's
+    // background sync gets the same bounded wait as a first tool list, and an already-loaded catalog
+    // adds none.
+    const knownTools = connection.searchListing
+      ? await this.knownCatalogTools(connection.workspaceContext, true)
       : undefined;
     return {
       protocolVersion: LATEST_PROTOCOL_VERSION,
       capabilities: connection.serverCapabilities,
       serverInfo: this.serverInfo,
       instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
-      ...learnedToolCountMeta(learnedToolCount),
+      ...learnedToolsMeta(knownTools),
     };
   }
 
@@ -699,14 +723,14 @@ export class LocalMcpGateway {
     return loaded;
   }
 
-  /** How many learned tools the workspace has, or undefined while its catalog is unknown. */
-  private async knownLearnedToolCount(
+  /** The tools the workspace lists, or undefined while its catalog is unknown. */
+  private async knownCatalogTools(
     context: McpConnection["workspaceContext"],
     waitForSync: boolean,
-  ): Promise<number | undefined> {
+  ): Promise<CatalogNoticeTool[] | undefined> {
     try {
       if (!(await this.catalogKnown(waitForSync))) return undefined;
-      return countLearnedTools(await this.listCatalogTools(context));
+      return await this.listCatalogTools(context);
     } catch {
       return undefined;
     }
@@ -759,10 +783,8 @@ export class LocalMcpGateway {
       connection.connectionId,
       connection.workspaceContext.workspaceId,
     );
-    const learnedToolCount = (await this.catalogKnown(false))
-      ? countLearnedTools(tools)
-      : undefined;
-    return { tools: toNativeToolCatalog(tools), ...learnedToolCountMeta(learnedToolCount) };
+    const knownTools = (await this.catalogKnown(false)) ? tools : undefined;
+    return { tools: toNativeToolCatalog(tools), ...learnedToolsMeta(knownTools) };
   }
   /**
    * Handles `tools/call` request.
