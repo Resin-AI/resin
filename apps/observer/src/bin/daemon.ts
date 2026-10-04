@@ -47,7 +47,7 @@ import {
 } from "../notifications.js";
 import { OpportunityTrackingModule } from "../opportunity-module.js";
 import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
-import { pruneStaleStateFiles } from "../state-hygiene.js";
+import { narrowSafetyAttestationKeyMode, pruneStaleStateFiles } from "../state-hygiene.js";
 import {
   type ConfigReloadResult,
   type DaemonHealthReport,
@@ -1121,6 +1121,9 @@ async function runForeground(options: {
     logger.info(
       `Removed ${prunedStateFiles.length} quarantined lock or temporary file(s) older than 7 days from ${paths.stateDir}`,
     );
+  }
+  if (await narrowSafetyAttestationKeyMode(paths.homeDir)) {
+    logger.info("Restricted the safety attestation private key to owner-only access (0600)");
   }
 
   try {

@@ -17,6 +17,7 @@ import {
   canonicalizePath,
   findGitRoot,
   generateWorkspaceId,
+  isExcludedProjectRoot,
   resolveGitMetadata,
   resolveProjectResinDir,
   resolveWorkspaceContext,
@@ -155,6 +156,46 @@ describe("Workspace Resolver & Project Bootstrap", () => {
         expect(first.projectJsonPath).toBe(second.projectJsonPath);
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("never bootstraps the user's home directory or anything inside the Resin home", () => {
+      const home = canonicalizePath(fs.mkdtempSync(path.join(os.tmpdir(), "resin-home-root-")));
+      try {
+        const resinHome = path.join(home, ".resin");
+        fs.mkdirSync(path.join(resinHome, "versions", "v1.0.0"), { recursive: true });
+        // Metadata earlier releases wrote into the Resin home stays untouched and unused.
+        fs.writeFileSync(path.join(resinHome, "project.json"), "not json");
+        const env = { HOME: home };
+
+        for (const cwd of [home, resinHome, path.join(resinHome, "versions", "v1.0.0")]) {
+          const ctx = resolveWorkspaceContext({ cwd, env });
+          expect(ctx.projectRoot).toBe(canonicalizePath(cwd));
+          expect(ctx.workspaceId).toBe(generateWorkspaceId(canonicalizePath(cwd)));
+          expect(ctx.lockPath).toBeUndefined();
+          expect(ctx.project).toBeUndefined();
+        }
+        expect(fs.readdirSync(resinHome).sort()).toEqual(["project.json", "versions"]);
+        expect(fs.readFileSync(path.join(resinHome, "project.json"), "utf8")).toBe("not json");
+        expect(fs.existsSync(path.join(resinHome, ".resin"))).toBe(false);
+
+        // A custom RESIN_HOME excludes its parent, and $HOME stays excluded.
+        const customParent = path.join(home, "custom");
+        fs.mkdirSync(path.join(customParent, ".resin"), { recursive: true });
+        const customEnv = { HOME: home, RESIN_HOME: path.join(customParent, ".resin") };
+        expect(isExcludedProjectRoot(customParent, customEnv)).toBe(true);
+        expect(isExcludedProjectRoot(home, customEnv)).toBe(true);
+        expect(isExcludedProjectRoot(customParent, env)).toBe(false);
+
+        // An ordinary project under $HOME still bootstraps.
+        const project = path.join(home, "project");
+        fs.mkdirSync(project);
+        expect(isExcludedProjectRoot(path.join(home, ".resinx"), env)).toBe(false);
+        const ctx = resolveWorkspaceContext({ cwd: project, env });
+        expect(ctx.lockPath).toBe(path.join(project, ".resin", "resin.lock"));
+        expect(ctx.workspaceId).toMatch(UUID_V4_REGEX);
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
       }
     });
 

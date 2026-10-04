@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { STALE_STATE_FILE_MAX_AGE_MS, pruneStaleStateFiles } from "../src/state-hygiene.js";
+import {
+  SAFETY_ATTESTATION_PRIVATE_KEY_FILE_NAME,
+  STALE_STATE_FILE_MAX_AGE_MS,
+  narrowSafetyAttestationKeyMode,
+  pruneStaleStateFiles,
+} from "../src/state-hygiene.js";
 
 describe("pruneStaleStateFiles", () => {
   const roots: string[] = [];
@@ -72,5 +77,44 @@ describe("pruneStaleStateFiles", () => {
     await expect(
       pruneStaleStateFiles(path.join(os.tmpdir(), `resin-missing-state-${process.pid}-x`)),
     ).resolves.toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("narrowSafetyAttestationKeyMode", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+  const makeHome = (): string => {
+    const resinHome = fs.mkdtempSync(path.join(os.tmpdir(), "resin-key-mode-"));
+    roots.push(resinHome);
+    fs.mkdirSync(path.join(resinHome, "state"), { mode: 0o700 });
+    return resinHome;
+  };
+
+  it("narrows a group- or world-readable key to 0600 and leaves its content", async () => {
+    const resinHome = makeHome();
+    const keyPath = path.join(resinHome, "state", SAFETY_ATTESTATION_PRIVATE_KEY_FILE_NAME);
+    fs.writeFileSync(keyPath, "PRIVATE");
+    fs.chmodSync(keyPath, 0o664);
+
+    await expect(narrowSafetyAttestationKeyMode(resinHome)).resolves.toBe(true);
+
+    expect(fs.statSync(keyPath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(keyPath, "utf8")).toBe("PRIVATE");
+    await expect(narrowSafetyAttestationKeyMode(resinHome)).resolves.toBe(false);
+  });
+
+  it("leaves a missing key and a symlinked key's target untouched", async () => {
+    const resinHome = makeHome();
+    await expect(narrowSafetyAttestationKeyMode(resinHome)).resolves.toBe(false);
+
+    const target = path.join(resinHome, "elsewhere.pem");
+    fs.writeFileSync(target, "x");
+    fs.chmodSync(target, 0o644);
+    fs.symlinkSync(target, path.join(resinHome, "state", SAFETY_ATTESTATION_PRIVATE_KEY_FILE_NAME));
+
+    await expect(narrowSafetyAttestationKeyMode(resinHome)).resolves.toBe(false);
+    expect(fs.statSync(target).mode & 0o777).toBe(0o644);
   });
 });
