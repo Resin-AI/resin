@@ -13,7 +13,7 @@ import type {
   ToolInvocationRequest,
   ToolInvocationRouter,
 } from "../../src/meta/router-contract.js";
-import type { CallToolResult } from "../../src/protocol/types.js";
+import { type CallToolResult, RESIN_OUTPUT_STEPS_META } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
@@ -113,6 +113,34 @@ describe("invoke_tool Meta-Tool", () => {
     ]);
     // A command that printed nothing still reports that it ran.
     expect(silent.content).toEqual([{ type: "text", text: "(completed with no output)" }]);
+  });
+
+  it("labels each output with the plan step that produced it, not its position among outputs", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-invoke" });
+    // A four-step deploy whose first step's output fed the second: steps 2-4 return outputs.
+    const result = await createInvokeToolHandler(registry, {
+      async invoke(): Promise<CallToolResult> {
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(["release is live", "smoke ok\n", "promoted\n"]) },
+          ],
+          _meta: { [RESIN_OUTPUT_STEPS_META]: { steps: [2, 3, 4], total: 4 } },
+        };
+      },
+    })(makeContext("ws-invoke"), {
+      toolId: "tool_validator",
+      parameters: { count: 1, mode: "fast" },
+    });
+
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: "--- step 2/4 ---\nrelease is live\n--- step 3/4 ---\nsmoke ok\n\n--- step 4/4 ---\npromoted\n",
+      },
+    ]);
+    // The numbering is Resin's own bookkeeping: it does not reach the client.
+    expect(result._meta?.[RESIN_OUTPUT_STEPS_META]).toBeUndefined();
   });
 
   it("validates parameter types, enums, and bounds strictly", async () => {

@@ -27,6 +27,8 @@ import {
   encodeDeterministicTar,
 } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { composedResultValue } from "../../src/meta/invoke-tool.js";
+import { RESIN_OUTPUT_STEPS_META } from "../../src/protocol/types.js";
 import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { resolveWorkspaceContext } from "../../src/workspace-resolver.js";
@@ -1225,5 +1227,133 @@ describe("recorded workflows of ordinary calls", () => {
     expect(skipped.content[0]?.text).toBe(
       "--- step 1/3 ---\nfirst\n\n--- step 2/3 skipped ---\n--- step 3/3 ---\nthird\n",
     );
+  });
+
+  describe("a four-step deploy", () => {
+    const shellStep = (index: number) => ({
+      id: `step${index}`,
+      callId: `call_${index}`,
+      callable: {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell", source: "", argument: "command" },
+      },
+      arguments: [
+        {
+          name: "command",
+          source: {
+            kind: "template",
+            template: { type: "private", reference: `private:sess:${index}` },
+          },
+        },
+      ],
+      dependsOn: [] as string[],
+      failurePolicy: { onError: "abort", policy: "default" },
+      observed: { outcome: "succeeded" },
+    });
+    const manifest = (name: string): TestManifestInput => ({
+      id: `tool_${name}`,
+      name,
+      version: "1.0.0",
+      description: "recorded four-step deploy",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      runtime: {
+        runtime: "recorded-workflow",
+        memoryLimitMb: 64,
+        timeoutMs: 20_000,
+        cpuLimitPercent: 100,
+        maxOutputSizeBytes: 65_536,
+      },
+      capabilities: { command: { allowShellExecution: true } },
+    });
+    const record = (commands: Record<number, string>) => {
+      const privateValues = new InMemoryPrivateValueStore();
+      const context = resolveWorkspaceContext({ cwd: workspaceDir });
+      for (const [index, command] of Object.entries(commands)) {
+        privateValues.set(`private:sess:${index}`, command, { workspaceId: context.workspaceId });
+      }
+      return { privateValues, context };
+    };
+
+    it("reports a failed step with what already ran, by plan step, and what did not run", async () => {
+      const commands = {
+        0: "echo created > created.marker; echo created release r-17",
+        1: "echo waited; echo ready",
+        2: "echo smoke check failed >&2; exit 3",
+        3: "echo promoted > promoted.marker; echo promoted",
+      };
+      const { privateValues, context } = record(commands);
+      const installed = await installPlan(manifest("deploy_application"), {
+        schemaVersion: 1,
+        workflowId: "deploy_application",
+        inputs: [],
+        privateReferences: Object.keys(commands).map((index) => `private:sess:${index}`),
+        steps: [shellStep(0), shellStep(1), shellStep(2), shellStep(3)],
+      });
+
+      const result = await execute({ ...installed, privateValues }, {}, context);
+
+      expect(result.isError).toBe(true);
+      const text = String(result.content[0]?.text);
+      expect(text).toMatch(/^Step 3 of 4 failed: .*exited with code 3: smoke check failed/);
+      expect(text).toContain("--- step 1/4 ---\ncreated release r-17\n");
+      expect(text).toContain("--- step 2/4 ---\nwaited\nready\n");
+      expect(text).toContain("Did not run: step 4/4.");
+      expect(text).toContain(
+        "Steps 1 and 2 completed and their effects already happened: do not rerun them blindly",
+      );
+      // The first two steps really ran and the last did not.
+      expect(fs.existsSync(path.join(workspaceDir, "created.marker"))).toBe(true);
+      expect(fs.existsSync(path.join(workspaceDir, "promoted.marker"))).toBe(false);
+      // Only what the steps printed: never the recorded programs themselves.
+      for (const command of Object.values(commands)) expect(text).not.toContain(command);
+      expect(text).not.toContain("promoted");
+    });
+
+    it("labels several outputs with the plan steps that produced them", async () => {
+      const commands = {
+        0: "echo r-17",
+        2: "echo smoke ok",
+        3: "echo promoted",
+      };
+      const { privateValues, context } = record(commands);
+      // Step 2 waits on the release step 1 created, so step 1's output is consumed, not returned.
+      const wait = {
+        id: "step1",
+        callId: "call_1",
+        callable: { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name: "deploy.wait", connection: "ops" },
+        arguments: [
+          {
+            name: "release",
+            source: { kind: "template", template: { type: "result", stepId: "step0", path: [] } },
+          },
+        ],
+        dependsOn: ["step0"],
+        failurePolicy: { onError: "abort", policy: "default" },
+        observed: { outcome: "succeeded" },
+      };
+      const installed = await installPlan(manifest("deploy_outputs"), {
+        schemaVersion: 1,
+        workflowId: "deploy_outputs",
+        inputs: [],
+        privateReferences: ["private:sess:0", "private:sess:2", "private:sess:3"],
+        steps: [shellStep(0), wait, shellStep(2), shellStep(3)],
+      });
+
+      const result = await execute(
+        {
+          ...installed,
+          privateValues,
+          stepInvoker: async () => ({ content: [{ type: "text", text: "release is live" }] }),
+        },
+        {},
+        context,
+      );
+
+      expect(result.isError, String(result.content[0]?.text)).toBeUndefined();
+      // Composition still reads the plain outputs array.
+      expect(composedResultValue(result)).toEqual(["release is live", "smoke ok\n", "promoted\n"]);
+      expect(result._meta?.[RESIN_OUTPUT_STEPS_META]).toEqual({ steps: [2, 3, 4], total: 4 });
+    });
   });
 });

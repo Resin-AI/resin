@@ -100,10 +100,11 @@ export const PI_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  */
 export const PI_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin learned tools from earlier work in this workspace. They are not in your tool list: find them with \`mcp__resin__search_tools\`.
+Resin may have learned tools from earlier work in this workspace. They are not in your tool list: find them with \`mcp__resin__search_tools\`. Its description says how many learned tools this workspace has.
 
-- Before running a multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
-- A tool that does your task is the procedure an earlier run already worked out: call \`mcp__resin__get_tool_schema\` with \`{"name": "<name>"}\` to see its commands and inputs, then run it with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
+- If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
+- Otherwise, before running a multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
+- A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
