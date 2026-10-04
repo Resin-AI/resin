@@ -604,9 +604,10 @@ export class LocalMcpGateway {
       }
 
       case "notifications/roots/list_changed": {
-        // Re-resolve workspace
+        // Re-resolve workspace from the directory the session started in, not its git root:
+        // learned tools run their commands in that directory (see `sessionWorkingDirectory`).
         const updated = resolveWorkspaceContext({
-          cwd: connection.workspaceContext.canonicalRoot,
+          cwd: connection.workspaceContext.startupPath,
           harnessId: connection.harnessId,
         });
         this.catalogNotices.reset(connection);
@@ -647,7 +648,9 @@ export class LocalMcpGateway {
       initParams: params,
       harnessId: detectedHarness,
       clientInfo: params.clientInfo,
-      cwd: connection.workspaceContext.canonicalRoot,
+      // The directory the session started in, not its git root: learned tools run their commands
+      // there (see `sessionWorkingDirectory`), and the project root resolves the same from it.
+      cwd: connection.workspaceContext.startupPath,
       // The session scope bound at connection time survives the initialize handshake:
       // composed references keep resolving against this connection's results.
       sessionId: connection.workspaceContext.sessionId,
