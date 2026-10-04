@@ -4,6 +4,7 @@ import path from "node:path";
 import { SecretManager } from "@resin/crypto";
 import type { DeviceAuthBootstrapResponse, DeviceTokenExchangeResponse } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CLI_VERSION } from "../src/bin/version.js";
 import {
   DEFAULT_DEVICE_AUTH_SCOPES,
   DeviceAuthClient,
@@ -66,7 +67,8 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
             ? process.platform
             : "other",
           arch: process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "x64" : "other",
-          clientVersion: "1.0.0",
+          // The running release, never a placeholder the cloud cannot tell apart.
+          clientVersion: CLI_VERSION,
           scopes: [
             "device:connect",
             "observations:write",

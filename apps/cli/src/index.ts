@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CLI_VERSION } from "./bin/cli.js";
+import { CLI_VERSION } from "./bin/version.js";
 import { CURRENT_VERSION } from "./commands/upgrade.js";
 import { createUpdaterErrorReporter, setupUpdaterErrorReporting } from "./error-reporting.js";
 import { requestDaemonGracefulShutdown } from "./service/daemon-shutdown.js";

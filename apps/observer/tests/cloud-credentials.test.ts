@@ -260,6 +260,46 @@ describe("CloudCredentialStore", () => {
     expect(isAllowedOrigin("not-a-url")).toBe(false);
   });
 
+  it("reports the running release on every token refresh", async () => {
+    const claims = makeValidClaims({ expiresAt: new Date(Date.now() - 5000).toISOString() });
+    const rotatedClaims = makeValidClaims();
+    const refreshBodies: Record<string, unknown>[] = [];
+    const refreshWith = async (clientVersion: string) => {
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        clientVersion,
+        fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+          refreshBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(
+            JSON.stringify({
+              accessToken: makeJwt(rotatedClaims),
+              tokenType: "Bearer",
+              expiresIn: 3600,
+              refreshToken: `rotated-${refreshBodies.length}`,
+              claims: rotatedClaims,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }) as typeof fetch,
+      });
+      await store.persist({
+        cloudUrl: "https://cloud.resin.dev",
+        accessToken: makeJwt(claims),
+        refreshToken: `original-${refreshBodies.length}`,
+        claims,
+        deviceId: claims.deviceId,
+        workspaceId: claims.workspaceId,
+      });
+      await store.getRequestIdentity({ forceRefresh: true });
+    };
+
+    await refreshWith("1.0.121");
+    // A version the protocol cannot carry is left out rather than failing the refresh.
+    await refreshWith("not-a-version");
+
+    expect(refreshBodies.map((body) => body.clientVersion)).toEqual(["1.0.121", undefined]);
+  });
+
   it("deduplicates concurrent refresh requests", async () => {
     let fetchCallCount = 0;
     const claims = makeValidClaims({

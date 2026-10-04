@@ -1159,6 +1159,7 @@ async function runForeground(options: {
   const credentialStore = new CloudCredentialStore({
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),
+    clientVersion: VERSION,
   });
   const deviceCredentials = await credentialStore.load();
   const cloudRuntimeModule = new CloudRuntimeModule({

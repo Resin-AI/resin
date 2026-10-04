@@ -1,6 +1,4 @@
-import fs from "node:fs";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import { LocalDatabaseConnection } from "@resin/db";
 import {
   McpStdioShim,
@@ -12,38 +10,12 @@ import {
 import { resolvePaths } from "@resin/observer";
 import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
-import { z } from "zod";
+import { CLI_VERSION } from "../bin/version.js";
 import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-runtime-registry.js";
 import {
   createActivatedReleaseNotice,
   registerRunningGateway,
 } from "../updates/gateway-registry.js";
-
-const PackageJsonSchema = z.object({
-  version: z.string().min(1),
-});
-
-function resolveVersion(): string {
-  const candidates = [
-    new URL("../../../../package.json", import.meta.url),
-    new URL("../../package.json", import.meta.url),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const parsed = PackageJsonSchema.safeParse(
-        JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")),
-      );
-      if (parsed.success) {
-        return parsed.data.version;
-      }
-    } catch {
-      // Continue to the next enclosing package candidate.
-    }
-  }
-  return "0.1.0";
-}
-
-const VERSION = process.env.RESIN_RELEASE_VERSION ?? resolveVersion();
 
 export interface McpCommandFlags {
   standaloneMode: boolean;
@@ -139,7 +111,7 @@ export function printMcpHelp(
   outStream: { write: (chunk: string) => boolean | undefined } = process.stdout,
 ): void {
   const text = `
-Resin MCP (v${VERSION})
+Resin MCP (v${CLI_VERSION})
 
 Usage:
   resin mcp [options]
@@ -240,7 +212,9 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
     ...(resinHome === undefined
       ? {}
-      : { releaseNotice: createActivatedReleaseNotice({ resinHome, runningVersion: VERSION }) }),
+      : {
+          releaseNotice: createActivatedReleaseNotice({ resinHome, runningVersion: CLI_VERSION }),
+        }),
   };
 
   const shim = options.shimFactory
@@ -261,7 +235,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
   if (resinHome !== undefined && (!process.env.VITEST || options.registerGateway)) {
     try {
       const register = options.registerGateway ?? registerRunningGateway;
-      unregisterGateway = register({ resinHome, version: VERSION });
+      unregisterGateway = register({ resinHome, version: CLI_VERSION });
       process.once("exit", unregisterGateway);
     } catch {
       // Version tracking is diagnostic only and must never block the MCP gateway.
