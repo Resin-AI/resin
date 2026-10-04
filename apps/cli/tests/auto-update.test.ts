@@ -7,7 +7,7 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { windowsPrivacyProblem } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import { mcpCommand } from "../src/commands/mcp.js";
-import { formatStaleMcpGateways } from "../src/commands/status.js";
+import { formatStaleMcpGateways, readStaleMcpGateways } from "../src/commands/status.js";
 import type { ResolvedProductionRelease } from "../src/installer/release-client.js";
 import { detectPlatform } from "../src/platform/index.js";
 import { runServiceSupervisor } from "../src/service/manager.js";
@@ -825,10 +825,58 @@ describe("MCP gateway version registry", () => {
   });
 
   it("tells the user which harness gateways need a restart", () => {
-    expect(formatStaleMcpGateways({ count: 0, versions: [] })).toBeNull();
-    expect(formatStaleMcpGateways({ count: 2, versions: ["1.0.0"] })).toBe(
+    expect(formatStaleMcpGateways({ count: 0, versions: [], unknownVersionCount: 0 })).toBeNull();
+    expect(formatStaleMcpGateways({ count: 2, versions: ["1.0.0"], unknownVersionCount: 0 })).toBe(
       "2 MCP gateway process(es) still run an older Resin (v1.0.0); restart the harness to load the updated version.",
     );
+    expect(formatStaleMcpGateways({ count: 1, versions: [], unknownVersionCount: 1 })).toBe(
+      "1 MCP gateway process(es) still run an older Resin (unknown version); restart the harness to load the updated version.",
+    );
+  });
+
+  it("counts live `resin mcp` processes of this home that never registered", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "resin-gateway-proc-"));
+    const resinHome = path.join(root, ".resin");
+    const procRoot = path.join(root, "proc");
+    try {
+      await fs.mkdir(path.join(resinHome, "versions", "v1.1.0"), { recursive: true });
+      await fs.symlink(
+        path.join(resinHome, "versions", "v1.1.0"),
+        path.join(resinHome, "current"),
+        "junction",
+      );
+      registerRunningGateway({ resinHome, version: "1.0.0", pid: 102 });
+      const processes: Record<string, string[]> = {
+        // Registered: counted once, by its recorded version.
+        "102": ["node", path.join(resinHome, "bin", "resin"), "mcp"],
+        // A gateway from before the registry existed.
+        "201": ["node", path.join(resinHome, "bin", "resin"), "mcp"],
+        // Another Resin home's gateway, a non-gateway command and an unrelated process.
+        "202": ["node", path.join(root, "other", ".resin", "bin", "resin"), "mcp"],
+        "203": ["node", path.join(resinHome, "bin", "resin"), "status"],
+        "204": ["bash", "-c", "sleep 60"],
+      };
+      for (const [pid, args] of Object.entries(processes)) {
+        await fs.mkdir(path.join(procRoot, pid), { recursive: true });
+        await fs.writeFile(path.join(procRoot, pid, "cmdline"), `${args.join("\0")}\0`);
+      }
+      await fs.mkdir(path.join(procRoot, "self"));
+
+      const stale = await readStaleMcpGateways(resinHome, { procRoot, isAlive: () => true });
+      expect(stale).toEqual({ count: 2, versions: ["1.0.0"], unknownVersionCount: 1 });
+      expect(formatStaleMcpGateways(stale)).toBe(
+        "2 MCP gateway process(es) still run an older Resin (v1.0.0, unknown version); restart the harness to load the updated version.",
+      );
+      // Without /proc (macOS, Windows) only registered gateways are reported.
+      await expect(
+        readStaleMcpGateways(resinHome, {
+          procRoot: path.join(root, "missing"),
+          isAlive: () => true,
+        }),
+      ).resolves.toEqual({ count: 1, versions: ["1.0.0"], unknownVersionCount: 0 });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("registers the running `resin mcp` version and releases it when the gateway fails", async () => {

@@ -2152,6 +2152,44 @@ function readVersionFile(filePath: string): string | null {
   }
 }
 
+function readVersionState(resinHome: string): Partial<VersionStateRecord> | null {
+  try {
+    // SAFETY: version-state.json is written by switchActiveVersion as a VersionStateRecord.
+    return JSON.parse(
+      fs.readFileSync(path.join(resinHome, "version-state.json"), "utf8"),
+    ) as Partial<VersionStateRecord>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Release directory names (`v<version>`) that must survive pruning: every caller-supplied
+ * version, the `current`/`previous` pointer targets and the versions recorded as active or
+ * previous. Empty when no active version can be determined.
+ */
+function retainedVersionDirectoryNames(
+  resinHome: string,
+  retainVersions: readonly (string | null | undefined)[],
+  state: Partial<VersionStateRecord> | null,
+): Set<string> {
+  const versionsDir = path.resolve(resinHome, "versions");
+  const retained = new Set<string>();
+  for (const name of [
+    ...retainVersions.map(versionDirectoryName),
+    readPointerDirectoryName(path.join(resinHome, "current"), versionsDir),
+    readPointerDirectoryName(path.join(resinHome, "previous"), versionsDir),
+    versionDirectoryName(readVersionFile(path.join(resinHome, "current-version"))),
+    versionDirectoryName(readVersionFile(path.join(resinHome, "previous-version"))),
+    versionDirectoryName(state?.activeVersion),
+    versionDirectoryName(state?.previousVersion),
+    versionDirectoryName(getActiveVersion(resinHome)),
+  ]) {
+    if (name) retained.add(name);
+  }
+  return retained;
+}
+
 /**
  * Removes release directories under <resinHome>/versions that are no longer needed after a
  * successful activation. The active version, the `current`/`previous` pointer targets, the
@@ -2182,25 +2220,8 @@ export async function pruneInstalledVersions(
     return { removed, failed };
   }
 
-  let state: Partial<VersionStateRecord> | null = null;
-  try {
-    // SAFETY: version-state.json is written by switchActiveVersion as a VersionStateRecord.
-    state = JSON.parse(fs.readFileSync(versionStatePath, "utf8")) as Partial<VersionStateRecord>;
-  } catch {}
-
-  const retained = new Set<string>();
-  for (const name of [
-    ...options.retainVersions.map(versionDirectoryName),
-    readPointerDirectoryName(path.join(resinHome, "current"), versionsDir),
-    readPointerDirectoryName(path.join(resinHome, "previous"), versionsDir),
-    versionDirectoryName(readVersionFile(path.join(resinHome, "current-version"))),
-    versionDirectoryName(readVersionFile(path.join(resinHome, "previous-version"))),
-    versionDirectoryName(state?.activeVersion),
-    versionDirectoryName(state?.previousVersion),
-    versionDirectoryName(getActiveVersion(resinHome)),
-  ]) {
-    if (name) retained.add(name);
-  }
+  const state = readVersionState(resinHome);
+  const retained = retainedVersionDirectoryNames(resinHome, options.retainVersions, state);
   if (retained.size === 0) {
     log("Skipping release version pruning: no active version could be determined.");
     return { removed, failed };
@@ -2255,6 +2276,75 @@ export async function pruneInstalledVersions(
 
   if (removed.length > 0) {
     log(`Removed ${removed.length} old release version(s): ${removed.join(", ")}.`);
+  }
+  return { removed, failed };
+}
+
+/** `resin-v<version>-<platform>.tar.gz`, the signed release payload (scripts/package-release.mjs). */
+const RELEASE_TARBALL_FILENAME =
+  /^resin-v(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)-(?:linux-x64|linux-arm64|darwin-x64|darwin-arm64|wsl|windows-x64|windows-arm64)\.tar\.gz$/u;
+/** Deno runtime archives: per-target release assets and the older `deno-<version>.zip` name. */
+const DENO_ARCHIVE_FILENAME =
+  /^deno-(?:\d+\.\d+\.\d+|(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin|pc-windows-msvc))\.zip$/u;
+
+export interface PruneDownloadedReleaseAssetsOptions {
+  readonly resinHome: string;
+  /** Versions (with or without a leading "v") whose release tarballs must survive. */
+  readonly retainVersions: readonly (string | null | undefined)[];
+  /** The Deno archive the active release installed from; other Deno archives are pruned only when set. */
+  readonly currentDenoFilename?: string;
+  readonly logger?: (message: string) => void;
+}
+
+/**
+ * Removes downloaded release tarballs and Deno archives under <resinHome>/downloads that belong
+ * to no retained version. They are only installer input: every install downloads afresh. Files
+ * outside the known release asset names are never touched. Failures are logged, never thrown.
+ */
+export async function pruneDownloadedReleaseAssets(
+  options: PruneDownloadedReleaseAssetsOptions,
+): Promise<PruneInstalledVersionsResult> {
+  const { resinHome } = options;
+  const log = options.logger ?? (() => {});
+  const downloadsDir = path.resolve(resinHome, "downloads");
+  const removed: string[] = [];
+  const failed: string[] = [];
+
+  const downloadsStats = lstatIfExists(downloadsDir, fs);
+  if (!downloadsStats || downloadsStats.isSymbolicLink() || !downloadsStats.isDirectory()) {
+    return { removed, failed };
+  }
+  const retained = retainedVersionDirectoryNames(
+    resinHome,
+    options.retainVersions,
+    readVersionState(resinHome),
+  );
+  if (retained.size === 0) {
+    log("Skipping downloaded release pruning: no active version could be determined.");
+    return { removed, failed };
+  }
+
+  for (const entry of fs.readdirSync(downloadsDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const tarballVersion = RELEASE_TARBALL_FILENAME.exec(entry.name)?.[1];
+    const prunable = tarballVersion
+      ? !retained.has(`v${tarballVersion}`)
+      : options.currentDenoFilename !== undefined &&
+        entry.name !== options.currentDenoFilename &&
+        DENO_ARCHIVE_FILENAME.test(entry.name);
+    if (!prunable) continue;
+    try {
+      await fsPromises.rm(path.join(downloadsDir, entry.name), { force: true });
+      removed.push(entry.name);
+    } catch (error) {
+      failed.push(entry.name);
+      log(
+        `Failed to remove old download '${entry.name}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (removed.length > 0) {
+    log(`Removed ${removed.length} old release download(s).`);
   }
   return { removed, failed };
 }

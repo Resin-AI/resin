@@ -72,7 +72,7 @@ import {
   readAutoUpdateState,
 } from "../updates/auto-update-state.js";
 import { UpdateEngine, readUpdateStatusSnapshot } from "../updates/engine.js";
-import { listRunningGateways } from "../updates/gateway-registry.js";
+import { listRunningGateways, listUnregisteredGatewayPids } from "../updates/gateway-registry.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
@@ -251,6 +251,8 @@ export interface DaemonStatusSummary {
     staleMcpGateways: {
       count: number;
       versions: string[];
+      /** Live `resin mcp` processes that never registered a version (older releases). */
+      unknownVersionCount: number;
     };
   };
   harnessHealth: {
@@ -1561,22 +1563,34 @@ async function readUpdateStatus(
   return { ...journal, automatic, lastAutomaticUpdate, staleMcpGateways };
 }
 
-async function readStaleMcpGateways(
+/**
+ * Counts `resin mcp` processes not running the active install: registered gateways on another
+ * version plus live unregistered ones, whose release predates the registry. Never throws.
+ */
+export async function readStaleMcpGateways(
   resinHome: string,
+  options: { readonly procRoot?: string; readonly isAlive?: (pid: number) => boolean } = {},
 ): Promise<DaemonStatusSummary["update"]["staleMcpGateways"]> {
+  const none = { count: 0, versions: [], unknownVersionCount: 0 };
   try {
     const activeVersion = getActiveVersion(resinHome);
-    if (!activeVersion) return { count: 0, versions: [] };
+    if (!activeVersion) return none;
     const active = activeVersion.replace(/^v/u, "");
-    const stale = (await listRunningGateways({ resinHome })).filter(
-      (gateway) => gateway.version !== active,
-    );
+    const registered = await listRunningGateways({ resinHome, isAlive: options.isAlive });
+    const stale = registered.filter((gateway) => gateway.version !== active);
     const versions = [...new Set(stale.map((gateway) => safeVersion(gateway.version)))]
       .filter((version): version is string => version !== null)
       .sort();
-    return { count: stale.length, versions };
+    const unknownVersionCount = (
+      await listUnregisteredGatewayPids({
+        resinHome,
+        registeredPids: registered.map((gateway) => gateway.pid),
+        procRoot: options.procRoot,
+      })
+    ).length;
+    return { count: stale.length + unknownVersionCount, versions, unknownVersionCount };
   } catch {
-    return { count: 0, versions: [] };
+    return none;
   }
 }
 
@@ -1584,8 +1598,9 @@ export function formatStaleMcpGateways(
   stale: DaemonStatusSummary["update"]["staleMcpGateways"] | undefined,
 ): string | null {
   if (!stale || stale.count === 0) return null;
-  const versions = stale.versions.map((version) => `v${version}`).join(", ");
-  return `${stale.count} MCP gateway process(es) still run an older Resin (${versions}); restart the harness to load the updated version.`;
+  const versions = stale.versions.map((version) => `v${version}`);
+  if (stale.unknownVersionCount > 0) versions.push("unknown version");
+  return `${stale.count} MCP gateway process(es) still run an older Resin (${versions.join(", ")}); restart the harness to load the updated version.`;
 }
 
 async function readUpdateJournalStatus(
