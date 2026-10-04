@@ -8,12 +8,18 @@ import {
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { failedToolResult } from "../../src/meta/invocation-failure.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import type {
   ToolInvocationRequest,
   ToolInvocationRouter,
 } from "../../src/meta/router-contract.js";
-import { type CallToolResult, RESIN_OUTPUT_STEPS_META } from "../../src/protocol/types.js";
+import { MCP_ERROR_CODES, McpProtocolError } from "../../src/protocol/errors.js";
+import {
+  type CallToolResult,
+  type JsonRpcParams,
+  RESIN_OUTPUT_STEPS_META,
+} from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
@@ -381,6 +387,55 @@ describe("invoke_tool Meta-Tool", () => {
     expect(validated.sessionId).toBe("session-abc");
     expect(validated.errorDetails).toBeDefined();
     expect(validated.errorDetails?.message).toContain("Target service unavailable");
+  });
+
+  it("records why a call failed as a schema-valid reason, never only as error text", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-invoke" });
+    const recordFor = async (
+      invoke: ToolInvocationRouter["invoke"],
+      parameters: Record<string, unknown> = { count: 10, mode: "fast" },
+    ) => {
+      const { promise, resolve } = Promise.withResolvers<InvocationRecord>();
+      const handler = createInvokeToolHandler(registry, { invoke }, undefined, async (record) =>
+        resolve(record),
+      );
+      const result = await handler(makeContext("ws-invoke", "session-reason"), {
+        name: "validate_tool",
+        parameters: parameters as JsonRpcParams,
+      });
+      expect(result.isError).toBe(true);
+      return InvocationRecordSchema.parse(await promise);
+    };
+    const ok = async (): Promise<CallToolResult> => ({ content: [{ type: "text", text: "OK" }] });
+
+    const invalid = await recordFor(ok, { mode: "fast" });
+    const reported = await recordFor(async () => ({
+      isError: true,
+      content: [{ type: "text", text: "exit 1" }],
+    }));
+    const missingArtifact = await recordFor(async () =>
+      failedToolResult("runtime_unavailable", "Artifact directory does not exist"),
+    );
+    const unreachable = await recordFor(async () => {
+      throw new McpProtocolError(MCP_ERROR_CODES.CONNECTION_CLOSED, "Cloud service is offline");
+    });
+    const timedOut = await recordFor(async () => {
+      throw new McpProtocolError(MCP_ERROR_CODES.REQUEST_TIMEOUT, "timed out");
+    });
+
+    expect(
+      [invalid, reported, missingArtifact, unreachable, timedOut].map((record) => [
+        record.status,
+        record.errorDetails?.reason,
+      ]),
+    ).toEqual([
+      ["error", "validation_error"],
+      ["error", "tool_error"],
+      ["error", "runtime_unavailable"],
+      ["error", "runtime_unavailable"],
+      ["timeout", "timeout"],
+    ]);
   });
 
   it("does not call onInvocationRecorded for system meta-tools", async () => {

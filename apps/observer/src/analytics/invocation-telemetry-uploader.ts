@@ -15,7 +15,7 @@ function toWireInvocation(record: InvocationRecord): InvocationRecord {
   if (!record.errorDetails) {
     return record;
   }
-  const { errorType, message } = record.errorDetails;
+  const { errorType, message, reason } = record.errorDetails;
   return {
     ...record,
     errorDetails: {
@@ -24,6 +24,7 @@ function toWireInvocation(record: InvocationRecord): InvocationRecord {
         message.length > MAX_ERROR_MESSAGE_LENGTH
           ? `${message.slice(0, MAX_ERROR_MESSAGE_LENGTH - 1)}…`
           : message,
+      ...(reason ? { reason } : {}),
     },
   };
 }

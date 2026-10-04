@@ -1,6 +1,8 @@
 import type { InvocationRecord, ToolManifest } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { LocalMcpGateway } from "../src/gateway.js";
+import { failedToolResult } from "../src/meta/invocation-failure.js";
+import { MCP_ERROR_CODES, McpProtocolError } from "../src/protocol/errors.js";
 import type { CallToolResult, JsonRpcSuccessResponse } from "../src/protocol/types.js";
 import { ToolRegistry } from "../src/registry/registry.js";
 import { createRegistryGatewayRouter } from "../src/router.js";
@@ -109,5 +111,69 @@ describe("direct tools/call invocation records", () => {
     expect(records[0]!.invocationId).toMatch(/^inv_[0-9a-f]{32}$/);
     expect(records[0]!.durationMs).toBeGreaterThanOrEqual(0);
     expect(records[0]!.inputDigest).toHaveLength(64);
+  });
+
+  it("records a failed direct call with its reason, including one the routing layer threw", async () => {
+    const records: InvocationRecord[] = [];
+    const registry = new ToolRegistry({
+      onInvocationRecorded: async (record) => {
+        records.push(record);
+      },
+    });
+    const gateway = new LocalMcpGateway({ router: createRegistryGatewayRouter(registry) });
+    const conn = gateway.createConnection({ cwd: "/tmp/workspace" });
+    await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test-harness", version: "1.0.0" },
+      },
+    });
+    const wsId = conn.workspaceContext.workspaceId;
+    const register = (toolId: string, handler: () => Promise<CallToolResult>) =>
+      registry.registerTool({
+        toolId,
+        name: toolId,
+        exposedName: toolId,
+        version: "1.0.0",
+        scope: "workspace",
+        workspaceId: wsId,
+        status: "active",
+        manifest: { ...makeManifest(), name: toolId },
+        handler,
+      });
+    await register("tool_missing_artifact", async () =>
+      failedToolResult("runtime_unavailable", "Artifact directory does not exist"),
+    );
+    await register("tool_offline", async () => {
+      throw new McpProtocolError(MCP_ERROR_CODES.CONNECTION_CLOSED, "Cloud service is offline");
+    });
+
+    for (const [id, name] of [
+      [2, "tool_missing_artifact"],
+      [3, "tool_offline"],
+    ] as const) {
+      await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name, arguments: { a: 1, b: 2 } },
+      });
+    }
+
+    const settled = Promise.withResolvers<void>();
+    setImmediate(settled.resolve);
+    await settled.promise;
+    expect(
+      records.map((record) => [record.toolId, record.status, record.errorDetails?.reason]),
+    ).toEqual([
+      ["tool_missing_artifact", "error", "runtime_unavailable"],
+      ["tool_offline", "error", "runtime_unavailable"],
+    ]);
+    // The reason travels without any error text.
+    expect(records.map((record) => record.errorDetails?.message)).toEqual(["", ""]);
   });
 });

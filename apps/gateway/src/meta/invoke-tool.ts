@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import {
+  type InvocationFailureReason,
   type InvocationRecord,
   type InvocationUsageEstimate,
   TOOL_IO_UTF8_METHOD,
@@ -30,6 +31,11 @@ import {
   type SessionDiscoveryTracker,
   isDiscoveryTool,
 } from "./discovery-tracker.js";
+import {
+  failureReasonOfError,
+  failureReasonOfResult,
+  invocationStatusFor,
+} from "./invocation-failure.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
 import { isSystemMetaTool } from "./system-tools.js";
@@ -325,16 +331,18 @@ export function createInvokeToolHandler(
       isDiscoveryTool(resolvedTool.toolId) || isDiscoveryTool(resolvedTool.name);
 
     const recordInvocation = (
-      status: "success" | "error" | "timeout" | "rejected_capability",
+      outcome: "success" | InvocationFailureReason,
       result?: CallToolResult,
       errorMessage?: string,
     ) => {
-      if (status !== "success") {
-        // Only ids, status and timing: never inputs, outputs or the error text.
+      const status = outcome === "success" ? "success" : invocationStatusFor(outcome);
+      if (outcome !== "success") {
+        // Only ids, status, reason and timing: never inputs, outputs or the error text.
         reportEvent("tool_invocation_failed", {
           tool_id: recordedToolId,
           tool_version: recordedToolVersion,
           status,
+          reason: outcome,
           duration_ms: Math.max(0, Date.now() - startTime),
           meta_tool: isMetaTool,
         });
@@ -396,7 +404,7 @@ export function createInvokeToolHandler(
           status,
           inputDigest,
           ...(outputDigest ? { outputDigest } : {}),
-          ...(errorMessage
+          ...(outcome !== "success"
             ? {
                 errorDetails: {
                   errorType:
@@ -405,7 +413,8 @@ export function createInvokeToolHandler(
                       : status === "rejected_capability"
                         ? "SafetyGateRefusal"
                         : "ToolExecutionError",
-                  message: errorMessage,
+                  message: errorMessage ?? "",
+                  reason: outcome,
                 },
               }
             : {}),
@@ -477,7 +486,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("error", res, message);
+        recordInvocation("validation_error", res, message);
         return res;
       }
       composed = { entry, callId };
@@ -500,7 +509,7 @@ export function createInvokeToolHandler(
           ],
         };
         recordInvocation(
-          "error",
+          "tool_unavailable",
           res,
           `Version '${requestedVersion}' of tool '${displayIdentifier}' not found or not accessible.`,
         );
@@ -521,7 +530,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation("error", res, `Tool '${resolvedTool.name}' is disabled.`);
+      recordInvocation("tool_unavailable", res, `Tool '${resolvedTool.name}' is disabled.`);
       return res;
     }
 
@@ -551,7 +560,7 @@ export function createInvokeToolHandler(
           content: gateCheck.refusal.content,
           _meta: { refusal },
         };
-        recordInvocation("rejected_capability", res, gateCheck.refusal.refusalReason);
+        recordInvocation("capability_rejected", res, gateCheck.refusal.refusalReason);
         return res;
       }
     }
@@ -568,7 +577,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation("error", res, validation.errors.join("; "));
+      recordInvocation("validation_error", res, validation.errors.join("; "));
       return res;
     }
 
@@ -608,7 +617,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("error", res, "Tool invocation was cancelled.");
+        recordInvocation("cancelled", res, "Tool invocation was cancelled.");
         return res;
       }
       parentSignal.addEventListener("abort", onParentAbort, { once: true });
@@ -626,12 +635,7 @@ export function createInvokeToolHandler(
         onProgress: options?.onProgress,
         timeoutMs,
       });
-      const status = result.isError
-        ? result._meta?.refusal
-          ? "rejected_capability"
-          : "error"
-        : "success";
-      recordInvocation(status, result);
+      recordInvocation(result.isError ? failureReasonOfResult(result) : "success", result);
       if (composed && !result.isError) {
         // The caller composed this call, so it gets a handle to the result rather than
         // the bare payload: later calls in the same session can name the handle instead
@@ -676,7 +680,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("error", res, "Tool invocation was cancelled.");
+        recordInvocation("cancelled", res, "Tool invocation was cancelled.");
         return res;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -689,7 +693,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation("error", res, message);
+      recordInvocation(failureReasonOfError(error), res, message);
       return res;
     } finally {
       clearTimeout(timerId);

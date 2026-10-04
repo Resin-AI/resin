@@ -283,5 +283,21 @@ describe("Deterministic Tool-I/O Usage Estimator (UTF-8)", () => {
         totalTokens: 65,
       });
     });
+
+    it("keeps a known failure reason and drops one this build does not know, never the record", () => {
+      const failed = (reason: unknown) =>
+        InvocationRecordSchema.parse({
+          ...baseRecord,
+          status: "error",
+          errorDetails: { errorType: "ToolExecutionError", message: "", reason },
+        }).errorDetails;
+
+      expect(failed("runtime_unavailable")?.reason).toBe("runtime_unavailable");
+      expect(failed("a_reason_from_a_newer_client")).toEqual({
+        errorType: "ToolExecutionError",
+        message: "",
+      });
+      expect(failed(undefined)?.reason).toBeUndefined();
+    });
   });
 });

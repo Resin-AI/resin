@@ -7,6 +7,7 @@ import {
   type CommandCapability,
   type FsCapability,
   IdentifierSchema,
+  type InvocationFailureReason,
   type RecordedWorkflow,
   type ToolManifest,
   ToolManifestSchema,
@@ -46,6 +47,7 @@ import {
   type RuntimeAdapter,
   RuntimeAdapterRegistry,
   ToolBundleLoader,
+  type WorkerExecutionResult,
   WorkerProcess,
   createInvocationGrant,
   encodeDeterministicTar,
@@ -55,6 +57,7 @@ import {
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
+import { failedToolResult } from "../meta/invocation-failure.js";
 import {
   type CallToolResult,
   type JsonRpcParams,
@@ -75,6 +78,18 @@ import {
 function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
   const result = value.result;
   return typeof result === "string" ? result : result === null ? "" : JSON.stringify(result);
+}
+
+/** Why a worker that did not succeed failed: a worker that never ran means no usable runtime. */
+function workerFailureReason(result: WorkerExecutionResult): InvocationFailureReason {
+  if (
+    result.status === "timeout" ||
+    result.status === "cancelled" ||
+    result.status === "validation_error"
+  ) {
+    return result.status;
+  }
+  return result.error?.type === "spawn_error" ? "runtime_unavailable" : "tool_error";
 }
 
 /** "1", "1 and 2", "1, 2 and 3". */
@@ -1157,15 +1172,10 @@ export class LocalArtifactExecutor {
     const artifactDir = this.cache.getArtifactPath(entry.artifactDigest);
 
     if (!fs.existsSync(artifactDir)) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Artifact directory does not exist for digest '${entry.artifactDigest}'`,
-          },
-        ],
-      };
+      return failedToolResult(
+        "runtime_unavailable",
+        `Artifact directory does not exist for digest '${entry.artifactDigest}'`,
+      );
     }
 
     // 1. Artifact bytes, never unsigned catalog metadata, govern execution.
@@ -1177,29 +1187,19 @@ export class LocalArtifactExecutor {
           const raw = fs.readFileSync(manifestPath, "utf8");
           manifest = ToolManifestSchema.parse(JSON.parse(raw));
         } catch (err) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Failed to parse manifest in artifact '${artifactDir}': ${err instanceof Error ? err.message : String(err)}`,
-              },
-            ],
-          };
+          return failedToolResult(
+            "runtime_unavailable",
+            `Failed to parse manifest in artifact '${artifactDir}': ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
     }
 
     if (!manifest) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Tool bundle is missing required ${BUNDLE_FILE_MANIFEST}`,
-          },
-        ],
-      };
+      return failedToolResult(
+        "runtime_unavailable",
+        `Tool bundle is missing required ${BUNDLE_FILE_MANIFEST}`,
+      );
     }
 
     let catalogDigestMatches = false;
@@ -1222,15 +1222,10 @@ export class LocalArtifactExecutor {
           (field) => canonicalJson(catalogManifest.data[field]) !== canonicalJson(manifest[field]),
         )
       ) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "Catalog execution manifest does not match the artifact manifest",
-            },
-          ],
-        };
+        return failedToolResult(
+          "runtime_unavailable",
+          "Catalog execution manifest does not match the artifact manifest",
+        );
       }
       catalogDigestMatches = Boolean(
         entry.manifestDigest && matchesManifestDigest(catalogManifest.data, entry.manifestDigest),
@@ -1249,15 +1244,10 @@ export class LocalArtifactExecutor {
       const rehashResult = await this.verifyArtifactDirectory(artifactDir, entry, manifest);
       if (!rehashResult.verified) {
         const computed = computeManifestDigest(manifest);
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}${rehashResult.error ? `; artifact verification failed: ${rehashResult.error}` : ""}`,
-            },
-          ],
-        };
+        return failedToolResult(
+          "runtime_unavailable",
+          `Manifest digest mismatch: expected ${entry.manifestDigest}, computed ${computed}${rehashResult.error ? `; artifact verification failed: ${rehashResult.error}` : ""}`,
+        );
       }
       artifactVerified = true;
     }
@@ -1275,15 +1265,10 @@ export class LocalArtifactExecutor {
           const normMeta = normalizeSha256(meta.digest, false);
           const normEntry = normalizeSha256(entry.artifactDigest, false);
           if (normMeta !== normEntry) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Artifact digest mismatch in extraction metadata: expected ${entry.artifactDigest}, got ${meta.digest}`,
-                },
-              ],
-            };
+            return failedToolResult(
+              "runtime_unavailable",
+              `Artifact digest mismatch in extraction metadata: expected ${entry.artifactDigest}, got ${meta.digest}`,
+            );
           }
         }
       } catch {
@@ -1301,15 +1286,10 @@ export class LocalArtifactExecutor {
         : undefined;
 
     if (!entrypointPath) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Tool bundle is missing entrypoint file (${BUNDLE_FILE_ENTRYPOINT_TS} or ${BUNDLE_FILE_ENTRYPOINT_JS})`,
-          },
-        ],
-      };
+      return failedToolResult(
+        "runtime_unavailable",
+        `Tool bundle is missing entrypoint file (${BUNDLE_FILE_ENTRYPOINT_TS} or ${BUNDLE_FILE_ENTRYPOINT_JS})`,
+      );
     }
 
     // 5. Bind every signed file and the unsigned archive digest to the trusted signature.
@@ -1322,15 +1302,10 @@ export class LocalArtifactExecutor {
     ) {
       const verification = await this.verifyArtifactDirectory(artifactDir, entry, manifest, false);
       if (!verification.verified) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: `Bundle signature verification failed: ${verification.error}`,
-            },
-          ],
-        };
+        return failedToolResult(
+          "runtime_unavailable",
+          `Bundle signature verification failed: ${verification.error}`,
+        );
       }
     }
 
@@ -1416,15 +1391,10 @@ export class LocalArtifactExecutor {
     // 7. Validate the complete reachable artifact graph before constructing a worker.
     const importInspection = inspectArtifactSourceGraph(entrypointPath, artifactDir);
     if (!importInspection.passed) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: `Failed to inspect artifact imports: ${importInspection.errors.join("; ")}`,
-          },
-        ],
-      };
+      return failedToolResult(
+        "runtime_unavailable",
+        `Failed to inspect artifact imports: ${importInspection.errors.join("; ")}`,
+      );
     }
 
     // 8. Determine timeout and resource limits from manifest. The manifest limit
@@ -1463,10 +1433,7 @@ export class LocalArtifactExecutor {
     });
 
     if (params.signal?.aborted) {
-      return {
-        isError: true,
-        content: [{ type: "text", text: "Tool invocation was cancelled." }],
-      };
+      return failedToolResult("cancelled", "Tool invocation was cancelled.");
     }
 
     const onAbort = () => {
@@ -1497,29 +1464,19 @@ export class LocalArtifactExecutor {
 
       if (params.signal?.aborted) {
         return commandFailures.append(
-          {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text: `Tool invocation was aborted by the caller before it completed (${result.error?.message ?? result.status}); the tool's manifest allows ${manifestTimeoutMs}ms.`,
-              },
-            ],
-          },
+          failedToolResult(
+            "cancelled",
+            `Tool invocation was aborted by the caller before it completed (${result.error?.message ?? result.status}); the tool's manifest allows ${manifestTimeoutMs}ms.`,
+          ),
           maxOutputSizeBytes,
         );
       }
 
       return commandFailures.append(
-        {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: result.error?.message ?? `Tool execution failed with status: ${result.status}`,
-            },
-          ],
-        },
+        failedToolResult(
+          workerFailureReason(result),
+          result.error?.message ?? `Tool execution failed with status: ${result.status}`,
+        ),
         maxOutputSizeBytes,
       );
     } catch (err) {
@@ -1556,23 +1513,21 @@ export class LocalArtifactExecutor {
     signal?: AbortSignal,
     timeoutMs?: number,
   ): Promise<CallToolResult> {
-    const fail = (text: string): CallToolResult => ({
-      isError: true,
-      content: [{ type: "text", text }],
-    });
     const stepInvoker = this.stepInvoker;
     let plan: RecordedWorkflow;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(entrypointPath, "utf8"));
       const validation = validateRecordedWorkflow(parsed);
       if (!validation.valid) {
-        return fail(
+        return failedToolResult(
+          "runtime_unavailable",
           `Recorded workflow artifact is not a valid plan: ${validation.errors.join("; ")}`,
         );
       }
       plan = parsed as RecordedWorkflow;
     } catch (err) {
-      return fail(
+      return failedToolResult(
+        "runtime_unavailable",
         `Failed to read recorded workflow artifact: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
@@ -1581,7 +1536,8 @@ export class LocalArtifactExecutor {
     // programs of its own does not, so the refusal is per requirement rather than per plan.
     const requiredRuntimes = [...new Set(plan.steps.map((step) => step.callable.runtime))];
     if (!stepInvoker && requiredRuntimes.includes(RESIN_INVOKE_TOOL_RUNTIME)) {
-      return fail(
+      return failedToolResult(
+        "runtime_unavailable",
         "This recorded-workflow tool needs a step dispatcher, which this executor was not given",
       );
     }
@@ -1626,7 +1582,8 @@ export class LocalArtifactExecutor {
         ? capabilities.data.command?.allowShellExecution === true
         : false;
       if (!granted) {
-        return fail(
+        return failedToolResult(
+          "runtime_unavailable",
           `this recorded workflow runs a program (${programRuntimes.join(", ")}) but its manifest does not grant command execution`,
         );
       }
@@ -1706,7 +1663,8 @@ export class LocalArtifactExecutor {
     try {
       const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
       if (execution.status !== "completed") {
-        return fail(
+        return failedToolResult(
+          "tool_error",
           failedWorkflowReport(plan, execution) ??
             execution.error ??
             "Recorded workflow execution failed",
@@ -1758,7 +1716,8 @@ export class LocalArtifactExecutor {
             }),
       };
     } catch (err) {
-      return fail(
+      return failedToolResult(
+        "tool_error",
         `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
