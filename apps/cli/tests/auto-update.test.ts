@@ -7,7 +7,11 @@ import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { windowsPrivacyProblem } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import { mcpCommand } from "../src/commands/mcp.js";
-import { formatStaleMcpGateways, readStaleMcpGateways } from "../src/commands/status.js";
+import {
+  collectStatus,
+  formatStaleMcpGateways,
+  readStaleMcpGateways,
+} from "../src/commands/status.js";
 import type { ResolvedProductionRelease } from "../src/installer/release-client.js";
 import { detectPlatform } from "../src/platform/index.js";
 import { runServiceSupervisor } from "../src/service/manager.js";
@@ -882,15 +886,62 @@ describe("MCP gateway version registry", () => {
   it("registers the running `resin mcp` version and releases it when the gateway fails", async () => {
     const unregister = vi.fn();
     const registerGateway = vi.fn(() => unregister);
+    const home = path.join(os.tmpdir(), "resin-gateway-user");
 
     const exitCode = await mcpCommand([], {
       stderr: { write: () => true },
+      home,
+      env: {},
       registerGateway,
       shimFactory: () => ({ start: async () => ({ mode: "failed" }), stop: async () => {} }),
     });
 
     expect(exitCode).toBe(1);
-    expect(registerGateway).toHaveBeenCalledWith(expect.stringMatching(/^\d+\.\d+\.\d+/));
+    expect(registerGateway).toHaveBeenCalledWith({
+      resinHome: path.resolve(home, ".resin"),
+      version: expect.stringMatching(/^\d+\.\d+\.\d+/),
+    });
     expect(unregister).toHaveBeenCalled();
+  });
+
+  it("registers gateways under a custom RESIN_HOME, where status reports them", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "resin-gateway-custom-home-"));
+    const home = path.join(root, "user");
+    const resinHome = path.join(root, "custom-resin");
+    const env = { HOME: home, RESIN_HOME: resinHome };
+    try {
+      await fs.mkdir(path.join(resinHome, "versions", "v1.1.0"), { recursive: true });
+      await fs.symlink(
+        path.join(resinHome, "versions", "v1.1.0"),
+        path.join(resinHome, "current"),
+        "junction",
+      );
+      // An older gateway (this live test process) registering through `resin mcp`'s resolution.
+      const unregister = vi.fn();
+      const registerGateway = vi.fn((registration: { resinHome: string; version: string }) => {
+        registerRunningGateway({ ...registration, version: "1.0.0", pid: process.pid });
+        return unregister;
+      });
+
+      await mcpCommand([], {
+        stderr: { write: () => true },
+        home,
+        env,
+        registerGateway,
+        shimFactory: () => ({ start: async () => ({ mode: "failed" }), stop: async () => {} }),
+      });
+
+      expect(registerGateway).toHaveBeenCalledWith(
+        expect.objectContaining({ resinHome: path.resolve(resinHome) }),
+      );
+      const summary = await collectStatus({ home, env, fsBridge: createMemoryFsBridge() });
+      expect(summary.update.staleMcpGateways).toEqual({
+        count: 1,
+        versions: ["1.0.0"],
+        unknownVersionCount: 0,
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

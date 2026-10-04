@@ -629,6 +629,7 @@ export async function fetchDaemonStatusSummary(
   const update = await readUpdateStatus(fsBridge, {
     home,
     resinHome,
+    gatewayResinHome: daemonPaths.homeDir,
     configPath: daemonPaths.configFile,
     env,
   });
@@ -1550,6 +1551,8 @@ async function readUpdateStatus(
   options: {
     home: string;
     resinHome: string;
+    /** Where `resin mcp` gateways register: the RESIN_HOME-aware root they resolve themselves. */
+    gatewayResinHome: string;
     configPath: string;
     env: NodeJS.ProcessEnv;
   },
@@ -1558,7 +1561,7 @@ async function readUpdateStatus(
     readUpdateJournalStatus(fsBridge, options.resinHome),
     readAutomaticUpdateStatus(fsBridge, options),
     readLastAutomaticUpdate(fsBridge, options.resinHome),
-    readStaleMcpGateways(options.resinHome),
+    readStaleMcpGateways(options.gatewayResinHome),
   ]);
   return { ...journal, automatic, lastAutomaticUpdate, staleMcpGateways };
 }
