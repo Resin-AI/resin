@@ -25,6 +25,31 @@ function directory() {
   return value;
 }
 
+describe("default private value store", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("lives in RESIN_HOME's data directory, where retention sweeps, not in ~/.resin", async () => {
+    const home = directory();
+    const resinHome = directory();
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    vi.stubEnv("RESIN_HOME", resinHome);
+    vi.stubEnv("RESIN_DATA_DIR", undefined);
+    vi.resetModules();
+    // A fresh module instance: `default()` caches one shared store per process.
+    const fresh = await import("../../src/analytics/private-value-store.js");
+    const key = "private:v2:resin-home";
+
+    fresh.FilePrivateValueStore.default().set(key, "value", { workspaceId: "ws" }, "literal");
+
+    expect(new FilePrivateValueStore(path.join(resinHome, "data")).get(key)).toBe("value");
+    expect(readdirSync(home)).toEqual([]);
+  });
+});
+
 describe("immutable private reference persistence", () => {
   it("does not overwrite a value or its owner, including through another store instance", () => {
     const root = directory();

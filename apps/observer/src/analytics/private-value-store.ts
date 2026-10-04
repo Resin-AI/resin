@@ -1,9 +1,9 @@
 /** Local-only workflow values. Exact V2 originals never become uploaded event fields. */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { resolvePaths } from "../paths.js";
 import { ensurePrivateDirectorySync, windowsPrivacyProblem } from "../private-fs.js";
 
 export interface PrivateValueOrigin {
@@ -218,10 +218,12 @@ export class FilePrivateValueStore implements PrivateValueStore {
     this.legacy = legacy;
   }
 
+  /**
+   * The store in the daemon's data directory (`RESIN_HOME`/`RESIN_DATA_DIR` aware), the same one
+   * private-value retention sweeps and stored tools live beside.
+   */
   static default(): FilePrivateValueStore {
-    FilePrivateValueStore.shared ??= new FilePrivateValueStore(
-      path.join(os.homedir(), ".resin", "data"),
-    );
+    FilePrivateValueStore.shared ??= new FilePrivateValueStore(resolvePaths().dataDir);
     return FilePrivateValueStore.shared;
   }
 
