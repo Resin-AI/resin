@@ -5,10 +5,12 @@ import { LocalMcpGateway } from "../../src/gateway.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
 import {
   type CallToolResult,
+  type InitializeResult,
   type JsonRpcErrorResponse,
   type JsonRpcNotification,
   type JsonRpcSuccessResponse,
   type ListToolsResult,
+  RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
 } from "../../src/protocol/types.js";
@@ -333,6 +335,122 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       params: { name: "search_tools", arguments: { query: "release notes" } },
     })) as JsonRpcSuccessResponse<CallToolResult>;
     expect(JSON.stringify(searched.result.content)).toContain("synced_tool");
+  });
+
+  describe("learned-tool count for a search-listing connection", () => {
+    const searchListingInitialize = (root: string) => ({
+      jsonrpc: "2.0" as const,
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
+        rootUri: `file:///test/${root}`,
+        _meta: { [RESIN_SEARCH_LISTING_META]: true },
+      },
+    });
+    const countOf = (result: { _meta?: Record<string, unknown> }) =>
+      result._meta?.[RESIN_LEARNED_TOOL_COUNT_META];
+
+    it("reports the count once a fresh install's catalog sync answers, from initialize on", async () => {
+      const registry = new ToolRegistry();
+      const router = createRegistryGatewayRouter(registry);
+      const loaded = Promise.withResolvers<void>();
+      let workspaceId = "";
+      // The cloud answers during the bounded wait: one learned tool.
+      const runtime = {
+        async onWorkspaceReady(workspace: { workspaceId: string }) {
+          workspaceId = workspace.workspaceId;
+        },
+        whenCatalogLoaded: () => loaded.promise,
+        async catalogSettled() {
+          await registry.registerTool(
+            makeManifest({ id: "tool_deploy", name: "deploy_application" }),
+            undefined,
+            { workspaceId },
+          );
+          loaded.resolve();
+        },
+        async stop() {},
+      } as unknown as ProductionProxyRuntime;
+      const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+      const conn = gateway.createConnection();
+
+      const initialized = (await gateway.handleMessage(
+        conn.connectionId,
+        searchListingInitialize("project-count-fresh"),
+      )) as JsonRpcSuccessResponse<InitializeResult>;
+      expect(countOf(initialized.result)).toBe(1);
+
+      const listed = (await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      })) as JsonRpcSuccessResponse<ListToolsResult>;
+      expect(countOf(listed.result)).toBe(1);
+    });
+
+    it("reports zero for a loaded empty catalog without waiting on a sync", async () => {
+      const registry = new ToolRegistry();
+      const router = createRegistryGatewayRouter(registry);
+      let waits = 0;
+      const runtime = {
+        async onWorkspaceReady() {},
+        async whenCatalogLoaded() {},
+        async catalogSettled() {
+          waits += 1;
+        },
+        async stop() {},
+      } as unknown as ProductionProxyRuntime;
+      const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+      const conn = gateway.createConnection();
+
+      const initialized = (await gateway.handleMessage(
+        conn.connectionId,
+        searchListingInitialize("project-count-empty"),
+      )) as JsonRpcSuccessResponse<InitializeResult>;
+      expect(countOf(initialized.result)).toBe(0);
+      // An already-loaded catalog adds no wait to initialize.
+      expect(waits).toBe(0);
+
+      const listed = (await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      })) as JsonRpcSuccessResponse<ListToolsResult>;
+      expect(countOf(listed.result)).toBe(0);
+    });
+
+    it("omits the count when the catalog could not be loaded, so nothing claims zero", async () => {
+      const registry = new ToolRegistry();
+      const router = createRegistryGatewayRouter(registry);
+      // The cloud never answers; the background sync settles (it failed) without loading.
+      const runtime = {
+        async onWorkspaceReady() {},
+        whenCatalogLoaded: () => new Promise<void>(() => {}),
+        async catalogSettled() {},
+        async stop() {},
+      } as unknown as ProductionProxyRuntime;
+      const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
+      const conn = gateway.createConnection();
+
+      const initialized = (await gateway.handleMessage(
+        conn.connectionId,
+        searchListingInitialize("project-count-unknown"),
+      )) as JsonRpcSuccessResponse<InitializeResult>;
+      expect(initialized.result._meta?.[RESIN_LEARNED_TOOL_COUNT_META]).toBeUndefined();
+
+      const listed = (await gateway.handleMessage(conn.connectionId, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      })) as JsonRpcSuccessResponse<ListToolsResult>;
+      expect(listed.result._meta?.[RESIN_LEARNED_TOOL_COUNT_META]).toBeUndefined();
+    });
   });
 
   it("calls an active tool with custom handler via tools/call", async () => {

@@ -329,6 +329,11 @@ export function createSearchToolsHandler(
 
     // Retrieve caller's user controls
     const controls = await registry.controls.getControls(context.workspaceId);
+    // The version each tool resolves to when invoked: the registry keeps every version this process
+    // registered, oldest first, so a version synced after startup would otherwise lose to its
+    // predecessor here while get_tool_schema and invoke_tool run the new one.
+    const activeVersions = (await registry.resolveCatalog(context.workspaceId, context.sessionId))
+      .tools;
 
     // Collect all registered tools and filter to caller's scoped tools
     const allRegistered = registry.getAllRegisteredTools();
@@ -378,15 +383,11 @@ export function createSearchToolsHandler(
         }
       }
 
-      // Only pick the active or pinned version per toolId for search listing
+      // Only pick the pinned, else the active, version per toolId for search listing
       const existing = candidateMap.get(tool.toolId);
-      if (!existing) {
+      const isActive = activeVersions[tool.toolId]?.version === tool.version;
+      if (!existing || isPinned || (isActive && !existing.isPinned)) {
         candidateMap.set(tool.toolId, { tool, isPinned, isDisabled });
-      } else {
-        // If this one is pinned or latest, replace
-        if (isPinned) {
-          candidateMap.set(tool.toolId, { tool, isPinned, isDisabled });
-        }
       }
     }
 

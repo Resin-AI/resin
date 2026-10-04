@@ -173,6 +173,7 @@ export interface InitializeResult {
   capabilities: McpServerCapabilities;
   serverInfo: McpImplementationInfo;
   instructions?: string;
+  _meta?: Record<string, unknown>;
 }
 
 /**
@@ -216,6 +217,20 @@ export const RESIN_LEARNED_TOOL_META = "resin/learned";
  * default; not with `--full-catalog`): the gateway then writes no per-tool catalog into the harness.
  */
 export const RESIN_SEARCH_LISTING_META = "resin/searchListing";
+
+/**
+ * Result `_meta` key on `initialize` and `tools/list`: how many learned tools the connection's
+ * workspace has. Set only once the workspace's catalog is known, so an unloaded catalog never
+ * reads as zero; the stdio shim states it to the model on a search-listing connection.
+ */
+export const RESIN_LEARNED_TOOL_COUNT_META = "resin/learnedToolCount";
+
+/**
+ * Tool-result `_meta` key a recorded workflow sets when it returns several steps' outputs: which
+ * plan step produced each output (`steps`, 1-based, in output order) and how many steps the plan
+ * has (`total`). The result's content stays the outputs array, so composition reads the same value.
+ */
+export const RESIN_OUTPUT_STEPS_META = "resin/outputSteps";
 export type McpTool = z.infer<typeof McpToolSchema>;
 
 /**
@@ -276,6 +291,7 @@ export type ListToolsParams = z.infer<typeof ListToolsParamsSchema>;
 export interface ListToolsResult {
   tools: McpTool[];
   nextCursor?: string;
+  _meta?: Record<string, unknown>;
 }
 
 /**

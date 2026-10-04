@@ -41,6 +41,8 @@ import {
   RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
+  type RecordedStepOutcome,
+  type RecordedWorkflowExecution,
   type RuntimeAdapter,
   RuntimeAdapterRegistry,
   ToolBundleLoader,
@@ -53,13 +55,86 @@ import {
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
-import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
+import {
+  type CallToolResult,
+  type JsonRpcParams,
+  RESIN_OUTPUT_STEPS_META,
+} from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
 
-import { composedResultValue, presentStepSections } from "../meta/invoke-tool.js";
+import {
+  type OutputStepNumbers,
+  composedResultValue,
+  presentStepSections,
+} from "../meta/invoke-tool.js";
+
+/** A completed step's output as text: printed text as is, any other value as JSON. */
+function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
+  const result = value.result;
+  return typeof result === "string" ? result : result === null ? "" : JSON.stringify(result);
+}
+
+/** "1", "1 and 2", "1, 2 and 3". */
+function joinStepNumbers(numbers: readonly number[]): string {
+  return numbers.length <= 1
+    ? numbers.join("")
+    : `${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
+}
+
+/**
+ * What a failed recorded workflow did, by plan step: the step that failed and its error, each
+ * completed step's output, the steps that never ran, and a warning that completed steps' effects
+ * already happened. Only what the steps returned is shown, never their recorded programs. A
+ * derivation computes inputs and has no effects, so it is counted but not shown.
+ */
+function failedWorkflowReport(
+  plan: RecordedWorkflow,
+  execution: RecordedWorkflowExecution,
+): string | undefined {
+  const total = plan.steps.length;
+  const numberOf = new Map(plan.steps.map((step, index) => [step.id, index + 1]));
+  const derivations = new Set(
+    plan.steps.flatMap((step) => (step.origin === "derivation" ? [step.id] : [])),
+  );
+  const failures = execution.steps.flatMap((outcome) =>
+    outcome.status === "failed" ? [outcome] : [],
+  );
+  const failed = failures[0];
+  if (failed === undefined) return undefined;
+  const completed = execution.steps.flatMap((outcome) =>
+    outcome.status === "completed" && !derivations.has(outcome.stepId) ? [outcome] : [],
+  );
+  const lines = [`Step ${numberOf.get(failed.stepId)} of ${total} failed: ${failed.error}`];
+  for (const outcome of completed) {
+    lines.push(`--- step ${numberOf.get(outcome.stepId)}/${total} ---\n${stepOutputText(outcome)}`);
+  }
+  for (const outcome of failures.slice(1)) {
+    lines.push(`Step ${numberOf.get(outcome.stepId)} of ${total} also failed: ${outcome.error}`);
+  }
+  const notRun = execution.steps.flatMap((outcome) =>
+    outcome.status === "skipped"
+      ? [`step ${numberOf.get(outcome.stepId)}/${total}`]
+      : outcome.status === "omitted"
+        ? [`step ${numberOf.get(outcome.stepId)}/${total} (turned off)`]
+        : [],
+  );
+  if (notRun.length > 0) lines.push(`Did not run: ${notRun.join(", ")}.`);
+  const ran = completed.flatMap((outcome) => {
+    const number = numberOf.get(outcome.stepId);
+    return number === undefined ? [] : [number];
+  });
+  lines.push(
+    ran.length === 0
+      ? "No step completed before the failure."
+      : ran.length === 1
+        ? `Step ${ran[0]} completed and its effects already happened: do not rerun it blindly; invoking this tool again repeats it.`
+        : `Steps ${joinStepNumbers(ran)} completed and their effects already happened: do not rerun them blindly; invoking this tool again repeats them.`,
+  );
+  return lines.join("\n");
+}
 
 export interface LocalArtifactEntry {
   toolId: string;
@@ -1631,9 +1706,23 @@ export class LocalArtifactExecutor {
     try {
       const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
       if (execution.status !== "completed") {
-        return fail(execution.error ?? "Recorded workflow execution failed");
+        return fail(
+          failedWorkflowReport(plan, execution) ??
+            execution.error ??
+            "Recorded workflow execution failed",
+        );
       }
       const result = execution.result ?? null;
+      // Several returned outputs are labeled by the plan steps that produced them; the content
+      // stays the outputs array, so composition reads the same value.
+      const sinks = workflowSinkStepIds(plan);
+      const numbers: OutputStepNumbers | undefined =
+        sinks.length > 1 && Array.isArray(result) && result.length === sinks.length
+          ? {
+              steps: sinks.map((stepId) => plan.steps.findIndex((step) => step.id === stepId) + 1),
+              total: plan.steps.length,
+            }
+          : undefined;
       // Several returned outputs with a caller-omitted step among them: label that step skipped.
       const omitted = new Set(
         execution.steps.flatMap((outcome) =>
@@ -1646,7 +1735,6 @@ export class LocalArtifactExecutor {
         result.length > 1 &&
         result.every((item) => typeof item === "string" || item === null)
       ) {
-        const sinks = workflowSinkStepIds(plan);
         const skipped = new Set(
           sinks.flatMap((stepId, index) => (omitted.has(stepId) ? [index] : [])),
         );
@@ -1654,12 +1742,21 @@ export class LocalArtifactExecutor {
           content: [
             {
               type: "text",
-              text: presentStepSections(result as Array<string | null>, skipped),
+              text: presentStepSections(result as Array<string | null>, skipped, numbers),
             },
           ],
         };
       }
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        ...(numbers === undefined
+          ? {}
+          : {
+              _meta: {
+                [RESIN_OUTPUT_STEPS_META]: { steps: [...numbers.steps], total: numbers.total },
+              },
+            }),
+      };
     } catch (err) {
       return fail(
         `Recorded workflow execution failed: ${err instanceof Error ? err.message : String(err)}`,

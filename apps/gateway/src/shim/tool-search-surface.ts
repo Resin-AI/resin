@@ -2,6 +2,7 @@ import { Transform } from "node:stream";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
   DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+  learnedToolCountSentence,
   searchListingGatewayInstructions,
 } from "../gateway.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
@@ -10,7 +11,7 @@ import {
   InitializeParamsSchema,
   type JsonRpcId,
   type JsonRpcMessage,
-  RESIN_LEARNED_TOOL_META,
+  RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_SEARCH_LISTING_META,
 } from "../protocol/types.js";
 
@@ -23,6 +24,29 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** The learned-tool count the gateway put in a result's `_meta`: only once the catalog is known. */
+function learnedToolCountOf(result: Record<string, unknown>): number | undefined {
+  const count = record(result._meta)?.[RESIN_LEARNED_TOOL_COUNT_META];
+  return typeof count === "number" && Number.isInteger(count) && count >= 0 ? count : undefined;
+}
+
+/**
+ * search_tools as a search-listing connection lists it: its description opens with how many learned
+ * tools there are, because harnesses show tool descriptions even where they drop server instructions.
+ */
+function withLearnedToolCount(tool: unknown, learnedToolCount: number | undefined): unknown {
+  const listed = record(tool);
+  if (learnedToolCount === undefined || !listed || !isSearch(listed.name)) return tool;
+  const sentence = learnedToolCountSentence(learnedToolCount);
+  return {
+    ...listed,
+    description:
+      typeof listed.description === "string" && listed.description.length > 0
+        ? `${sentence} ${listed.description}`
+        : sentence,
+  };
 }
 
 function isSearch(value: unknown): boolean {
@@ -251,7 +275,8 @@ export function createToolSearchSurface(
   let clientIdentified = false;
   let codexClient = false;
   let searchEnabled = enableSearch || searchOnlyListing;
-  // Learned tools in the daemon's last unfiltered tools/list; unknown until one is seen.
+  // Learned tools in the workspace's catalog, as the gateway last reported them; unknown until it
+  // reports a count, which it does only once the catalog is known.
   let learnedToolCount: number | undefined;
   const send = (message: JsonRpcMessage) => output.write(encodeMcpMessage(message));
   const transform = (filter: (message: JsonRpcMessage) => JsonRpcMessage | undefined) => {
@@ -360,6 +385,8 @@ export function createToolSearchSurface(
     output: transform((message) => {
       if (!("method" in message) && "id" in message && message.id !== null) {
         if (initializeIds.delete(message.id)) {
+          const initialized = "result" in message ? record(message.result) : undefined;
+          if (initialized) learnedToolCount = learnedToolCountOf(initialized) ?? learnedToolCount;
           const replacement = searchOnlyListing
             ? searchListingGatewayInstructions(learnedToolCount)
             : searchEnabled
@@ -388,22 +415,24 @@ export function createToolSearchSurface(
         if (lists.delete(message.id) && "result" in message) {
           const result = record(message.result);
           if (result && Array.isArray(result.tools)) {
-            learnedToolCount = result.tools.filter(
-              (tool) => record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true,
-            ).length;
+            learnedToolCount = learnedToolCountOf(result);
             return {
               jsonrpc: "2.0",
               id: message.id,
               result: {
                 ...result,
-                tools: result.tools.filter((tool) => {
-                  const name = record(tool)?.name;
-                  if (typeof name !== "string") return false;
-                  // Search-only listing: the meta tools alone; learned tools are found by search
-                  // and still answer tools/call by name.
-                  if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
-                  return searchEnabled || !isSearch(name);
-                }),
+                tools: result.tools
+                  .filter((tool) => {
+                    const name = record(tool)?.name;
+                    if (typeof name !== "string") return false;
+                    // Search-only listing: the meta tools alone; learned tools are found by search
+                    // and still answer tools/call by name.
+                    if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
+                    return searchEnabled || !isSearch(name);
+                  })
+                  .map((tool) =>
+                    searchOnlyListing ? withLearnedToolCount(tool, learnedToolCount) : tool,
+                  ),
               },
             };
           }

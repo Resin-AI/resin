@@ -15,6 +15,7 @@ import {
   type JsonRpcMessage,
   type JsonRpcParams,
   type JsonRpcResponse,
+  RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
 } from "../src/protocol/types.js";
@@ -134,7 +135,8 @@ describe.each(["standalone", "fallback", "daemon"] as const)("tool search surfac
             : undefined;
         expect(initInstructions).toBe(
           !fullCatalog
-            ? searchListingGatewayInstructions()
+            ? // No cloud runtime: the router's catalog is known, and it has no learned tools.
+              searchListingGatewayInstructions(0)
             : searchable
               ? DEFAULT_GATEWAY_INSTRUCTIONS
               : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
@@ -1268,7 +1270,12 @@ describe("search-only listing", () => {
       clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
     },
   });
-  const initializeResult = (id: number): JsonRpcMessage => ({
+  // The gateway sets the count only once the workspace's catalog is known.
+  const countMeta = (learnedToolCount?: number) =>
+    learnedToolCount === undefined
+      ? {}
+      : { _meta: { [RESIN_LEARNED_TOOL_COUNT_META]: learnedToolCount } };
+  const initializeResult = (id: number, learnedToolCount?: number): JsonRpcMessage => ({
     jsonrpc: "2.0",
     id,
     result: {
@@ -1276,18 +1283,29 @@ describe("search-only listing", () => {
       capabilities: {},
       serverInfo: { name: "resin", version: "0.1.0" },
       instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
+      ...countMeta(learnedToolCount),
     },
   });
+  const SEARCH_DESCRIPTION =
+    "Read-only live lookup of tools available in the caller's scope. Each result includes its inputSchema.";
   const instructionsOf = (message: JsonRpcMessage | undefined) =>
     z.object({ result: z.object({ instructions: z.string() }) }).parse(message).result.instructions;
-  const listWithLearned = (client: ReturnType<typeof createSurfaceClient>, id: number) => {
+  const listWithLearned = (
+    client: ReturnType<typeof createSurfaceClient>,
+    id: number,
+    learnedToolCount?: number,
+  ) => {
     client.send({ jsonrpc: "2.0", id, method: "tools/list" });
     client.respond({
       jsonrpc: "2.0",
       id,
       result: {
         tools: [
-          { name: "search_tools", inputSchema: { type: "object" } },
+          {
+            name: "search_tools",
+            description: SEARCH_DESCRIPTION,
+            inputSchema: { type: "object" },
+          },
           { name: "sys_search_tools", inputSchema: { type: "object" } },
           { name: "get_tool_schema", inputSchema: { type: "object" } },
           { name: "invoke_tool", inputSchema: { type: "object" } },
@@ -1296,6 +1314,7 @@ describe("search-only listing", () => {
           { name: "run_tests", inputSchema: { type: "object" }, _meta: LEARNED },
           { name: "upstream_tool", inputSchema: { type: "object" } },
         ],
+        ...countMeta(learnedToolCount),
       },
     });
     const response = client.received.find((message) => "id" in message && message.id === id);
@@ -1399,17 +1418,94 @@ describe("search-only listing", () => {
     }
   });
 
-  it("states the learned-tool count from the last unfiltered list it saw", () => {
+  const searchDescriptionOf = (client: ReturnType<typeof createSurfaceClient>, id: number) =>
+    z
+      .object({
+        result: z.object({
+          tools: z.array(z.object({ name: z.string(), description: z.string().optional() })),
+        }),
+      })
+      .parse(client.received.find((message) => "id" in message && message.id === id))
+      .result.tools.find((tool) => tool.name === "search_tools")?.description ?? "";
+  const firstSentence = (text: string) => text.split(/(?<=\.)\s/)[0];
+
+  it("tells the model there are no learned tools yet, and not to search, when the catalog is empty", () => {
     const client = createSurfaceClient({});
     try {
-      listWithLearned(client, 1);
-      client.send(initialize(2));
-      client.respond(initializeResult(2));
+      client.send(initialize(1));
+      client.respond(initializeResult(1, 0));
+      const instructions = instructionsOf(client.received.at(-1));
+      expect(instructions).toBe(searchListingGatewayInstructions(0));
+      expect(instructions).toContain("no learned tools");
+      expect(instructions).toMatch(/do not search/i);
+      expect(instructions).not.toContain("search_tools(query=");
+
+      listWithLearned(client, 2, 0);
+      const description = searchDescriptionOf(client, 2);
+      const first = firstSentence(description);
+      expect(first).toMatch(/^Resin has no learned tools for this workspace yet/);
+      expect(first).toMatch(/do not search/i);
+      expect(first).toMatch(/do the task directly/);
+      // The rest of the description is the tool's own.
+      expect(description.endsWith(SEARCH_DESCRIPTION)).toBe(true);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("states the known learned-tool count in the instructions and first in search_tools' description", () => {
+    const client = createSurfaceClient({});
+    try {
+      client.send(initialize(1));
+      client.respond(initializeResult(1, 2));
       const instructions = instructionsOf(client.received.at(-1));
       expect(instructions).toBe(searchListingGatewayInstructions(2));
       expect(instructions).toContain("Resin has 2 learned tools");
+      expect(instructions).toContain("search_tools(query=");
+
+      listWithLearned(client, 2, 2);
+      const description = searchDescriptionOf(client, 2);
+      const first = firstSentence(description);
+      expect(first).toMatch(/^Resin has 2 learned tools for this workspace/);
+      expect(first).toMatch(/search .*before running a multi-step job by hand/);
+      expect(description.endsWith(SEARCH_DESCRIPTION)).toBe(true);
+
+      // One learned tool reads in the singular.
+      listWithLearned(client, 3, 1);
+      expect(firstSentence(searchDescriptionOf(client, 3))).toMatch(
+        /^Resin has 1 learned tool for/,
+      );
     } finally {
       client.close();
+    }
+  });
+
+  it("keeps the generic wording, claiming no count, when the gateway does not know the catalog", () => {
+    const client = createSurfaceClient({});
+    try {
+      client.send(initialize(1));
+      client.respond(initializeResult(1));
+      const instructions = instructionsOf(client.received.at(-1));
+      expect(instructions).toBe(searchListingGatewayInstructions());
+      expect(instructions).not.toMatch(/\d+ learned tool|no learned tools/);
+
+      // Learned tools in the list itself are not the catalog's count: no count is claimed.
+      listWithLearned(client, 2);
+      expect(searchDescriptionOf(client, 2)).toBe(SEARCH_DESCRIPTION);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("routes the model from a search result straight to invoke_tool, not through get_tool_schema", () => {
+    for (const instructions of [
+      searchListingGatewayInstructions(),
+      searchListingGatewayInstructions(3),
+    ]) {
+      expect(instructions).toContain("invoke_tool(name, parameters)");
+      expect(instructions).toContain("inputSchema");
+      expect(instructions).not.toMatch(/get_tool_schema\(name\)\s+and\s+invoke_tool/);
+      expect(instructions).toMatch(/get_tool_schema only for/);
     }
   });
 

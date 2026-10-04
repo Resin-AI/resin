@@ -15,7 +15,12 @@ import {
 import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
-import type { CallToolResult, JsonRpcParamValue, JsonRpcParams } from "../protocol/types.js";
+import {
+  type CallToolResult,
+  type JsonRpcParamValue,
+  type JsonRpcParams,
+  RESIN_OUTPUT_STEPS_META,
+} from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -92,21 +97,55 @@ export function composedResultValue(result: CallToolResult): WorkflowJsonValue {
   return content === undefined ? null : (content as unknown as WorkflowJsonValue);
 }
 
+/** Which plan step produced each of several returned outputs, and how many steps the plan has. */
+export interface OutputStepNumbers {
+  /** 1-based plan step number of each output, in output order. */
+  steps: readonly number[];
+  total: number;
+}
+
 /**
- * Several steps' text outputs as one labeled section per step, in recorded order. A step the caller
- * turned off is labeled as skipped rather than shown as empty output.
+ * Several steps' text outputs as one labeled section per step, in recorded order, each labeled with
+ * the plan step that produced it when known (else its position among the outputs). A step the
+ * caller turned off is labeled as skipped rather than shown as empty output.
  */
 export function presentStepSections(
   items: ReadonlyArray<string | null>,
   skipped: ReadonlySet<number> = new Set(),
+  numbers?: OutputStepNumbers,
 ): string {
+  const label = (index: number) =>
+    numbers !== undefined && numbers.steps.length === items.length
+      ? `${numbers.steps[index]}/${numbers.total}`
+      : `${index + 1}/${items.length}`;
   return items
     .map((item, index) =>
       skipped.has(index)
-        ? `--- step ${index + 1}/${items.length} skipped ---`
-        : `--- step ${index + 1}/${items.length} ---\n${item ?? ""}`,
+        ? `--- step ${label(index)} skipped ---`
+        : `--- step ${label(index)} ---\n${item ?? ""}`,
     )
     .join("\n");
+}
+
+/** The output step numbers a recorded workflow attached to its result, when well formed. */
+function outputStepNumbers(result: CallToolResult): OutputStepNumbers | undefined {
+  const value = result._meta?.[RESIN_OUTPUT_STEPS_META];
+  if (value === null || typeof value !== "object" || !("steps" in value) || !("total" in value)) {
+    return undefined;
+  }
+  const { steps, total } = value;
+  if (typeof total !== "number" || !Array.isArray(steps)) return undefined;
+  return steps.every((step): step is number => typeof step === "number")
+    ? { steps, total }
+    : undefined;
+}
+
+/** A result without the output step numbers, which are Resin's bookkeeping, not the tool's. */
+function withoutOutputStepNumbers(result: CallToolResult): CallToolResult {
+  if (result._meta?.[RESIN_OUTPUT_STEPS_META] === undefined) return result;
+  const { [RESIN_OUTPUT_STEPS_META]: _numbers, ...meta } = result._meta;
+  const { _meta: _dropped, ...rest } = result;
+  return Object.keys(meta).length > 0 ? { ...rest, _meta: meta } : rest;
 }
 
 /**
@@ -125,11 +164,12 @@ function presentedResult(result: CallToolResult): CallToolResult {
       : Array.isArray(value) &&
           value.length > 1 &&
           value.every((item) => typeof item === "string" || item === null)
-        ? presentStepSections(value)
+        ? presentStepSections(value, new Set(), outputStepNumbers(result))
         : undefined;
+  const shown = withoutOutputStepNumbers(result);
   return presented !== undefined && text !== undefined && presented !== text
-    ? { ...result, content: [{ type: "text", text: presented }] }
-    : result;
+    ? { ...shown, content: [{ type: "text", text: presented }] }
+    : shown;
 }
 
 /**

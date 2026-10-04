@@ -6,6 +6,8 @@ import {
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
 import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
@@ -98,6 +100,35 @@ describe("search_tools Meta-Tool", () => {
       properties: { input: { type: "string" } },
       required: ["input"],
     });
+  });
+
+  it("lists the version invocation would run, not the first one this process registered", async () => {
+    const registry = new ToolRegistry();
+    const search = createSearchToolsHandler(registry);
+    const schema = createGetToolSchemaHandler(registry);
+    const context = makeContext("ws-versions");
+    // The session started with 1.0.1 registered; the catalog sync then brought 1.0.2.
+    for (const version of ["1.0.1", "1.0.2"]) {
+      await registry.registerTool(
+        makeManifest({ id: "tool_deploy", name: "deploy_application", version }),
+        undefined,
+        { workspaceId: "ws-versions" },
+      );
+    }
+
+    const [found] = parseSearchResponse(
+      await search(context, { query: "deploy_application" }),
+    ).tools;
+    const inspected = z
+      .object({ version: z.string() })
+      .parse(
+        JSON.parse(
+          String((await schema(context, { name: "deploy_application" })).content[0]?.text),
+        ),
+      );
+
+    expect(inspected.version).toBe("1.0.2");
+    expect(found?.version).toBe(inspected.version);
   });
 
   it("strictly enforces workspace isolation and never leaks other workspaces' tools", async () => {
