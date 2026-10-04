@@ -12,6 +12,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import type { ToolManifest } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
@@ -23,9 +24,15 @@ import {
   resolveDenoExecutable,
 } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { LocalMcpGateway } from "../../src/gateway.js";
+import { McpFrameDecoder, encodeMcpMessage } from "../../src/protocol/framing.js";
+import type { CallToolResult, JsonRpcParams, JsonRpcResponse } from "../../src/protocol/types.js";
 import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
+import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { recordedWorkflowRuntimeAdapters } from "../../src/proxy/runtime.js";
+import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
+import { createRegistryGatewayRouter } from "../../src/router.js";
 import {
   type WorkspaceContext,
   resolveWorkspaceContext,
@@ -209,6 +216,152 @@ describe("the directory a learned tool runs in", () => {
       const { printed, harnessCwd } = await runRecordedPlan(context);
       expect(printed, String(startupPath)).toBe("project-root");
       expect(harnessCwd, String(startupPath)).toBe(projectDir);
+    }
+  });
+
+  it("keeps the session's subdirectory through the gateway's initialize and invoke_tool", async () => {
+    // A harness's MCP server process starts in the session's directory and sends no roots, as OMP
+    // does: the workspace is resolved from that cwd at connection time and again on initialize.
+    const registry = new ToolRegistry();
+    const gateway = new LocalMcpGateway({
+      router: createRegistryGatewayRouter(registry),
+      registry,
+      enableRefreshCoordinator: false,
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const decoder = new McpFrameDecoder();
+    const responses = new Map<number, (response: JsonRpcResponse) => void>();
+    output.on("data", (chunk: Buffer) => {
+      for (const message of decoder.push(chunk)) {
+        if ("id" in message && typeof message.id === "number" && !("method" in message)) {
+          responses.get(message.id)?.(message);
+          responses.delete(message.id);
+        }
+      }
+    });
+    const connection = await gateway.processStream(input, output, { cwd: sessionDir });
+    let nextId = 0;
+    const request = (method: string, params?: JsonRpcParams): Promise<JsonRpcResponse> => {
+      const id = ++nextId;
+      const pending = new Promise<JsonRpcResponse>((resolve) => responses.set(id, resolve));
+      input.write(encodeMcpMessage({ jsonrpc: "2.0", id, method, params }));
+      return pending;
+    };
+    try {
+      const initialized = await request("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "omp-coding-agent", version: "18.6.0" },
+      });
+      expect(initialized.error).toBeUndefined();
+      input.write(encodeMcpMessage({ jsonrpc: "2.0", method: "notifications/initialized" }));
+      const workspace = connection.workspaceContext;
+      expect(workspace.projectRoot).toBe(projectDir);
+      expect(workspace.startupPath).toBe(sessionDir);
+
+      const privateValues = new InMemoryPrivateValueStore();
+      privateValues.set("private:sess:0", "cat marker.txt", {
+        workspaceId: workspace.workspaceId,
+      });
+      const installed = await install(
+        {
+          id: "tool_gateway_session",
+          name: "check_session_marker",
+          version: "1.0.0",
+          description: "a program recorded relative to the session's directory",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          runtime: {
+            runtime: "recorded-workflow",
+            memoryLimitMb: 64,
+            timeoutMs: 10_000,
+            cpuLimitPercent: 100,
+            maxOutputSizeBytes: 65_536,
+          },
+          capabilities: { command: { allowShellExecution: true } },
+        },
+        JSON.stringify(
+          compileRecordedWorkflow({
+            schemaVersion: 1,
+            workflowId: "check_session_marker",
+            inputs: [],
+            privateReferences: ["private:sess:0"],
+            steps: [
+              {
+                id: "step0",
+                callId: "call_cat",
+                callable: {
+                  runtime: RESIN_PROCESS_RUNTIME,
+                  name: "bash",
+                  program: { kind: "shell", source: "", argument: "command" },
+                },
+                arguments: [
+                  {
+                    name: "command",
+                    source: {
+                      kind: "template",
+                      template: { type: "private", reference: "private:sess:0" },
+                    },
+                  },
+                ],
+                dependsOn: [],
+                failurePolicy: { onError: "abort", policy: "default" },
+                observed: { outcome: "succeeded" },
+              },
+            ],
+          } as never).plan,
+        ),
+      );
+      const { manifest, artifactDigest } = installed;
+      // The production path: the learned tool's handler is the invocation router's, which runs
+      // the locked, cached artifact on the local executor with the connection's workspace.
+      const invocationRouter = new CloudInvocationRouter({
+        localExecutor: new LocalArtifactExecutor({
+          cache,
+          workspaceRoot: projectDir,
+          development: true,
+          allowDevKeys: true,
+          privateValueStore: privateValues,
+          recordedWorkflowAdapters: (host) => recordedWorkflowRuntimeAdapters(host, {}),
+        }),
+        lockManager: {
+          read: () => ({
+            tools: {
+              [manifest.id]: {
+                toolId: manifest.id,
+                name: manifest.name,
+                version: manifest.version,
+                artifactDigest,
+                status: "active",
+              },
+            },
+          }),
+        } as never,
+      });
+      await registry.registerTool({
+        toolId: manifest.id,
+        name: manifest.name,
+        version: manifest.version,
+        manifest,
+        description: manifest.description,
+        scope: "workspace",
+        status: "active",
+        handler: invocationRouter.createToolHandler(manifest.id),
+      });
+      await registry.activateToolVersion(manifest.id, manifest.version, workspace.workspaceId);
+
+      const invoked = await request("tools/call", {
+        name: "invoke_tool",
+        arguments: { name: manifest.name, parameters: {} },
+      });
+      expect(invoked.error).toBeUndefined();
+      const result = invoked.result as CallToolResult;
+      const text = result.content.map((part) => ("text" in part ? part.text : "")).join("\n");
+      expect(result.isError, text).toBeFalsy();
+      expect(text).toContain("session-dir");
+    } finally {
+      input.end();
+      gateway.close();
     }
   });
 
