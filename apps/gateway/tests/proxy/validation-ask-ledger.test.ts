@@ -19,7 +19,7 @@ describe("the validation ask ledger", () => {
     const now = { value: Date.parse("2026-09-27T00:00:00Z") };
     const { ledger: asks } = ledger(now);
     const ask = (requestId: string, keys: string[]) =>
-      asks.admit({ requestId, planDigest: `digest-${requestId}`, keys });
+      asks.admit({ requestId, planDigest: `digest-${requestId}`, keys }).admitted;
     expect(ask("a", ["call:1"])).toBe(true);
     expect(ask("b", ["call:1", "call:2"])).toBe(true);
     // A third different plan over call 1 is one more bit about it: refused.
@@ -32,6 +32,34 @@ describe("the validation ask ledger", () => {
     expect(ask("a", ["call:1"])).toBe(true);
     now.value += 24 * 60 * 60 * 1000;
     expect(ask("c", ["call:1"])).toBe(true);
+  });
+
+  it("says when a key at its limit frees a check: when its oldest counted check ages out", () => {
+    const start = Date.parse("2026-09-27T00:00:00Z");
+    const hour = 60 * 60 * 1000;
+    const now = { value: start };
+    const { ledger: asks } = ledger(now);
+    asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1"] });
+    now.value = start + hour;
+    asks.admit({ requestId: "b", planDigest: "d2", keys: ["call:1", "call:2"] });
+    now.value = start + 2 * hour;
+    asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:2"] });
+    now.value = start + 3 * hour;
+    // call:1 frees at a's expiry; call:2 only at b's, which is later: the ask waits for both.
+    expect(asks.admit({ requestId: "d", planDigest: "d4", keys: ["call:1", "call:2"] })).toEqual({
+      admitted: false,
+      reason: "limit-reached",
+      key: "call:2",
+      retryAt: start + hour + 24 * hour,
+    });
+    now.value = start + 24 * hour + hour - 1;
+    expect(asks.admit({ requestId: "d", planDigest: "d4", keys: ["call:1", "call:2"] })).toEqual(
+      expect.objectContaining({ admitted: false, reason: "limit-reached" }),
+    );
+    now.value = start + 24 * hour + hour;
+    expect(asks.admit({ requestId: "d", planDigest: "d4", keys: ["call:1", "call:2"] })).toEqual({
+      admitted: true,
+    });
   });
 
   it("appends an owner-only audit of what each ask checked", () => {
@@ -63,12 +91,18 @@ describe("the validation ask ledger", () => {
     const { ledger: asks, filePath } = ledger(now);
     asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1"] });
     fs.appendFileSync(filePath, "{torn");
-    expect(asks.admit({ requestId: "b", planDigest: "d2", keys: ["call:9"] })).toBe(false);
+    expect(asks.admit({ requestId: "b", planDigest: "d2", keys: ["call:9"] })).toEqual({
+      admitted: false,
+      reason: "ledger-unavailable",
+    });
     fs.writeFileSync(filePath, "");
     fs.writeFileSync(`${filePath}.lock`, "");
-    expect(asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:9"] })).toBe(false);
+    expect(asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:9"] })).toEqual({
+      admitted: false,
+      reason: "ledger-unavailable",
+    });
     fs.rmSync(`${filePath}.lock`);
-    expect(asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:9"] })).toBe(true);
+    expect(asks.admit({ requestId: "c", planDigest: "d3", keys: ["call:9"] }).admitted).toBe(true);
   });
 
   it("breaks a lock its holder left behind, moving it aside rather than deleting in place", () => {
@@ -79,7 +113,7 @@ describe("the validation ask ledger", () => {
     fs.writeFileSync(lock, "");
     const past = new Date(Date.now() - 60_000);
     fs.utimesSync(lock, past, past);
-    expect(asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1"] })).toBe(true);
+    expect(asks.admit({ requestId: "a", planDigest: "d1", keys: ["call:1"] }).admitted).toBe(true);
     expect(fs.existsSync(lock)).toBe(false);
     expect(fs.readdirSync(path.dirname(lock)).filter((name) => name.includes(".stale."))).toEqual(
       [],
