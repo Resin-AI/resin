@@ -105,7 +105,8 @@ Resin may have learned tools from earlier work in this workspace. They are not i
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
 const PI_CONTEXT_FILE_NAMES = [

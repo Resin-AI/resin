@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import { createManageToolsHandler } from "../../src/meta/manage-tools.js";
+import { NO_MATCHING_TOOL_NOTE } from "../../src/meta/search-tools.js";
 import { SYSTEM_META_TOOL_IDS } from "../../src/meta/system-tools.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
@@ -456,6 +457,42 @@ describe("manage_tools Meta-Tool", () => {
       );
       expect(dataNone.tools).toHaveLength(0);
       expect(dataNone.total).toBe(0);
+    });
+
+    it("tells the agent to do the task itself only when a non-empty query matches no tool", async () => {
+      const registry = new ToolRegistry();
+      const handler = createManageToolsHandler(registry);
+      const context = makeContext("ws-note");
+      await registry.registerTool(
+        makeManifest({ id: "aws_cost", name: "aws_cost", description: "Fetches AWS cost" }),
+        undefined,
+        { workspaceId: "ws-note" },
+      );
+      const listVersions = async (query?: string) =>
+        parseContentJson<{ tools: unknown[]; total: number; note?: string }>(
+          await handler(context, {
+            action: "list_versions",
+            scope: "workspace",
+            compact: true,
+            ...(query === undefined ? {} : { query }),
+          }),
+        );
+
+      // The query the agent ran before giving up on a PostHog report.
+      const none = await listVersions("posthog");
+      expect(none).toMatchObject({ tools: [], total: 0, note: NO_MATCHING_TOOL_NOTE });
+      expect(Object.keys(none).sort()).toEqual([
+        "hasMore",
+        "limit",
+        "note",
+        "offset",
+        "tools",
+        "total",
+      ]);
+
+      expect(await listVersions("aws")).not.toHaveProperty("note");
+      expect(await listVersions()).not.toHaveProperty("note");
+      expect(await listVersions("   ")).not.toHaveProperty("note");
     });
 
     it("supports pagination with limit, offset, and deterministic stable sorting", async () => {

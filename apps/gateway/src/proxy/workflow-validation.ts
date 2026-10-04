@@ -16,6 +16,7 @@
  */
 
 import path from "node:path";
+import { isOmpHarnessInternalUri } from "@resin/adapter-omp";
 import {
   type ProgramLanguage,
   type RecordedWorkflow,
@@ -27,6 +28,8 @@ import {
   type WorkflowRecordedProgram,
   type WorkflowStep,
   type WorkflowValuePath,
+  type WorkflowValueSource,
+  type WorkflowValueTemplate,
   isShellDialect,
   isSkippableSegment,
   programNotLearnableReason,
@@ -132,6 +135,8 @@ const OTHER_TOOL =
   "the demonstration was recorded with a different tool than the plan's step; no recording check or parameter decision was performed";
 const UNAVAILABLE =
   "this device could not identify the demonstration's recorded calls; no parameter decision was performed";
+const HARNESS_INTERNAL_READ =
+  "a step of this plan reads a harness-internal session URI (such as an artifact:// spill of an earlier tool's output) that no later session can read back; the plan cannot be replayed, and no recording check or parameter decision was performed";
 
 type SegmentAddress = NonNullable<WorkflowStep["segment"]>;
 
@@ -872,6 +877,30 @@ export function createRecordingCheckValidator(
     if (!(await planRecordedHere(plan, options.localCalls))) {
       return { verdicts: [], unavailable: UNAVAILABLE, notRecordedHere: true };
     }
+    // A recording made before capture stopped recording harness-internal reads can carry a step
+    // that pages the harness's own session state: it can never run again, so the plan is refused.
+    const internalReads = await harnessInternalReadSteps(plan, options.localCalls, resolveOwned);
+    if (internalReads.length > 0) {
+      return {
+        verdicts: candidates.map((candidate) => ({
+          candidate: {
+            stepId: candidate.stepId,
+            argument: candidate.argument,
+            path: candidate.path,
+            proposed: candidate.proposed,
+          },
+          confirmed: false,
+          reason: HARNESS_INTERNAL_READ,
+        })),
+        verification: {
+          status: "failed",
+          reproduced: [],
+          missed: internalReads.map((stepId) => ({ stepId, detail: HARNESS_INTERNAL_READ })),
+          dropped: [],
+        },
+        unavailable: HARNESS_INTERNAL_READ,
+      };
+    }
     const derivation = options.derivation ?? createProgramAdapter({ timeoutMs: options.timeoutMs });
     const runs = new Map<DemonstrationLabel, LocalDemonstrationRuns>();
     for (const each of ["held-out", "baseline"] as const) {
@@ -1234,6 +1263,74 @@ export function createRecordingCheckValidator(
       ...(verification === undefined ? {} : { verification }),
     };
   };
+}
+
+/** Argument names a harness tool takes a path or URI under. */
+const PATH_LIKE_ARGUMENTS: ReadonlySet<string> = new Set([
+  "path",
+  "file_path",
+  "filePath",
+  "file",
+  "uri",
+  "url",
+]);
+
+/**
+ * The string values a step argument's source names directly: literals, and private references
+ * resolved from this device's store (a reference this workspace does not own resolves to nothing).
+ * Inputs, results and extracts name no value of their own.
+ */
+function sourceStrings(
+  source: WorkflowValueSource | WorkflowValueTemplate,
+  resolve: (reference: string) => WorkflowJsonValue,
+): string[] {
+  const kind = "kind" in source ? source.kind : source.type;
+  if (kind === "literal" && "value" in source) {
+    return typeof source.value === "string" ? [source.value] : [];
+  }
+  if (kind === "private" && "reference" in source) {
+    try {
+      const value = resolve(source.reference);
+      return typeof value === "string" ? [value] : [];
+    } catch {
+      return [];
+    }
+  }
+  if ("template" in source) return sourceStrings(source.template, resolve);
+  if ("entries" in source) {
+    return Object.values(source.entries).flatMap((entry) => sourceStrings(entry, resolve));
+  }
+  if ("items" in source) return source.items.flatMap((item) => sourceStrings(item, resolve));
+  if ("parts" in source) return source.parts.flatMap((part) => sourceStrings(part, resolve));
+  return [];
+}
+
+/**
+ * The harness-tool steps whose path-like argument is a harness-internal URI (an OMP `read` of
+ * `artifact://1`, say), read from the step's own literal or private source and from the call this
+ * device recorded for it. Such a step paged the harness's own session state: no later session can
+ * read the same URI, so no replay of the plan can succeed.
+ */
+async function harnessInternalReadSteps(
+  plan: RecordedWorkflow,
+  localCalls: LocalCallIdentity,
+  resolve: (reference: string) => WorkflowJsonValue,
+): Promise<string[]> {
+  const found: string[] = [];
+  for (const step of plan.steps) {
+    if (step.callable.runtime !== RESIN_HARNESS_TOOL_RUNTIME) continue;
+    const values = step.arguments
+      .filter((argument) => PATH_LIKE_ARGUMENTS.has(argument.name))
+      .flatMap((argument) => sourceStrings(argument.source, resolve));
+    if (step.callId !== undefined && step.callId.length > 0) {
+      const recorded = await localCalls.lookup(step.callId);
+      for (const [name, value] of Object.entries(recorded?.arguments ?? {})) {
+        if (PATH_LIKE_ARGUMENTS.has(name) && typeof value === "string") values.push(value);
+      }
+    }
+    if (values.some(isOmpHarnessInternalUri)) found.push(step.id);
+  }
+  return found;
 }
 
 /**

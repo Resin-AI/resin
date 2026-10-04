@@ -82,6 +82,49 @@ export interface ReconcileRemoteTelemetryConsentResult {
   changed: boolean;
   cutoffAdvanced: boolean;
 }
+
+/**
+ * Longest downtime a restarted daemon catches up. Sessions that finished while the daemon was
+ * down (restart, update, closed `resin connect`) are captured on the next start only when their
+ * activity is after the capture watermark and within this window; anything older stays history.
+ */
+export const MAX_DOWNTIME_CATCH_UP_MS = 24 * 60 * 60 * 1000;
+
+/** How often a running capture refreshes its watermark, bounding what a crash can lose. */
+export const CAPTURE_WATERMARK_HEARTBEAT_MS = 60_000;
+
+/**
+ * Owner-only record of the last instant capture was running with consent. `ownerWorkspaceId`
+ * pins it to the paired workspace so a re-pair never inherits the previous pairing's window.
+ */
+export const CaptureWatermarkSchema = z
+  .object({
+    version: z.literal(1),
+    lastRunningAtMs: z.number().int().nonnegative(),
+    ownerWorkspaceId: z.string().nullable(),
+  })
+  .strict();
+
+export type CaptureWatermark = z.infer<typeof CaptureWatermarkSchema>;
+
+/**
+ * The instant a restarted capture may observe from, or undefined for today's behavior (observe
+ * from now). Never earlier than the watermark, the maximum window or the consent floor (the
+ * persisted privacy cutoff, which is at or after the last consent change).
+ */
+export function resolveDowntimeCatchUpFrom(input: {
+  nowMs: number;
+  watermarkMs: number | undefined;
+  consentFloorMs: number;
+  maxWindowMs: number;
+}): number | undefined {
+  const { nowMs, watermarkMs, consentFloorMs, maxWindowMs } = input;
+  if (watermarkMs === undefined || !Number.isFinite(watermarkMs) || watermarkMs > nowMs) {
+    return undefined;
+  }
+  const from = Math.max(watermarkMs, nowMs - Math.max(0, maxWindowMs), consentFloorMs);
+  return from < nowMs ? from : undefined;
+}
 /**
  * Resolves trajectory attribution context strictly from session metadata.
  * Missing or schema-invalid metadata returns undefined and is skipped.
@@ -232,6 +275,16 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
   uploadStatusPath?: string;
 
   /**
+   * Owner-only capture watermark: refreshed while capture runs and on clean shutdown, read on
+   * construction so the next start catches up sessions that finished during the downtime. With
+   * no path (or no watermark yet) capture observes from start only.
+   */
+  captureWatermarkPath?: string;
+
+  /** Overrides `MAX_DOWNTIME_CATCH_UP_MS`, the longest downtime that is caught up. */
+  maxDowntimeCatchUpMs?: number;
+
+  /**
    * Injectable clock for deterministic privacy-boundary tests.
    */
   now?: () => number;
@@ -292,6 +345,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private unsubscribeRecords?: () => void;
   private telemetryEnabled: boolean;
   private readonly privacyCheckpointPath?: string;
+  private readonly captureWatermarkPath?: string;
+  private readonly privateValueOwnerWorkspaceId: string | null;
+  /** Downtime catch-up boundary for the first start only; cleared once used or on consent change. */
+  private pendingCatchUpFromMs?: number;
+  private watermarkHeartbeat?: NodeJS.Timeout;
   private readonly now: () => number;
   private privacyCutoffMs: number;
   private remoteConsentCutoffMs: number;
@@ -332,16 +390,39 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.remoteConsentHistoryAvailable =
       !this.remoteConsentRequired ||
       (persistedCheckpoint?.version === 2 && persistedCheckpoint.remoteHistoryAvailable);
+    this.captureWatermarkPath = options.captureWatermarkPath;
+    this.privateValueOwnerWorkspaceId = options.privateValueOwnerWorkspaceId ?? null;
+    // Only a run that ended with consent may extend capture into the downtime after it.
+    const watermark =
+      requestedTelemetryEnabled && persistedCheckpoint?.telemetryEnabled === true
+        ? this.readCaptureWatermark()
+        : undefined;
+    const catchUpFromMs = resolveDowntimeCatchUpFrom({
+      nowMs: this.now(),
+      watermarkMs:
+        watermark?.ownerWorkspaceId === this.privateValueOwnerWorkspaceId
+          ? watermark.lastRunningAtMs
+          : undefined,
+      consentFloorMs: Math.max(persistedCheckpoint?.cutoffMs ?? 0, this.remoteConsentCutoffMs),
+      maxWindowMs: options.maxDowntimeCatchUpMs ?? MAX_DOWNTIME_CATCH_UP_MS,
+    });
     this.privacyCutoffMs = Math.max(
       persistedCheckpoint?.cutoffMs ?? 0,
       this.remoteConsentCutoffMs,
-      this.now(),
+      catchUpFromMs ?? this.now(),
     );
     if (options.remoteTelemetryConsent) {
       this.reconcileRemoteTelemetryConsent(options.remoteTelemetryConsent);
     }
+    // A consent change advances the privacy cutoff; the catch-up never reaches behind it.
+    if (catchUpFromMs !== undefined && this.privacyCutoffMs < this.now()) {
+      this.pendingCatchUpFromMs = this.privacyCutoffMs;
+    }
     this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(requestedTelemetryEnabled);
     this.telemetryEnabled = requestedTelemetryEnabled && this.privacyCheckpointHealthy;
+    if (!this.telemetryEnabled) {
+      this.pendingCatchUpFromMs = undefined;
+    }
 
     // 1. Decoders and Normalization Pipeline
     this.decoders =
@@ -574,6 +655,86 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
   }
 
+  private readCaptureWatermark(): CaptureWatermark | undefined {
+    if (!this.captureWatermarkPath) {
+      return undefined;
+    }
+    try {
+      const stats = fs.statSync(this.captureWatermarkPath);
+      if (!stats.isFile() || stats.size > 4 * 1024) {
+        throw new Error("invalid capture watermark file");
+      }
+      return CaptureWatermarkSchema.parse(
+        JSON.parse(fs.readFileSync(this.captureWatermarkPath, "utf8")),
+      );
+    } catch (error) {
+      const errorCode =
+        error instanceof Error && "code" in error && z.string().safeParse(error.code).success
+          ? String(error.code)
+          : undefined;
+      if (errorCode !== "ENOENT") {
+        this.logger?.warn("Capture watermark was unreadable; downtime sessions are not caught up");
+      }
+      return undefined;
+    }
+  }
+
+  /** Records that capture is running now. Best effort: a missed write only shortens catch-up. */
+  private writeCaptureWatermark(): void {
+    if (!this.captureWatermarkPath) {
+      return;
+    }
+    const temporaryPath = `${this.captureWatermarkPath}.${process.pid}.tmp`;
+    const watermark: CaptureWatermark = {
+      version: 1,
+      lastRunningAtMs: Math.max(0, Math.trunc(this.now())),
+      ownerWorkspaceId: this.privateValueOwnerWorkspaceId,
+    };
+    try {
+      ensurePrivateDirectorySync(path.dirname(this.captureWatermarkPath));
+      fs.writeFileSync(temporaryPath, `${JSON.stringify(watermark)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      fs.renameSync(temporaryPath, this.captureWatermarkPath);
+    } catch {
+      try {
+        fs.rmSync(temporaryPath, { force: true });
+      } catch {
+        // Best-effort cleanup only.
+      }
+      this.logger?.warn("Unable to persist the capture watermark");
+    }
+  }
+
+  /** Forgets the watermark so the next start observes from start only (consent withdrawn). */
+  private clearCaptureWatermark(): void {
+    if (!this.captureWatermarkPath) {
+      return;
+    }
+    try {
+      fs.rmSync(this.captureWatermarkPath, { force: true });
+    } catch {
+      this.logger?.warn("Unable to remove the capture watermark");
+    }
+  }
+
+  private startWatermarkHeartbeat(): void {
+    this.stopWatermarkHeartbeat();
+    this.writeCaptureWatermark();
+    this.watermarkHeartbeat = setInterval(() => {
+      if (this.telemetryEnabled && this.state === "ready") {
+        this.writeCaptureWatermark();
+      }
+    }, CAPTURE_WATERMARK_HEARTBEAT_MS);
+    this.watermarkHeartbeat.unref();
+  }
+
+  private stopWatermarkHeartbeat(): void {
+    clearInterval(this.watermarkHeartbeat);
+    this.watermarkHeartbeat = undefined;
+  }
+
   private advanceRemoteConsentCutoff(cutoffMs: number): boolean {
     const normalizedCutoff = Number.isFinite(cutoffMs)
       ? Math.max(0, Math.trunc(cutoffMs))
@@ -769,6 +930,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       ) {
         this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
       }
+      this.pendingCatchUpFromMs = undefined;
+      this.stopWatermarkHeartbeat();
+      this.clearCaptureWatermark();
       this.skipBackfillOnNextStart = true;
       this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(false);
       return true;
@@ -785,6 +949,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     ) {
       this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
     }
+    this.pendingCatchUpFromMs = undefined;
     this.skipBackfillOnNextStart = true;
     this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(true);
     if (!this.privacyCheckpointHealthy) {
@@ -879,7 +1044,16 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       // machine with tens of thousands of transcripts. Start waits a bounded time so a normal
       // start still begins with sessions attached, then lets it finish in the background so
       // daemon readiness never waits on history size.
-      const scan = this.observerCoordinator.start();
+      // Only the first start after construction catches up the downtime since the watermark; a
+      // privacy boundary crossed in this process (consent toggled) never does.
+      const catchUpFromMs = this.skipBackfillOnNextStart ? undefined : this.pendingCatchUpFromMs;
+      this.pendingCatchUpFromMs = undefined;
+      if (catchUpFromMs !== undefined) {
+        this.logger?.info("Catching up sessions that finished while capture was down", {
+          catchUpFrom: new Date(catchUpFromMs).toISOString(),
+        });
+      }
+      const scan = this.observerCoordinator.start({ catchUpFromMs });
       this.initialScan = scan.catch((err: unknown) => {
         this.logger?.error("Initial transcript discovery failed", {
           error: err instanceof Error ? err.message : String(err),
@@ -895,6 +1069,13 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       ]).finally(() => clearTimeout(waitTimer));
       this.state = "ready";
       this.skipBackfillOnNextStart = false;
+      // The watermark moves only once the catch-up scan has attached the downtime sessions, so a
+      // crash during that scan still catches them up on the next start.
+      void this.initialScan.then(() => {
+        if (this.state === "ready" && this.telemetryEnabled) {
+          this.startWatermarkHeartbeat();
+        }
+      });
       this.logger?.info("Trajectory capture runtime module started successfully", {
         adaptersCount: this.adapters.length,
         decodersCount: this.decoders.length,
@@ -912,7 +1093,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     if (this.state === "stopping" || this.state === "stopped") {
       return;
     }
+    const wasCapturing = this.state === "ready" && this.telemetryEnabled;
     this.state = "stopping";
+    this.stopWatermarkHeartbeat();
 
     try {
       if (this.unsubscribeRecords) {
@@ -927,6 +1110,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       }
       await this.initialScan;
       await this.observerCoordinator.stop();
+      // Clean shutdown: the next start catches up whatever finishes from here on.
+      if (wasCapturing && this.telemetryEnabled) {
+        this.writeCaptureWatermark();
+      }
       if (this.ownsObserverCoordinator) {
         this.observerCoordinatorNeedsRebuild = true;
       }

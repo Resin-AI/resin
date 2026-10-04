@@ -5,7 +5,7 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
-import { isToolInScope } from "./search-tools.js";
+import { isToolInScope, noMatchingToolNote } from "./search-tools.js";
 
 export type ManageToolsAction =
   | "list_versions"
@@ -399,6 +399,7 @@ export function createManageToolsHandler(
                 limit,
                 offset,
                 hasMore,
+                ...noMatchingToolNote(query, total),
               }),
             },
           ],

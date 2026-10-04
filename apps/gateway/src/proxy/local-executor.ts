@@ -57,6 +57,11 @@ import {
   validateBundleEntryPath,
   verifyBundleSignature,
 } from "@resin/runtime";
+import {
+  isDatedValue,
+  missingDatedInputs,
+  missingDatedInputsMessage,
+} from "../meta/dated-defaults.js";
 import { failedToolResult } from "../meta/invocation-failure.js";
 import {
   type CallToolResult,
@@ -79,6 +84,17 @@ import { programCommands } from "../meta/learned-commands.js";
 function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
   const result = value.result;
   return typeof result === "string" ? result : result === null ? "" : JSON.stringify(result);
+}
+
+/**
+ * What a cached recorded workflow runs, resolved on this machine: the description of its steps
+ * (none when no step can be shown), the commands its programs run, and its dated recorded-default
+ * inputs with their recorded values.
+ */
+interface RecordedWorkflowSummary {
+  description: string | undefined;
+  commands: string[];
+  dated: ReadonlyMap<string, string>;
 }
 
 /** Why a worker that did not succeed failed: a worker that never ran means no usable runtime. */
@@ -547,10 +563,7 @@ export class LocalArtifactExecutor {
   private readonly privateValueOwnerWorkspaceId?: string;
   private managedToolAccess?: ManagedToolAccess;
   /** Resolved local summaries by artifact and owning workspace; both are immutable inputs. */
-  private readonly recordedWorkflowSummaries = new Map<
-    string,
-    { description: string; commands: string[] }
-  >();
+  private readonly recordedWorkflowSummaries = new Map<string, RecordedWorkflowSummary>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -607,10 +620,23 @@ export class LocalArtifactExecutor {
     return this.recordedWorkflowSummary(artifactDigest, context)?.commands ?? [];
   }
 
+  /**
+   * The recorded-default inputs of a cached recorded workflow whose recorded value is a date or a
+   * time (see {@link isDatedValue}), each with that value. Such an input is required on this
+   * device: rerunning its recorded date would silently answer for the recorded moment. Local-only,
+   * like {@link describeRecordedWorkflow}; empty for any other tool.
+   */
+  recordedWorkflowDatedInputs(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): ReadonlyMap<string, string> {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.dated ?? new Map();
+  }
+
   private recordedWorkflowSummary(
     artifactDigest: string,
     context: WorkspaceContext,
-  ): { description: string; commands: string[] } | undefined {
+  ): RecordedWorkflowSummary | undefined {
     const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
     const key = `${artifactDigest}\u0000${owner}`;
     const cached = this.recordedWorkflowSummaries.get(key);
@@ -631,6 +657,20 @@ export class LocalArtifactExecutor {
     } catch {
       return undefined;
     }
+    return this.summarizeRecordedPlan(plan, owner, key);
+  }
+
+  /**
+   * Describes a parsed plan from the values its owner recorded, cached under `key` once a step can
+   * be shown. Execution reads the dated inputs of the plan it is about to run through this too.
+   */
+  private summarizeRecordedPlan(
+    plan: RecordedWorkflow,
+    owner: string | undefined,
+    key: string,
+  ): RecordedWorkflowSummary {
+    const cached = this.recordedWorkflowSummaries.get(key);
+    if (cached !== undefined) return cached;
     const declared = new Set(plan.privateReferences ?? []);
     const store = this.getPrivateValueStore();
     const resolveOwned = (reference: string): string | undefined => {
@@ -743,7 +783,7 @@ export class LocalArtifactExecutor {
      */
     const parameterized = (
       source: WorkflowValueSource,
-    ): { text: string; parameters: string[] } | undefined => {
+    ): { text: string; parameters: { name: string; value: string }[] } | undefined => {
       if (source.kind !== "template" || source.template.type !== "program") return undefined;
       const template = source.template;
       const recorded =
@@ -862,13 +902,15 @@ export class LocalArtifactExecutor {
           !parameter
             ? []
             : span === undefined
-              ? [`${name} = ${token.value ?? token.raw}`]
-              : [`${name} = ${(token.value as string).slice(span.start, span.end)}`],
+              ? [{ name, value: String(token.value ?? token.raw) }]
+              : [{ name, value: (token.value as string).slice(span.start, span.end) }],
         ),
       };
     };
     const steps: RecordedStep[] = [];
     const parameters = new Set<string>();
+    // Each recorded-default input whose recorded value is a date: it is required, not defaulted.
+    const dated = new Map<string, string>();
     const commands: string[] = [];
     for (const [index, step] of plan.steps.entries()) {
       // A derivation is model-written code: describe what it computes, never the code itself.
@@ -953,7 +995,13 @@ export class LocalArtifactExecutor {
       if (programText === undefined || programText.length === 0) continue;
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
       const workdir = workdirSource === undefined ? undefined : text(workdirSource);
-      for (const parameter of bound?.parameters ?? []) parameters.add(parameter);
+      for (const { name, value } of bound?.parameters ?? []) {
+        if (isDatedValue(value)) {
+          if (!dated.has(name)) dated.set(name, value);
+        } else {
+          parameters.add(`${name} = ${value}`);
+        }
+      }
       const toggle =
         step.optional === undefined
           ? ""
@@ -995,14 +1043,23 @@ export class LocalArtifactExecutor {
         body: programText,
       });
     }
-    if (steps.length === 0) return undefined;
+    if (steps.length === 0) return { description: undefined, commands, dated };
+    // An input bound in several places is dated if any of its recorded values is.
+    const defaulted = [...parameters].filter(
+      (parameter) => !dated.has(parameter.slice(0, parameter.indexOf(" = "))),
+    );
     const inputs =
-      parameters.size === 0
+      defaulted.length === 0
         ? ""
-        : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${[...parameters].join("; ")}`;
-    const summary = {
-      description: `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}`,
+        : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${defaulted.join("; ")}`;
+    const required =
+      dated.size === 0
+        ? ""
+        : `\nRequired parameters (each replaces its {name} above; its recorded value was a date, so pass the current one in the same form): ${[...dated].map(([name, value]) => `${name} (recorded: ${value})`).join("; ")}`;
+    const summary: RecordedWorkflowSummary = {
+      description: `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}${required}`,
       commands,
+      dated,
     };
     this.recordedWorkflowSummaries.set(key, summary);
     return summary;
@@ -1406,6 +1463,7 @@ export class LocalArtifactExecutor {
     // calls, so the plan runs here under the executor's own permissions.
     if (manifest.runtime?.runtime === "recorded-workflow") {
       return await this.executeRecordedWorkflowArtifact(
+        entry.artifactDigest,
         entrypointPath,
         parameters,
         context,
@@ -1599,6 +1657,7 @@ export class LocalArtifactExecutor {
    * fails with the actual reason rather than a substituted behavior.
    */
   private async executeRecordedWorkflowArtifact(
+    artifactDigest: string,
     entrypointPath: string,
     parameters: JsonRpcParams,
     context: WorkspaceContext,
@@ -1623,6 +1682,15 @@ export class LocalArtifactExecutor {
         "runtime_unavailable",
         `Failed to read recorded workflow artifact: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+
+    // A recorded date is not a default: omitted, it would rerun the recorded period and answer for
+    // that moment as if it were now. Refused before anything runs, naming the input and its form.
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    const { dated } = this.summarizeRecordedPlan(plan, owner, `${artifactDigest}\u0000${owner}`);
+    const missing = missingDatedInputs(dated, parameters);
+    if (missing.length > 0) {
+      return failedToolResult("validation_error", missingDatedInputsMessage(dated, missing));
     }
 
     // A plan that routes a step back through this host needs the dispatcher; a plan that only runs

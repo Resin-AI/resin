@@ -26,6 +26,7 @@ import {
   DeterministicWorkerSandbox,
   type SafetyGateEvaluator,
 } from "@resin/runtime";
+import { type LocalToolDatedInputs, requireDatedInputs } from "../meta/dated-defaults.js";
 import {
   type LocalToolDescriber,
   type ToolInvocationRouter,
@@ -472,6 +473,7 @@ export class ToolRegistry {
   private safetyGateEvaluator?: SafetyGateEvaluator;
   private localToolDescriber?: LocalToolDescriber;
   private localToolCommands?: LocalToolCommands;
+  private localToolDatedInputs?: LocalToolDatedInputs;
   // Scope activations: scopeKey -> Map<toolId, version>
   // System scope
   private readonly systemActiveTools = new Map<string, string>();
@@ -722,6 +724,25 @@ export class ToolRegistry {
     context: WorkspaceContext,
   ): string[] {
     return this.localToolCommands?.(tool, context) ?? [];
+  }
+
+  /** Installs the local-only reader of a learned tool's dated recorded-default inputs. */
+  setLocalToolDatedInputs(reader: LocalToolDatedInputs): void {
+    this.localToolDatedInputs = reader;
+  }
+
+  /**
+   * The input schema an agent is served for a tool on this machine: `schema` with each input whose
+   * recorded default is a date made required (see `requireDatedInputs`). Unchanged without a
+   * reader or a dated input; the catalog's schema itself is never modified.
+   */
+  learnedToolInputSchema<T extends object>(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+    schema: T,
+  ): T {
+    const dated = this.localToolDatedInputs?.(tool, context);
+    return dated === undefined ? schema : requireDatedInputs(schema, dated);
   }
 
   getSafetyGateEvaluator(): SafetyGateEvaluator | undefined {

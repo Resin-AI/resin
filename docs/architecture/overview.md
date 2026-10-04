@@ -84,6 +84,7 @@ When starting MCP or resolving tools, Resin automatically identifies the project
 - **Git Root Resolution**: If running within a Git repository, the root is the top-level Git working tree.
 - **Non-Git Fallback**: If not within a Git repository, the root is the MCP startup directory.
 - **Synchronous Zero-Prompt Bootstrap**: If `.resin/project.json` or `.resin/resin.lock` is missing, Resin automatically creates them synchronously during resolver initialization. No user prompts, confirmations, or interactive setup are required.
+- **Ignored Until Pinned**: A `.resin/` that bootstrap creates also gets `.resin/.gitignore` (`*`), so starting Resin in a repository or per-task worktree leaves `git status` clean. The first lock write that pins or disables a tool removes it, making `.resin/` visible to commit. An existing or git-tracked `.resin/` is never given the file ([ADR 0006](../adr/0006-storage-and-runtimes.md)).
 
 ### 2. Committed Portable Files vs. Local Trust
 - **`.resin/project.json`**: Contains portable project metadata (`schemaVersion: 1`, project UUID `id`, `name`, and timestamp). It declares identity, not execution authority.
@@ -114,6 +115,7 @@ The Local MCP Gateway is the single point of contact for all AI coding harnesses
 ### 2. Observer & Sanitizer (`@resin/observer`)
 The Observer passively monitors tool executions, transcript interactions, and performance metrics:
 - Records raw execution traces into local SQLite ([ADR 0005](../adr/0005-privacy-data-boundaries.md)). Raw session transcripts remain strictly local.
+- Captures only sessions active while capture runs with consent; history from before is never captured. The daemon keeps a capture watermark in its private state (`capture-watermark.json`, refreshed every minute and on clean shutdown), and on the next start also catches up sessions whose activity falls after that watermark, at most 24 hours back and never before the persisted consent cutoff. Turning telemetry off deletes the watermark; without one, capture observes from start only.
 - Runs a multi-stage local redaction pipeline to scrub credentials, private paths, and PII.
 - Generates sanitized observation summaries for the evolution engine.
 - Continuously tracks each session's workflow episodes locally, running the deterministic opportunity engine over metadata-projected events to attest recurring patterns. Proven patterns are queued in a local outbox, deduplicated by structural hash, and dispatched only when projected savings exceed the configured synthesis cost; the evolution kill switch halts detection.

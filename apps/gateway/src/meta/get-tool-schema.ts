@@ -156,7 +156,11 @@ export function createGetToolSchemaHandler(
     const learned =
       !resolvedTool.isSystem &&
       (resolvedTool.scope === "workspace" || resolvedTool.scope === "session");
-    const baseSchema = toolInputSchema(resolvedTool);
+    const baseSchema = registry.learnedToolInputSchema(
+      resolvedTool,
+      context,
+      toolInputSchema(resolvedTool),
+    );
     const forEach = learned && offersForEach(baseSchema);
     const inputSchema = forEach ? withForEachInput(baseSchema as McpToolInput) : baseSchema;
     const description = describeToolLocally(resolvedTool, context, describer);

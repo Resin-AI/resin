@@ -42,6 +42,30 @@ export interface SearchToolsResponse {
   limit: number;
   offset: number;
   hasMore: boolean;
+  /** Present only when a non-empty query matched no tool; see {@link noMatchingToolNote}. */
+  note?: string;
+}
+
+/**
+ * What an agent is told when its query matches no learned tool. An empty result alone read as "this
+ * workspace cannot do that": an agent asked for a PostHog error report searched `posthog`, found
+ * nothing and answered that no PostHog tools were available instead of doing the task. Learned
+ * tools are shortcuts for work the agent can already do, so the note sends it back to that work.
+ */
+export const NO_MATCHING_TOOL_NOTE =
+  "No learned tool matches this query. Do the task yourself with your usual tools; Resin learns from that work.";
+
+/**
+ * The note to add to a discovery result: only for a non-empty query that matched no tool. An empty
+ * query is a listing, not a question about the task, and a query with results needs no advice.
+ */
+export function noMatchingToolNote(
+  query: string | undefined,
+  total: number,
+): { note: string } | Record<string, never> {
+  return query !== undefined && query.trim() !== "" && total === 0
+    ? { note: NO_MATCHING_TOOL_NOTE }
+    : {};
 }
 
 export interface SearchToolsParams {
@@ -76,15 +100,34 @@ export function toolInputSchema(tool: RegistryTool): ToolParameterSchema | JsonR
   );
 }
 
+/** A tool's catalog description and the detail this machine adds to it, kept apart. */
+interface ToolDescriptionParts {
+  catalog: string;
+  /** A learned tool's recorded program, as the {@link LocalToolDescriber} renders it. */
+  local?: string;
+}
+
+function toolDescriptionParts(
+  tool: Pick<RegistryTool, "artifactDigest" | "description" | "manifest">,
+  context: WorkspaceContext,
+  describer?: LocalToolDescriber,
+): ToolDescriptionParts {
+  const catalog = tool.description || tool.manifest?.description || "";
+  const local = describer?.(tool, context);
+  return local ? { catalog, local } : { catalog };
+}
+
+function joinDescription({ catalog, local }: ToolDescriptionParts): string {
+  return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
+}
+
 /** The description an agent sees: the catalog's, followed by any local detail. */
 export function describeToolLocally(
   tool: Pick<RegistryTool, "artifactDigest" | "description" | "manifest">,
   context: WorkspaceContext,
   describer?: LocalToolDescriber,
 ): string {
-  const catalog = tool.description || tool.manifest?.description || "";
-  const local = describer?.(tool, context);
-  return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
+  return joinDescription(toolDescriptionParts(tool, context, describer));
 }
 
 /**
@@ -253,13 +296,97 @@ function containsSequence(haystack: string[], needle: string[]): boolean {
   return false;
 }
 
+/** A shell word naming an option: `-o`, `--profile`, `--group-by=…`; not a dash in prose. */
+const OPTION_WORD = /^--?[\p{L}\p{N}]/u;
+/** Shell words that end one command, so the word after one is never an option's value. */
+const SHELL_OPERATORS: ReadonlySet<string> = new Set(["&&", "||", "|", ";", "&", ">", ">>", "<"]);
+/** A `{name}` hole a learned tool fills from its inputs: a parameter name, not a recorded value. */
+const PARAMETER_HOLE = /^\{[^{}]+\}\W*$/u;
+
+/**
+ * The text without the argument values a recorded run happened to pass: an option's value
+ * (`--profile acme-production-auto`, `--group-by Type=DIMENSION,Key=SERVICE`), the right side of a
+ * `key=value` word, and the value after a standalone `=` (`profile = acme-production-auto`).
+ *
+ * Those values are the data of one run — profile and alarm names, ids, dates — not what the tool
+ * does, and their parts are ordinary words: `acme-production-auto` made every tool recorded with
+ * that profile match a question about the `acme` daemon, and `Key=SERVICE` one about services.
+ * Commands, subcommands, option names, `{name}` holes and prose all stay. Values are found one
+ * whitespace-separated word at a time, so a quoted value with spaces loses only its first word.
+ */
+function withoutRecordedValues(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const kept: string[] = [];
+      let valueFollows = false;
+      for (const word of line.split(/\s+/).filter(Boolean)) {
+        const isValue =
+          valueFollows &&
+          !OPTION_WORD.test(word) &&
+          !SHELL_OPERATORS.has(word) &&
+          !PARAMETER_HOLE.test(word);
+        valueFollows = false;
+        if (isValue) {
+          continue;
+        }
+        if (word === "=") {
+          valueFollows = true;
+          continue;
+        }
+        const assignment = word.indexOf("=");
+        if (assignment > 0) {
+          kept.push(word.slice(0, assignment));
+          continue;
+        }
+        kept.push(word);
+        // An option closing a code span or a sentence (`--watch\``, `--watch.`) takes no value.
+        valueFollows = OPTION_WORD.test(word) && !/[`.,;:)]$/u.test(word);
+      }
+      return kept.join(" ");
+    })
+    .join("\n");
+}
+
+/**
+ * Lines Resin writes around the programs in a learned tool's local detail (`RecordedWorkflowSummary`
+ * in proxy/local-executor.ts): the "Recorded on this machine:" header, the "Step N runs this
+ * recorded shell program:" heads, elision markers, and the parameter listings, which hold nothing
+ * but recorded values.
+ */
+const RECORDED_DETAIL_FRAMING =
+  /^(?:Recorded on this machine:|Step \d+\b|\[(?:\.\.\.|\d+ more steps? not shown)\]$|(?:Required )?[Pp]arameters \()/u;
+/** The file an edit step's head names (`Step 2 edits src/app.ts, adding:`). */
+const EDITED_FILE = /^Step \d+\b.*? edits (\S+?)(?:,| \(|$)/u;
+
+/**
+ * The recorded programs in a learned tool's local detail, without Resin's framing around them:
+ * the framing is the same for every learned tool ("Recorded on this machine" made each one match
+ * a question about "this machine"), so only the programs, and the files edit steps edit, say what
+ * this tool does.
+ */
+function recordedPrograms(local: string): string {
+  return local
+    .split("\n")
+    .flatMap((line) => {
+      if (!RECORDED_DETAIL_FRAMING.test(line)) {
+        return [line];
+      }
+      const edited = EDITED_FILE.exec(line)?.[1];
+      return edited === undefined ? [] : [edited];
+    })
+    .join("\n");
+}
+
 /** The text of one candidate tool that a query is matched against. */
 interface SearchableTool {
   /** Exposed and registered names. */
   names: string[];
   tags: string[];
-  /** What the agent sees, including a learned tool's local recorded program. */
+  /** The catalog description. */
   description: string;
+  /** A learned tool's local recorded program, which the agent sees after the description. */
+  recorded?: string;
   isPinned: boolean;
 }
 
@@ -281,12 +408,56 @@ const UBIQUITOUS_MIN_TOOLS = 5;
 const RELATIVE_COVERAGE_FLOOR = 0.6;
 
 /**
+ * Words a task description is phrased with rather than words naming what a tool does: function
+ * words, request verbs ("list", "identify", "compare", "review"), report shapes ("breakdown",
+ * "summary") and time frames ("current", "last", "hours", "today"). Learned tool descriptions use
+ * them too ("steps 1 and 5", "24 hours ago"), so in a small catalog, where no word is common
+ * enough to be dismissed as ubiquitous, one of them alone matched an unrelated tool: a PostHog
+ * question found the AWS cost tool through "hours". They still weigh in a tool's ranking; they
+ * just never make a tool match on their own. Folded like query words, so plurals are covered.
+ */
+const GENERIC_QUERY_WORDS: ReadonlySet<string> = new Set(
+  searchTokens(
+    [
+      // Function words.
+      "a an the and or but nor not no of to in on at by for from with without into onto over",
+      "under about as is are was were be been being am it its this that these those there here",
+      "then than so if else via per vs versus up down out off again also too very just only own",
+      "same such both each every either any all some many much more most less least few other",
+      "between after before during since until while plus what which who whom whose when where",
+      "whether",
+      "why how i me my we our us you your he she they them their his her can could will would",
+      "should shall may might must do does did done doing have has had having get got please",
+      // Request verbs and the shapes of an answer.
+      "list show give find look see check tell make let want need help try use using used run",
+      "running ran",
+      "identify compare review investigate inspect examine analyze analyse explore determine",
+      "summarize summarise summary report overview breakdown detail info information result",
+      "count number total top new old",
+      // Time frames.
+      "current currently now today yesterday tomorrow recent recently latest last past previous",
+      "next ago time period second minute hour day week month year daily weekly monthly yearly",
+    ].join(" "),
+  ),
+);
+
+/** Whether a query word only frames the task, so it cannot by itself make a tool match. */
+function isGenericQueryWord(token: string): boolean {
+  // A bare number is a count or a duration ("last 36 hours"), not something a tool does.
+  return GENERIC_QUERY_WORDS.has(token) || /^\p{N}+$/u.test(token);
+}
+
+/**
  * Scores each tool against the query, or returns undefined for a tool that does not match.
  *
  * Query words are weighted by inverse document frequency over the candidates, so a word nearly every
  * tool contains contributes almost nothing and a distinctive one (`pnpm`, `gh`) decides the ranking.
  * A tool's word score is scaled by the share of the query's weight it covers, so tools matching the
  * whole command outrank tools matching one common word of it. Searching by name earns a bonus.
+ * Otherwise a tool matches only through a distinctive word: neither one most tools share nor one
+ * that merely frames the task (see {@link GENERIC_QUERY_WORDS}), found in the tool's name, tags,
+ * description or recorded programs — not only in a recorded argument value or Resin's framing
+ * around those programs (see {@link withoutRecordedValues} and {@link recordedPrograms}).
  */
 function scoreToolsForQuery(
   query: string,
@@ -297,8 +468,18 @@ function scoreToolsForQuery(
     const nameSequences = tool.names.map(searchTokens);
     const name = new Set(nameSequences.flat());
     const tags = new Set(tool.tags.flatMap(searchTokens));
-    const description = new Set(searchTokens(tool.description));
-    return { nameSequences, name, tags, description };
+    const description = new Set([
+      ...searchTokens(tool.description),
+      ...searchTokens(tool.recorded ?? ""),
+    ]);
+    // The words that can make this tool match; the rest of its text only ranks it.
+    const qualifying = new Set([
+      ...name,
+      ...tags,
+      ...searchTokens(withoutRecordedValues(tool.description)),
+      ...searchTokens(withoutRecordedValues(recordedPrograms(tool.recorded ?? ""))),
+    ]);
+    return { nameSequences, name, tags, description, qualifying };
   });
 
   const total = documents.length;
@@ -312,11 +493,18 @@ function scoreToolsForQuery(
       continue;
     }
     idf.set(token, Math.log(1 + (total - frequency + 0.5) / (frequency + 0.5)));
-    if (frequency <= total / 2 || frequency <= UBIQUITOUS_MIN_TOOLS) {
+    const distinctive = frequency <= total / 2 || frequency <= UBIQUITOUS_MIN_TOOLS;
+    if (distinctive && !isGenericQueryWord(token)) {
       informative.add(token);
     }
   }
   const queryWeight = [...idf.values()].reduce((sum, weight) => sum + weight, 0);
+  // Whether a tool covers enough of the query is judged on the words naming the task's subject: a
+  // framing word one tool happens to share ("daily") must not push an equally relevant tool out.
+  const subjectWeight = [...idf].reduce(
+    (sum, [token, weight]) => (isGenericQueryWord(token) ? sum : sum + weight),
+    0,
+  );
 
   const scored = tools.map((tool, index) => {
     const doc = documents[index];
@@ -336,6 +524,7 @@ function scoreToolsForQuery(
       queryTokens.length > 0 && doc.nameSequences.some((seq) => containsSequence(seq, queryTokens));
 
     let matchedWeight = 0;
+    let subjectMatched = 0;
     let fieldWeighted = 0;
     let matchesInformative = false;
     for (const [token, weight] of idf) {
@@ -350,10 +539,12 @@ function scoreToolsForQuery(
         continue;
       }
       matchedWeight += weight;
+      subjectMatched += isGenericQueryWord(token) ? 0 : weight;
       fieldWeighted += weight * fieldWeight;
-      matchesInformative ||= informative.has(token);
+      matchesInformative ||= informative.has(token) && doc.qualifying.has(token);
     }
     const coverage = queryWeight > 0 ? matchedWeight / queryWeight : 0;
+    const subjectCoverage = subjectWeight > 0 ? subjectMatched / subjectWeight : 0;
     const lexical =
       queryWeight > 0
         ? (LEXICAL_SCALE * fieldWeighted * coverage) / (NAME_WEIGHT * queryWeight)
@@ -365,15 +556,25 @@ function scoreToolsForQuery(
         : phrase
           ? NAME_PHRASE_BONUS
           : 0;
-    return { lexical, bonus, coverage, alwaysMatches: exact || prefix, matchesInformative };
+    return {
+      lexical,
+      bonus,
+      subjectCoverage,
+      alwaysMatches: exact || prefix,
+      matchesInformative,
+    };
   });
 
-  const bestCoverage = Math.max(0, ...scored.map((s) => (s?.matchesInformative ? s.coverage : 0)));
+  const bestCoverage = Math.max(
+    0,
+    ...scored.map((s) => (s?.matchesInformative ? s.subjectCoverage : 0)),
+  );
   return scored.map((s, index) => {
     if (!s) {
       return undefined;
     }
-    const relevant = s.matchesInformative && s.coverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
+    const relevant =
+      s.matchesInformative && s.subjectCoverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
     if (!s.alwaysMatches && !relevant) {
       return undefined;
     }
@@ -475,7 +676,11 @@ export function createSearchToolsHandler(
 
     // Filter, then score against the tools that remain: word weights depend on the whole set.
     // The registered name stays searchable when the exposed one is disambiguated.
-    const filtered: { item: SearchToolsResultItem; registeredName: string }[] = [];
+    const filtered: {
+      item: SearchToolsResultItem;
+      registeredName: string;
+      description: ToolDescriptionParts;
+    }[] = [];
 
     for (const { tool, isPinned, isDisabled } of candidateMap.values()) {
       const tags = extractTags(tool);
@@ -499,16 +704,18 @@ export function createSearchToolsHandler(
         }
       }
 
+      const description = toolDescriptionParts(tool, context, describer);
       filtered.push({
         registeredName: tool.name,
+        description,
         item: {
           toolId: tool.toolId,
           name: tool.exposedName || tool.name,
           version: tool.version,
           scope: tool.scope ?? "workspace",
           status: isDisabled ? "disabled" : tool.status || "active",
-          description: describeToolLocally(tool, context, describer),
-          inputSchema: toolInputSchema(tool),
+          description: joinDescription(description),
+          inputSchema: registry.learnedToolInputSchema(tool, context, toolInputSchema(tool)),
           tags,
           capabilities: capSummary,
           isPinned,
@@ -521,10 +728,11 @@ export function createSearchToolsHandler(
     const scores = query
       ? scoreToolsForQuery(
           query,
-          filtered.map(({ item, registeredName }) => ({
+          filtered.map(({ item, registeredName, description }) => ({
             names: [item.name, registeredName],
             tags: item.tags,
-            description: item.description,
+            description: description.catalog,
+            ...(description.local === undefined ? {} : { recorded: description.local }),
             isPinned: item.isPinned,
           })),
         )
@@ -562,6 +770,7 @@ export function createSearchToolsHandler(
       limit,
       offset,
       hasMore,
+      ...noMatchingToolNote(query, total),
     };
 
     return {

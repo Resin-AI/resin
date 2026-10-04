@@ -79,10 +79,32 @@ export interface ObserverCoordinatorOptions {
   ) => BackfillPolicy | undefined;
   defaultMaxInFlightBatches?: number;
   captureUserSessionsOnly?: boolean;
-  /** Opt into idle/terminal catchup during this run; historical sessions are never attached. */
+  /**
+   * Opt into idle/terminal catchup for activity at or after the observation start (see
+   * `ObserverStartOptions.catchUpFromMs`); historical sessions are never attached.
+   */
   captureInactiveSessions?: (session: HarnessSession, startedAt: number) => boolean;
   terminalNotificationTimeoutMs?: number;
   logger?: CoordinatorLogger;
+}
+
+/** Options for one `ObserverCoordinator.start()`. */
+export interface ObserverStartOptions {
+  /**
+   * Moves the observation start back to this instant for this run, so sessions that started or
+   * finished between it and now are caught up as if they had been observed live. The caller owns
+   * the privacy decision: pass only a boundary capture was already consented to and running at
+   * (the daemon's persisted capture watermark). Ignored unless finite and earlier than now.
+   */
+  catchUpFromMs?: number;
+}
+
+/** The instant this run observes from: now, or an earlier valid catch-up boundary. */
+export function resolveObservationStart(nowMs: number, catchUpFromMs?: number): number {
+  if (catchUpFromMs === undefined || !Number.isFinite(catchUpFromMs) || catchUpFromMs < 0) {
+    return nowMs;
+  }
+  return Math.min(nowMs, Math.trunc(catchUpFromMs));
 }
 
 export interface CoordinatorLogger {
@@ -113,6 +135,7 @@ export class ObserverCoordinator extends EventEmitter {
     session: HarnessSession,
     startedAt: number,
   ) => boolean;
+  /** Observation start for this run; sessions active since then count as observed. */
   private startedAt?: number;
   private readonly terminalNotificationTimeoutMs: number;
   private readonly logger?: CoordinatorLogger;
@@ -220,9 +243,9 @@ export class ObserverCoordinator extends EventEmitter {
   /**
    * Starts periodic polling and session supervision.
    */
-  async start(): Promise<void> {
+  async start(options: ObserverStartOptions = {}): Promise<void> {
     if (this.isRunning) return;
-    this.startedAt = Date.now();
+    this.startedAt = resolveObservationStart(Date.now(), options.catchUpFromMs);
     this.isRunning = true;
 
     try {

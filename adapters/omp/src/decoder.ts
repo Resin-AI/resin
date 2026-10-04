@@ -44,6 +44,62 @@ export const OMP_ACCOUNTING_VERSION = "omp-v1";
 /** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
 export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
 
+/**
+ * URI schemes OMP's `read` tool resolves against the harness's own session or installation rather
+ * than the workspace (OMP 18's internal URL handlers): `artifact://N` is the spill of an earlier tool
+ * output too long to show inline; `history://`, `agent://`, `proc://` (`jobs://` before it) and
+ * `attachment://` are this session's transcript, subagents, background jobs and attachments;
+ * `local://` is session scratch space; `conflict://` is session-held merge state; `skill://`,
+ * `rule://`, `memory://`, `omp://`, `cfg://` and `security://` are the harness's own context,
+ * documentation, settings and findings.
+ *
+ * No later session can read the same value back from such a URI, so reading one is the agent paging
+ * through context it already holds, never a step of the work: it is not recorded as a workflow call.
+ * `xd://` is deliberately absent: a read of a device-surface path invokes the tool behind it (see
+ * `device-surface.ts`) and keeps its own recording. Remote schemes (`pr://`, `issue://`, `mcp://`,
+ * `ssh://`) and the file-backed `vault://` read data outside the session and are left as they are.
+ */
+export const OMP_HARNESS_INTERNAL_URI_SCHEMES = [
+  "agent",
+  "artifact",
+  "attachment",
+  "cfg",
+  "conflict",
+  "history",
+  "jobs",
+  "local",
+  "memory",
+  "omp",
+  "proc",
+  "rule",
+  "security",
+  "skill",
+] as const;
+
+/**
+ * Whether `value` is a URI in one of {@link OMP_HARNESS_INTERNAL_URI_SCHEMES}, with or without a
+ * read selector (`artifact://3:50-100`). The scheme is compared case-insensitively, as URL schemes
+ * are; anything that is not a string, or names another scheme, is not harness-internal.
+ */
+export function isOmpHarnessInternalUri(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(value.trim())?.[1]?.toLowerCase();
+  return (
+    scheme !== undefined && (OMP_HARNESS_INTERNAL_URI_SCHEMES as readonly string[]).includes(scheme)
+  );
+}
+
+/**
+ * Whether a call is OMP's `read` of a harness-internal URI: the harness paging its own session
+ * state, recorded neither as a call nor as its result.
+ */
+function isHarnessInternalRead(
+  toolName: string | undefined,
+  parameters: DecoderMetadataRecord | undefined,
+): boolean {
+  return toolName === OMP_DEVICE_SURFACE_READ_TOOL && isOmpHarnessInternalUri(parameters?.path);
+}
+
 function boundedNativeArguments(
   args: OmpTranscriptPayload | undefined,
 ): OmpTranscriptPayload | undefined {
@@ -881,6 +937,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private readonly deviceSurfaceResultCalls = new BoundedSessionCallMap<OmpDeviceSurfaceCall>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /**
+   * Reads of harness-internal URIs (see {@link OMP_HARNESS_INTERNAL_URI_SCHEMES}) seen in this
+   * session, keyed by raw call id: neither the call nor its result is recorded.
+   */
+  private readonly harnessInternalReads = new BoundedSessionCallMap<true>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
   private readonly deviceSurfaceServers?: () => readonly string[];
 
   constructor(options: OmpRecordDecoderOptions = {}) {
@@ -927,6 +990,47 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.pendingDeviceSurfaceCalls.clearSession(sessionId);
     this.pendingArgumentlessCalls.clearSession(sessionId);
     this.deviceSurfaceResultCalls.clearSession(sessionId);
+    this.harnessInternalReads.clearSession(sessionId);
+  }
+
+  /**
+   * Marks a harness-internal read so no record of it becomes a call: whichever record announces it
+   * first marks it announced (so the other is deduplicated as usual), anything held for it is
+   * released, and its result is dropped when it arrives.
+   */
+  private skipHarnessInternalRead(
+    sessionId: string,
+    rawCallId: string,
+    origin: CallAnnouncementOrigin,
+  ): void {
+    this.harnessInternalReads.set(sessionId, rawCallId, true);
+    if (this.announcedToolCalls.get(sessionId, rawCallId) === undefined) {
+      this.announcedToolCalls.set(sessionId, rawCallId, origin);
+    }
+    this.pendingArgumentlessCalls.getAndClear(sessionId, rawCallId);
+    this.pendingDeviceSurfaceCalls.getAndClear(sessionId, rawCallId);
+  }
+
+  /**
+   * Whether a result answers a harness-internal read; if so, everything cached for that call is
+   * released, since the result is not recorded either. The mark itself stays until the session
+   * ends, so a second record of the same result (an execution end and the result message) is
+   * dropped too.
+   */
+  private consumeHarnessInternalRead(
+    sessionId: string,
+    rawCallId: string | undefined,
+    callId: string,
+  ): boolean {
+    const key = rawCallId ?? callId;
+    if (this.harnessInternalReads.get(sessionId, key) === undefined) return false;
+    this.callToolArguments.getAndClear(sessionId, key);
+    this.callToolNames.getAndClear(sessionId, key);
+    this.callToolNames.getAndClear(sessionId, callId);
+    this.pendingArgumentlessCalls.getAndClear(sessionId, key);
+    this.pendingDeviceSurfaceCalls.getAndClear(sessionId, key);
+    this.deviceSurfaceResultCalls.getAndClear(sessionId, callId);
+    return true;
   }
 
   /**
@@ -1121,6 +1225,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       if (toolName === undefined || parameters === undefined || stepIndex === undefined) continue;
       if (this.announcedToolCalls.get(sessionId, call.rawCallId) !== undefined) continue;
       this.announcedToolCalls.set(sessionId, call.rawCallId, "assistant_message");
+      // The harness paging its own session state is not a step of the work.
+      if (isHarnessInternalRead(toolName, parameters)) {
+        this.skipHarnessInternalRead(sessionId, call.rawCallId, "assistant_message");
+        continue;
+      }
 
       const callId = normalizeCallId(call.rawCallId, call.rawCallId);
       const { parameters: recordedParameters, metadata: recordedMetadata } = this.recordedArguments(
@@ -2005,6 +2114,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       }
       parameters = rawParamsObj ?? {};
     }
+    // The harness paging its own session state is not a step of the work.
+    if (isHarnessInternalRead(toolName, parameters)) {
+      this.skipHarnessInternalRead(sessionId, cacheCallId, "execution_record");
+      return null;
+    }
     const recorded = this.recordedArguments(toolName, parameters, metadata);
     parameters = recorded.parameters;
     if (recorded.metadata !== metadata) metadata.intent = recorded.metadata.intent;
@@ -2063,7 +2177,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
-  ): IntermediateToolResultEvent | IntermediateSessionEvent[] {
+  ): IntermediateToolResultEvent | IntermediateSessionEvent[] | null {
     const toolResultObj = asObject(obj.toolResult) ?? asObject(obj.tool_result) ?? obj;
 
     const rawCallId =
@@ -2073,6 +2187,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asString(toolResultObj.tool_call_id) ??
       asString(toolResultObj.id);
     const callId = normalizeCallId(rawCallId, `call_${causalRef.causalSequence}`);
+    // The result of a harness-internal read was never a call's result: recording it would leave an
+    // orphan result for a call the session does not record.
+    if (this.consumeHarnessInternalRead(sessionId, rawCallId, callId)) return null;
     const pendingSurface = rawCallId
       ? this.pendingDeviceSurfaceCalls.getAndClear(sessionId, rawCallId)
       : undefined;

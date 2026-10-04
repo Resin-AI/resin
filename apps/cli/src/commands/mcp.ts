@@ -7,11 +7,12 @@ import {
   type ShimStatus,
   shimExitCode,
 } from "@resin/gateway";
+import type { HarnessDefinition } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
 import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { CLI_VERSION } from "../bin/version.js";
-import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-runtime-registry.js";
+import { HARNESS_DEFINITIONS } from "../harness-runtime-registry.js";
 import {
   createActivatedReleaseNotice,
   registerRunningGateway,
@@ -140,6 +141,24 @@ export interface McpShimRunner {
 }
 
 /**
+ * The harness this gateway serves: the one `--harness` names, or, for a shim started without it,
+ * whichever registered harness declares its servers.
+ *
+ * Harnesses register the gateway as plain `resin mcp` and do not identify themselves to the MCP
+ * servers they spawn (OMP's `OMPCODE`/`CLAUDECODE` variables reach only its bash tool), so a bare
+ * shim cannot tell its host apart. The recorded workflow's connections and its native tool steps
+ * are both answered from this one harness, so a replay never mixes two harnesses' surfaces.
+ */
+export function servedHarnessDefinition(
+  harnessId: string | undefined,
+  definitions: readonly HarnessDefinition[] = HARNESS_DEFINITIONS,
+): HarnessDefinition | undefined {
+  return harnessId === undefined
+    ? definitions.find((candidate) => candidate.resolveMcpServer !== undefined)
+    : definitions.find((candidate) => candidate.id === harnessId);
+}
+
+/**
  * The protocol connections this host can dial, taken from the harness's own MCP configuration.
  *
  * A recorded callable that was reached over a server names that server; re-making the call means
@@ -148,14 +167,9 @@ export interface McpShimRunner {
  * descriptor, and the step that names it is refused rather than answered from somewhere else.
  */
 function harnessMcpConnections(
-  harnessId: string | undefined,
+  definition: HarnessDefinition | undefined,
   cwd: string | undefined,
 ): ((name: string) => McpServerDescriptor | undefined) | undefined {
-  // A shim started without --harness serves whichever registered harness declares its servers.
-  const definition =
-    harnessId === undefined
-      ? HARNESS_DEFINITIONS.find((candidate) => candidate.resolveMcpServer !== undefined)
-      : findHarnessDefinition(harnessId);
   const resolveMcpServer = definition?.resolveMcpServer;
   if (resolveMcpServer === undefined) return undefined;
   const workspaceRoot = cwd ?? process.cwd();
@@ -185,7 +199,8 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     return 0;
   }
 
-  const nativeToolInvoker = findHarnessDefinition(parsedArgs.harnessId)?.nativeToolInvoker;
+  const servedHarness = servedHarnessDefinition(parsedArgs.harnessId);
+  const nativeToolInvoker = servedHarness?.nativeToolInvoker;
   // The same Resin home the gateway's own state, the update engine and status resolve. Release
   // tracking is diagnostic only, so a home that cannot be resolved never blocks the gateway.
   let resinHome: string | undefined;
@@ -208,7 +223,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stdout: (options.stdout ?? process.stdout) as NodeJS.WritableStream,
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
-    recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
+    recordedWorkflowConnections: harnessMcpConnections(servedHarness, parsedArgs.cwd),
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
     ...(resinHome === undefined
       ? {}

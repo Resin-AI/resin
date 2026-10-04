@@ -8,7 +8,11 @@ import {
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
-import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
+import {
+  NO_MATCHING_TOOL_NOTE,
+  type SearchToolsResponse,
+  createSearchToolsHandler,
+} from "../../src/meta/search-tools.js";
 import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
@@ -460,5 +464,246 @@ describe("search_tools ranking over learned tools", () => {
     const names = (await searchLearned("filter_test_output")).tools.map((t) => t.name);
 
     expect(names.slice(0, 2)).toEqual(["filter_test_output", "filter_test_output_summary"]);
+  });
+});
+
+/** A learned tool as the agent sees it: catalog description, then the local recorded program. */
+type LearnedTool = [name: string, catalog: string, recorded: string];
+
+/** Searches a workspace holding `tools`, each tool's recorded program described locally. */
+async function searchLearnedCatalog(
+  tools: readonly LearnedTool[],
+  query: string,
+): Promise<SearchToolsResponse> {
+  const registry = new ToolRegistry();
+  const recordedByDigest = new Map<string, string>();
+  for (const [index, [name, catalog, recorded]] of tools.entries()) {
+    const artifactDigest = String(index).repeat(64);
+    recordedByDigest.set(artifactDigest, recorded);
+    await registry.registerTool(
+      makeManifest({
+        id: `tool_${name}`,
+        name,
+        description: catalog,
+        metadata: { tags: ["shell"] },
+      }),
+      undefined,
+      { workspaceId: "ws-learned-catalog", artifactDigest },
+    );
+  }
+  const describer = (tool: { artifactDigest?: string }) =>
+    tool.artifactDigest === undefined ? undefined : recordedByDigest.get(tool.artifactDigest);
+  return parseSearchResponse(
+    await createSearchToolsHandler(registry, describer)(makeContext("ws-learned-catalog"), {
+      query,
+      limit: 100,
+    }),
+  );
+}
+
+describe("search_tools over a small catalog of learned AWS tools", () => {
+  // Three tools learned from real recurring jobs, described as the agent saw them. Too few tools
+  // for any word to be ubiquitous.
+  const awsTools: LearnedTool[] = [
+    [
+      "fetch_aws_cost_and_usage_by_service",
+      "Runs `aws ce get-cost-and-usage --profile {profile} --time-period Start=$(date -u -d {relative_start_offset} +%Y-%m-%dT%H:%M:%SZ),End=$(date -u +%Y-%m-%dT%H:%M:%SZ) --granularity {granularity} --metrics {metrics} --group-by Type=DIMENSION,Key=SERVICE` (steps 1 and 5), `aws ce get-cost-and-usage --profile {profile} --time-period Start=$(date. Learned from one run; defaults are the recorded values.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "aws ce get-cost-and-usage --profile {profile} --time-period Start=$(date -u -d {relative_start_offset} +%Y-%m-%dT%H:%M:%SZ),End=$(date -u +%Y-%m-%dT%H:%M:%SZ) --granularity {granularity} --metrics {metrics} --group-by Type=DIMENSION,Key=SERVICE",
+        "Step 2 calls the harness's read tool with path = artifact://1",
+        "Step 3 runs this recorded shell program:",
+        "aws ce get-cost-and-usage --profile {profile} --time-period Start=$(date -u -d {relative_start_offset} +%Y-%m-%dT%H:%M:%SZ),End=$(date -u +%Y-%m-%dT%H:%M:%SZ) --granularity {granularity_sub} --metrics {metrics} --group-by Type=DIMENSION,Key=SERVICE",
+        "Step 4 calls the harness's read tool with path = artifact://3",
+        "Step 5 runs this recorded shell program:",
+        "aws ce get-cost-and-usage --profile {profile} --time-period Start=$(date -u -d {relative_start_offset} +%Y-%m-%dT%H:%M:%SZ),End=$(date -u +%Y-%m-%dT%H:%M:%SZ) --granularity {granularity} --metrics {metrics} --group-by Type=DIMENSION,Key=SERVICE --output json | jq '[.ResultsByTime[].Groups[] | {service: .Keys[0], amount: (.Metrics.{metrics}.Amount | tonumber)}] | group_by(.service) | map({service: .[0].service, usd: (map(.amount) | add)}) | sort_by(-.usd)'",
+        "Parameters (each replaces its {name} above; omitted, the recorded value runs): profile = acme-production-auto; relative_start_offset = 24 hours ago; granularity = HOURLY; metrics = UnblendedCost; granularity_sub = DAILY",
+      ].join("\n"),
+    ],
+    [
+      "verify_identity_and_get_cost_usage",
+      "Runs aws sts get-caller-identity --profile acme-production-auto && aws sts get-caller-identity --profile acme-nonprod-auto, then aws ce get-cost-and-usage --profile {aws_profile} --time-period {cost_time_period} --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE --output json. Returns the outputs of both steps in recorded order.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "aws sts get-caller-identity --profile acme-production-auto && aws sts get-caller-identity --profile acme-nonprod-auto",
+        "Step 2 runs this recorded shell program:",
+        "aws ce get-cost-and-usage --profile {aws_profile} --time-period {cost_time_period} --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE --output json",
+        "Parameters (each replaces its {name} above; omitted, the recorded value runs): aws_profile = acme-production-auto; cost_time_period = Start=2026-10-01,End=2026-10-05",
+      ].join("\n"),
+    ],
+    [
+      "describe_cloudwatch_alarms",
+      "Runs aws cloudwatch describe-alarms --profile {profile} --region {region} --alarm-names {alarm_names} {text_filter}. Returns the JSON result of the describe-alarms call. Use this tool when you need to retrieve CloudWatch alarms matching the given names and text filter, instead of running the AWS CLI command manually. Learned from one run; defaults are the recorded values.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "aws cloudwatch describe-alarms --profile {profile} --region {region} --alarm-names {alarm_names} {text_filter}",
+        "Parameters (each replaces its {name} above; omitted, the recorded value runs): profile = acme-production-auto; region = us-east-1; alarm_names = acme-production-http-api-latency-p95; text_filter = acme-production-active-daemons-anomaly",
+      ].join("\n"),
+    ],
+  ];
+
+  async function searchAwsResponse(query: string): Promise<SearchToolsResponse> {
+    return searchLearnedCatalog(awsTools, query);
+  }
+
+  async function searchAws(query: string): Promise<string[]> {
+    return (await searchAwsResponse(query)).tools.map((tool) => tool.name);
+  }
+
+  it("finds both cost tools for a cost question, and not the alarm tool", async () => {
+    const names = await searchAws(
+      "AWS cost and usage compare daily service breakdown today yesterday",
+    );
+
+    expect(names[0]).toBe("fetch_aws_cost_and_usage_by_service");
+    expect(names.sort()).toEqual([
+      "fetch_aws_cost_and_usage_by_service",
+      "verify_identity_and_get_cost_usage",
+    ]);
+  });
+
+  it("finds only the alarm tool for a CloudWatch alarm question", async () => {
+    expect(
+      await searchAws("CloudWatch describe-alarms investigate alarm history metric datapoints"),
+    ).toEqual(["describe_cloudwatch_alarms"]);
+  });
+
+  it("finds nothing for a PostHog question that shares only `hours` with the cost tool", async () => {
+    expect(
+      await searchAws(
+        "PostHog error tracking issues exceptions insights events breakdown last 36 hours",
+      ),
+    ).toEqual([]);
+    expect(
+      await searchAws("PostHog errors insights exceptions error tracking last 24 hours"),
+    ).toEqual([]);
+  });
+
+  it("finds nothing for a grievance question that shares only `and` or `the` with the tools", async () => {
+    expect(
+      await searchAws("omp grievances list current grievances and identify most destructive"),
+    ).toEqual([]);
+    expect(
+      await searchAws("review grievances and identify the most destructive grievance currently"),
+    ).toEqual([]);
+  });
+
+  it("does not match on task-framing words alone, but still lists every tool for an empty query", async () => {
+    expect(
+      await searchAws(
+        "list the current breakdown for the last hours, identify most, compare today",
+      ),
+    ).toEqual([]);
+    expect((await searchAws("")).sort()).toEqual(awsTools.map(([name]) => name).sort());
+  });
+
+  it("still lets a framing word rank tools once a distinctive word matches", async () => {
+    expect(await searchAws("daily aws cost")).toEqual([
+      "fetch_aws_cost_and_usage_by_service",
+      "verify_identity_and_get_cost_usage",
+    ]);
+  });
+
+  it("tells the agent to do the task itself only when a non-empty query matches no tool", async () => {
+    const none = await searchAwsResponse("PostHog errors insights exceptions error tracking");
+    expect(none).toEqual({
+      tools: [],
+      total: 0,
+      limit: 100,
+      offset: 0,
+      hasMore: false,
+      note: NO_MATCHING_TOOL_NOTE,
+    });
+
+    expect(await searchAwsResponse("aws cost")).not.toHaveProperty("note");
+    expect(await searchAwsResponse("")).not.toHaveProperty("note");
+    expect(await searchAwsResponse("   ")).not.toHaveProperty("note");
+  });
+
+  it("matches a command a tool's recorded program runs, but not a value one run passed it", async () => {
+    // `jq` and `sts` are commands, `jq` only in the local recorded program.
+    expect(await searchAws("jq")).toEqual(["fetch_aws_cost_and_usage_by_service"]);
+    expect(await searchAws("sts get-caller-identity")).toEqual([
+      "verify_identity_and_get_cost_usage",
+    ]);
+    // Profile, alarm and dimension values, and Resin's framing around the programs.
+    expect(await searchAws("acme")).toEqual([]);
+    expect(await searchAws("anomaly daemons nonprod")).toEqual([]);
+    expect(await searchAws("this machine")).toEqual([]);
+  });
+});
+
+describe("search_tools over the learned tools of a later run", () => {
+  // The workspace's tools after a second run of the same jobs, as the agent saw them.
+  const laterTools: LearnedTool[] = [
+    [
+      "get_aws_cost_and_usage",
+      "Runs `aws sts get-caller-identity --profile acme-production-auto` and `aws ce get-cost-and-usage --profile acme-production-auto --time-period {time_period} --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE` to verify the caller identity and retrieve monthly. The job ran 2 times with different time_period; call it once per value or use for_each to cover them all.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "aws sts get-caller-identity --profile acme-production-auto",
+        "Step 2 runs this recorded shell program:",
+        "aws ce get-cost-and-usage --profile acme-production-auto --time-period {time_period} --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE",
+        "Required parameters (each replaces its {name} above; its recorded value was a date, so pass the current one in the same form): time_period (recorded: Start=2026-10-01,End=2026-10-05)",
+      ].join("\n"),
+    ],
+    [
+      "describe_cloudwatch_alarms",
+      "Runs aws cloudwatch describe-alarms --profile {profile} --region {region} --alarm-names {alarm_names}. Returns the JSON result of describing the specified CloudWatch alarms. An agent should call this when it needs to retrieve alarm details instead of manually querying the AWS CLI. Learned from one run; defaults are the recorded values.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "aws cloudwatch describe-alarms --profile {profile} --region {region} --alarm-names {alarm_names}",
+        'Parameters (each replaces its {name} above; omitted, the recorded value runs): profile = acme-production-auto; region = us-east-1; alarm_names = ["acme-production-serverless-http-api-latency-p95","acme-production-serverless-active-daemons-anomaly"]',
+      ].join("\n"),
+    ],
+    [
+      "run_omp_grievances",
+      "Runs omp grievances, processing complaint records and generating resolution reports for the grievance management system. Learned from one run; defaults are the recorded values.",
+      [
+        "Recorded on this machine:",
+        "Step 1 runs this recorded shell program:",
+        "omp grievances",
+      ].join("\n"),
+    ],
+  ];
+
+  async function searchLater(query: string): Promise<string[]> {
+    return (await searchLearnedCatalog(laterTools, query)).tools.map((tool) => tool.name);
+  }
+
+  it("finds nothing for a question about the acme daemon that only recorded values mention", async () => {
+    // `acme` is only in the recorded profile and alarm names, `daemons` only in an alarm name,
+    // `service` only in `Key=SERVICE` and `machine` only in Resin's "Recorded on this machine".
+    expect(
+      await searchLater(
+        "check whether any acme daemon processes or services are currently running on this machine",
+      ),
+    ).toEqual([]);
+  });
+
+  it("still finds each tool for the questions it was learned for", async () => {
+    expect(
+      await searchLater(
+        "AWS Cost Explorer daily cost breakdown by service yesterday today get-cost-and-usage",
+      ),
+    ).toEqual(["get_aws_cost_and_usage"]);
+    expect(
+      await searchLater(
+        "CloudWatch describe-alarms production HTTP API 5xx alarm and investigate alarm history",
+      ),
+    ).toEqual(["describe_cloudwatch_alarms"]);
+    expect(
+      await searchLater(
+        "omp grievances list review current grievances and identify most destructive",
+      ),
+    ).toEqual(["run_omp_grievances"]);
+    expect(
+      await searchLater("PostHog errors analytics insights exception issues last 36 hours"),
+    ).toEqual([]);
   });
 });
