@@ -22,6 +22,13 @@ export {
 } from "./capture-coordinator.js";
 
 export {
+  CLOUD_UPLOAD_STATUS_FILE_NAME,
+  type CloudUploadStatus,
+  CloudUploadStatusRecorder,
+  parseCloudUploadStatus,
+} from "./cloud-upload-status.js";
+
+export {
   projectEventToMetadataOnly,
   projectEventMetadataOnly,
   extractParameterShape,

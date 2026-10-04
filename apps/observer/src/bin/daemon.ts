@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createLocalStateStore } from "@resin/db";
 import type { ActionableNotification } from "@resin/protocol";
 import { z } from "zod";
+import { CLOUD_UPLOAD_STATUS_FILE_NAME } from "../analytics/cloud-upload-status.js";
 import { CloudCredentialStore } from "../cloud-credentials.js";
 import { CloudRuntimeModule } from "../cloud-runtime.js";
 import {
@@ -27,6 +28,7 @@ import {
   FileControlPlaneApplyAdapter,
 } from "../control-plane.js";
 import { registeredDaemonModuleProviders } from "../daemon-extensions.js";
+import { createDaemonShutdown } from "../daemon-shutdown.js";
 import { DeviceSyncSignal } from "../device-sync-signal.js";
 import {
   bridgeErrorLogs,
@@ -45,6 +47,7 @@ import {
 } from "../notifications.js";
 import { OpportunityTrackingModule } from "../opportunity-module.js";
 import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
+import { pruneStaleStateFiles } from "../state-hygiene.js";
 import {
   type ConfigReloadResult,
   type DaemonHealthReport,
@@ -1113,6 +1116,12 @@ async function runForeground(options: {
   for (const recoveredSocketPath of lockResult.recoveredSocketPaths ?? []) {
     logger.info(`Removed orphaned daemon socket at ${recoveredSocketPath}`);
   }
+  const prunedStateFiles = await pruneStaleStateFiles(paths.stateDir);
+  if (prunedStateFiles.length > 0) {
+    logger.info(
+      `Removed ${prunedStateFiles.length} quarantined lock or temporary file(s) older than 7 days from ${paths.stateDir}`,
+    );
+  }
 
   try {
     await fs.promises.writeFile(paths.pidFilePath, String(process.pid), { mode: 0o644 });
@@ -1162,6 +1171,7 @@ async function runForeground(options: {
     remoteTelemetryConsent: cloudConsent,
     refreshRemoteTelemetryConsent: refreshCloudConsent,
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
+    uploadStatusPath: path.join(paths.stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME),
     captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
   const opportunityTrackingConfig = config.opportunityTracking;
@@ -1289,60 +1299,28 @@ async function runForeground(options: {
     paired: Boolean(deviceCredentials.credentials),
   });
 
-  let cleanupPromise: Promise<void> | null = null;
-  const cleanup = (reason: string): Promise<void> => {
-    if (cleanupPromise) return cleanupPromise;
-    clearInterval(notificationObserver);
-    cleanupPromise = (async () => {
-      logger.info("Cleaning up daemon resources...");
-      const reporter = getErrorReporter();
-      reporter.capture("daemon_stopped", { reason });
-      await reporter.flush();
-      try {
-        await supervisor.stop({ reason });
-      } catch {
-        // Ignore shutdown errors while releasing process resources.
-      }
-      try {
-        stateStore.close();
-      } catch {
-        // Ignore database close errors on shutdown.
-      }
-      try {
-        await ipcServer.stop();
-      } catch {
-        // Ignore.
-      }
-      try {
-        await lock.release();
-      } catch {
-        // Ignore.
-      }
-      try {
-        if (fs.existsSync(paths.pidFilePath)) {
-          await fs.promises.unlink(paths.pidFilePath);
-        }
-      } catch {
-        // Ignore.
-      }
-    })();
-    return cleanupPromise;
-  };
-
-  let exitRequested = false;
-  const exitAfterCleanup = (reason: string) => {
-    if (exitRequested) return;
-    exitRequested = true;
-    void cleanup(reason).finally(() => process.exit(0));
-  };
-
-  process.once("SIGINT", () => exitAfterCleanup("SIGINT"));
-  process.once("SIGTERM", () => exitAfterCleanup("SIGTERM"));
+  const shutdown = createDaemonShutdown({
+    logger,
+    exit: (code) => process.exit(code),
+    onCleanupStart: () => clearInterval(notificationObserver),
+    resources: {
+      stopSupervisor: (reason) => supervisor.stop({ reason }),
+      closeStateStore: () => stateStore.close(),
+      stopIpcServer: () => ipcServer.stop(),
+      releaseLock: () => lock.release(),
+      removePidFile: () => fs.promises.rm(paths.pidFilePath, { force: true }),
+      reportStopped: async (reason) => {
+        const reporter = getErrorReporter();
+        reporter.capture("daemon_stopped", { reason });
+        await reporter.flush();
+      },
+    },
+  });
 
   const shutdownWatcher = setInterval(() => {
     if (supervisor.currentState === "stopped") {
       clearInterval(shutdownWatcher);
-      exitAfterCleanup("IPC graceful shutdown");
+      shutdown.requestExit("IPC graceful shutdown");
     }
   }, 100);
   shutdownWatcher.unref();

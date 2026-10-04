@@ -592,6 +592,80 @@ describe("TrajectoryCaptureRuntimeModule", () => {
       },
     );
 
+    it("records the last upload the cloud accepted and keeps it across restarts", async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-upload-status-"));
+      const uploadStatusPath = path.join(stateDir, "cloud-upload-status.json");
+      const uploadedAt = Date.parse("2026-10-04T09:30:00.000Z");
+      const session = (sessionId: string): HarnessSession => ({
+        sessionId,
+        workspaceId: "ws-1",
+        harnessId: "claude-code",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      });
+      const record = (recordId: string): RawHarnessRecord => ({
+        recordId,
+        harnessId: "claude-code",
+        sourcePath: "/tmp/claude.jsonl",
+        rawPayload: JSON.stringify({ type: "message", role: "user", content: "hello" }),
+        // After both modules' privacy cutoffs (their clocks), so the records are uploadable.
+        timestamp: new Date(uploadedAt + 120_000).toISOString(),
+      });
+      try {
+        const module = new TrajectoryCaptureRuntimeModule({
+          observationClient: mockClient,
+          uploadStatusPath,
+          now: () => uploadedAt,
+        });
+        expect((await module.healthCheck()).details?.cloudUpload).toBeNull();
+
+        // A rejected batch is not an upload.
+        mockSendObservationBatch.mockRejectedValueOnce(
+          Object.assign(new Error("Rejected"), { status: 400 }),
+        );
+        const rejected = module.getCaptureCoordinator();
+        await rejected.handleRecords(session("sess-rejected"), [record("rec-0")], vi.fn());
+        await rejected.waitForIdle();
+        expect((await module.healthCheck()).details?.cloudUpload).toBeNull();
+        expect(fs.existsSync(uploadStatusPath)).toBe(false);
+
+        await rejected.handleRecords(session("sess-accepted"), [record("rec-1")], vi.fn());
+        await rejected.waitForIdle();
+        const recorded = {
+          version: 1,
+          lastSuccessAt: "2026-10-04T09:30:00.000Z",
+          lastBatchObservations: 1,
+          totalBatches: 1,
+          totalObservations: 1,
+          since: "2026-10-04T09:30:00.000Z",
+        };
+        expect((await module.healthCheck()).details?.cloudUpload).toEqual(recorded);
+        expect((await module.getDiagnostics()).cloudUpload).toEqual(recorded);
+
+        // A restarted daemon (new module) still reports it, and keeps counting from it.
+        const restarted = new TrajectoryCaptureRuntimeModule({
+          observationClient: mockClient,
+          uploadStatusPath,
+          now: () => uploadedAt + 60_000,
+        });
+        expect((await restarted.healthCheck()).details?.cloudUpload).toEqual(recorded);
+        const coordinator = restarted.getCaptureCoordinator();
+        await coordinator.handleRecords(session("sess-next"), [record("rec-2")], vi.fn());
+        await coordinator.waitForIdle();
+        expect((await restarted.healthCheck()).details?.cloudUpload).toEqual({
+          ...recorded,
+          lastSuccessAt: "2026-10-04T09:31:00.000Z",
+          totalBatches: 2,
+          totalObservations: 2,
+        });
+        expect(JSON.parse(fs.readFileSync(uploadStatusPath, "utf8")).totalBatches).toBe(2);
+      } finally {
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it("processes and submits observation batch for malformed attribution metadata without trajectory submission", async () => {
       const module = new TrajectoryCaptureRuntimeModule({
         observationClient: mockClient,
