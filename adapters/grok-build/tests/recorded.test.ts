@@ -323,8 +323,18 @@ describe("recorded grok 1.0.13 sessions", () => {
     const shellMeta = { "x.ai/tool": { name: "run_terminal_command", namespace: "grok_build" } };
     const useToolMeta = { "x.ai/tool": { name: "use_tool", namespace: "grok_build" } };
     const opened = [
-      decode({ sessionUpdate: "tool_call", toolCallId: "sh", title: "run_terminal_command", _meta: shellMeta }),
-      decode({ sessionUpdate: "tool_call", toolCallId: "mcp", title: "use_tool", _meta: useToolMeta }),
+      decode({
+        sessionUpdate: "tool_call",
+        toolCallId: "sh",
+        title: "run_terminal_command",
+        _meta: shellMeta,
+      }),
+      decode({
+        sessionUpdate: "tool_call",
+        toolCallId: "mcp",
+        title: "use_tool",
+        _meta: useToolMeta,
+      }),
       decode({ sessionUpdate: "tool_call", toolCallId: "bare", title: "list_dir", _meta: {} }),
     ];
     expect(opened).toEqual([[], [], []]);
@@ -380,8 +390,18 @@ describe("recorded grok 1.0.13 sessions", () => {
     });
     // A call no update ever completed is still recorded, with its result, and no arguments.
     expect(bareDone).toEqual([
-      expect.objectContaining({ type: "tool_call", callId: "bare", toolName: "list_dir", parameters: {} }),
-      expect.objectContaining({ type: "tool_result", callId: "bare", toolName: "list_dir", result: "a.py" }),
+      expect.objectContaining({
+        type: "tool_call",
+        callId: "bare",
+        toolName: "list_dir",
+        parameters: {},
+      }),
+      expect.objectContaining({
+        type: "tool_result",
+        callId: "bare",
+        toolName: "list_dir",
+        result: "a.py",
+      }),
     ]);
   });
 });
