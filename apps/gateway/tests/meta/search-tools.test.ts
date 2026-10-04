@@ -363,3 +363,102 @@ describe("search_tools Meta-Tool", () => {
     expect(tool?.capabilities.filesystem?.allowedPaths).toContain("/data");
   });
 });
+
+describe("search_tools ranking over learned tools", () => {
+  // Learned tools' descriptions share this boilerplate around the recorded program, and all carry
+  // the `shell` tag, so only the program and summary distinguish them.
+  const learned = (summary: string, program: string) =>
+    [
+      `Runs ${summary}. Learned from one run; defaults are the recorded values.`,
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      program,
+      "Parameters (each replaces its {name} above; omitted, the recorded value runs)",
+    ].join("\n");
+  const workspace: [name: string, summary: string, program: string][] = [
+    ["watch_pr_checks", "watches the pull request checks", "gh pr checks {pr} --watch"],
+    [
+      "rerun_failed_pr_checks",
+      "reruns failed pull request checks",
+      "gh run rerun {run} --failed && gh pr checks {pr}",
+    ],
+    ["run_workspace_suite", "the workspace suite", "pnpm test --filter {package}"],
+    ["filter_test_output", "filters test output down to failures", "grep -E 'FAIL' {log}"],
+    ["filter_test_output_summary", "summarizes test output", "tail -n 40 {log}"],
+    ["rerun_flaky_test", "reruns one flaky test", "npx vitest run {file}"],
+    ["format_luau", "formats Luau sources", "stylua --check src"],
+    [
+      "watch_lune_build",
+      "rebuilds the place on change",
+      "lune run build --watch && stylua --check src",
+    ],
+    ["lint_luau", "lints Luau sources", "selene src && stylua --check src"],
+    [
+      "fetch_latest_release",
+      "downloads the latest release",
+      "curl -sL https://example.com/releases/latest -o {out}",
+    ],
+    ["install_dependencies", "installs dependencies", "pnpm install --frozen-lockfile"],
+    ["deploy_docs", "publishes the docs", "rsync -a docs/ {host}:/srv/docs"],
+  ];
+
+  async function searchLearned(query: string): Promise<SearchToolsResponse> {
+    const registry = new ToolRegistry();
+    for (const [name, summary, program] of workspace) {
+      await registry.registerTool(
+        makeManifest({
+          id: `tool_${name}`,
+          name,
+          description: learned(summary, program),
+          metadata: { tags: ["shell"] },
+        }),
+        undefined,
+        { workspaceId: "ws-learned" },
+      );
+    }
+    return parseSearchResponse(
+      await createSearchToolsHandler(registry)(makeContext("ws-learned"), { query, limit: 100 }),
+    );
+  }
+
+  it("finds the gh tools for a gh command line, not Luau tools sharing --check or --watch", async () => {
+    const result = await searchLearned("gh pr checks --watch");
+
+    expect(result.tools.map((t) => t.name)).toEqual(["watch_pr_checks", "rerun_failed_pr_checks"]);
+    expect(result.total).toBe(2);
+  });
+
+  it("ranks the tool running `pnpm test` first and drops tools that only mention test", async () => {
+    const names = (await searchLearned("pnpm test")).tools.map((t) => t.name);
+
+    expect(names[0]).toBe("run_workspace_suite");
+    expect(names).not.toContain("filter_test_output");
+    expect(names).not.toContain("filter_test_output_summary");
+    expect(names).not.toContain("rerun_flaky_test");
+  });
+
+  it("matches whole words, so `test` does not find a tool that only says `latest`", async () => {
+    const names = (await searchLearned("test")).tools.map((t) => t.name);
+
+    expect(names).not.toContain("fetch_latest_release");
+    expect(names.sort()).toEqual([
+      "filter_test_output",
+      "filter_test_output_summary",
+      "rerun_flaky_test",
+      "run_workspace_suite",
+    ]);
+  });
+
+  it("ignores words every learned tool shares", async () => {
+    expect((await searchLearned("recorded shell program")).total).toBe(0);
+    expect((await searchLearned("run vitest tests")).tools.map((t) => t.name)).toEqual([
+      "rerun_flaky_test",
+    ]);
+  });
+
+  it("still ranks an exact tool name first", async () => {
+    const names = (await searchLearned("filter_test_output")).tools.map((t) => t.name);
+
+    expect(names.slice(0, 2)).toEqual(["filter_test_output", "filter_test_output_summary"]);
+  });
+});

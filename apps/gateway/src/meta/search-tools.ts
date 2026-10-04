@@ -232,72 +232,154 @@ export function isToolInScope(tool: RegistryTool, context: WorkspaceContext): bo
   return false;
 }
 
+/** Lowercases text and splits it into whole words, folding a plural `s` so `tests` finds `test`. */
+function searchTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map((token) =>
+      token.length > 3 && token.endsWith("s") && !token.endsWith("ss") ? token.slice(0, -1) : token,
+    );
+}
+
+/** Whether `needle` occurs as a contiguous run of `haystack`. */
+function containsSequence(haystack: string[], needle: string[]): boolean {
+  for (let start = 0; start + needle.length <= haystack.length; start++) {
+    if (needle.every((token, i) => haystack[start + i] === token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The text of one candidate tool that a query is matched against. */
+interface SearchableTool {
+  /** Exposed and registered names. */
+  names: string[];
+  tags: string[];
+  /** What the agent sees, including a learned tool's local recorded program. */
+  description: string;
+  isPinned: boolean;
+}
+
+// A query word counts more in a tool's name than in its tags, and more there than in its description.
+const NAME_WEIGHT = 2;
+const TAG_WEIGHT = 1.5;
+const DESCRIPTION_WEIGHT = 1;
+// Bonuses for searching by a tool's name; they outrank any word match (worth at most LEXICAL_SCALE).
+const EXACT_NAME_BONUS = 100;
+const NAME_PREFIX_BONUS = 60;
+const NAME_PHRASE_BONUS = 35;
+const LEXICAL_SCALE = 20;
+const PINNED_BONUS = 5;
+// A word in more than half the candidates (and in more than this many) cannot by itself make a tool
+// match: learned tools share boilerplate ("Runs ...", "recorded shell program", the `shell` tag).
+const UBIQUITOUS_MIN_TOOLS = 5;
+// A tool covering less than this share of the query weight the best tool covers is dropped as noise
+// (so its Lucene-style coverage-squared relevance stays above ~35% of the best).
+const RELATIVE_COVERAGE_FLOOR = 0.6;
+
 /**
- * Computes lexical and tag match score for ranking.
+ * Scores each tool against the query, or returns undefined for a tool that does not match.
+ *
+ * Query words are weighted by inverse document frequency over the candidates, so a word nearly every
+ * tool contains contributes almost nothing and a distinctive one (`pnpm`, `gh`) decides the ranking.
+ * A tool's word score is scaled by the share of the query's weight it covers, so tools matching the
+ * whole command outrank tools matching one common word of it. Searching by name earns a bonus.
  */
-function computeToolScore(
-  tool: RegistryTool,
-  description: string,
-  queryLower: string,
-  tags: string[],
-  isPinned: boolean,
-): number {
-  if (!queryLower) {
-    return isPinned ? 10 : 0;
-  }
+function scoreToolsForQuery(
+  query: string,
+  tools: readonly SearchableTool[],
+): (number | undefined)[] {
+  const queryTokens = [...new Set(searchTokens(query))];
+  const documents = tools.map((tool) => {
+    const nameSequences = tool.names.map(searchTokens);
+    const name = new Set(nameSequences.flat());
+    const tags = new Set(tool.tags.flatMap(searchTokens));
+    const description = new Set(searchTokens(tool.description));
+    return { nameSequences, name, tags, description };
+  });
 
-  let score = 0;
-  const nameLower = (tool.exposedName || tool.name).toLowerCase();
-  const rawNameLower = tool.name.toLowerCase();
-  const descLower = description.toLowerCase();
-
-  // Exact name match
-  if (nameLower === queryLower || rawNameLower === queryLower) {
-    score += 100;
-  }
-  // Name prefix match
-  else if (nameLower.startsWith(queryLower) || rawNameLower.startsWith(queryLower)) {
-    score += 60;
-  }
-  // Substring in name
-  else if (nameLower.includes(queryLower) || rawNameLower.includes(queryLower)) {
-    score += 35;
-  }
-
-  // Description match
-  if (descLower.includes(queryLower)) {
-    score += 15;
-  }
-
-  // Word token matches
-  const queryTokens = queryLower.split(/\s+/).filter(Boolean);
+  const total = documents.length;
+  const idf = new Map<string, number>();
+  const informative = new Set<string>();
   for (const token of queryTokens) {
-    if (nameLower.includes(token)) {
-      score += 10;
+    const frequency = documents.filter(
+      (doc) => doc.name.has(token) || doc.tags.has(token) || doc.description.has(token),
+    ).length;
+    if (frequency === 0) {
+      continue;
     }
-    if (descLower.includes(token)) {
-      score += 5;
-    }
-    if (tags.some((t) => t.includes(token))) {
-      score += 12;
-    }
-  }
-
-  // Tag matches
-  for (const tag of tags) {
-    if (tag === queryLower) {
-      score += 25;
-    } else if (tag.includes(queryLower)) {
-      score += 10;
+    idf.set(token, Math.log(1 + (total - frequency + 0.5) / (frequency + 0.5)));
+    if (frequency <= total / 2 || frequency <= UBIQUITOUS_MIN_TOOLS) {
+      informative.add(token);
     }
   }
+  const queryWeight = [...idf.values()].reduce((sum, weight) => sum + weight, 0);
 
-  // Boost for pinned tools
-  if (isPinned) {
-    score += 5;
-  }
+  const scored = tools.map((tool, index) => {
+    const doc = documents[index];
+    if (!doc) {
+      return undefined;
+    }
+    const startsWithQuery = (seq: string[]) =>
+      queryTokens.length > 0 && queryTokens.every((token, i) => seq[i] === token);
+    const exact =
+      tool.names.some((name) => name.toLowerCase() === query) ||
+      doc.nameSequences.some((seq) => seq.length === queryTokens.length && startsWithQuery(seq));
+    const prefix =
+      !exact &&
+      (tool.names.some((name) => name.toLowerCase().startsWith(query)) ||
+        doc.nameSequences.some(startsWithQuery));
+    const phrase =
+      queryTokens.length > 0 && doc.nameSequences.some((seq) => containsSequence(seq, queryTokens));
 
-  return score;
+    let matchedWeight = 0;
+    let fieldWeighted = 0;
+    let matchesInformative = false;
+    for (const [token, weight] of idf) {
+      const fieldWeight = doc.name.has(token)
+        ? NAME_WEIGHT
+        : doc.tags.has(token)
+          ? TAG_WEIGHT
+          : doc.description.has(token)
+            ? DESCRIPTION_WEIGHT
+            : 0;
+      if (fieldWeight === 0) {
+        continue;
+      }
+      matchedWeight += weight;
+      fieldWeighted += weight * fieldWeight;
+      matchesInformative ||= informative.has(token);
+    }
+    const coverage = queryWeight > 0 ? matchedWeight / queryWeight : 0;
+    const lexical =
+      queryWeight > 0
+        ? (LEXICAL_SCALE * fieldWeighted * coverage) / (NAME_WEIGHT * queryWeight)
+        : 0;
+    const bonus = exact
+      ? EXACT_NAME_BONUS
+      : prefix
+        ? NAME_PREFIX_BONUS
+        : phrase
+          ? NAME_PHRASE_BONUS
+          : 0;
+    return { lexical, bonus, coverage, alwaysMatches: exact || prefix, matchesInformative };
+  });
+
+  const bestCoverage = Math.max(0, ...scored.map((s) => (s?.matchesInformative ? s.coverage : 0)));
+  return scored.map((s, index) => {
+    if (!s) {
+      return undefined;
+    }
+    const relevant = s.matchesInformative && s.coverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
+    if (!s.alwaysMatches && !relevant) {
+      return undefined;
+    }
+    const score = s.bonus + s.lexical + (tools[index]?.isPinned ? PINNED_BONUS : 0);
+    return Math.round(score * 100) / 100;
+  });
 }
 
 /**
@@ -391,13 +473,9 @@ export function createSearchToolsHandler(
       }
     }
 
-    // Filter, Score, and Rank
-    interface ScoredTool {
-      item: SearchToolsResultItem;
-      score: number;
-    }
-
-    const scoredTools: ScoredTool[] = [];
+    // Filter, then score against the tools that remain: word weights depend on the whole set.
+    // The registered name stays searchable when the exposed one is disambiguated.
+    const filtered: { item: SearchToolsResultItem; registeredName: string }[] = [];
 
     for (const { tool, isPinned, isDisabled } of candidateMap.values()) {
       const tags = extractTags(tool);
@@ -421,31 +499,42 @@ export function createSearchToolsHandler(
         }
       }
 
-      const description = describeToolLocally(tool, context, describer);
-      const score = computeToolScore(tool, description, query, tags, isPinned);
-
-      // If query was specified, exclude tools that didn't match at all
-      if (query && score <= 0) {
-        continue;
-      }
-
-      const resultItem: SearchToolsResultItem = {
-        toolId: tool.toolId,
-        name: tool.exposedName || tool.name,
-        version: tool.version,
-        scope: tool.scope ?? "workspace",
-        status: isDisabled ? "disabled" : tool.status || "active",
-        description,
-        inputSchema: toolInputSchema(tool),
-        tags,
-        capabilities: capSummary,
-        isPinned,
-        isDisabled,
-        score: query ? score : undefined,
-      };
-
-      scoredTools.push({ item: resultItem, score });
+      filtered.push({
+        registeredName: tool.name,
+        item: {
+          toolId: tool.toolId,
+          name: tool.exposedName || tool.name,
+          version: tool.version,
+          scope: tool.scope ?? "workspace",
+          status: isDisabled ? "disabled" : tool.status || "active",
+          description: describeToolLocally(tool, context, describer),
+          inputSchema: toolInputSchema(tool),
+          tags,
+          capabilities: capSummary,
+          isPinned,
+          isDisabled,
+          score: undefined,
+        },
+      });
     }
+
+    const scores = query
+      ? scoreToolsForQuery(
+          query,
+          filtered.map(({ item, registeredName }) => ({
+            names: [item.name, registeredName],
+            tags: item.tags,
+            description: item.description,
+            isPinned: item.isPinned,
+          })),
+        )
+      : [];
+    const scoredTools = query
+      ? filtered.flatMap(({ item }, index) => {
+          const score = scores[index];
+          return score === undefined ? [] : [{ item: { ...item, score }, score }];
+        })
+      : filtered.map(({ item }) => ({ item, score: 0 }));
 
     // Sort by score descending, then name ascending
     scoredTools.sort((a, b) => {
