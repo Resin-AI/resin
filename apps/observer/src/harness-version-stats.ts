@@ -105,7 +105,8 @@ export const EXPECTED_PASSTHROUGH_RECORD_TYPES: Readonly<Record<string, readonly
   "claude-code": ["attachment", "queue-operation", "atis-latch", "last-prompt", "mode", "system"],
   // Per-model-call usage the next assistant message did not claim.
   "muse-code": ["muse.model_completed"],
-  // Session configuration changes and harness-injected reminders that are not user prompts.
+  // Session configuration changes, harness-injected reminders that are not user prompts, and
+  // (18.6.1+) `model_usage`: usage of an auxiliary model call such as the auto-thinking judge.
   omp: [
     "title",
     "model_change",
@@ -113,6 +114,7 @@ export const EXPECTED_PASSTHROUGH_RECORD_TYPES: Readonly<Record<string, readonly
     "service_tier_change",
     "credential_pin",
     "custom_message",
+    "model_usage",
   ],
   pi: ["model_change", "thinking_level_change", "context_edit", "session_info", "usage"],
 };

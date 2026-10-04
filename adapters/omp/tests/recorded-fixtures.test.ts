@@ -38,6 +38,12 @@ const RECORDINGS: Record<string, Recording> = {
     evalSpill: "2026-10-04T09-31-03-015Z_01a10640-a7e7-74f3-8415-1b9e7d91c930",
     aborted: "2026-10-04T09-31-20-882Z_01a10640-edb2-74c0-a7bc-d6a71955670a.jsonl",
   },
+  "18.6.1": {
+    main: "2026-10-04T17-44-12-357Z_01a10804-2745-7541-a62f-379131b16485",
+    agentName: "CompactTiglon",
+    evalSpill: "2026-10-04T17-43-32-460Z_01a10803-8b6c-706b-9b10-7e45dca576e0",
+    aborted: "2026-10-04T17-43-51-727Z_01a10803-d6af-7424-bcea-9d9aeadf5eeb.jsonl",
+  },
 };
 
 interface Decoded {
@@ -110,7 +116,7 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
     const shout = calls.find((call) => call.toolName === "shout");
     expect(shout?.connection).toBe("fixture-echo");
     expect(shout?.parameters).toEqual({ text: "resin fixture" });
-    // OMP 18.6.0 writes the edit's and the task's start markers without arguments; each call is
+    // OMP 18.6.x writes the edit's and the task's start markers without arguments; each call is
     // recorded with the arguments its assistant record carries, not `{}`.
     const edit = calls.find((call) => call.toolName === "edit");
     expect(JSON.stringify(edit?.parameters)).toContain("Hi, ");

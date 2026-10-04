@@ -21,6 +21,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
   it("reports OMP releases without recorded fixtures as untested", () => {
     expect(classifyHarnessVersion("18.3.2", ompHarness.testedVersions)).toBe("tested");
     expect(classifyHarnessVersion("18.6.0", ompHarness.testedVersions)).toBe("tested");
+    expect(classifyHarnessVersion("18.6.1", ompHarness.testedVersions)).toBe("tested");
     expect(classifyHarnessVersion("18.4.5", ompHarness.testedVersions)).toBe("untested");
     expect(classifyHarnessVersion("17.3.8", ompHarness.testedVersions)).toBe("untested");
     expect(classifyHarnessVersion("0.0.0", ompHarness.testedVersions)).toBe("unknown");

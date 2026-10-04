@@ -38,7 +38,7 @@ export const ompInstallHarness: HarnessInstallDefinition = {
   testedVersions: OMP_TESTED_VERSIONS,
   knownLimits: [
     "Subagent sessions are learned as their own sessions; a workflow split between a parent and its subagents is not learned as one tool.",
-    "Built-in tool replay runs the OMP SDK Resin pins (18.6.0) under Bun; a built-in that SDK does not export fails with an explicit error.",
+    "Built-in tool replay runs the OMP SDK Resin pins (18.6.1) under Bun; a built-in that SDK does not export fails with an explicit error.",
   ],
   probeInstallation: ({ targetPath, home, env }) =>
     probeOmpInstallation({ customConfigPath: targetPath, env, homeDir: home }),
