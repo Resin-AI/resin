@@ -274,15 +274,12 @@ function redirectionAt(
 /**
  * A segment's command and argument words with their quotes removed, and whether it redirects, or
  * undefined when the segment is not in the grammar: an unquoted character outside it, a redirection
- * outside it, before the command word, or without a non-empty target word. With
- * `stderrIntoPipe`, a `2>&1` on a stage before the last is in the grammar too: it only joins that
- * stage's stderr to the pipe, which every POSIX shell and zsh read the same way.
+ * outside it, before the command word, or without a non-empty target word.
  */
 function segmentWords(
   text: string,
   version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
   zsh = false,
-  stderrIntoPipe = false,
 ): { words: string[]; redirects: boolean; pipeline: string[][] } | undefined {
   // From version 3 a segment may be a pipeline: each `|`-separated command's words, in order.
   const pipeline: string[][] = [[]];
@@ -343,7 +340,7 @@ function segmentWords(
       // Only the first stage of a pipeline reads a file and only the last writes one: zsh would
       // otherwise join the redirection and the pipe (MULTIOS), which no other shell does.
       if (input && stage > 0) return undefined;
-      if (!input && !(stderrIntoPipe && text.startsWith("2>&1", index))) outputStages.push(stage);
+      if (!input) outputStages.push(stage);
       index = redirection.end;
       if (!redirection.target) continue;
       while (isBlank(text[index])) index += 1;
@@ -369,9 +366,8 @@ function runsExternalCommand(
   text: string,
   version: ShellAndChainSplitterVersion,
   zsh: boolean,
-  stderrIntoPipe: boolean,
 ): boolean {
-  const pipeline = segmentWords(text, version, zsh, stderrIntoPipe)?.pipeline;
+  const pipeline = segmentWords(text, version, zsh)?.pipeline;
   return (
     pipeline !== undefined &&
     pipeline.every((command) => {
@@ -397,21 +393,6 @@ export function splitShellAndChain(
   source: string,
   version: ShellAndChainSplitterVersion = SHELL_AND_CHAIN_SPLITTER_VERSION,
 ): ShellAndChain | undefined {
-  const scanned = scanShellSegments(shell, source, version, false);
-  if (scanned === undefined || scanned.segments.length < 2) return undefined;
-  return { version, segments: scanned.segments };
-}
-
-/**
- * The segments of a program in the grammar above, one or more, and how many separators the scan
- * cut it at; undefined when `shell` is not a POSIX shell or any of it is outside the grammar.
- */
-function scanShellSegments(
-  shell: string,
-  source: string,
-  version: ShellAndChainSplitterVersion,
-  stderrIntoPipe: boolean,
-): { segments: ShellAndChainSegment[]; separators: number } | undefined {
   if (POSIX_SHELLS[shell] !== true) return undefined;
   const zsh = shell === ZSH_OR_SH;
   const cuts: Array<[number, number]> = [];
@@ -471,7 +452,7 @@ function scanShellSegments(
     wordStart = false;
     if (char === "'" || char === '"') quote = char;
   }
-  if (quote !== undefined) return undefined;
+  if (quote !== undefined || cuts.length === 0) return undefined;
   const segments: ShellAndChainSegment[] = [];
   let from = 0;
   for (const [cutStart, cutEnd] of [...cuts, [source.length, source.length] as [number, number]]) {
@@ -485,10 +466,10 @@ function scanShellSegments(
     if (start === end && lines && segments.length > 0) continue;
     if (start === end) return undefined;
     const text = source.slice(start, end);
-    if (!runsExternalCommand(text, version, zsh, stderrIntoPipe)) return undefined;
+    if (!runsExternalCommand(text, version, zsh)) return undefined;
     segments.push({ start, end, text });
   }
-  if (segments.length === 0) return undefined;
+  if (segments.length < 2) return undefined;
   // Defence in depth: the segments and the recorded separators between them are the source.
   let rejoined = source.slice(0, segments[0]!.start);
   for (const [index, segment] of segments.entries()) {
@@ -510,68 +491,7 @@ function scanShellSegments(
   }
   if (!/^[ \t]*$/.test(source.slice(0, segments[0]!.start)) || rejoined !== source)
     return undefined;
-  return { segments, separators: cuts.length };
-}
-
-/** One command of a single-pipeline program, with its offsets in the recorded source. */
-export interface ShellPipelineStage {
-  /** Half-open [start, end) offsets of the stage's text in the source, without blanks around it. */
-  start: number;
-  end: number;
-  /** Offset of the `|` before this stage; undefined for the first stage. */
-  pipe?: number;
-  /** The command word and its arguments, quotes removed; redirections and their targets omitted. */
-  words: string[];
-  /** Whether the stage carries any redirection. */
-  redirects: boolean;
-}
-
-/**
- * The commands of a program that is exactly one pipeline of external commands in the current
- * splitter grammar — one segment, no `&&`, `;` or line-break separator — or undefined. Beyond the
- * chain grammar, a stage before the last may carry `2>&1`, joining its stderr to the pipe.
- */
-export function shellPipelineStages(
-  shell: string,
-  source: string,
-): ShellPipelineStage[] | undefined {
-  const version = SHELL_AND_CHAIN_SPLITTER_VERSION;
-  const scanned = scanShellSegments(shell, source, version, true);
-  if (scanned === undefined || scanned.separators !== 0 || scanned.segments.length !== 1) {
-    return undefined;
-  }
-  const segment = scanned.segments[0]!;
-  // The grammar quotes only plain single- and double-quoted strings: an unquoted `|` is a pipe.
-  const pipes: number[] = [];
-  let quote: string | undefined;
-  for (let index = segment.start; index < segment.end; index += 1) {
-    const char = source[index]!;
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-    } else if (char === "'" || char === '"') {
-      quote = char;
-    } else if (char === "|") {
-      pipes.push(index);
-    }
-  }
-  const stages: ShellPipelineStage[] = [];
-  const bounds = [segment.start - 1, ...pipes, segment.end];
-  for (let position = 0; position + 1 < bounds.length; position += 1) {
-    let start = bounds[position]! + 1;
-    let end = bounds[position + 1]!;
-    while (start < end && isBlank(source[start])) start += 1;
-    while (end > start && isBlank(source[end - 1])) end -= 1;
-    const parsed = segmentWords(source.slice(start, end), version, shell === ZSH_OR_SH);
-    if (parsed === undefined || parsed.pipeline.length !== 1) return undefined;
-    stages.push({
-      start,
-      end,
-      ...(position === 0 ? {} : { pipe: bounds[position]! }),
-      words: parsed.words,
-      redirects: parsed.redirects,
-    });
-  }
-  return stages;
+  return { version, segments };
 }
 
 /**

@@ -3,7 +3,6 @@ import {
   DISPLAY_FILTER_VERSION,
   RECORDED_WORKFLOW_SCHEMA_VERSION,
   splitDisplayFilter,
-  splitShellAndChain,
   tokenizeProgram,
   validateRecordedWorkflow,
 } from "../src/index.js";
@@ -36,6 +35,33 @@ describe("splitDisplayFilter", () => {
       command: "pytest -q",
       filter: "grep -v 'passed' | tail -2",
     });
+    // A chain keeps its earlier segments verbatim, builtins included; quotes may hold Unicode.
+    expect(
+      splitDisplayFilter(
+        "bash",
+        'cd packages/frontend && npx vitest run a.test.tsx 2>&1 | grep -E "×|FAIL" | head -40',
+      ),
+    ).toEqual({
+      command: "cd packages/frontend && npx vitest run a.test.tsx 2>&1",
+      filter: 'grep -E "×|FAIL" | head -40',
+    });
+    expect(splitDisplayFilter("bash", "sleep 5; gh pr checks 12 --watch 2>&1 | tail -4")).toEqual({
+      command: "sleep 5; gh pr checks 12 --watch 2>&1",
+      filter: "tail -4",
+    });
+    expect(splitDisplayFilter("dash", "./prep\n./run =x 2>&1| grep '✓ ok' \n")).toEqual({
+      command: "./prep\n./run =x 2>&1",
+      filter: "grep '✓ ok'",
+    });
+    expect(splitDisplayFilter("bash", "grep -c x notes | sort && make | tail -2")).toEqual({
+      command: "grep -c x notes | sort && make",
+      filter: "tail -2",
+    });
+    // A double-quoted pattern may end in `$` and carry a backslash it does not escape.
+    expect(splitDisplayFilter("bash", 'make 2>&1 | grep -vE "^\\s+at " | grep -v "^$"')).toEqual({
+      command: "make 2>&1",
+      filter: 'grep -vE "^\\s+at " | grep -v "^$"',
+    });
   });
 
   it("splits nothing that is not a display filter", () => {
@@ -62,33 +88,47 @@ describe("splitDisplayFilter", () => {
       expect(splitDisplayFilter("bash", text), text).toBeUndefined();
   });
 
-  it("splits only one pipeline in the chain grammar under a POSIX shell and a known version", () => {
+  it("splits only a program in its own grammar under a POSIX shell and a known version", () => {
     for (const text of [
-      "a && b | tail",
-      "make; ls | tail",
-      "make | tail\n",
-      "make\nls | tail",
-      "tail -5",
-      "grep x notes | head -5",
-      "echo $HOME | tail",
+      "a | grep x || true",
+      'a | grep "$X"',
+      "a $(b) | tail",
+      "a > f | tail",
       "make | tail -$N",
-      "cd out | tail",
       "make || ls | tail",
       "make |& tail",
       "make >&2 | tail",
-      "make > out | tail",
+      "make 1>&2 | tail",
+      "make & ls | tail",
+      "a ;; b | tail",
+      "a | | tail",
+      "; a | tail",
+      "a\n\nb | tail",
+      "a | tail;",
+      "a | tail &&",
+      "a |\ntail",
+      "2>&1 | tail",
+      "a 2>&1x | tail",
+      "a ×| tail",
+      "a 'x\ny' | tail",
+      "a | grep 'x\ty'",
+      'a | grep "x\\\\y"',
+      'a | grep "x\\$y"',
+      'a | grep "x\\"y"',
+      'a | grep "x\\"',
+      'a | grep "x$y"',
+      'a | grep "x`y`"',
+      'a | grep "x!"',
+      "a | grep 'unterminated",
+      "a | tail # note",
+      "tail -5",
+      "grep x notes | head -5",
+      "make | tail && ls",
     ])
       expect(splitDisplayFilter("bash", text), text).toBeUndefined();
     expect(splitDisplayFilter("pwsh", "make | tail -5")).toBeUndefined();
     expect(splitDisplayFilter("zsh", "make | tail -5")).toBeUndefined();
     expect(splitDisplayFilter("bash", "make | tail -5", 2)).toBeUndefined();
-  });
-
-  it("leaves the && chain grammar unchanged", () => {
-    expect(splitShellAndChain("bash", "pnpm vitest run 2>&1 | tail -30 && ls")).toBeUndefined();
-    expect(splitShellAndChain("bash", "pnpm vitest run | tail -30 && ls")?.segments).toHaveLength(
-      2,
-    );
   });
 });
 
