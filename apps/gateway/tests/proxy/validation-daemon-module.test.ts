@@ -395,7 +395,9 @@ describe("the daemon's validation module", () => {
 
   it("keeps a token owed while another process holds the shared lease, and lists once it frees", async () => {
     const recorded = recording();
-    const cloud = fakeCloud(askFor(recorded.plan));
+    const { promise: listingHeld, resolve: releaseListing } = Promise.withResolvers<void>();
+    // Skipped passes list nothing, so the first listing is the one after the lease frees.
+    const cloud = fakeCloud(askFor(recorded.plan), listingHeld);
     vi.stubGlobal("fetch", cloud.fetchImpl);
     const leasePath = path.join(context.paths.stateDir, WORKFLOW_VALIDATION_LEASE_FILE_NAME);
     await fsPromises.mkdir(path.dirname(leasePath), { recursive: true });
@@ -433,12 +435,17 @@ describe("the daemon's validation module", () => {
       expect(listings()).toBe(0);
 
       await other.release();
+      // The pass that took the freed lease is listing; the same token arriving meanwhile is
+      // already covered by it and must not start another pass.
+      await vi.waitFor(() => expect(listings()).toBe(1));
+      deviceSync.publish(syncAnswer("v:1"));
+      releaseListing();
       await vi.waitFor(() => expect(cloud.decisions).toHaveLength(1));
-      const listed = listings();
-      // Listed once the lease freed; the same token then lists nothing more.
+      // Once listed, the same token lists nothing more either. Asserting that nothing happens
+      // needs a real window: no signal fires for a pass that is (correctly) never started.
       deviceSync.publish(syncAnswer("v:1"));
       await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(listings()).toBe(listed);
+      expect(listings()).toBe(1);
     } finally {
       await module.stop(moduleContext());
     }

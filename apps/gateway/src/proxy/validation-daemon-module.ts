@@ -56,6 +56,8 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   private followedToken?: string;
   /** The token a pass is owed for, while it is not yet listed. */
   private owedToken?: string;
+  /** The token a pass is running for now; the same token seen again meanwhile waits for it. */
+  private listingToken?: string;
   private retryTimer?: NodeJS.Timeout;
 
   /**
@@ -120,6 +122,8 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
     }
     const token = `${accountId}\u0000${userId}\u0000${validationToken}`;
     if (token === this.followedToken || !this.worker.isRunning()) return;
+    // A pass already running for this still-owed token lists for it; another would list twice.
+    if (token === this.owedToken && token === this.listingToken) return;
     this.owedToken = token;
     void this.listFor(token);
   }
@@ -127,10 +131,13 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   /** Runs a pass whose listing starts now; records `token` only once such a listing succeeded. */
   private async listFor(token: string): Promise<void> {
     const seenAt = Date.now();
+    this.listingToken = token;
     try {
       await this.worker.runFresh();
     } catch {
       // A pass reports its own failures; whether it listed is read below.
+    } finally {
+      if (this.listingToken === token) this.listingToken = undefined;
     }
     if (this.owedToken !== token) return;
     if (this.worker.listedAt() >= seenAt) {
