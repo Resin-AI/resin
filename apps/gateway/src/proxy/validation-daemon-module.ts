@@ -178,6 +178,7 @@ export function createWorkflowValidationDaemonModule(
       }),
       askLedger: new FileValidationAskLedger({
         filePath: path.join(context.paths.stateDir, WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME),
+        log: (message) => context.logger.warn(message),
       }),
       log: (message) => context.logger.info(message),
       ...(context.deviceSync

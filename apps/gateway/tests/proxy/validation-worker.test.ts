@@ -377,16 +377,20 @@ describe("WorkflowValidationWorker", () => {
         ? jsonResponse({ requests: [requestFor(plan)] })
         : jsonResponse({ status: "recorded" }),
     );
+    const admit = vi.fn(async () => ({ admitted: true }) as const);
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       privateValues: recorded.store,
       localCalls: { lookup },
+      askLedger: { admit },
       now: () => new Date(DECIDED_AT),
     });
 
     expect(await worker.runOnce()).toMatchObject({ pending: 1, answered: 0 });
     expect(calls.filter((call) => call.init.method === "POST")).toHaveLength(0);
+    // Another device's ask spends none of this device's daily checks.
+    expect(admit).not.toHaveBeenCalled();
   });
 
   it("still answers a failed decision when this device recorded the demonstration", async () => {
@@ -423,7 +427,7 @@ describe("WorkflowValidationWorker", () => {
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       createValidator: () => async () => ({ verdicts: [], unavailable: "stub" }),
       askLedger: {
-        admit: (ask) => {
+        admit: async (ask) => {
           admitted.push([...ask.keys]);
           return { admitted: false, reason: "ledger-unavailable" };
         },
@@ -452,7 +456,7 @@ describe("WorkflowValidationWorker", () => {
     const retryAt = start + 60 * 60 * 1000;
     const clock = { value: start };
     let limited = true;
-    const admit = vi.fn(() =>
+    const admit = vi.fn(async () =>
       limited
         ? ({ admitted: false, reason: "limit-reached", key: "call:x", retryAt } as const)
         : ({ admitted: true } as const),
@@ -486,27 +490,33 @@ describe("WorkflowValidationWorker", () => {
     expect(admit).toHaveBeenCalledTimes(2);
   });
 
-  it("logs an unavailable ledger apart from a reached limit", async () => {
+  it("backs off an ask the unavailable ledger refused instead of refusing it on every pass", async () => {
     const plan = recordedPlan();
     const { fetchImpl } = recordingFetch(() => jsonResponse({ requests: [requestFor(plan)] }));
     const logs: string[] = [];
+    const clock = { value: Date.parse(DECIDED_AT) };
+    const admit = vi.fn(async () => ({ admitted: false, reason: "ledger-unavailable" }) as const);
     const worker = new WorkflowValidationWorker({
       client: clientOver(fetchImpl),
       identity: { workspaceId: WORKSPACE_ID, deviceId: DEVICE_ID },
       createValidator: () => async () => ({ verdicts: [], unavailable: "stub" }),
-      askLedger: { admit: () => ({ admitted: false, reason: "ledger-unavailable" }) },
+      askLedger: { admit },
       log: (message) => logs.push(message),
-      now: () => new Date(DECIDED_AT),
+      now: () => new Date(clock.value),
     });
 
     await worker.runOnce();
+    clock.value += 60_000;
     await worker.runOnce();
-    // An unavailable ledger says nothing about when a check frees: every pass tries again.
-    expect(logs).toEqual([
-      expect.stringContaining("the local check ledger is unavailable"),
-      expect.stringContaining("the local check ledger is unavailable"),
-    ]);
+    // One refusal, logged apart from a reached limit, and the ledger is not asked again yet.
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(logs).toEqual([expect.stringContaining("the local check ledger is unavailable")]);
     expect(logs.join("\n")).not.toContain("daily check limit");
+    // After the backoff the ask is tried again.
+    clock.value += 5 * 60_000;
+    await worker.runOnce();
+    expect(admit).toHaveBeenCalledTimes(2);
+    expect(logs).toHaveLength(2);
   });
 
   it("does not submit a decision while local session discovery is unavailable", async () => {

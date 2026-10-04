@@ -812,6 +812,29 @@ function sensitiveSteps(
 }
 
 /**
+ * Whether this device recorded every call the plan names. A plan naming any call this device did
+ * not record is another device's to check: a device holding only some of them (run 1 here, run 2
+ * on another machine) cannot answer truthfully.
+ */
+export async function planRecordedHere(
+  plan: RecordedWorkflow,
+  localCalls: LocalCallIdentity,
+): Promise<boolean> {
+  const namedCallIds = new Set([
+    ...plan.steps.flatMap((step) =>
+      step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
+        ? [step.callId]
+        : [],
+    ),
+    ...(plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
+  ]);
+  for (const callId of namedCallIds) {
+    if ((await localCalls.lookup(callId)) === undefined) return false;
+  }
+  return true;
+}
+
+/**
  * The validator this device runs for the cloud's validation asks. Candidates require held-out
  * evidence; with no held-out run, the baseline recording can prove the closed plan and the
  * single-recording vocabulary (recorded defaults, extracts, derivations).
@@ -846,24 +869,7 @@ export function createRecordingCheckValidator(
           "the selected workflow has no recorded demonstration; no recording check or parameter decision was performed",
       };
     }
-    // A plan naming any call this device did not record is another device's to check: a device
-    // holding only some of them (run 1 here, run 2 on another machine) cannot answer truthfully.
-    const namedCallIds = new Set([
-      ...plan.steps.flatMap((step) =>
-        step.origin !== "derivation" && step.callId !== undefined && step.callId.length > 0
-          ? [step.callId]
-          : [],
-      ),
-      ...(plan.heldOut?.calls ?? []).flatMap((entry) => entry.callIds),
-    ]);
-    let recordedHere = true;
-    for (const callId of namedCallIds) {
-      if ((await options.localCalls.lookup(callId)) === undefined) {
-        recordedHere = false;
-        break;
-      }
-    }
-    if (!recordedHere) {
+    if (!(await planRecordedHere(plan, options.localCalls))) {
       return { verdicts: [], unavailable: UNAVAILABLE, notRecordedHere: true };
     }
     const derivation = options.derivation ?? createProgramAdapter({ timeoutMs: options.timeoutMs });
