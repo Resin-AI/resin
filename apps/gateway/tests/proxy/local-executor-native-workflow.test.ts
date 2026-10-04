@@ -45,6 +45,18 @@ interface TestManifestInput {
 
 const WORKSPACE_ID = "ws_native_executor";
 
+/**
+ * A program template's source as the recorder projects one: the sanitized text the plan carries
+ * (here nothing was redacted, so it is the program itself) and its original behind `reference`.
+ */
+function projectedSource(reference: string, text: string) {
+  return {
+    source: { type: "literal" as const, value: text },
+    sourceReference: reference,
+    protectedTokens: [],
+  };
+}
+
 describe("recorded workflows of ordinary calls", () => {
   let tempDir: string;
   let workspaceDir: string;
@@ -276,8 +288,9 @@ describe("recorded workflows of ordinary calls", () => {
       privateValueStore: privateValues,
     });
 
+    // A program recorded wholly as a private value is shown as its placeholder, never resolved.
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
-      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}`,
+      "Recorded on this machine:\nStep 1 runs this recorded shell program:\n<private:1>",
     );
     // A program recorded wholly as a private value has no projected text to name a command from.
     expect(executor.recordedWorkflowCommands(installed.artifactDigest, context)).toEqual([]);
@@ -455,14 +468,26 @@ describe("recorded workflows of ordinary calls", () => {
             callable: {
               runtime: RESIN_PROCESS_RUNTIME,
               name: "bash",
-              program: { kind: "shell", source: "", argument: "command" },
+              program: {
+                kind: "shell",
+                source: "python3 scripts/validate.py sources/orders_001.json",
+                argument: "command",
+              },
             },
             arguments: [
               {
                 name: "command",
                 source: {
                   kind: "template",
-                  template: { type: "private", reference: "private:sess:2" },
+                  template: {
+                    type: "program",
+                    language: "shell",
+                    ...projectedSource(
+                      "private:sess:2",
+                      "python3 scripts/validate.py sources/orders_001.json",
+                    ),
+                    holes: [],
+                  },
                 },
               },
             ],
@@ -595,7 +620,7 @@ describe("recorded workflows of ordinary calls", () => {
             callable: {
               runtime: RESIN_PROCESS_RUNTIME,
               name: "bash",
-              program: { kind: "shell", source: "", argument: "command" },
+              program: { kind: "shell", source: program, argument: "command" },
             },
             arguments: [
               {
@@ -605,7 +630,7 @@ describe("recorded workflows of ordinary calls", () => {
                   template: {
                     type: "program",
                     language: "shell",
-                    source: { type: "private", reference: "private:sess:1" },
+                    ...projectedSource("private:sess:1", program),
                     holes: [
                       { token: 3, binding: { type: "input", name: "month" } },
                       { token: 4, binding: { type: "input", name: "text" } },
@@ -650,13 +675,13 @@ describe("recorded workflows of ordinary calls", () => {
       JSON.stringify({ before: "deployment ", charset: ["lower", "digit", "-"] }),
       owned,
     );
-    const shellStep = (id: string, callId: string, template: unknown) => ({
+    const shellStep = (id: string, callId: string, source: string, template: unknown) => ({
       id,
       callId,
       callable: {
         runtime: RESIN_PROCESS_RUNTIME,
         name: "bash",
-        program: { kind: "shell", source: "", argument: "command" },
+        program: { kind: "shell", source, argument: "command" },
       },
       arguments: [{ name: "command", source: { kind: "template", template } }],
       dependsOn: [],
@@ -685,11 +710,16 @@ describe("recorded workflows of ordinary calls", () => {
         inputs: [],
         privateReferences: ["private:create", "private:wait", "private:locator"],
         steps: [
-          shellStep("step0", "call_1", { type: "private", reference: "private:create" }),
-          shellStep("step1", "call_2", {
+          shellStep("step0", "call_1", "./deployctl create", {
             type: "program",
             language: "shell",
-            source: { type: "private", reference: "private:wait" },
+            ...projectedSource("private:create", "./deployctl create"),
+            holes: [],
+          }),
+          shellStep("step1", "call_2", "./deployctl wait dep-9e983a", {
+            type: "program",
+            language: "shell",
+            ...projectedSource("private:wait", "./deployctl wait dep-9e983a"),
             holes: [
               {
                 token: 2,
@@ -781,7 +811,11 @@ describe("recorded workflows of ordinary calls", () => {
             callable: {
               runtime: RESIN_PROCESS_RUNTIME,
               name: "bash",
-              program: { kind: "shell", source: "", argument: "command" },
+              program: {
+                kind: "shell",
+                source: "printf '%s %s %s\\n' Crossfit_Hanna R 5942",
+                argument: "command",
+              },
             },
             arguments: [
               {
@@ -791,7 +825,10 @@ describe("recorded workflows of ordinary calls", () => {
                   template: {
                     type: "program",
                     language: "shell",
-                    source: { type: "private", reference: "private:report" },
+                    ...projectedSource(
+                      "private:report",
+                      "printf '%s %s %s\\n' Crossfit_Hanna R 5942",
+                    ),
                     holes: [
                       { token: 2, binding: { type: "input", name: "merchant" } },
                       {
@@ -949,7 +986,7 @@ describe("recorded workflows of ordinary calls", () => {
             callable: {
               runtime: RESIN_PROCESS_RUNTIME,
               name: "bash",
-              program: { kind: "shell", source: "", argument: "command" },
+              program: { kind: "shell", source: program, argument: "command" },
             },
             arguments: [
               {
@@ -959,7 +996,7 @@ describe("recorded workflows of ordinary calls", () => {
                   template: {
                     type: "program",
                     language: "shell",
-                    source: { type: "private", reference: "private:sess:2" },
+                    ...projectedSource("private:sess:2", program),
                     holes: [
                       {
                         token: heredoc.anchor,
@@ -1034,7 +1071,7 @@ describe("recorded workflows of ordinary calls", () => {
             callable: {
               runtime: RESIN_PROCESS_RUNTIME,
               name: "bash",
-              program: { kind: "shell", source: "", argument: "command" },
+              program: { kind: "shell", source: program, argument: "command" },
             },
             arguments: [
               {
@@ -1044,7 +1081,7 @@ describe("recorded workflows of ordinary calls", () => {
                   template: {
                     type: "program",
                     language: "shell",
-                    source: { type: "private", reference: "private:sess:3" },
+                    ...projectedSource("private:sess:3", program),
                     holes: [
                       { token: 3, binding: region },
                       { token: 5, span: { start: 4, end: 8 }, binding: region },

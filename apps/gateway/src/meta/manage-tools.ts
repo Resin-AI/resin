@@ -317,7 +317,12 @@ export function createManageToolsHandler(
             }
           }
 
-          const description = toolDesc.length > 160 ? toolDesc.slice(0, 160) : toolDesc;
+          const scrubbedDesc = registry.scrubLearnedToolText(
+            matchedTool ?? catalogEntry ?? {},
+            context,
+            toolDesc,
+          );
+          const description = scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc;
 
           summaries.push({
             toolId: summary.toolId,
@@ -368,7 +373,9 @@ export function createManageToolsHandler(
               }
             }
 
-            const description = toolDesc.length > 160 ? toolDesc.slice(0, 160) : toolDesc;
+            const scrubbedDesc = registry.scrubLearnedToolText(repTool, context, toolDesc);
+            const description =
+              scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc;
             const scope = repTool.scope ?? (repTool.sessionId ? "session" : "workspace");
 
             summaries.push({

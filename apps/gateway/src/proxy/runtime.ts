@@ -38,6 +38,7 @@ import {
 import type { LocalToolDatedInputs } from "../meta/dated-defaults.js";
 import { composedResultValue } from "../meta/invoke-tool.js";
 import type { LocalToolCommands } from "../meta/learned-commands.js";
+import type { LocalToolPrivateValues } from "../meta/private-values.js";
 import type { LocalToolDescriber } from "../meta/search-tools.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
@@ -222,6 +223,14 @@ function recordedDatedInputs(executor: LocalArtifactExecutor): LocalToolDatedInp
     tool.artifactDigest === undefined
       ? new Map()
       : executor.recordedWorkflowDatedInputs(tool.artifactDigest, context);
+}
+
+/** Defense in depth for meta-tool text: the private values each cached learned tool resolves. */
+function recordedPrivateValues(executor: LocalArtifactExecutor): LocalToolPrivateValues {
+  return (tool, context) =>
+    tool.artifactDigest === undefined
+      ? []
+      : executor.recordedWorkflowPrivateValues(tool.artifactDigest, context);
 }
 
 function workspaceRootFromContext(workspace: WorkspaceContext | undefined): string | undefined {
@@ -442,6 +451,7 @@ export async function createProductionProxyRuntime(
     options.registry?.setLocalToolDescriber(recordedProgramDescriber(executor));
     options.registry?.setLocalToolCommands(recordedProgramCommands(executor));
     options.registry?.setLocalToolDatedInputs(recordedDatedInputs(executor));
+    options.registry?.setLocalToolPrivateValues(recordedPrivateValues(executor));
     routerBox.current = new CloudInvocationRouter({
       circuitBreaker,
       catalogCache: cache,
@@ -759,6 +769,7 @@ export async function createProductionProxyRuntime(
   options.registry?.setLocalToolDescriber(recordedProgramDescriber(localExecutor));
   options.registry?.setLocalToolCommands(recordedProgramCommands(localExecutor));
   options.registry?.setLocalToolDatedInputs(recordedDatedInputs(localExecutor));
+  options.registry?.setLocalToolPrivateValues(recordedPrivateValues(localExecutor));
 
   // Persisted positive denial remains effective even if credentials are now unavailable.
   try {

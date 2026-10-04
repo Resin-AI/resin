@@ -93,7 +93,7 @@ describe("recorded defaults that name a date", () => {
           callable: {
             runtime: RESIN_PROCESS_RUNTIME,
             name: "bash",
-            program: { kind: "shell", source: "", argument: "command" },
+            program: { kind: "shell", source: RECORDED_PROGRAM, argument: "command" },
           },
           arguments: [
             {
@@ -103,7 +103,11 @@ describe("recorded defaults that name a date", () => {
                 template: {
                   type: "program",
                   language: "shell",
-                  source: { type: "private", reference: "private:cost" },
+                  // A projected program: its sanitized text (here nothing was redacted) is what the
+                  // plan carries and what is shown; the original runs from the private store.
+                  source: { type: "literal", value: RECORDED_PROGRAM },
+                  sourceReference: "private:cost",
+                  protectedTokens: [],
                   holes: [
                     { token: 2, binding: { type: "input", name: "aws_profile" } },
                     { token: 3, binding: { type: "input", name: "cost_time_period" } },

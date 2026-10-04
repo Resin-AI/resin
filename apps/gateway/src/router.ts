@@ -297,7 +297,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
         return { description: catalog, inputSchema: schema, _meta: undefined, localCommands: [] };
       }
       return {
-        description: listedPurpose(catalog, Object.keys(schema.properties ?? {})),
+        description: this.registry.scrubLearnedToolText(
+          tool,
+          context,
+          listedPurpose(catalog, Object.keys(schema.properties ?? {})),
+        ),
         inputSchema: listedInputSchema(this.registry.learnedToolInputSchema(tool, context, schema)),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
         localCommands: this.registry.learnedToolCommands(tool, context),

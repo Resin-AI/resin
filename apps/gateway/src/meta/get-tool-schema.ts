@@ -163,7 +163,11 @@ export function createGetToolSchemaHandler(
     );
     const forEach = learned && offersForEach(baseSchema);
     const inputSchema = forEach ? withForEachInput(baseSchema as McpToolInput) : baseSchema;
-    const description = describeToolLocally(resolvedTool, context, describer);
+    const description = registry.scrubLearnedToolText(
+      resolvedTool,
+      context,
+      describeToolLocally(resolvedTool, context, describer),
+    );
 
     // Extract output schema if available in metadata
     const outputSchema: ToolOutputSchema | JsonRpcParams | undefined =

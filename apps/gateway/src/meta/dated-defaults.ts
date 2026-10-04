@@ -5,16 +5,16 @@
  * That is right for a profile name or a directory, and wrong for a date: a cost query recorded
  * with `--time-period Start=2026-10-01,End=2026-10-05` would quietly report October's spend for
  * every later month. So an input whose recorded value is a date or a time is served, and enforced,
- * as required on this device. The recorded value is read from the local private store and never
- * leaves it; the plan and the catalog schema stay as published.
+ * as required on this device. The recorded value is recognised locally and shown only as the plan
+ * carries it (a private one as its placeholder); the plan and the catalog schema stay as published.
  */
 
 import type { RegistryTool } from "../registry/types.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 
 /**
- * A learned tool's dated recorded-default inputs, each with its recorded value, resolved on this
- * machine (none for a tool that has no recorded plan).
+ * A learned tool's dated recorded-default inputs, each with its recorded value as it may be shown
+ * (none for a tool that has no recorded plan).
  */
 export type LocalToolDatedInputs = (
   tool: Pick<RegistryTool, "artifactDigest">,

@@ -63,6 +63,7 @@ import {
   missingDatedInputsMessage,
 } from "../meta/dated-defaults.js";
 import { failedToolResult } from "../meta/invocation-failure.js";
+import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-values.js";
 import {
   type CallToolResult,
   type JsonRpcParams,
@@ -87,14 +88,26 @@ function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): s
 }
 
 /**
- * What a cached recorded workflow runs, resolved on this machine: the description of its steps
- * (none when no step can be shown), the commands its programs run, and its dated recorded-default
- * inputs with their recorded values.
+ * What a cached recorded workflow runs, as this machine may show it: the description of its steps
+ * (none when no step can be shown), the commands its programs run, its dated recorded-default inputs
+ * with their recorded values as shown, and the private values no shown text may contain.
+ *
+ * Shown text reaches the model provider and the harness transcript, so it holds only what the plan
+ * itself carries: a private value appears as a `<private:N>` placeholder, never resolved.
  */
 interface RecordedWorkflowSummary {
   description: string | undefined;
   commands: string[];
   dated: ReadonlyMap<string, string>;
+  /** Every resolved private value of the plan (4+ characters), longest first, for scrubbing. */
+  privateValues: readonly string[];
+}
+
+/** Where one private value sits in a recorded text resolved on this machine. */
+interface PrivateRange {
+  start: number;
+  end: number;
+  reference: string;
 }
 
 /** Why a worker that did not succeed failed: a worker that never ran means no usable runtime. */
@@ -601,12 +614,24 @@ export class LocalArtifactExecutor {
   }
 
   /**
-   * What a cached recorded workflow runs, for tool discovery on this machine. Program text stays
-   * private to the recording workspace: it resolves under the same declaration and ownership rules
-   * as execution and is returned only to the local caller, never uploaded.
+   * What a cached recorded workflow runs, for tool discovery on this machine, shown only to the
+   * recording workspace. The text reaches the model provider and the harness transcript, so it holds
+   * only what the plan carries: a projected program's sanitized text, `{input}` for each caller
+   * value and a `<private:N>` placeholder for each private value, never a resolved one.
    */
   describeRecordedWorkflow(artifactDigest: string, context: WorkspaceContext): string | undefined {
     return this.recordedWorkflowSummary(artifactDigest, context)?.description;
+  }
+
+  /**
+   * The resolved private values of a cached recorded workflow (string leaves of 4+ characters,
+   * longest first): what meta-tool text scrubs before it is returned, so no path can show one.
+   */
+  recordedWorkflowPrivateValues(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): readonly string[] {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.privateValues ?? [];
   }
 
   /**
@@ -622,9 +647,9 @@ export class LocalArtifactExecutor {
 
   /**
    * The recorded-default inputs of a cached recorded workflow whose recorded value is a date or a
-   * time (see {@link isDatedValue}), each with that value. Such an input is required on this
-   * device: rerunning its recorded date would silently answer for the recorded moment. Local-only,
-   * like {@link describeRecordedWorkflow}; empty for any other tool.
+   * time (see {@link isDatedValue}), each with that value as a description may show it (masked
+   * where it is private). Such an input is required on this device: rerunning its recorded date
+   * would silently answer for the recorded moment. Empty for any other tool.
    */
   recordedWorkflowDatedInputs(
     artifactDigest: string,
@@ -673,30 +698,46 @@ export class LocalArtifactExecutor {
     if (cached !== undefined) return cached;
     const declared = new Set(plan.privateReferences ?? []);
     const store = this.getPrivateValueStore();
-    const resolveOwned = (reference: string): string | undefined => {
+    const resolveOwnedValue = (reference: string): unknown => {
       if (!declared.has(reference)) return undefined;
       const recorded = store.origin?.(reference)?.workspaceId;
       if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
         return undefined;
       }
       try {
-        const value = resolvePrivateReference(store, reference);
-        return typeof value === "string" ? value : undefined;
+        return resolvePrivateReference(store, reference);
       } catch {
         return undefined;
       }
     };
-    const templateText = (template: WorkflowValueTemplate): string | undefined => {
+    const resolveOwned = (reference: string): string | undefined => {
+      const value = resolveOwnedValue(reference);
+      return typeof value === "string" ? value : undefined;
+    };
+    // Shown text holds only what the plan carries: each private value it reads is a stable
+    // `<private:N>` placeholder, never the value, and only the owning workspace (which alone can
+    // run it) sees even that. A resolved value is read only to place holes and recognise dates.
+    const placeholders = new Map<string, string>();
+    const placeholder = (reference: string): string | undefined => {
+      if (resolveOwned(reference) === undefined) return undefined;
+      let shown = placeholders.get(reference);
+      if (shown === undefined) {
+        shown = `<private:${placeholders.size + 1}>`;
+        placeholders.set(reference, shown);
+      }
+      return shown;
+    };
+    const shownTemplateText = (template: WorkflowValueTemplate): string | undefined => {
       switch (template.type) {
         case "literal":
           return typeof template.value === "string" ? template.value : undefined;
         case "private":
-          return resolveOwned(template.reference);
+          return placeholder(template.reference);
         case "text": {
           // Composed text reads as its literals with `{input}` where each caller value goes.
           let shown = "";
           for (const part of template.parts) {
-            const piece = part.type === "input" ? `{${part.name}}` : templateText(part);
+            const piece = part.type === "input" ? `{${part.name}}` : shownTemplateText(part);
             if (piece === undefined) return undefined;
             shown += piece;
           }
@@ -706,16 +747,51 @@ export class LocalArtifactExecutor {
           return undefined;
       }
     };
-    const text = (source: WorkflowValueSource): string | undefined =>
+    const shownText = (source: WorkflowValueSource): string | undefined =>
       source.kind === "literal"
         ? typeof source.value === "string"
           ? source.value
           : undefined
         : source.kind === "private"
-          ? resolveOwned(source.reference)
+          ? placeholder(source.reference)
           : source.kind === "template"
-            ? templateText(source.template)
+            ? shownTemplateText(source.template)
             : undefined;
+    /**
+     * A legacy program's text resolved on this machine, with where each private value sits in it,
+     * so holes are found in the text that runs and the private values masked before it is shown.
+     */
+    const recordedText = (
+      template: WorkflowValueTemplate,
+      ranges: PrivateRange[],
+      at: number,
+    ): string | undefined => {
+      switch (template.type) {
+        case "literal":
+          return typeof template.value === "string" ? template.value : undefined;
+        case "private": {
+          const value = resolveOwned(template.reference);
+          if (value !== undefined) {
+            ranges.push({ start: at, end: at + value.length, reference: template.reference });
+          }
+          return value;
+        }
+        case "text": {
+          let recorded = "";
+          for (const part of template.parts) {
+            const piece =
+              part.type === "input"
+                ? `{${part.name}}`
+                : recordedText(part, ranges, at + recorded.length);
+            if (piece === undefined) return undefined;
+            recorded += piece;
+          }
+          return recorded;
+        }
+        default:
+          return undefined;
+      }
+    };
     // Command names reach every harness-visible summary, so they come from the projected program:
     // the recording's sanitized source, with any private value left unresolved.
     const projectedTemplateText = (template: WorkflowValueTemplate): string | undefined => {
@@ -754,11 +830,14 @@ export class LocalArtifactExecutor {
     // Defense in depth: a command naming any of the plan's private values is never listed. A
     // projected program's whole original source is not such a value; it is the program itself.
     const programSources = new Set<string>();
+    const projectedPrograms: Extract<WorkflowValueTemplate, { type: "program" }>[] = [];
     const collectProgramSources = (template: WorkflowValueTemplate): void => {
       if (template.type === "text") template.parts.forEach(collectProgramSources);
       if (template.type !== "program") return;
-      if (typeof template.sourceReference === "string")
+      if (typeof template.sourceReference === "string") {
         programSources.add(template.sourceReference);
+        projectedPrograms.push(template);
+      }
       collectProgramSources(template.source);
     };
     for (const step of plan.steps) {
@@ -771,31 +850,78 @@ export class LocalArtifactExecutor {
       const value = resolveOwned(reference);
       return value === undefined ? [] : [value];
     });
+    // Defense in depth for every shown text: each resolved private value, and each original token
+    // a projected program's redaction replaced, is scrubbed wherever it would still appear. A
+    // projected program's whole original is not scrubbed as one value: unredacted, it is its own
+    // shown text.
+    const scrubbed = [...declared]
+      .filter((reference) => !programSources.has(reference))
+      .map(resolveOwnedValue);
+    for (const template of projectedPrograms) {
+      const original = resolveOwned(template.sourceReference!);
+      if (original === undefined || (template.protectedTokens ?? []).length === 0) continue;
+      try {
+        const tokens = tokenizeProgram(template.language, original);
+        for (const index of template.protectedTokens ?? []) {
+          scrubbed.push(tokens[index]?.raw, tokens[index]?.value);
+        }
+      } catch {
+        // An original that no longer tokenizes has no protected token to find; it is scrubbed whole.
+      }
+    }
+    const scrubValues = scrubbablePrivateValues(scrubbed);
+    const scrub = (text: string): string => scrubPrivateValues(text, scrubValues);
     // Only an input that keeps its recorded token when omitted may be shown with that value: a
     // required input has no value a caller can fall back on, and showing one would claim it does.
     const recordedDefaults = new Set(
       plan.inputs.filter((input) => input.recordedDefault === true).map((input) => input.name),
     );
     /**
-     * A program whose tokens are bound to caller inputs: its recorded text with each bound token
-     * shown as `{input}`, so a caller sees where a value goes, and the recorded value of each input
-     * that runs it when omitted.
+     * A program whose tokens are bound to caller inputs: its text with each bound token shown as
+     * `{input}`, so a caller sees where a value goes, and the recorded value of each input that runs
+     * it when omitted (`value`, to recognise a date; `shown`, masked where it is private).
+     *
+     * A projected program is read from the sanitized text the plan carries, which tokenizes like its
+     * original; the original is resolved only to run. A legacy program is resolved here only to
+     * place holes: each private value in it is shown as its placeholder, and a hole inside one is
+     * shown as that placeholder too.
      */
     const parameterized = (
       source: WorkflowValueSource,
-    ): { text: string; parameters: { name: string; value: string }[] } | undefined => {
+    ):
+      | { text: string; parameters: { name: string; value: string; shown: string }[] }
+      | undefined => {
       if (source.kind !== "template" || source.template.type !== "program") return undefined;
       const template = source.template;
+      const ranges: PrivateRange[] = [];
       const recorded =
         typeof template.sourceReference === "string"
-          ? resolveOwned(template.sourceReference)
-          : templateText(template.source);
+          ? resolveOwned(template.sourceReference) !== undefined &&
+            template.source.type === "literal" &&
+            typeof template.source.value === "string"
+            ? template.source.value
+            : undefined
+          : recordedText(template.source, ranges, 0);
       if (recorded === undefined) return undefined;
+      const covering = (start: number, end: number): PrivateRange | undefined =>
+        ranges.find((range) => range.start < end && start < range.end);
+      const masked = ranges.map((range) => ({
+        start: range.start,
+        end: range.end,
+        shown: placeholder(range.reference)!,
+      }));
+      const show = (replacements: { start: number; end: number; shown: string }[]): string => {
+        let text = recorded;
+        for (const { start, end, shown } of [...replacements].sort((a, b) => b.start - a.start)) {
+          text = `${text.slice(0, start)}${shown}${text.slice(end)}`;
+        }
+        return text;
+      };
       let tokens: ReturnType<typeof tokenizeProgram>;
       try {
         tokens = tokenizeProgram(template.language, recorded);
       } catch {
-        return { text: recorded, parameters: [] };
+        return { text: show(masked), parameters: [] };
       }
       const programs = template.holes.some((hole) => hole.embedded !== undefined)
         ? embeddedPrograms(recorded)
@@ -875,6 +1001,8 @@ export class LocalArtifactExecutor {
       // raw text when the value appears there verbatim, else inside the decoded value.
       const shownTokens = new Map<(typeof tokens)[number], string>();
       for (const { token, name, span } of bound) {
+        // A hole inside a private value shows as that value's placeholder, never its text.
+        if (covering(token.start, token.end) !== undefined) continue;
         if (span === undefined) {
           shownTokens.set(token, `{${name}}`);
           continue;
@@ -892,19 +1020,30 @@ export class LocalArtifactExecutor {
         }
         shownTokens.set(token, shown);
       }
-      let text = recorded;
-      for (const [token, shown] of [...shownTokens].sort((a, b) => b[0].start - a[0].start)) {
-        text = `${text.slice(0, token.start)}${shown}${text.slice(token.end)}`;
-      }
       return {
-        text,
-        parameters: bound.flatMap(({ token, name, span, parameter }) =>
-          !parameter
-            ? []
-            : span === undefined
-              ? [{ name, value: String(token.value ?? token.raw) }]
-              : [{ name, value: (token.value as string).slice(span.start, span.end) }],
-        ),
+        text: show([
+          ...masked,
+          ...[...shownTokens].map(([token, shown]) => ({
+            start: token.start,
+            end: token.end,
+            shown,
+          })),
+        ]),
+        parameters: bound.flatMap(({ token, name, span, parameter }) => {
+          if (!parameter) return [];
+          const value =
+            span === undefined
+              ? String(token.value ?? token.raw)
+              : (token.value as string).slice(span.start, span.end);
+          const privateValue = covering(token.start, token.end);
+          return [
+            {
+              name,
+              value,
+              shown: privateValue === undefined ? value : placeholder(privateValue.reference)!,
+            },
+          ];
+        }),
       };
     };
     const steps: RecordedStep[] = [];
@@ -976,9 +1115,9 @@ export class LocalArtifactExecutor {
                 ? source.template.name
                 : undefined;
           if (input !== undefined) return [`${argument.name} = {${input}}`];
-          const value = text(source);
+          const value = shownText(source);
           if (value === undefined) return [];
-          const oneLine = value.replace(/\s+/gu, " ").trim();
+          const oneLine = scrub(value).replace(/\s+/gu, " ").trim();
           return [
             `${argument.name} = ${oneLine.length > RECORDED_NATIVE_ARGUMENT_CHARS ? `${oneLine.slice(0, RECORDED_NATIVE_ARGUMENT_CHARS)}[...]` : oneLine}`,
           ];
@@ -991,15 +1130,25 @@ export class LocalArtifactExecutor {
       }
       const source = step.arguments.find((argument) => argument.name === program.argument)?.source;
       const bound = source === undefined ? undefined : parameterized(source);
-      const programText = source === undefined ? undefined : (bound?.text ?? text(source));
+      const programText = source === undefined ? undefined : (bound?.text ?? shownText(source));
       if (programText === undefined || programText.length === 0) continue;
+      // Only a literal working directory is shown; a private one stays on this machine.
       const workdirSource = step.arguments.find((argument) => argument.name === "workdir")?.source;
-      const workdir = workdirSource === undefined ? undefined : text(workdirSource);
-      for (const { name, value } of bound?.parameters ?? []) {
+      const workdir =
+        workdirSource?.kind === "literal"
+          ? typeof workdirSource.value === "string"
+            ? workdirSource.value
+            : undefined
+          : workdirSource?.kind === "template" &&
+              workdirSource.template.type === "literal" &&
+              typeof workdirSource.template.value === "string"
+            ? workdirSource.template.value
+            : undefined;
+      for (const { name, value, shown } of bound?.parameters ?? []) {
         if (isDatedValue(value)) {
-          if (!dated.has(name)) dated.set(name, value);
+          if (!dated.has(name)) dated.set(name, shown);
         } else {
-          parameters.add(`${name} = ${value}`);
+          parameters.add(`${name} = ${shown}`);
         }
       }
       const toggle =
@@ -1012,7 +1161,15 @@ export class LocalArtifactExecutor {
         const header = lines.find((line) => line.startsWith("+++ "))?.slice(4);
         const deleted = header === "/dev/null";
         const file = deleted ? lines.find((line) => line.startsWith("--- "))?.slice(4) : header;
-        if (file === undefined) continue;
+        if (file === undefined) {
+          // A recorded edit kept wholly private shows only that it runs.
+          if (/^<private:\d+>$/u.test(programText)) {
+            steps.push({
+              head: `Step ${index + 1}${toggle} applies a recorded edit (${programText})`,
+            });
+          }
+          continue;
+        }
         const shownFile =
           workdir !== undefined && path.isAbsolute(file) ? path.relative(workdir, file) : file;
         const added = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++ "));
@@ -1043,23 +1200,32 @@ export class LocalArtifactExecutor {
         body: programText,
       });
     }
-    if (steps.length === 0) return { description: undefined, commands, dated };
+    // Step text is scrubbed before any preview is cut, so no part of a private value survives a cut.
+    const shownDated = new Map([...dated].map(([name, value]) => [name, scrub(value)]));
+    if (steps.length === 0) {
+      return { description: undefined, commands, dated: shownDated, privateValues: scrubValues };
+    }
     // An input bound in several places is dated if any of its recorded values is.
-    const defaulted = [...parameters].filter(
-      (parameter) => !dated.has(parameter.slice(0, parameter.indexOf(" = "))),
-    );
+    const defaulted = [...parameters]
+      .filter((parameter) => !dated.has(parameter.slice(0, parameter.indexOf(" = "))))
+      .map(scrub);
     const inputs =
       defaulted.length === 0
         ? ""
         : `\nParameters (each replaces its {name} above; omitted, the recorded value runs): ${defaulted.join("; ")}`;
     const required =
-      dated.size === 0
+      shownDated.size === 0
         ? ""
-        : `\nRequired parameters (each replaces its {name} above; its recorded value was a date, so pass the current one in the same form): ${[...dated].map(([name, value]) => `${name} (recorded: ${value})`).join("; ")}`;
+        : `\nRequired parameters (each replaces its {name} above; its recorded value was a date, so pass the current one in the same form): ${[...shownDated].map(([name, value]) => `${name} (recorded: ${value})`).join("; ")}`;
+    const shownSteps = steps.map((step) => ({
+      head: scrub(step.head),
+      ...(step.body === undefined ? {} : { body: scrub(step.body) }),
+    }));
     const summary: RecordedWorkflowSummary = {
-      description: `Recorded on this machine:\n${renderRecordedSteps(steps)}${inputs}${required}`,
+      description: `Recorded on this machine:\n${renderRecordedSteps(shownSteps)}${inputs}${required}`,
       commands,
-      dated,
+      dated: shownDated,
+      privateValues: scrubValues,
     };
     this.recordedWorkflowSummaries.set(key, summary);
     return summary;
