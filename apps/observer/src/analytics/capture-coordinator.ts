@@ -46,11 +46,10 @@ import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
  * Upload batching policy for generic observation sessions. Every constant that decides when a
  * buffered session is sent to the cloud lives here.
  *
- * Rationale: each `POST /v1/observations/batch` costs a fixed ~13-15 DynamoDB WRU on the cloud side
- * (ingestion receipt + outbox item + cursor-head update in one transaction) on top of the
- * per-event writes. Flushing on every turn boundary produced ~88 uploads per active user-hour at
- * ~6 events each, so the fixed per-request cost dominated. A longer window amortizes it over more
- * events while bounded latency is kept for detection:
+ * Rationale: each `POST /v1/observations/batch` carries a fixed per-request cost on the cloud side
+ * on top of its per-event cost. Flushing on every turn boundary produced ~88 uploads per active
+ * user-hour at ~6 events each, so the fixed per-request cost dominated. A longer window amortizes
+ * it over more events while bounded latency is kept for detection:
  * - `windowMs`: a batch is sent at most 45 s after its first buffered event. Replaying local OMP
  *   and Codex sessions with the 15 s window gave ~116-158 uploads per active session-hour at ~5
  *   events each; continuous agent work sends one batch per window, so the window sets the rate.

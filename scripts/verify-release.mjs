@@ -62,9 +62,7 @@ export const REQUIRED_SECURITY_DOCS = [
 ];
 
 export const REQUIRED_RELEASE_DOCS = [
-  "v1.0.3-release-notes.md",
   "compatibility-matrix.md",
-  "release-evidence.md",
   "rollback-procedure.md",
   "signing-trust.md",
 ];

@@ -830,11 +830,12 @@ export function formatReleaseEvidenceMarkdown(evidence) {
   lines.push("");
   lines.push("## Related Documentation");
   lines.push("");
-  lines.push("- [Release Notes](v1.0.3-release-notes.md)");
-  lines.push("- [Cross-Component Compatibility Matrix](compatibility-matrix.md)");
-  lines.push("- [Client & Cloud Rollback Procedures](rollback-procedure.md)");
-  lines.push("- [Operator Deployment Runbook](../operator/deployment.md)");
-  lines.push("- [Support Policy](../security/support-policy.md)");
+  // RELEASE-EVIDENCE.md is a release asset, so it links the docs at the exact released commit.
+  const docsAt = `https://github.com/Resin-AI/resin/blob/${evidence.commitSha}/docs`;
+  lines.push(`- [Compatibility Matrix](${docsAt}/release/compatibility-matrix.md)`);
+  lines.push(`- [Client Rollback Procedures](${docsAt}/release/rollback-procedure.md)`);
+  lines.push(`- [Release Signing Trust](${docsAt}/release/signing-trust.md)`);
+  lines.push(`- [Support Policy](${docsAt}/security/support-policy.md)`);
   lines.push("");
 
   return lines.join("\n");
@@ -848,7 +849,6 @@ export function formatReleaseEvidenceMarkdown(evidence) {
 export function writeReleaseEvidence(options = {}) {
   const rootDir = options.rootDir || process.cwd();
   const distDir = options.distDir || path.resolve(rootDir, `dist/release/v${RELEASE_VERSION}`);
-  const syncDocs = options.syncDocs ?? false;
 
   if (!fs.existsSync(distDir)) {
     fs.mkdirSync(distDir, { recursive: true });
@@ -866,13 +866,6 @@ export function writeReleaseEvidence(options = {}) {
   fs.writeFileSync(markdownPath, markdownContent, "utf8");
   const markdownSha256 = crypto.createHash("sha256").update(markdownContent).digest("hex");
 
-  if (syncDocs) {
-    const docsEvidencePath = path.resolve(rootDir, "docs/release/release-evidence.md");
-    if (fs.existsSync(path.dirname(docsEvidencePath))) {
-      fs.writeFileSync(docsEvidencePath, markdownContent, "utf8");
-    }
-  }
-
   return {
     evidence,
     jsonPath,
@@ -884,7 +877,7 @@ export function writeReleaseEvidence(options = {}) {
 
 if (process.argv[1] && process.argv[1].endsWith("generate-release-evidence.mjs")) {
   try {
-    const result = writeReleaseEvidence({ syncDocs: true, testOnly: true });
+    const result = writeReleaseEvidence({ testOnly: true });
     console.log("✅ Release evidence generated successfully:");
     console.log(`   - JSON: ${result.jsonPath} (${result.jsonSha256.slice(0, 16)}...)`);
     console.log(`   - Markdown: ${result.markdownPath} (${result.markdownSha256.slice(0, 16)}...)`);

@@ -288,25 +288,18 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       }).toThrow(/Production release evidence requires machine-readable CI qualification evidence/);
     });
 
-    it("verifies static committed docs describe candidate awaiting publication under Epic #22", () => {
-      const releaseNotesPath = path.resolve(rootDir, "docs/release/v1.0.3-release-notes.md");
-      const releaseEvidencePath = path.resolve(rootDir, "docs/release/release-evidence.md");
+    it("links the generated evidence to docs that exist at the released commit", () => {
+      const evidence = generateReleaseEvidence({ rootDir, testOnly: true });
+      const markdown = formatReleaseEvidenceMarkdown(evidence);
+      const prefix = `https://github.com/Resin-AI/resin/blob/${evidence.commitSha}/`;
+      const related = markdown.slice(markdown.indexOf("## Related Documentation"));
+      const targets = [...related.matchAll(/\]\(([^)]+)\)/g)].map((match) => match[1]);
 
-      expect(fs.existsSync(releaseNotesPath)).toBe(true);
-      expect(fs.existsSync(releaseEvidencePath)).toBe(true);
-
-      const notes = fs.readFileSync(releaseNotesPath, "utf8");
-      const evidence = fs.readFileSync(releaseEvidencePath, "utf8");
-
-      expect(notes).toContain("#22");
-      expect(notes).not.toContain("#47");
-      expect(notes).not.toMatch(/Status:\s*General Availability\s*\(GA\)/i);
-      expect(notes).toContain("Release Candidate");
-
-      expect(evidence).toContain("#22");
-      expect(evidence).not.toContain("#47");
-      expect(evidence).not.toContain("99151d19e95d7e63798ad624c084662d8ada0fa4");
-      expect(evidence).toContain("PREPUBLICATION CANDIDATE");
+      expect(targets.length).toBeGreaterThan(0);
+      for (const target of targets) {
+        expect(target.startsWith(prefix)).toBe(true);
+        expect(fs.existsSync(path.resolve(rootDir, target.slice(prefix.length)))).toBe(true);
+      }
     });
   });
 

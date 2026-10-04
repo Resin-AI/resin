@@ -6,22 +6,20 @@ This document defines the official support tiers, operating system matrix, harne
 
 ## 1. Supported Operating System Matrix
 
-| Tier | Operating System | Architecture | Minimum Version | Support Level |
-|------|------------------|--------------|-----------------|---------------|
-| **Tier 1** | Linux (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `arm64` | Kernel 5.4+ (glibc >= 2.31) | Full Support & Automated CI Qualification |
-| **Tier 1** | macOS (Apple Silicon & Intel) | `arm64`, `x86_64` | macOS 13 Ventura+ | Full Support & Automated CI Qualification |
-| **Tier 1** | Windows Subsystem for Linux (WSL2) | `x86_64`, `arm64` | WSL2 (Ubuntu 22.04+) | Full Support & Automated CI Qualification |
-| **Tier 1** | Windows Native (`win32`) | `x86_64`, `arm64` | Windows 10/11 | Full Support & Automated CI Qualification |
+| Tier | Operating System | Architecture | Minimum Version | Release Candidate Qualification |
+|------|------------------|--------------|-----------------|---------------------------------|
+| **Tier 1** | Linux (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `arm64` | Kernel 5.4+ (glibc >= 2.31) | Packaged artifact installed and run natively |
+| **Tier 1** | macOS (Apple Silicon & Intel) | `arm64`, `x86_64` | macOS 13 Ventura+ | Artifact digest and layout validated (not run on macOS in CI) |
+| **Tier 1** | Windows Subsystem for Linux (WSL2) | `x86_64`, `arm64` | WSL2 (Ubuntu 22.04+) | Artifact digest and layout validated (not run on WSL in CI) |
+| **Tier 1** | Windows Native (`win32`) | `x86_64`, `arm64` | Windows 10/11 | Packaged artifact installed and run natively, second-user isolation probe |
+
+See the [Compatibility Matrix](../release/compatibility-matrix.md#2-platforms) for the qualification lanes.
 
 ---
 
 ## 2. Supported AI Coding Harnesses
 
-| Harness | Vendor / Runtime | Protocol | Supported Versions | Qualified Qualification Profile |
-|---------|------------------|----------|--------------------|---------------------------------|
-| **Claude Code CLI** | Anthropic | MCP (SSE & Stdio) | `>= 0.1.0` | `0.2.29`, `1.0.0` |
-| **Codex CLI** | OpenAI | MCP (SSE) | `>= 0.1.0` | `0.1.0`, `0.2.0` |
-| **Oh My Pi (OMP)** | Canary Laboratories | MCP (SSE & IPC) | `>= 0.1.0` | `0.1.0`, `0.2.0` |
+Resin supports Claude Code, Codex CLI, Oh My Pi (OMP), Pi, Cursor CLI, Grok Build, Muse Code, OpenCode and GitHub Copilot CLI over stdio MCP. Any installed version is registered; the versions with recorded-session coverage are listed in [Limitations](../user/limitations.md#2-supported-ai-coding-harnesses), and `resin status` marks other versions as untested.
 
 ---
 

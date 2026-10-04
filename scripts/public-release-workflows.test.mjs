@@ -1784,9 +1784,8 @@ with patch("subprocess.run", side_effect=publish):
       expect(checkAll).toContain("pnpm run test");
       expect(checkAll).toContain("pnpm run release:test");
       expect(checkAll).toContain("pnpm run test:e2e");
-      expect(checkAll).toContain("pnpm run check:smoke");
-      expect(checkAll).toContain("pnpm run release:package:test");
-      expect(checkAll).toContain("pnpm run release:verify:test");
+      // The binary smoke check runs in the release candidate through the packaging suite.
+      expect(scripts["release:test:packaging"]).toContain("pnpm run check:smoke");
     });
 
     it("runs every unit-test selection through parallel Vitest shards with pinned Deno", () => {

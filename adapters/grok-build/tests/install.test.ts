@@ -111,7 +111,11 @@ describe("Grok config.toml registration", () => {
     );
   });
 
-  // The real install; test runners may point HOME elsewhere.
+  // Live conformance against the real grok binary, which CI does not install: it checks grok's own
+  // MCP source precedence (config.toml over ~/.claude.json) and AGENTS.md discovery, behavior a
+  // hermetic test could only restate. What Resin writes is covered hermetically above; run this on
+  // a machine with grok installed when adopting a new grok release. Test runners may point HOME
+  // elsewhere, so the real install is looked up from the OS account's home directory.
   const grok = path.join(os.userInfo().homedir, ".grok", "bin", "grok");
   it.skipIf(!existsSync(grok))(
     "makes the installed grok load Resin once even when ~/.claude.json also declares it",

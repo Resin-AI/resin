@@ -1,64 +1,33 @@
-# Cross-Component Compatibility Matrix (V1.0.0)
+# Compatibility Matrix
 
-This document defines the naming, versioning, and compatibility matrix across all schemas, wire protocols, harness adapters, execution runtimes, and release artifacts for Resin `1.0.0`.
-
----
-
-## 1. Naming & Version Policy
-
-- **Product Identity**: The official product name is **Resin**.
-- **Public CLI**: The CLI binary command is `resin` at `1.0.0`.
-- **Internal Implementation Namespaces**: Internal workspace packages use the `@resin/*` naming scope (e.g. `@resin/contracts`, `@resin/protocol`).
-- **Release Alignment**: All standalone release artifacts for a given release are produced from the same source commit SHA, share the same `1.0.0` version, and target the supported platform/runtime lanes.
+This document describes how Resin client releases are versioned and which platforms, harnesses and protocol features each release covers. It is not tied to one release: the version a given artifact carries is in its signed release manifest.
 
 ---
 
-## 2. Schema & Contract Versions
+## 1. Versioning
 
-| Component / Package   | Package Name               | Version | Schema / Contract Spec     | Backward Compatibility  |
-| --------------------- | -------------------------- | ------- | -------------------------- | ----------------------- |
-| **Domain Contracts**  | `@resin/contracts`         | `1.0.0` | Domain Schema v1.0         | Compatible with v1.0.0+ |
-| **Wire Protocol**     | `@resin/protocol`          | `1.0.0` | Protocol Spec v1.0         | Compatible with v1.0.0+ |
-| **Harness Contracts** | `@resin/harness-contracts` | `1.0.0` | Harness SPI v1.0           | Compatible with v1.0.0+ |
-| **Crypto & Vault**    | `@resin/crypto`            | `1.0.0` | Crypto Spec v1.0 (Ed25519) | Dual-key verification   |
-| **Database Schema**   | `@resin/db`                | `1.0.0` | SQLite Schema v1 / PG 16   | Idempotent migrations   |
-| **Runtime Engine**    | `@resin/runtime`           | `1.0.0` | Sandbox Spec v1.0          | Deno 2.x & Node 22+     |
+- **Product and CLI**: the product is **Resin**; the CLI command is `resin`.
+- **Release versions**: releases are tagged `v1.0.<patch>` and published through the signed release channel (`https://dist.resin.sh/releases/v1/channels.json`). `resin upgrade` installs only versions that channel authenticates.
+- **One commit per release**: every artifact of a release is built from the same commit and carries the same version.
+- **Workspace packages**: internal packages use the `@resin/*` scope. Their wire contracts (`@resin/contracts`, `@resin/protocol`, `@resin/harness-contracts`) evolve additively; schema versions are carried in the payloads themselves.
 
 ---
 
-## 3. AI Coding Harness Compatibility
+## 2. Platforms
 
-| Harness Adapter     | Adapter Package              | Supported Versions | Tested & Qualified Versions | Protocol Bridge        |
-| ------------------- | ---------------------------- | ------------------ | --------------------------- | ---------------------- |
-| **Claude Code CLI** | `@resin/adapter-claude-code` | `>= 0.1.0`         | `0.2.29`, `1.0.0`           | MCP over SSE / Stdio   |
-| **Codex CLI**       | `@resin/adapter-codex`       | `>= 0.1.0`         | `0.1.0`, `0.2.0`            | MCP over SSE           |
-| **Oh My Pi (OMP)**  | `@resin/adapter-omp`         | `>= 0.1.0`         | `0.1.0`, `0.2.0`            | MCP over SSE & Hub IPC |
-
----
-
-## 4. Host Operating Systems & Node.js Matrix
-
-| Platform                        | Node.js 22.x LTS | Node.js 24.x | Deno 2.x (Worker) | Support Level        |
-| ------------------------------- | ---------------- | ------------ | ----------------- | -------------------- |
-| **Linux x86_64**                | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **Linux arm64**                 | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **macOS arm64** (Apple Silicon) | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **macOS x86_64** (Intel)        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **WSL2** (Ubuntu 22.04+)        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **Windows 10/11 x86_64**        | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-| **Windows 10/11 arm64**         | ✅ Supported     | ✅ Supported | ✅ Supported      | Tier 1 (CI Verified) |
-
-Release qualification lanes and artifacts (see [ADR 0014](../adr/0014-native-windows-support.md)):
+Every release candidate qualifies seven lanes before it can be published (see [ADR 0014](../adr/0014-native-windows-support.md)). Linux and Windows lanes install and run the packaged artifact natively; the macOS and WSL lanes check the artifact's digest and layout on a Linux runner and are not run on those operating systems in CI.
 
 | Lane            | Artifact                                | Service manager               | Daemon endpoint             | Release candidate check                       |
 | --------------- | --------------------------------------- | ----------------------------- | --------------------------- | --------------------------------------------- |
-| `linux-x64`     | `resin-v<version>-linux-x64.tar.gz`     | `systemd --user`              | Unix socket (`0600`)        | Native on `ubuntu-latest`                     |
+| `linux-x64`     | `resin-v<version>-linux-x64.tar.gz`     | `systemd --user`              | Unix socket (`0600`)        | Native on `ubuntu-24.04`                      |
 | `linux-arm64`   | `resin-v<version>-linux-arm64.tar.gz`   | `systemd --user`              | Unix socket (`0600`)        | Native on `ubuntu-24.04-arm`                  |
-| `darwin-x64`    | `resin-v<version>-darwin-x64.tar.gz`    | `launchd`                     | Unix socket (`0600`)        | Artifact validation                           |
-| `darwin-arm64`  | `resin-v<version>-darwin-arm64.tar.gz`  | `launchd`                     | Unix socket (`0600`)        | Artifact validation                           |
-| `wsl`           | `resin-v<version>-wsl.tar.gz`           | `systemd --user` / supervisor | Unix socket (`0600`)        | Artifact validation                           |
+| `darwin-x64`    | `resin-v<version>-darwin-x64.tar.gz`    | `launchd`                     | Unix socket (`0600`)        | Artifact validation only                      |
+| `darwin-arm64`  | `resin-v<version>-darwin-arm64.tar.gz`  | `launchd`                     | Unix socket (`0600`)        | Artifact validation only                      |
+| `wsl`           | `resin-v<version>-wsl.tar.gz`           | `systemd --user` / supervisor | Unix socket (`0600`)        | Artifact validation only                      |
 | `windows-x64`   | `resin-v<version>-windows-x64.tar.gz`   | Per-user logon Scheduled Task | Named pipe, owner-only DACL | Native on `windows-latest`, second-user probe |
 | `windows-arm64` | `resin-v<version>-windows-arm64.tar.gz` | Per-user logon Scheduled Task | Named pipe, owner-only DACL | Native on `windows-11-arm`, second-user probe |
+
+Minimum operating system and Node.js requirements are listed in [Limitations](../user/limitations.md#1-supported-platform-matrix).
 
 Native Windows installs from Windows PowerShell 5.1 or PowerShell 7+ with `irm https://resin.sh/install.ps1 | iex`. Each Windows artifact carries its architecture's `@resin/windows-security` native helper and windowless service host.
 
@@ -75,21 +44,25 @@ A recording is checked and replayed only under the dialect it was recorded in. P
 
 ---
 
-## 5. MCP Protocol & Feature Compatibility
+## 3. AI Coding Harnesses
 
-| MCP Feature                        | Implementation   | Supported in V1? | Notes                                 |
-| ---------------------------------- | ---------------- | ---------------- | ------------------------------------- |
-| `tools/list`                       | Dynamic Catalog  | ✅ Yes           | Invariant meta-tools + promoted tools |
-| `tools/call`                       | Sandboxed Invoke | ✅ Yes           | Enforces capability envelope          |
-| `resources/list`                   | Workspace State  | ✅ Yes           | Read-only workspace inspection        |
-| `prompts/list`                     | Context Prompts  | ✅ Yes           | Evolution guidance prompts            |
-| `notifications/tools/list_changed` | Real-time Push   | ✅ Yes           | Broadcast on tool promotion/rollback  |
+Resin ships adapters for Claude Code, Codex CLI, Oh My Pi (OMP), Pi, Cursor CLI, Grok Build, Muse Code, OpenCode and GitHub Copilot CLI. Every harness is registered as a stdio MCP server (`<resin home>/bin/resin mcp`). The versions each adapter has recorded-session coverage for are listed in [Limitations](../user/limitations.md#2-supported-ai-coding-harnesses) and, with configuration paths and capture methods, in the [Harness Integration Guide](../user/harness-guide.md).
+
+---
+
+## 4. MCP Features
+
+| MCP Feature                        | Supported | Notes                                                       |
+| ---------------------------------- | --------- | ----------------------------------------------------------- |
+| `tools/list`                       | ✅ Yes    | Locked meta-tools plus the workspace's learned tools        |
+| `tools/call`                       | ✅ Yes    | Enforces the capability envelope                            |
+| `notifications/tools/list_changed` | ✅ Yes    | Sent when the catalog changes, to clients that support it   |
+| `resources/*`, `prompts/*`         | ❌ No     | Not served                                                  |
 
 ---
 
 ## Related Documentation
 
-- [Release Notes](v1.0.3-release-notes.md)
-- [Release Evidence Trace](release-evidence.md)
 - [Rollback Procedures](rollback-procedure.md)
+- [Release Signing Trust](signing-trust.md)
 - [Support Policy](../security/support-policy.md)

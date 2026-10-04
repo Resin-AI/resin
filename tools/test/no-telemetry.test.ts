@@ -39,7 +39,7 @@ describe("tests never send error reports or usage events", () => {
   });
 
   it("opts out every workflow that runs tests, qualification or releases", () => {
-    for (const name of ["ci", "release-candidate", "release", "internal-workflow-acceptance"]) {
+    for (const name of ["ci", "release-candidate", "release"]) {
       const workflow: unknown = parse(
         fs.readFileSync(path.join(repoRoot, ".github/workflows", `${name}.yml`), "utf8"),
       );

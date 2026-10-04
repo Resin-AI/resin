@@ -114,7 +114,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for development commands, package bounda
 ## Repository layout
 
 ```text
-apps/       CLI, gateway, observer, and web applications
+apps/       CLI, gateway, and observer applications
 packages/   Runtime, protocol, contracts, crypto, and shared libraries
 adapters/   Coding-harness integrations (Claude Code, Codex, OMP, Pi, Cursor, Grok, Muse, OpenCode, Copilot)
 fixtures/   Conformance and end-to-end fixtures

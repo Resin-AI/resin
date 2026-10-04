@@ -40,12 +40,10 @@ flowchart TB
     end
 
     subgraph CloudPlane["Cloud Evolution Plane"]
-        CloudAPI["Cloud API Gateway\n(mTLS / Auth)"]
+        CloudAPI["Cloud API\n(Device Token Auth)"]
         TelemetryIngest["Telemetry & Analytics\nPipeline"]
         EvolEngine["Evolution Engine\n(Synthesis & Optimization)"]
-        CloudDB[("PostgreSQL\nRelational Metadata")]
-        BlobStore[("S3 Object Store\nTool Bundles & Fixtures")]
-        TaskQueue["Task Bus / Queue\n(BullMQ / Redis)"]
+        CloudStore[("Hosted Storage\nCatalogs & Signed Tool Bundles")]
     end
 
     %% Local Connections
@@ -73,11 +71,8 @@ flowchart TB
     %% Cloud Internal Connections
     CloudAPI --> TelemetryIngest
     CloudAPI --> EvolEngine
-    TelemetryIngest --> TaskQueue
-    TaskQueue --> EvolEngine
-    EvolEngine <--> CloudDB
-    EvolEngine <--> BlobStore
-    TelemetryIngest <--> CloudDB
+    EvolEngine <--> CloudStore
+    TelemetryIngest --> EvolEngine
 ```
 
 ## Project Runtime & Metadata Model
@@ -154,18 +149,11 @@ Embedded SQLite with Write-Ahead Logging (WAL mode) and OS-standard identity-par
 
 ## Core Cloud Components
 
-### 1. Cloud API Gateway & Ingestion
-- Authenticates local daemon sync sessions via mTLS or bearer tokens.
-- Ingests sanitized observation batches and enqueues them for pattern analysis.
+The hosted cloud is operated privately and is not part of this repository; its storage and queueing technology can change without a client release ([ADR 0006](../adr/0006-storage-and-runtimes.md#3-cloud-persistence--infrastructure)). The client sees only its signed API:
 
-### 2. Evolution Engine & Task Queue
-- Asynchronously processes aggregated telemetry to detect optimization opportunities (e.g., repetitive tool chains, slow query patterns).
-- Synthesizes candidate MCP tools and workflows using specialized code models.
-- Generates property-based contract test suites and publishes immutable tool bundles to S3.
-
-### 3. Cloud Storage & Catalog
-- **Amazon DynamoDB**: Single-table datastore with continuous PITR for relational metadata, multi-tenant accounts, global catalogs, and outbox streams.
-- **Amazon S3**: Immutable, versioned object storage for cryptographically signed tool bundles and verification fixtures.
+- **API & Ingestion**: authenticates device sync with bearer device tokens and accepts sanitized observation batches.
+- **Tool Generation**: detects recurring work in sanitized observations and generates candidate tools, which the device validates against its own local recordings ([ADR 0012](../adr/0012-validate-learned-tools-against-local-recordings.md)).
+- **Catalog**: serves each workspace's catalog and the signed tool bundles the client verifies before activation.
 
 ## Key Architectural Principles
 
