@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +14,12 @@ import {
   validateV1ProjectMetadata,
   validateV1ToolLock,
 } from "@resin/contracts";
-import { canonicalizePath, findGitRoot, resolveProjectResinDir } from "../workspace-resolver.js";
+import {
+  canonicalizePath,
+  findEnclosingGitRoot,
+  findGitRoot,
+  resolveProjectResinDir,
+} from "../workspace-resolver.js";
 import type {
   ProjectBootstrapOptions,
   ProjectBootstrapResult,
@@ -123,6 +129,89 @@ function cleanupStaleTempFiles(resinDir: string, maxAgeMs = 60_000): void {
     }
   } catch {
     // Ignore directory read errors
+  }
+}
+
+/**
+ * `.resin/.gitignore` written into a `.resin/` that bootstrap itself creates. Its `*` makes git
+ * ignore the whole directory, this file included, so starting Resin in a repository (or in each
+ * per-task worktree) leaves `git status` clean while the lock holds nothing worth committing.
+ * The exact bytes mark the file as Resin's: only a byte-identical file is ever removed, so a
+ * user-authored `.resin/.gitignore` is never touched.
+ */
+export const RESIN_DIR_GITIGNORE =
+  "# Written by Resin: this project's resin.lock pins no tool yet, so git ignores .resin/.\n" +
+  "# Resin removes this file when a tool is pinned or disabled, making the lock committable.\n" +
+  "*\n";
+
+/**
+ * Whether the lock records an explicit project decision worth committing: a tool pinned to its
+ * locked version or disabled for this project. Entries catalog sync adopts as `active` follow the
+ * catalog and are re-adopted in any checkout, so they alone keep `.resin/` ignored.
+ */
+export function lockRecordsProjectDecision(lock: V1ToolLock): boolean {
+  return Object.values(lock.tools).some((entry) => entry.status !== "active");
+}
+
+/** Whether git tracks anything under `dir`. False outside a work tree or when git is missing. */
+function hasGitTrackedFiles(dir: string): boolean {
+  if (!findEnclosingGitRoot(path.dirname(dir))) {
+    return false;
+  }
+  try {
+    const tracked = execFileSync("git", ["ls-files", "--", path.basename(dir)], {
+      cwd: path.dirname(dir),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    return tracked.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Hides a `.resin/` bootstrap just created from git, unless git already tracks files there.
+ * Never overwrites an existing `.gitignore`. Best effort: failure leaves the directory visible.
+ */
+function hideCreatedResinDir(resinDir: string): void {
+  if (hasGitTrackedFiles(resinDir)) {
+    return;
+  }
+  try {
+    fs.writeFileSync(path.join(resinDir, ".gitignore"), RESIN_DIR_GITIGNORE, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o644,
+    });
+  } catch {
+    // Already present (concurrent bootstrap or user file) or unwritable: leave it as is.
+  }
+}
+
+/**
+ * Removes Resin's own `.resin/.gitignore` once `lock` records a project decision, so the lock
+ * shows up in `git status` to be committed. Returns whether the file was removed.
+ */
+export function revealResinDirForProjectDecisions(resinDir: string, lock: V1ToolLock): boolean {
+  if (!lockRecordsProjectDecision(lock)) {
+    return false;
+  }
+  const gitignorePath = path.join(resinDir, ".gitignore");
+  try {
+    const stat = fs.lstatSync(gitignorePath);
+    if (!stat.isFile() || stat.size !== Buffer.byteLength(RESIN_DIR_GITIGNORE)) {
+      return false;
+    }
+    if (fs.readFileSync(gitignorePath, "utf8") !== RESIN_DIR_GITIGNORE) {
+      return false;
+    }
+    fs.unlinkSync(gitignorePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -389,6 +478,7 @@ export function writeToolLock(projectRootOrResinDir: string, lock: V1ToolLock): 
   const validated = validateV1ToolLock(lock);
   const target = path.join(resinDir, "resin.lock");
   atomicWriteJsonSync(target, validated);
+  revealResinDirForProjectDecisions(resinDir, validated);
 }
 
 /**
@@ -454,6 +544,8 @@ function loadExistingReadOnlyMetadata(
  * - Prioritizes Git root if present, otherwise uses startupPath.
  * - Serializes initialization with exclusive .bootstrap.lock and stale recovery.
  * - Creates/validates .resin/project.json and .resin/resin.lock atomically.
+ * - A `.resin/` it creates gets Resin's `.gitignore` (see `RESIN_DIR_GITIGNORE`) until the lock
+ *   records a project decision; an existing or git-tracked `.resin/` is never given one.
  * - Recovers deterministic partial states (project-only or lock-only).
  * - Handles read-only project directories explicitly without mutation.
  * - Fails closed on symlinks, case collisions, corrupt schemas, or mismatched UUIDs.
@@ -518,6 +610,8 @@ export function bootstrapProject(
         `Security violation: '.resin' directory cannot be a symbolic link at '${resinDir}'`,
       );
     }
+    // A fresh lock pins nothing, so the new directory starts out ignored by git.
+    hideCreatedResinDir(resinDir);
   }
 
   // Acquire exclusive concurrency lock
@@ -624,6 +718,9 @@ export function bootstrapProject(
       atomicWriteJsonSync(projectJsonPath, project);
       recoveredPartialState = "lock_recreated_project";
     }
+
+    // The lock may have gained a pin elsewhere (another process, an edit) since it was hidden.
+    revealResinDirForProjectDecisions(resinDir, lock);
 
     return {
       projectId: project.projectId,

@@ -3,9 +3,17 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import stream from "node:stream";
+import { ompHarness } from "@resin/adapter-omp";
+import type { McpStdioShimOptions } from "@resin/gateway";
+import type { HarnessDefinition } from "@resin/harness-contracts";
 import { getErrorReporter } from "@resin/observer/error-reporting/core";
 import { describe, expect, it, vi } from "vitest";
-import { mcpCommand, parseMcpArgs, printMcpHelp } from "../src/commands/mcp.js";
+import {
+  mcpCommand,
+  parseMcpArgs,
+  printMcpHelp,
+  servedHarnessDefinition,
+} from "../src/commands/mcp.js";
 
 describe("resin mcp command", () => {
   it("defaults a bare invocation to the in-process gateway", () => {
@@ -184,6 +192,61 @@ describe("resin mcp command", () => {
       daemon.server.close();
       harness.server.close();
     }
+  });
+});
+
+describe("the harness a resin mcp shim serves", () => {
+  async function shimOptionsFor(args: string[]): Promise<McpStdioShimOptions> {
+    let captured: McpStdioShimOptions | undefined;
+    await expect(
+      mcpCommand(args, {
+        shimFactory: (options) => {
+          captured = options;
+          return { start: async () => ({ mode: "daemon_ipc" }), stop: async () => {} };
+        },
+      }),
+    ).resolves.toBe(0);
+    if (captured === undefined) throw new Error("the shim was never created");
+    return captured;
+  }
+
+  it("runs native tool steps through OMP when started as plain `resin mcp`, as OMP registers it", async () => {
+    const options = await shimOptionsFor([]);
+
+    expect(options.harnessId).toBeUndefined();
+    expect(options.recordedHarnessToolInvoker).toBe(ompHarness.nativeToolInvoker);
+    expect(options.recordedWorkflowConnections).toBeTypeOf("function");
+  });
+
+  it("keeps an explicit --harness: OMP's invoker for omp, none for a harness without one", async () => {
+    const omp = await shimOptionsFor(["--harness", "omp"]);
+    expect(omp.harnessId).toBe("omp");
+    expect(omp.recordedHarnessToolInvoker).toBe(ompHarness.nativeToolInvoker);
+    expect(omp.recordedWorkflowConnections).toBeTypeOf("function");
+
+    const codex = await shimOptionsFor(["--harness=codex-cli"]);
+    expect(codex.harnessId).toBe("codex-cli");
+    expect(codex).not.toHaveProperty("recordedHarnessToolInvoker");
+    expect(codex.recordedWorkflowConnections).toBeUndefined();
+
+    const unknown = await shimOptionsFor(["-H", "not-a-harness"]);
+    expect(unknown).not.toHaveProperty("recordedHarnessToolInvoker");
+    expect(unknown.recordedWorkflowConnections).toBeUndefined();
+  });
+
+  it("falls back to the first harness declaring its servers, for connections and invoker alike", () => {
+    const { resolveMcpServer: _servers, ...invokerOnly } = ompHarness;
+    const { nativeToolInvoker: _invoker, ...serversOnly } = ompHarness;
+    const definitions: HarnessDefinition[] = [
+      { ...invokerOnly, id: "invoker-only" },
+      { ...serversOnly, id: "servers-only" },
+      ompHarness,
+    ];
+
+    // The invoker comes from the harness whose servers are dialed, never from another one.
+    expect(servedHarnessDefinition(undefined, definitions)?.id).toBe("servers-only");
+    expect(servedHarnessDefinition("invoker-only", definitions)?.id).toBe("invoker-only");
+    expect(servedHarnessDefinition("missing", definitions)).toBeUndefined();
   });
 });
 

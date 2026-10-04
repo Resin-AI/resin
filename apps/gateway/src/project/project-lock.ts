@@ -12,7 +12,7 @@ import {
   validateV1ToolLock,
 } from "@resin/contracts";
 import { resolveProjectResinDir } from "../workspace-resolver.js";
-import { atomicWriteJsonSync } from "./project-bootstrap.js";
+import { atomicWriteJsonSync, revealResinDirForProjectDecisions } from "./project-bootstrap.js";
 import type { ProjectLockManagerOptions, ReconcileOutcome, ReconcileResult } from "./types.js";
 
 export type { ProjectLockManagerOptions, ReconcileOutcome, ReconcileResult };
@@ -412,7 +412,7 @@ export class ProjectLockManager {
         };
 
         const validatedLock = validateV1ToolLock(updatedLock);
-        atomicWriteJsonSync(this.lockPath, validatedLock);
+        this.writeLock(validatedLock);
 
         return {
           outcome: "added",
@@ -447,7 +447,7 @@ export class ProjectLockManager {
         };
 
         const validatedLock = validateV1ToolLock(updatedLock);
-        atomicWriteJsonSync(this.lockPath, validatedLock);
+        this.writeLock(validatedLock);
 
         return {
           outcome: "updated",
@@ -482,7 +482,7 @@ export class ProjectLockManager {
       };
 
       const validatedLock = validateV1ToolLock(updatedLock);
-      atomicWriteJsonSync(this.lockPath, validatedLock);
+      this.writeLock(validatedLock);
 
       return {
         outcome: "updated",
@@ -537,7 +537,7 @@ export class ProjectLockManager {
       };
 
       const validatedLock = validateV1ToolLock(updatedLock);
-      atomicWriteJsonSync(this.lockPath, validatedLock);
+      this.writeLock(validatedLock);
       return validatedLock;
     });
   }
@@ -572,7 +572,7 @@ export class ProjectLockManager {
       };
 
       const validatedLock = validateV1ToolLock(updatedLock);
-      atomicWriteJsonSync(this.lockPath, validatedLock);
+      this.writeLock(validatedLock);
       return validatedLock;
     });
   }
@@ -605,9 +605,18 @@ export class ProjectLockManager {
       };
 
       const validatedLock = validateV1ToolLock(updatedLock);
-      atomicWriteJsonSync(this.lockPath, validatedLock);
+      this.writeLock(validatedLock);
       return validatedLock;
     });
+  }
+
+  /**
+   * Writes a validated lock. The first write that records a project decision (a pinned or
+   * disabled tool) also removes Resin's `.resin/.gitignore`, so the lock becomes visible to commit.
+   */
+  private writeLock(lock: V1ToolLock): void {
+    atomicWriteJsonSync(this.lockPath, lock);
+    revealResinDirForProjectDecisions(path.dirname(this.lockPath), lock);
   }
 
   /**
@@ -748,7 +757,7 @@ export class ProjectLockManager {
       };
 
       const validatedLock = validateV1ToolLock(repairedLock);
-      atomicWriteJsonSync(this.lockPath, validatedLock);
+      this.writeLock(validatedLock);
       return validatedLock;
     });
   }

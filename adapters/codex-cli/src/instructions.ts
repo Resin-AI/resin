@@ -20,6 +20,7 @@ Resin may have learned tools from earlier runs in this workspace. They are not l
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, search with the job in a few words (e.g. the commands or scripts you are about to run). With an \`exec\` tool (Code Mode), do it in that \`exec\` call: \`text(JSON.stringify(await tools.mcp__resin__search_tools({query: "<the job>"})))\`. Without \`exec\`, Resin's tools are deferred: call \`tool_search\` with \`resin search_tools\` to load them, then call \`mcp__resin__search_tools\` with \`{"query": "<the job>"}\`. No match: do the task.
 - A result that does your task's next step is a procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool({name: "<name>", parameters: {...}})\` instead of re-reading docs or \`--help\` to rediscover those steps, and use its output instead of rerunning its commands. Omitted inputs reuse the recorded values. Run several at once with \`Promise.all\` in \`exec\`.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
 `;
 
 /** Resolves Codex's home directory: `$CODEX_HOME`, else `<home>/.codex`. */

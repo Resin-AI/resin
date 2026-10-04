@@ -1189,6 +1189,7 @@ async function runForeground(options: {
     refreshRemoteTelemetryConsent: refreshCloudConsent,
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
     uploadStatusPath: path.join(paths.stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME),
+    captureWatermarkPath: path.join(paths.stateDir, "capture-watermark.json"),
     captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
   const opportunityTrackingConfig = config.opportunityTracking;
