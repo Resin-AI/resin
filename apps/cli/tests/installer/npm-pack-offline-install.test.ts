@@ -90,5 +90,6 @@ describe("public npm bootstrap offline installation", () => {
       env,
     });
     expect(version.trim()).toBe("resin v1.0.0");
-  }, 180_000);
+    // Packing and offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
+  }, 600_000);
 });

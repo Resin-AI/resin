@@ -189,7 +189,7 @@ jobs:
           github.ref == 'refs/heads/main' && github.ref_protected == true &&
           (inputs.operation != 'notification-drill' ||
            (github.event_name == 'workflow_dispatch' && inputs.confirmation == 'NOTIFY_CHANNEL_MONITOR_DRILL')) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release-monitoring
     permissions:

@@ -54,6 +54,7 @@ describe("Public Release Workflows Contract", () => {
         "windows-qualification",
         "windows-suites",
         "system-qualification",
+        "release-tests",
       ];
       for (const [jobId, job] of Object.entries(candidate.doc.jobs)) {
         if (qualificationJobs.includes(jobId)) {
@@ -62,9 +63,9 @@ describe("Public Release Workflows Contract", () => {
           expect(JSON.stringify(job), `${jobId} must not reference secrets`).not.toContain(
             "secrets.",
           );
-          const runners = job.strategy?.matrix?.include?.map((entry) => entry.runner) ?? [
-            job["runs-on"],
-          ];
+          const runners = job.strategy?.matrix?.include?.map(
+            (entry) => entry.runner ?? job["runs-on"],
+          ) ?? [job["runs-on"]];
           for (const runner of runners) {
             expect(runner, `${jobId} must run on a GitHub-hosted runner`).toMatch(
               /^(?:ubuntu-|windows-latest$|windows-11-arm$)/,
@@ -91,7 +92,9 @@ describe("Public Release Workflows Contract", () => {
       for (const name of fs.readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file))) {
         const doc = YAML.parse(fs.readFileSync(path.join(workflowDir, name), "utf8"));
         for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
-          const matrixRunners = job.strategy?.matrix?.include?.map((entry) => entry.runner);
+          const matrixRunners = job.strategy?.matrix?.include?.map(
+            (entry) => entry.runner ?? job["runs-on"],
+          );
           const runners = matrixRunners ?? [job["runs-on"]];
           for (const runner of runners) {
             expect(typeof runner, `${name}: ${jobId} runs-on must be a single label`).toBe(
@@ -232,6 +235,7 @@ describe("Public Release Workflows Contract", () => {
       expect(Object.keys(jobs).sort()).toEqual([
         "build-and-sign",
         "platform-qualification",
+        "release-tests",
         "system-qualification",
         "windows-qualification",
         "windows-suites",
@@ -241,6 +245,7 @@ describe("Public Release Workflows Contract", () => {
         "windows-qualification",
         "windows-suites",
         "system-qualification",
+        "release-tests",
       ]);
       const uploads = buildJob.steps.filter((s) => s.uses?.startsWith("actions/upload-artifact"));
       expect(uploads).toHaveLength(1);
@@ -1292,7 +1297,7 @@ describe("Public Release Workflows Contract", () => {
     it("isolates the SNS role and topic from monitoring and signing and fails closed on missing configuration", () => {
       expect(notify.environment).toBe("release-monitoring");
       expect(notify.permissions).toEqual({ "id-token": "write" });
-      expect(notify["runs-on"]).toBe("ubuntu-latest");
+      expect(notify["runs-on"]).toBe("ubuntu-24.04");
       expect(notify.steps.some((step) => step.uses?.startsWith("actions/checkout"))).toBe(false);
       const serialized = JSON.stringify(notify);
       expect([...new Set(serialized.match(/secrets\.[A-Z_]+/g))].sort()).toEqual([
@@ -1804,19 +1809,62 @@ with patch("subprocess.run", side_effect=publish):
       expect(testIndex).toBeGreaterThan(buildIndex);
     });
 
-    it("gates PRs on the CI Gate Rollup over static checks and unit tests", () => {
+    it("gates PRs on the CI Gate Rollup over every CI job", () => {
       const gateJob = ci.doc.jobs["ci-gate"];
       expect(gateJob).toBeDefined();
       expect(gateJob.name).toBe("CI Gate Rollup");
       expect(gateJob.if).toBe("always()");
-      expect(gateJob.needs).toEqual(["static", "test-unit"]);
+      const gatedJobs = ["static", "repo-gates", "test-unit", "test-sandbox"];
+      expect(gateJob.needs).toEqual(gatedJobs);
+      expect(Object.keys(ci.doc.jobs).sort()).toEqual([...gatedJobs, "ci-gate"].sort());
 
       const staticRuns = ci.doc.jobs.static.steps.map((step) => step.run).filter(Boolean);
       expect(staticRuns).toEqual(expect.arrayContaining(["pnpm lint", "pnpm typecheck"]));
 
       const verifyStep = gateJob.steps.find((s) => s.id === "gate");
-      expect(verifyStep.run).toContain("for job in static test-unit");
+      expect(verifyStep.run).toContain(`for job in ${gatedJobs.join(" ")}`);
       expect(verifyStep.run).toContain('if [ "$result" != "success" ]');
+    });
+
+    it("runs the repository gates and the excluded sandbox suite in PR CI", () => {
+      const gateRuns = ci.doc.jobs["repo-gates"].steps.map((step) => step.run).filter(Boolean);
+      expect(gateRuns).toEqual([
+        "node scripts/check-boundaries.mjs",
+        "node scripts/check-secrets.mjs",
+        "node scripts/verify-adrs.mjs",
+      ]);
+
+      const sandboxSteps = ci.doc.jobs["test-sandbox"].steps;
+      const deno = sandboxSteps.find((step) => step.uses?.startsWith("denoland/setup-deno@"));
+      expect(deno.with["deno-version"]).toBe("2.9.5");
+      const buildIndex = sandboxSteps.findIndex((step) => step.run === "pnpm build");
+      const testIndex = sandboxSteps.findIndex((step) => step.run === "pnpm test:sandbox");
+      expect(buildIndex).toBeGreaterThan(-1);
+      expect(testIndex).toBeGreaterThan(buildIndex);
+    });
+
+    // Every file `pnpm test` excludes must run somewhere: the sandbox job in PR CI, or the
+    // release-tests job in the release candidate before signing.
+    it("runs every test file excluded from pnpm test in CI or the release candidate", () => {
+      const scripts = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts;
+      const excluded = [...scripts.test.matchAll(/--exclude (\S+)/g)].map((match) => match[1]);
+      expect(excluded.length).toBeGreaterThan(0);
+
+      const releaseScripts = candidate.doc.jobs["release-tests"].strategy.matrix.include.map(
+        (entry) => entry.script,
+      );
+      const covered = ["test:sandbox", ...releaseScripts].map((name) => scripts[name]).join(" ");
+      for (const file of excluded) {
+        expect(covered, `${file} is excluded from pnpm test but runs in no workflow`).toContain(
+          file,
+        );
+      }
+      expect(scripts["release:test"]).toBe(
+        releaseScripts
+          .filter((name) => name !== "test:e2e")
+          .map((name) => `pnpm run ${name}`)
+          .join(" && "),
+      );
     });
 
     it("verifies configure-branch-protection.sh requires only the CI Gate Rollup", () => {
@@ -1969,7 +2017,7 @@ with patch("subprocess.run", side_effect=publish):
 
     it("runs system qualification against the exact candidate in the release candidate", () => {
       const job = candidate.doc.jobs["system-qualification"];
-      expect(job["runs-on"]).toBe("ubuntu-latest");
+      expect(job["runs-on"]).toBe("ubuntu-24.04");
       const checkoutStep = job.steps.find((s) => s.uses?.startsWith("actions/checkout"));
       expect(checkoutStep.with?.ref).toContain("RELEASE_SHA");
       expect(checkoutStep.with?.["persist-credentials"]).toBe(false);

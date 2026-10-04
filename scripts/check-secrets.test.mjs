@@ -135,7 +135,8 @@ const key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA 
       const slack = 'const slackBot = "xoxb-1234567890-123456789012-abcdef123456";';
       expect(scanContent("src/slack.ts", slack)[0].rule).toBe("slack-token");
 
-      const stripe = 'const stripeSecret = "sk_live_51AbCdEfGhIjKlMnOpQrStUvWxYz01234";';
+      // Assembled at runtime so GitHub secret scanning never sees a literal live-key shape.
+      const stripe = `const stripeSecret = "${["sk", "live", "51AbCdEfGhIjKlMnOpQrStUvWxYz01234"].join("_")}";`;
       expect(scanContent("src/stripe.ts", stripe)[0].rule).toBe("stripe-key");
     });
 

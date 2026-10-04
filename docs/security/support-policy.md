@@ -9,7 +9,7 @@ This document defines the official support tiers, operating system matrix, harne
 | Tier | Operating System | Architecture | Minimum Version | Support Level |
 |------|------------------|--------------|-----------------|---------------|
 | **Tier 1** | Linux (Ubuntu, Debian, Fedora, Arch) | `x86_64`, `arm64` | Kernel 5.4+ (glibc >= 2.31) | Full Support & Automated CI Qualification |
-| **Tier 1** | macOS (Apple Silicon & Intel) | `arm64`, `x86_64` | macOS 12 Monterey+ | Full Support & Automated CI Qualification |
+| **Tier 1** | macOS (Apple Silicon & Intel) | `arm64`, `x86_64` | macOS 13 Ventura+ | Full Support & Automated CI Qualification |
 | **Tier 1** | Windows Subsystem for Linux (WSL2) | `x86_64`, `arm64` | WSL2 (Ubuntu 22.04+) | Full Support & Automated CI Qualification |
 | **Tier 1** | Windows Native (`win32`) | `x86_64`, `arm64` | Windows 10/11 | Full Support & Automated CI Qualification |
 

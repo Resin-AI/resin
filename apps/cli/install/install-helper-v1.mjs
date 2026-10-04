@@ -10249,7 +10249,7 @@ var V1_SUPPORT_MATRIX = Object.freeze({
       serviceManager: "launchd",
       tarball: "resin-v1.0.0-darwin-x64.tar.gz",
       qualified: true,
-      minimumOsVersion: "macOS 12 Monterey+"
+      minimumOsVersion: "macOS 13 Ventura+"
     }),
     Object.freeze({
       id: "darwin-arm64",
@@ -10261,7 +10261,7 @@ var V1_SUPPORT_MATRIX = Object.freeze({
       serviceManager: "launchd",
       tarball: "resin-v1.0.0-darwin-arm64.tar.gz",
       qualified: true,
-      minimumOsVersion: "macOS 12 Monterey+"
+      minimumOsVersion: "macOS 13 Ventura+"
     }),
     Object.freeze({
       id: "wsl",

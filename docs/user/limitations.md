@@ -10,8 +10,8 @@ This document specifies the supported scope, platform matrix, resource boundarie
 |----------|--------------|--------|----------------------|
 | **Linux** | `x86_64` | Supported | Kernel 5.4+, Node.js >= 22.0.0, glibc 2.31+ |
 | **Linux** | `arm64` | Supported | Kernel 5.4+, Node.js >= 22.0.0, glibc 2.31+ |
-| **macOS** | Apple Silicon (`arm64`) | Supported | macOS 12+ (Monterey or later), Node.js >= 22.0.0 |
-| **macOS** | Intel (`x86_64`) | Supported | macOS 12+ (Monterey or later), Node.js >= 22.0.0 |
+| **macOS** | Apple Silicon (`arm64`) | Supported | macOS 13+ (Ventura or later), Node.js >= 22.0.0 |
+| **macOS** | Intel (`x86_64`) | Supported | macOS 13+ (Ventura or later), Node.js >= 22.0.0 |
 | **Windows Subsystem for Linux** | `WSL2` (Ubuntu 22.04+) | Supported | WSL2 with systemd enabled, Node.js >= 22.0.0 |
 | **Windows (native)** | `x86_64`, `arm64` | Supported | Windows 10/11, Node.js >= 22.0.0, Windows PowerShell 5.1 or PowerShell 7+ |
 
@@ -33,10 +33,6 @@ Resin registers any installed version of these harnesses; only the listed versio
 | **OpenCode** | `1.18.32`, `1.1.65` | MCP stdio / SQLite or legacy JSON store |
 | **GitHub Copilot CLI** | `1.0.88` | MCP stdio / JSONL event logs |
 
----------|-----------------------|-----------------|---------------------|
-| **Claude Code CLI** | `>= 0.1.0` | `0.2.29`, `1.0.0` | MCP SSE / JSONL observation |
-| **Codex CLI** | `>= 0.1.0` | `0.1.0`, `0.2.0` | MCP SSE / TOML session observation |
-| **Oh My Pi (OMP)** | `>= 0.1.0` | `0.1.0`, `0.2.0` | MCP SSE / Hub IPC observation |
 ---
 
 ## 3. Runtime Boundaries & Default Limits

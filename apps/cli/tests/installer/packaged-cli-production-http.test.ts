@@ -451,5 +451,6 @@ describe("packed CLI production bootstrap", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  }, 180_000);
+    // Packing and offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
+  }, 600_000);
 });

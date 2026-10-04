@@ -8,21 +8,23 @@ Thank you for contributing to Resin! Please follow the guidelines below to maint
 
 ### What CI runs
 
-CI is deliberately minimal (static checks + unit tests). Don't add CI jobs, required checks or pre-push gates without the owner's approval.
+CI is deliberately small. Don't add CI jobs, required checks or pre-push gates without the owner's approval.
 
 Pull-request CI (`.github/workflows/ci.yml`) runs only:
 - **Static Checks:** `pnpm lint` and `pnpm typecheck`
+- **Repository Gates:** `check-boundaries`, `check-secrets` and `verify-adrs`
 - **Unit Tests:** `pnpm test`, sharded across parallel jobs
-- **CI Gate Rollup:** the single required check; it fails unless both jobs above pass
+- **Sandbox Tests:** `pnpm test:sandbox`, the derivation sandbox suites `pnpm test` excludes
+- **CI Gate Rollup:** the single required check; it fails unless every job above passes
 
-Every other check below runs by hand. `ci.yml` is the only workflow that runs on pushes to `main`; everything the release needs beyond it runs inside `release-candidate.yml`.
+`ci.yml` is the only workflow that runs on pushes to `main`; everything the release needs beyond it runs inside `release-candidate.yml`, including the `release-tests` job (`release:test:*`, `check:public-artifact`, `test:e2e`). The remaining checks below run by hand.
 
-Speed targets: PR CI ≤ 90 s, merge to `main` → published release ≤ 5 min. Keep signing, integrity verification, the packaged vulnerability scan, exact-SHA pinning and channel verification; anything that only repeats a test run must not be added to the release path.
+Speed targets: PR CI ≤ 4 min, merge to `main` → published release ≤ 15 min (release candidate 10–13 min, publication 2–4 min). Keep signing, integrity verification, the packaged vulnerability scan, exact-SHA pinning and channel verification; anything that only repeats a test run must not be added to the release critical path.
 
 ### Cutting a release
 
 1. Merge to `main`. The `ci.yml` push run for the merge commit starts immediately.
-2. Right away, dispatch `release-candidate.yml` with `commit_sha` (the merge commit), `release_tag` and `ci_run_id` (the ID of that `ci.yml` push run; it may still be running). The RC runs platform qualification (linux-x64 and linux-arm64 natively, darwin-x64/darwin-arm64/wsl artifact validation, windows-x64 and windows-arm64 natively in PowerShell including install, service, second-user isolation and uninstall) and system qualification in parallel on GitHub-hosted runners, then the signing job audits production dependencies, generates the qualification evidence, and builds, signs and verifies the candidate.
+2. Right away, dispatch `release-candidate.yml` with `commit_sha` (the merge commit), `release_tag` and `ci_run_id` (the ID of that `ci.yml` push run; it may still be running). The RC runs platform qualification (linux-x64 and linux-arm64 natively, darwin-x64/darwin-arm64/wsl artifact validation, windows-x64 and windows-arm64 natively in PowerShell including install, service, second-user isolation and uninstall), system qualification and the release test suites in parallel on GitHub-hosted runners, then the signing job audits production dependencies, generates the qualification evidence, and builds, signs and verifies the candidate.
 3. When the RC and the CI run have both succeeded, dispatch `release.yml` with `commit_sha`, `release_tag`, `candidate_run_id`, `confirm_promotion=PROMOTE_PRODUCTION` and `environment=production`. It fails before publishing anything unless the CI run recorded in the candidate evidence completed successfully on the exact SHA, then publishes and verifies the channel.
 
 ### Complete Local Verification Gate
@@ -93,23 +95,9 @@ Do not use an unqualified `npx resin` command to validate source changes. It res
 The `main` branch is strictly protected and enforces PR-only release gates:
 - **Direct Pushes Blocked:** Direct commits and pushes to `main` are disabled. All changes must arrive via pull request.
 - **Force Pushes Disabled:** Force-pushing to `main` is strictly forbidden.
-- **Review Policy:** Pull requests enforce PR-only integration with zero required approving reviews. Human reviews are optional and are not automatically requested through code ownership rules. Automated gating relies entirely on required machine verification: all 13 parallel CI status checks, package and privacy boundary checks, security scans, and the rollup `ci-gate` must pass before merging.
+- **Review Policy:** Pull requests enforce PR-only integration with zero required approving reviews. Human reviews are optional and are not automatically requested through code ownership rules. Automated gating relies entirely on required machine verification.
 - **Branch Protection Automation:** Run `./scripts/configure-branch-protection.sh` (or `pnpm exec ./scripts/configure-branch-protection.sh`) to automatically configure strict branch protection rules via GitHub API / gh CLI.
-- **Required Status Checks:** All 13 parallel CI jobs and the rollup `ci-gate` must pass before merging:
-  1. `lint` (Biome Lint & Format Check)
-  2. `typecheck` (TypeScript Typecheck)
-  3. `build` (Monorepo Build)
-  4. `test-unit` (Unit Tests)
-  5. `test-e2e` (E2E Tests with PostgreSQL)
-  6. `check-boundaries` (Package Import Boundaries)
-  7. `check-adrs` (ADR Integrity & Glossary Validation)
-  8. `check-privacy-boundary` (Privacy Data Boundary Check)
-  9. `check-hostile-cloud` (Hostile Cloud Quarantine & Preactivation Check)
-  10. `check-runtime-security` (Runtime IPC & Broker Security Check)
-  11. `release-verification` (Release Packaging, Digest, SBOM, and Docs Cross-Links)
-  12. `binary-smoke` (Binary Entry Point Smoke Tests)
-  13. `secret-scan` (Gitleaks and Standalone Secret Scanner)
-  14. `ci-gate` (Rollup Status Gate)
+- **Required Status Check:** `CI Gate Rollup` is the only required check; it passes only when every `ci.yml` job (Static Checks, Repository Gates, every Unit Tests shard, Sandbox Tests) passed on the exact commit.
 
 ### PR Template & Checklist
 All pull requests must use `.github/pull_request_template.md` and provide:

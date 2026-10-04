@@ -1,8 +1,9 @@
 name: CI
 
-# CI is deliberately minimal (static checks + unit tests). Don't add CI jobs,
-# required checks or pre-push gates without the owner's approval. Removed checks
-# still run by hand via their package.json scripts (see AGENTS.md).
+# CI is deliberately small: static checks, repository gates, unit tests and the
+# derivation sandbox suite. Don't add CI jobs, required checks or pre-push gates
+# without the owner's approval. Release-only suites run in release-candidate.yml;
+# the rest run by hand via their package.json scripts (see AGENTS.md).
 
 on:
   push:
@@ -29,7 +30,7 @@ env:
 jobs:
   static:
     name: Static Checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       commit_sha: ${{ steps.checkout.outputs.commit }}
@@ -86,9 +87,38 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+  # Repository-wide gates: no private/cloud imports across package boundaries, no
+  # committed credentials, ADR index integrity. Node built-ins only; no install.
+  repo-gates:
+    name: Repository Gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Check package boundaries
+        run: node scripts/check-boundaries.mjs
+
+      - name: Scan for committed secrets
+        run: node scripts/check-secrets.mjs
+
+      - name: Verify ADRs
+        run: node scripts/verify-adrs.mjs
+
   test-unit:
     name: Unit Tests (Shard ${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -154,11 +184,75 @@ jobs:
       - name: Run unit test shard
         run: pnpm test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
+  # The derivation sandbox suites spawn real Deno sandboxes and are CPU-heavy, so
+  # they run in their own job instead of loading the unit shards.
+  test-sandbox:
+    name: Sandbox Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      commit_sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Setup pinned Deno for real sandbox tests
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+        with:
+          deno-version: "2.9.5"
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Locate turbo cache
+        run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
+
+      - name: Restore turbo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-turbo-sandbox-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-sandbox-
+            ${{ runner.os }}-turbo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build workspace packages (turbo cache)
+        run: pnpm build
+
+      - name: Run derivation sandbox tests
+        run: pnpm test:sandbox
+
   ci-gate:
     name: CI Gate Rollup
-    needs: [static, test-unit]
+    needs: [static, repo-gates, test-unit, test-sandbox]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       commit_sha: ${{ steps.gate.outputs.commit_sha }}
@@ -170,7 +264,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github
 
-      - name: Verify static checks and every unit shard passed
+      - name: Verify every CI job passed
         id: gate
         shell: bash
         env:
@@ -179,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for job in static test-unit; do
+          for job in static repo-gates test-unit test-sandbox; do
             result=$(jq -r ".[\"$job\"].result // \"missing\"" <<<"$RESULTS")
             sha=$(jq -r ".[\"$job\"].outputs.commit_sha // \"missing\"" <<<"$RESULTS")
             if [ "$result" != "success" ]; then
