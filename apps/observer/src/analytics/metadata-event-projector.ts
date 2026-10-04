@@ -75,8 +75,11 @@ export class MetadataEventProjector {
   private readonly entries = new Map<string, StoredEntry>();
   private retainedBytes = 0;
 
+  /** `commitmentKey` yields the device-local key command parameter commitments are keyed by. */
+  constructor(private readonly commitmentKey?: () => Uint8Array | undefined) {}
+
   public project(event: NormalizedSessionEvent): NormalizedSessionEvent {
-    const projected = projectEventToMetadataOnly(event);
+    const projected = projectEventToMetadataOnly(event, { commitmentKey: this.commitmentKey?.() });
     // Processing time is not source evidence and must not change a retry's payload.
     delete projected.redaction.redactedAt;
     const metadata = projected.metadata ?? {};

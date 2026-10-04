@@ -361,7 +361,10 @@ export function isDescriptorSafePlainTree(
  *   input value shared by several steps and therefore keeps one role; the argv prefix carrying each
  *   occurrence is positional and may differ
  * - strict plain objects with no extra keys, prototype pollution, or hostiles
- * - evidence-derived SHA-256 commitments for every private string parameter
+ * - an evidence-derived value commitment for every private string parameter: a keyed HMAC-SHA256
+ *   under a device-local key the cloud never holds (`parameterValueHmacSha256`), or the unkeyed
+ *   SHA-256 earlier clients sent (`parameterValueSha256`, still accepted, never produced). At most
+ *   one of the two is present.
  */
 const RawDeterministicCommandSequenceSchema = z
   .object({
@@ -369,7 +372,12 @@ const RawDeterministicCommandSequenceSchema = z
     kind: z.literal(DETERMINISTIC_COMMAND_SEQUENCE_KIND),
     control: z.literal(DETERMINISTIC_COMMAND_SEQUENCE_CONTROL),
     steps: z.array(DeterministicCommandStepSchema).min(1),
+    /** Unkeyed SHA-256 commitments from earlier clients: a guessable value can be confirmed. */
     parameterValueSha256: z
+      .record(z.string().regex(/^arg[0-9]+$/), z.string().regex(/^[0-9a-f]{64}$/))
+      .optional(),
+    /** HMAC-SHA256 commitments under a device-local key, so nothing else can test a guess. */
+    parameterValueHmacSha256: z
       .record(z.string().regex(/^arg[0-9]+$/), z.string().regex(/^[0-9a-f]{64}$/))
       .optional(),
   })
@@ -433,9 +441,21 @@ const RawDeterministicCommandSequenceSchema = z
       });
     }
 
+    if (seq.parameterValueSha256 !== undefined && seq.parameterValueHmacSha256 !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A command sequence carries one kind of value commitment, not both",
+        path: ["parameterValueSha256"],
+      });
+    }
+    const commitmentField =
+      seq.parameterValueHmacSha256 !== undefined
+        ? "parameterValueHmacSha256"
+        : "parameterValueSha256";
+    const commitments = seq[commitmentField];
+
     // Structural work is bounded by matching the canonical serializer's node budget
-    let totalNodes =
-      5 + (seq.parameterValueSha256 ? 1 + Object.keys(seq.parameterValueSha256).length : 0);
+    let totalNodes = 5 + (commitments ? 1 + Object.keys(commitments).length : 0);
     for (let i = 0; i < seq.steps.length; i++) {
       const step = seq.steps[i];
       totalNodes += 4; // step object + id + executable + argv array
@@ -460,21 +480,21 @@ const RawDeterministicCommandSequenceSchema = z
     }
 
     for (const parameter of stringParamNames) {
-      if (!(parameter in (seq.parameterValueSha256 ?? {}))) {
+      if (!(parameter in (commitments ?? {}))) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `String parameter '${parameter}' requires an evidence-derived value commitment`,
-          path: ["parameterValueSha256", parameter],
+          path: [commitmentField, parameter],
         });
       }
     }
 
-    for (const parameter of Object.keys(seq.parameterValueSha256 ?? {})) {
+    for (const parameter of Object.keys(commitments ?? {})) {
       if (!stringParamNames.has(parameter)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Value commitment '${parameter}' must reference a string parameter`,
-          path: ["parameterValueSha256", parameter],
+          path: [commitmentField, parameter],
         });
       }
     }

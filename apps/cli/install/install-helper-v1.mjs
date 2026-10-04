@@ -11709,6 +11709,15 @@ function parseShellRuntime(command) {
   if (!token) return null;
   return { token, path: token.slice(1, -1).replaceAll(`'"'"'`, "'") };
 }
+function isTemporarySearchPathEntry(entry) {
+  if (entry.length === 0) return false;
+  const resolved = path34.resolve(entry);
+  for (const root of [os6.tmpdir(), ...process4.platform === "win32" ? [] : ["/tmp"]]) {
+    const resolvedRoot = path34.resolve(root);
+    if (resolved === resolvedRoot || resolved.startsWith(`${resolvedRoot}${path34.sep}`)) return true;
+  }
+  return false;
+}
 function daemonChildCommand(daemonPath, nodePath, windows) {
   if (!windows) {
     return daemonPath.endsWith(".js") ? [nodePath, daemonPath, "--foreground"] : [daemonPath, "--foreground"];
@@ -11752,19 +11761,7 @@ function formatShellEnvironment(name, value) {
 }
 function serviceSearchPath(nodePath) {
   const inheritedPath = process4.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  const temporaryRoots = new Set(
-    [os6.tmpdir(), ...process4.platform === "win32" ? [] : ["/tmp"]].map(
-      (root) => path34.resolve(root)
-    )
-  );
-  const inheritedEntries = inheritedPath.split(path34.delimiter).filter((entry) => {
-    if (entry.length === 0) return false;
-    const resolved = path34.resolve(entry);
-    for (const root of temporaryRoots) {
-      if (resolved === root || resolved.startsWith(`${root}${path34.sep}`)) return false;
-    }
-    return true;
-  });
+  const inheritedEntries = inheritedPath.split(path34.delimiter).filter((entry) => entry.length > 0 && !isTemporarySearchPathEntry(entry));
   return Array.from(/* @__PURE__ */ new Set([path34.dirname(nodePath), ...inheritedEntries])).join(path34.delimiter);
 }
 async function resolveInstallNodePath(input) {

@@ -176,6 +176,49 @@ describe("exact local values across the real normalization boundary", () => {
     ).toEqual(original.nested);
   });
 
+  it("keeps a composed call's literal private when it restates a recorded value", async () => {
+    const { directory, store } = temporaryStore();
+    const captured = await capture(store, "session-restated");
+    const recordedPath = captured.parameters[0]!.path;
+    // A later process (another gateway run, a daemon restart) sees only the on-disk store.
+    const recorder = new WorkflowCallRecorder({
+      privateValues: new FilePrivateValueStore(directory),
+    });
+    const pipeline = new NormalizationPipeline({ redactionConfig: { scanContent: false } });
+    const result = await pipeline.processIntermediateEvent(
+      {
+        sessionId: "session-composed",
+        type: "tool_call",
+        toolName: "invoke_tool",
+        callId: "call-composed",
+        parameters: {
+          toolName: "local.render_result",
+          parameters: { path: recordedPath, format: "plain-text-report" },
+        },
+        timestamp: "2026-09-19T00:00:00.000Z",
+        causalRef: { causalSequence: 1, parentId: null },
+      },
+      origin,
+    );
+    if (result.status !== "success") throw new Error(result.errorReason);
+    const observed = projectEventToMetadataOnly(recorder.observe(result.event, origin));
+    const carrier = readWorkflowCallCarrier(observed.metadata?.workflowCall)!;
+
+    const restated = carrier.origins.path!;
+    if (restated.type !== "private") throw new Error("Expected the restated value kept private");
+    expect(resolvePrivateReference(store, restated.reference)).toBe(recordedPath);
+    expect(carrier.origins.format).toEqual({ type: "literal", value: "plain-text-report" });
+    expect(JSON.stringify(observed.metadata)).not.toContain(recordedPath);
+    // Another workspace's recording does not make the same text private here.
+    const elsewhere = new WorkflowCallRecorder({
+      privateValues: new FilePrivateValueStore(directory),
+    }).observe({ ...result.event, sessionId: "session-elsewhere" }, { workspaceId: "ws-other" });
+    expect(readWorkflowCallCarrier(elsewhere.metadata?.workflowCall)!.origins.path).toEqual({
+      type: "literal",
+      value: recordedPath,
+    });
+  });
+
   it("keeps references stable across sessions, fresh instances, and clear/restart", async () => {
     const { directory, store } = temporaryStore();
     const recorder = new WorkflowCallRecorder({ privateValues: store });

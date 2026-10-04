@@ -953,9 +953,10 @@ export class WorkflowCallRecorder {
   }
 
   /**
-   * Replaces literal leaves that still carry a redaction placeholder with `private:`
-   * references, writing the redacted leaf to the local store so the executor can
-   * reconstruct the original at invocation time.
+   * Replaces literal leaves that still carry a redaction placeholder, or that restate a value this
+   * device recorded as private (an agent copying a recorded step's value into its call), with
+   * `private:` references, writing the leaf to the local store so the executor can reconstruct the
+   * original at invocation time.
    */
   private sweepOrigin(
     origin: AgentArgumentOrigin,
@@ -969,7 +970,11 @@ export class WorkflowCallRecorder {
           value: WorkflowJsonValue,
           currentPath: WorkflowValuePath,
         ): AgentArgumentOrigin => {
-          if (typeof value === "string" && containsRedactionPlaceholder(value)) {
+          if (
+            typeof value === "string" &&
+            (containsRedactionPlaceholder(value) ||
+              this.privateValues.holdsValue?.(value, this.observeAccess) === true)
+          ) {
             return this.storeLocalValue(value, sessionId, callId, currentPath);
           }
           if (Array.isArray(value)) {

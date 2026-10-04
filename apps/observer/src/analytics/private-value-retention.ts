@@ -11,6 +11,7 @@ import {
   privateValueEntriesDir,
   privateValueEntryName,
   privateValueEntryPath,
+  privateValueIndexDir,
 } from "./private-value-store.js";
 
 /**
@@ -24,6 +25,7 @@ export const PRIVATE_VALUE_SWEEP_MAX_ENTRIES = 20_000;
 const SHARD_COUNT = 256;
 const REFERENCE_PATTERN = /private:v2:[a-z]+:[0-9a-f]{64}/g;
 const ENTRY_NAME = /^[0-9a-f]{64}\.json$/;
+const INDEX_MARKER_NAME = /^[0-9a-f]{64}$/;
 
 /**
  * Every V2 reference named by a file under `roots` (stored tool artifacts, recorded workflows,
@@ -65,9 +67,11 @@ export async function collectPrivateValueReferences(
 }
 
 export interface PrivateValueSweepResult {
-  /** Entry and leftover temporary files examined. */
+  /** Entry, value-index marker and leftover temporary files examined. */
   scanned: number;
   deleted: number;
+  /** Value-index markers removed: values not recorded or read back within the age floor. */
+  indexDeleted: number;
   /** Flat pre-sharding entries moved into their shard. */
   migrated: number;
   /** The shard the next pass starts at. */
@@ -79,7 +83,9 @@ export interface PrivateValueSweepResult {
  * is at least `minAgeMs` old, along with temporary files an interrupted write left that old. Flat
  * entries written before sharding are swept first and every one kept is moved into its shard
  * (hard link then unlink, so its age and a concurrent winner are preserved); shards follow, from
- * `startShard`, until about `maxEntries` files were examined.
+ * `startShard`, until about `maxEntries` files were examined. Each shard visited also drops the
+ * value-index markers (see `privateValueIndexDir`) that are that old: recording or reading a value
+ * back refreshes its marker, so only values nothing used within the age floor lose theirs.
  */
 export async function sweepPrivateValues(options: {
   dataDir: string;
@@ -97,9 +103,11 @@ export async function sweepPrivateValues(options: {
   const result: PrivateValueSweepResult = {
     scanned: 0,
     deleted: 0,
+    indexDeleted: 0,
     migrated: 0,
     nextShard: (options.startShard ?? 0) % SHARD_COUNT,
   };
+  const indexDir = privateValueIndexDir(options.dataDir);
 
   /**
    * Deletes an expired entry or leftover temporary file. True when the file is gone afterwards or
@@ -159,16 +167,40 @@ export async function sweepPrivateValues(options: {
   }
 
   for (let visited = 0; visited < SHARD_COUNT && result.scanned < budget; visited++) {
-    const shard = path.join(entriesDir, result.nextShard.toString(16).padStart(2, "0"));
+    const shardName = result.nextShard.toString(16).padStart(2, "0");
     result.nextShard = (result.nextShard + 1) % SHARD_COUNT;
-    let names: string[];
-    try {
-      names = await fs.promises.readdir(shard);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
+    for (const [directory, isIndex] of [
+      [path.join(entriesDir, shardName), false],
+      [path.join(indexDir, shardName), true],
+    ] as const) {
+      let names: string[];
+      try {
+        names = await fs.promises.readdir(directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      for (const name of names) {
+        if (!isIndex) {
+          await expire(directory, name);
+          continue;
+        }
+        if (!INDEX_MARKER_NAME.test(name)) continue;
+        result.scanned++;
+        const marker = path.join(directory, name);
+        let stat: fs.Stats;
+        try {
+          stat = await fs.promises.lstat(marker);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
+        }
+        if (stat.isFile() && stat.mtimeMs < cutoff) {
+          await fs.promises.rm(marker, { force: true });
+          result.indexDeleted++;
+        }
+      }
     }
-    for (const name of names) await expire(shard, name);
   }
   return result;
 }

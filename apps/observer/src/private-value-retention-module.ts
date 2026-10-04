@@ -117,10 +117,11 @@ export class PrivateValueRetentionModule implements DaemonModule {
       this.nextShard = result.nextShard;
       this.lastResult = result;
       this.lastError = null;
-      if (result.deleted > 0 || result.migrated > 0) {
+      if (result.deleted > 0 || result.migrated > 0 || result.indexDeleted > 0) {
         this.options.logger?.info("Private value retention pass", {
           scanned: result.scanned,
           deleted: result.deleted,
+          indexDeleted: result.indexDeleted,
           migrated: result.migrated,
           referenced: keep.size,
         });
@@ -147,6 +148,7 @@ export class PrivateValueRetentionModule implements DaemonModule {
       lastError: this.lastError,
       scanned: this.lastResult?.scanned ?? null,
       deleted: this.lastResult?.deleted ?? null,
+      indexDeleted: this.lastResult?.indexDeleted ?? null,
       migrated: this.lastResult?.migrated ?? null,
       nextShard: this.nextShard,
     };

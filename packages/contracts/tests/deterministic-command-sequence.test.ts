@@ -628,6 +628,41 @@ describe("DeterministicCommandSequenceSchema", () => {
     ).toBe(false);
   });
 
+  it("accepts keyed commitments, and the legacy unkeyed ones, but never both", () => {
+    const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const keyed = {
+      schemaVersion: 1,
+      kind: "command-sequence",
+      control: "and-then",
+      steps: [
+        {
+          id: "step0",
+          executable: "custom-checker",
+          argv: [
+            { parameter: "arg0", role: "string" },
+            { parameter: "arg1", role: "path" },
+          ],
+        },
+      ],
+      parameterValueHmacSha256: { arg0: digest },
+    };
+
+    expect(isDeterministicCommandSequence(keyed)).toBe(true);
+    expect(
+      isDeterministicCommandSequence({ ...keyed, parameterValueHmacSha256: { arg1: digest } }),
+    ).toBe(false);
+    expect(
+      isDeterministicCommandSequence({ ...keyed, parameterValueSha256: { arg0: digest } }),
+    ).toBe(false);
+    expect(
+      isDeterministicCommandSequence({
+        ...keyed,
+        parameterValueHmacSha256: undefined,
+        parameterValueSha256: { arg0: digest },
+      }),
+    ).toBe(true);
+  });
+
   it("accepts privacy-safe parameters embedded in --flag=value argv tokens", () => {
     const sequence = {
       schemaVersion: 1,
