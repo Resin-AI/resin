@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
   DETERMINISTIC_COMMAND_SEQUENCE_LIMITS,
   type NormalizedCommandExecEvent,
@@ -14,6 +14,7 @@ import {
   projectDeterministicCommandSequence,
   projectDeterministicCommandSequenceFromEvent,
 } from "../../src/analytics/deterministic-command-sequence.js";
+import { MetadataEventProjector } from "../../src/analytics/metadata-event-projector.js";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 
 function createBaseHeaders(seq = 1) {
@@ -375,15 +376,37 @@ describe("projectDeterministicCommandSequence", () => {
         { parameter: "arg1", role: "path" },
         { parameter: "arg2", role: "string" },
       ]);
-      expect(sequence?.parameterValueSha256).toEqual({
-        arg0: createHash("sha256").update("run").digest("hex"),
-        arg2: createHash("sha256").update("customer-secret").digest("hex"),
-      });
+      // Only the keyed commitment is sent, never the unkeyed hash a guess could be checked against.
+      expect(sequence?.parameterValueSha256).toBeUndefined();
+      expect(json).not.toContain(createHash("sha256").update("customer-secret").digest("hex"));
+      expect(json).not.toContain(createHash("sha256").update("run").digest("hex"));
       expect(json).not.toContain("run");
       expect(json).not.toContain("customer-secret");
       expect(
         JSON.stringify(projectDeterministicCommandSequence("custom-tool alice")),
       ).not.toContain("alice");
+    });
+
+    it("commits to string parameter values with an HMAC under the device key", () => {
+      const key = Buffer.alloc(32, 7);
+      const commit = (value: string) =>
+        createHmac("sha256", key)
+          .update("resin:command-parameter-commitment:v1\0")
+          .update(value)
+          .digest("hex");
+      const command = "lune run scripts/test.luau customer-secret";
+      const sequence = projectDeterministicCommandSequence(command, key);
+
+      expect(sequence?.parameterValueHmacSha256).toEqual({
+        arg0: commit("run"),
+        arg2: commit("customer-secret"),
+      });
+      // Stable under one key, so one device's evidence stays comparable; another key differs.
+      expect(projectDeterministicCommandSequence(command, key)).toEqual(sequence);
+      expect(
+        projectDeterministicCommandSequence(command, Buffer.alloc(32, 8))?.parameterValueHmacSha256
+          ?.arg2,
+      ).not.toBe(commit("customer-secret"));
     });
   });
 
@@ -691,6 +714,32 @@ describe("projectDeterministicCommandSequence", () => {
 
       expect(isDeterministicCommandSequence(sequence)).toBe(true);
     });
+  });
+});
+
+describe("metadata projector value commitments", () => {
+  it("keys uploaded command evidence with the device key the projector is given", () => {
+    const key = Buffer.alloc(32, 3);
+    const event: NormalizedCommandExecEvent = {
+      ...createBaseHeaders(1),
+      type: "command_exec",
+      command: "lune run scripts/test.luau customer-secret",
+      args: [],
+      exitCode: 0,
+      durationMs: 10,
+    };
+    const projected = new MetadataEventProjector(() => key).project(event);
+    const sequence = projected.metadata?.[RESIN_COMMAND_SEQUENCE_METADATA_KEY] as
+      | { parameterValueHmacSha256?: Record<string, string>; parameterValueSha256?: unknown }
+      | undefined;
+
+    expect(sequence?.parameterValueSha256).toBeUndefined();
+    expect(sequence?.parameterValueHmacSha256?.arg2).toBe(
+      createHmac("sha256", key)
+        .update("resin:command-parameter-commitment:v1\0")
+        .update("customer-secret")
+        .digest("hex"),
+    );
   });
 });
 

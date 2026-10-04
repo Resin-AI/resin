@@ -678,7 +678,13 @@ export function isStaleSupervisorUnitContent(
     return true;
   }
 
-  // 2. Systemd: compare ExecStart directive only (ignoring volatile PATH or environment changes)
+  // 2. A PATH carrying temporary-directory entries the expected unit does not carry: test or
+  // bootstrap staging from the installing shell, written before installs filtered it out.
+  if (hasStaleTemporarySearchPath(onDiskContent, expectedContent)) {
+    return true;
+  }
+
+  // 3. Systemd: compare ExecStart directive only (ignoring other PATH or environment changes)
   const onDiskExecMatch = onDiskContent.match(/^ExecStart=(.*)$/m);
   const expectedExecMatch = expectedContent.match(/^ExecStart=(.*)$/m);
   if (onDiskExecMatch && expectedExecMatch) {
@@ -691,7 +697,7 @@ export function isStaleSupervisorUnitContent(
     );
     return onDiskExec !== expectedExec;
   }
-  // 3. Launchd: compare ProgramArguments array only
+  // 4. Launchd: compare ProgramArguments array only
   const onDiskArgsMatch = onDiskContent.match(
     /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/,
   );
@@ -715,7 +721,7 @@ export function isStaleSupervisorUnitContent(
     );
   }
 
-  // 4. Windows task XML: compare the action's command and arguments
+  // 5. Windows task XML: compare the action's command and arguments
   const onDiskAction = onDiskContent.match(/<Exec>([\s\S]*?)<\/Exec>/);
   const expectedAction = expectedContent.match(/<Exec>([\s\S]*?)<\/Exec>/);
   if (onDiskAction?.[1] !== undefined && expectedAction?.[1] !== undefined) {
@@ -723,7 +729,7 @@ export function isStaleSupervisorUnitContent(
     return normalizeAction(onDiskAction[1]) !== normalizeAction(expectedAction[1]);
   }
 
-  // 5. WSL fallback script: compare command invocation line
+  // 6. WSL fallback script: compare command invocation line
   const onDiskNohupMatch = onDiskContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   const expectedNohupMatch = expectedContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   if (onDiskNohupMatch && expectedNohupMatch) {
@@ -739,6 +745,38 @@ export function isStaleSupervisorUnitContent(
 
   // Fallback: full trim comparison if specific directives are missing
   return onDiskContent.trim() !== expectedContent.trim();
+}
+
+/** The PATH a systemd unit, launchd plist or fallback script sets, as written. */
+function unitSearchPath(content: string): string | undefined {
+  return (
+    content.match(/^Environment="?PATH=([^"\n]*)"?\s*$/m)?.[1] ??
+    content.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/)?.[1] ??
+    content.match(/^export PATH='([^'\n]*)'\s*$/m)?.[1]
+  );
+}
+
+function hasStaleTemporarySearchPath(onDiskContent: string, expectedContent: string): boolean {
+  const onDisk = unitSearchPath(onDiskContent);
+  if (onDisk === undefined) return false;
+  const expected = new Set((unitSearchPath(expectedContent) ?? "").split(path.delimiter));
+  // The first entry is the directory of the Node that runs the unit (see serviceSearchPath), which
+  // the runtime comparison below judges; only inherited entries can be leftover staging.
+  return onDisk
+    .split(path.delimiter)
+    .slice(1)
+    .some((entry) => isTemporarySearchPathEntry(entry) && !expected.has(entry));
+}
+
+/** Whether a PATH entry lies under a temporary directory (`os.tmpdir()`, and `/tmp` off Windows). */
+function isTemporarySearchPathEntry(entry: string): boolean {
+  if (entry.length === 0) return false;
+  const resolved = path.resolve(entry);
+  for (const root of [os.tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])]) {
+    const resolvedRoot = path.resolve(root);
+    if (resolved === resolvedRoot || resolved.startsWith(`${resolvedRoot}${path.sep}`)) return true;
+  }
+  return false;
 }
 
 /**
@@ -892,19 +930,9 @@ export interface UserServiceManager {
  */
 function serviceSearchPath(nodePath: string): string {
   const inheritedPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  const temporaryRoots = new Set(
-    [os.tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])].map((root) =>
-      path.resolve(root),
-    ),
-  );
-  const inheritedEntries = inheritedPath.split(path.delimiter).filter((entry) => {
-    if (entry.length === 0) return false;
-    const resolved = path.resolve(entry);
-    for (const root of temporaryRoots) {
-      if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) return false;
-    }
-    return true;
-  });
+  const inheritedEntries = inheritedPath
+    .split(path.delimiter)
+    .filter((entry) => entry.length > 0 && !isTemporarySearchPathEntry(entry));
   return Array.from(new Set([path.dirname(nodePath), ...inheritedEntries])).join(path.delimiter);
 }
 

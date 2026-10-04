@@ -387,6 +387,48 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
         }
       },
     );
+
+    it.skipIf(process.platform === "win32")(
+      "rewrites an installed unit whose PATH still carries temporary directories",
+      () => {
+        vi.stubEnv("PATH", "/usr/local/bin:/usr/bin");
+        try {
+          const manager = (nodePath: string) =>
+            new SystemdUserServiceManager({
+              homeDir: fakeHome,
+              resinHome,
+              nodePath,
+              runner: mockRunner,
+            });
+          const expected = manager("/opt/node/bin/node").getUnitDefinition();
+          const onDisk = expected.replace(
+            "Environment=PATH=/opt/node/bin:",
+            "Environment=PATH=/opt/node/bin:/tmp/resin-skip-test-1/bin:/tmp/resin-bootstrap-home-x/bin:",
+          );
+          expect(onDisk).not.toBe(expected);
+          expect(isStaleSupervisorUnitContent(onDisk, expected)).toBe(true);
+          expect(isStaleSupervisorUnitContent(expected, expected)).toBe(false);
+          // A Node that itself lives in a temporary directory is the expected PATH, not staging.
+          const temporaryNode = manager("/tmp/resin-node/bin/node").getUnitDefinition();
+          expect(isStaleSupervisorUnitContent(temporaryNode, temporaryNode)).toBe(false);
+
+          const plist = new LaunchdUserServiceManager({
+            homeDir: fakeHome,
+            resinHome,
+            nodePath: "/opt/node/bin/node",
+            runner: mockRunner,
+          }).getUnitDefinition();
+          const stalePlist = plist.replace(
+            "<string>/opt/node/bin:",
+            "<string>/opt/node/bin:/tmp/resin-bootstrap-idempotent-y/bin:",
+          );
+          expect(stalePlist).not.toBe(plist);
+          expect(isStaleSupervisorUnitContent(stalePlist, plist)).toBe(true);
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
   });
 
   describe("LaunchdUserServiceManager", () => {

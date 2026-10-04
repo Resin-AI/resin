@@ -661,6 +661,11 @@ export interface MetadataProjectionOptions {
   enrichEvidence?: boolean;
   /** Home directory prefix to strip from path patterns (default: os.homedir()). */
   homeDir?: string;
+  /**
+   * Device-local key for command parameter value commitments (the private store's redaction key);
+   * see `projectDeterministicCommandSequence`.
+   */
+  commitmentKey?: Uint8Array;
 }
 
 /**
@@ -913,7 +918,10 @@ export function projectEventToMetadataOnly(
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
   // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
-  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(event);
+  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(
+    event,
+    options.commitmentKey,
+  );
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }

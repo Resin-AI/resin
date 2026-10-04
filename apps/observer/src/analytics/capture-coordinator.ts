@@ -231,9 +231,10 @@ export interface TrajectoryCaptureCoordinatorOptions {
   /**
    * Local store the redaction pipeline and workflow recorder mint placeholder aliases into. Its
    * pending writes are persisted before any batch is acknowledged or any event leaves the device,
-   * so a placeholder never outlives the alias that resolves it.
+   * so a placeholder never outlives the alias that resolves it. Its device-local redaction key also
+   * keys the value commitments of uploaded command evidence.
    */
-  privateValueStore?: { flush(): void };
+  privateValueStore?: { flush(): void; redactionKey?(): Uint8Array };
   logger?: Logger;
   /**
    * Dynamic transmission gate. Any value other than an explicit `true` fails closed.
@@ -400,7 +401,9 @@ export class TrajectoryCaptureCoordinator {
     string,
     { dropped: Set<string>; seen: Set<string> }
   >();
-  private readonly metadataEventProjector = new MetadataEventProjector();
+  private readonly metadataEventProjector = new MetadataEventProjector(() =>
+    this.privateValueStore?.redactionKey?.(),
+  );
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -411,7 +414,7 @@ export class TrajectoryCaptureCoordinator {
   private lastGenericBatchSize = 0;
   private totalGenericBatchesAccepted = 0;
   private totalGenericObservationsAccepted = 0;
-  private readonly privateValueStore?: { flush(): void };
+  private readonly privateValueStore?: { flush(): void; redactionKey?(): Uint8Array };
   private readonly uploadStatus?: CloudUploadStatusRecorder;
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(

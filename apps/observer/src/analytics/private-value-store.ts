@@ -1,5 +1,5 @@
 /** Local-only workflow values. Exact V2 originals never become uploaded event fields. */
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -27,6 +27,11 @@ export interface PrivateValueStore {
    * keeps one placeholder across sessions; never uploaded.
    */
   redactionKey?(): Uint8Array;
+  /**
+   * Whether this exact string is a recorded argument value (a `private:v2:value:` entry) of the
+   * origin's workspace, so a caller that restates it can keep it private as well.
+   */
+  holdsValue?(value: string, origin?: PrivateValueOrigin): boolean;
 }
 
 const STORE_FILE = "private-values.json";
@@ -52,6 +57,24 @@ export function privateValueEntryName(key: string): string {
 /** Where an entry file name lives under the entries directory, sharded by its first byte. */
 export function privateValueEntryPath(entriesDir: string, name: string): string {
   return path.join(entriesDir, name.slice(0, 2), name);
+}
+
+/**
+ * Recorded argument values by keyed digest, one empty marker file each:
+ * `<dir>/<first two hex digits>/<hmac>`. Lets a value restated elsewhere be recognized as private
+ * without reading every entry; the digest is keyed by the device redaction key, so a marker name
+ * cannot confirm a guessed value either. Markers age out with retention like entries do.
+ */
+export function privateValueIndexDir(dataDir: string): string {
+  return path.join(dataDir, STORE_DIR, "value-index-v1");
+}
+
+const RECORDED_VALUE_PREFIX = "private:v2:value:";
+
+function recordedValueDigest(key: Uint8Array, value: string, workspaceId: string | undefined) {
+  return createHmac("sha256", key)
+    .update(JSON.stringify(["resin:private-value-index:v1", workspaceId ?? null, value]))
+    .digest("hex");
 }
 /**
  * Legacy aliases are written back at most this often. Rewriting the whole file per new alias made
@@ -199,11 +222,15 @@ export class FilePrivateValueStore implements PrivateValueStore {
   private readonly entriesDir: string;
   private readonly legacy: LegacyFileState;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
+  private readonly indexDir: string;
+  /** Value digests this process already indexed (or refreshed), so each is touched once. */
+  private readonly indexedDigests = new Set<string>();
   private deviceRedactionKey: Buffer | undefined;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, STORE_DIR, STORE_FILE);
     this.entriesDir = privateValueEntriesDir(dataDir);
+    this.indexDir = privateValueIndexDir(dataDir);
     let legacy = FilePrivateValueStore.legacyStates.get(this.file);
     if (!legacy) {
       legacy = {
@@ -496,9 +523,57 @@ export class FilePrivateValueStore implements PrivateValueStore {
   }
 
   get(key: string): unknown | undefined {
-    return key.startsWith("private:v2:")
-      ? structuredClone(this.readImmutable(key)?.value)
-      : this.load().get(key)?.value;
+    if (!key.startsWith("private:v2:")) return this.load().get(key)?.value;
+    const entry = this.readImmutable(key);
+    // A value read back (to run or describe a recorded step) is one an agent may now restate.
+    if (entry !== undefined) this.indexRecordedValue(key, entry);
+    return structuredClone(entry?.value);
+  }
+
+  holdsValue(value: string, origin?: PrivateValueOrigin): boolean {
+    try {
+      const digest = recordedValueDigest(this.redactionKey(), value, origin?.workspaceId);
+      return (
+        this.indexedDigests.has(digest) ||
+        fs.existsSync(privateValueEntryPath(this.indexDir, digest))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Marks a recorded argument value in the value index (see `privateValueIndexDir`), or refreshes
+   * an existing marker's age at most daily. Best effort: the index never fails a read or a write.
+   */
+  private indexRecordedValue(key: string, entry: PrivateEntry): void {
+    if (!key.startsWith(RECORDED_VALUE_PREFIX) || typeof entry.value !== "string") return;
+    try {
+      const digest = recordedValueDigest(
+        this.redactionKey(),
+        entry.value,
+        entry.origin?.workspaceId,
+      );
+      if (this.indexedDigests.has(digest)) return;
+      const marker = privateValueEntryPath(this.indexDir, digest);
+      ensurePrivateDirectorySync(path.dirname(marker));
+      try {
+        fs.writeFileSync(marker, "", { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (Date.now() - fs.statSync(marker).mtimeMs >= IMMUTABLE_REFRESH_AFTER_MS) {
+          const now = new Date();
+          fs.utimesSync(marker, now, now);
+        }
+      }
+      this.indexedDigests.add(digest);
+      if (this.indexedDigests.size > MAX_ENTRIES) {
+        const oldest = this.indexedDigests.values().next().value;
+        if (oldest !== undefined) this.indexedDigests.delete(oldest);
+      }
+    } catch {
+      // An unindexed value only stays recognizable through its placeholder, as before the index.
+    }
   }
 
   origin(key: string): PrivateValueOrigin | undefined {
@@ -522,6 +597,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
     const entry = snapshot(value, origin, representation);
     if (key.startsWith("private:v2:")) {
       this.writeImmutable(key, entry);
+      this.indexRecordedValue(key, entry);
       return;
     }
     // load() re-reads only when another writer changed the file since this instance last saw it.
@@ -574,6 +650,18 @@ export class InMemoryPrivateValueStore implements PrivateValueStore {
   }
   representation(key: string): PrivateValueRepresentation | undefined {
     return this.entries.get(key)?.representation;
+  }
+  holdsValue(value: string, origin?: PrivateValueOrigin): boolean {
+    for (const [key, entry] of this.entries) {
+      if (
+        key.startsWith(RECORDED_VALUE_PREFIX) &&
+        entry.value === value &&
+        entry.origin?.workspaceId === origin?.workspaceId
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
   set(
     key: string,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import {
   privateValueEntriesDir,
   privateValueEntryName,
   privateValueEntryPath,
+  privateValueIndexDir,
 } from "../../src/analytics/private-value-store.js";
 import {
   PrivateValueRetentionModule,
@@ -206,4 +208,45 @@ describe("private value retention", () => {
       }
     },
   );
+});
+
+describe("recorded value index", () => {
+  const markers = (dataDir: string) =>
+    fs
+      .readdirSync(privateValueIndexDir(dataDir), { recursive: true, encoding: "utf8" })
+      .map((name) => path.join(privateValueIndexDir(dataDir), name))
+      .filter((file) => fs.statSync(file).isFile());
+
+  it("recognizes a recorded argument value by a keyed digest, per workspace", () => {
+    const { dataDir } = home();
+    const store = new FilePrivateValueStore(dataDir);
+    store.set(reference("argument"), "release/2026-10", OWNER, "literal");
+    store.set(`private:v2:demonstration:${"d".repeat(64)}`, "command output", OWNER, "literal");
+
+    const reopened = new FilePrivateValueStore(dataDir);
+    expect(reopened.holdsValue("release/2026-10", OWNER)).toBe(true);
+    expect(reopened.holdsValue("release/2026-10", { workspaceId: "ws-other" })).toBe(false);
+    expect(reopened.holdsValue("command output", OWNER)).toBe(false);
+    expect(reopened.holdsValue("never recorded", OWNER)).toBe(false);
+    // Marker names are keyed: neither the value nor its plain hash can be read off the disk.
+    const names = markers(dataDir).map((file) => path.basename(file));
+    expect(names).toHaveLength(1);
+    expect(names[0]).not.toBe(createHash("sha256").update("release/2026-10").digest("hex"));
+  });
+
+  it("ages markers out with retention and restores one when its value is read back", async () => {
+    const { dataDir } = home();
+    const key = reference("restated");
+    new FilePrivateValueStore(dataDir).set(key, "feature/old-branch", OWNER, "literal");
+    for (const marker of markers(dataDir)) age(marker, 30);
+
+    const result = await sweepPrivateValues({ dataDir, keep: new Set([key]) });
+    expect(result).toMatchObject({ deleted: 0, indexDeleted: 1 });
+    expect(markers(dataDir)).toHaveLength(0);
+    expect(new FilePrivateValueStore(dataDir).holdsValue("feature/old-branch", OWNER)).toBe(false);
+
+    // Running or describing the recorded step reads the value back, which marks it again.
+    expect(new FilePrivateValueStore(dataDir).get(key)).toBe("feature/old-branch");
+    expect(new FilePrivateValueStore(dataDir).holdsValue("feature/old-branch", OWNER)).toBe(true);
+  });
 });

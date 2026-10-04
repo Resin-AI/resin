@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   DETERMINISTIC_COMMAND_SEQUENCE_CONTROL,
   DETERMINISTIC_COMMAND_SEQUENCE_KIND,
@@ -184,8 +184,18 @@ function placeholderRole(token: string): "path" | "string" | "number" | null {
   return null;
 }
 
-function valueSha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+/** Used when a caller supplies no device key: commitments then only match within this process. */
+let processCommitmentKey: Uint8Array | undefined;
+
+/**
+ * Commits to a string parameter's value with an HMAC under the device-local key. An unkeyed hash
+ * would let whoever receives the evidence confirm a guessed branch name or short ID offline.
+ */
+function valueCommitment(key: Uint8Array, value: string): string {
+  return createHmac("sha256", key)
+    .update("resin:command-parameter-commitment:v1\0")
+    .update(value)
+    .digest("hex");
 }
 
 /**
@@ -194,9 +204,13 @@ function valueSha256(value: string): string {
  * by typed parameters through the shared command normalizer. Only explicit
  * `&&` sequencing is supported, and the compiled runtime still invokes each
  * executable directly without a shell.
+ *
+ * `commitmentKey` keys the string parameters' value commitments: the device-local redaction key,
+ * which never leaves this machine. Without one a random per-process key is used.
  */
 export function projectDeterministicCommandSequence(
   command: string,
+  commitmentKey?: Uint8Array,
 ): DeterministicCommandSequence | null {
   if (typeof command !== "string") return null;
   const trimmed = command.trim();
@@ -402,7 +416,8 @@ export function projectDeterministicCommandSequence(
     return name;
   };
 
-  const parameterValueSha256: Record<string, string> = {};
+  const key = commitmentKey ?? (processCommitmentKey ??= randomBytes(32));
+  const parameterValueHmacSha256: Record<string, string> = {};
   const steps: DeterministicCommandStep[] = [];
   for (let stepIndex = 0; stepIndex < normalizedSteps.length; stepIndex++) {
     const tokens = normalizedSteps[stepIndex] as string[];
@@ -427,7 +442,7 @@ export function projectDeterministicCommandSequence(
         const parameter = allocateParameter(role, rawArgument);
         argv.push({ parameter, role });
         if (role === "string") {
-          parameterValueSha256[parameter] = valueSha256(rawArgument);
+          parameterValueHmacSha256[parameter] = valueCommitment(key, rawArgument);
         }
         continue;
       }
@@ -444,7 +459,10 @@ export function projectDeterministicCommandSequence(
           role: prefixedRole,
         });
         if (prefixedRole === "string") {
-          parameterValueSha256[parameter] = valueSha256(rawArgument.slice(prefix.length));
+          parameterValueHmacSha256[parameter] = valueCommitment(
+            key,
+            rawArgument.slice(prefix.length),
+          );
         }
         continue;
       }
@@ -465,7 +483,7 @@ export function projectDeterministicCommandSequence(
     kind: DETERMINISTIC_COMMAND_SEQUENCE_KIND,
     control: DETERMINISTIC_COMMAND_SEQUENCE_CONTROL,
     steps,
-    ...(Object.keys(parameterValueSha256).length > 0 ? { parameterValueSha256 } : {}),
+    ...(Object.keys(parameterValueHmacSha256).length > 0 ? { parameterValueHmacSha256 } : {}),
   };
 
   const parseResult = DeterministicCommandSequenceSchema.safeParse(sequence);
@@ -477,10 +495,11 @@ export function projectDeterministicCommandSequence(
  */
 export function projectDeterministicCommandSequenceFromEvent(
   event: NormalizedSessionEvent,
+  commitmentKey?: Uint8Array,
 ): DeterministicCommandSequence | null {
   const rawCommand = extractRawCommandStringFromEvent(event);
   if (rawCommand === null) {
     return null;
   }
-  return projectDeterministicCommandSequence(rawCommand);
+  return projectDeterministicCommandSequence(rawCommand, commitmentKey);
 }
