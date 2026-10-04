@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ToolManifest } from "@resin/contracts";
+import type { ToolManifest, WorkflowValueTemplate } from "@resin/contracts";
 import { derivationHeader, derivationInputTokenIndexes, embeddedPrograms } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
@@ -279,16 +279,103 @@ describe("recorded workflows of ordinary calls", () => {
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, context)).toBe(
       `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}`,
     );
-    // The command it runs is named for discovery, under the same ownership rule as the program.
-    expect(executor.recordedWorkflowCommands(installed.artifactDigest, context)).toEqual([
-      "python3 -m pytest",
-    ]);
+    // A program recorded wholly as a private value has no projected text to name a command from.
+    expect(executor.recordedWorkflowCommands(installed.artifactDigest, context)).toEqual([]);
     const otherDir = path.join(tempDir, "other-workspace");
     fs.mkdirSync(otherDir);
     const other = resolveWorkspaceContext({ cwd: otherDir });
     expect(other.workspaceId).not.toBe(context.workspaceId);
     expect(executor.describeRecordedWorkflow(installed.artifactDigest, other)).toBeUndefined();
     expect(executor.recordedWorkflowCommands(installed.artifactDigest, other)).toEqual([]);
+  });
+
+  it("names commands from the projected program, never from a resolved private value", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    const owner = { workspaceId: context.workspaceId };
+    // A projected program: the recording's sanitized text, its original kept as a private value.
+    const original = "canarysecrettool --flag 1; gh pr checks 7";
+    const sanitized = "[REDACTED_HIGH_ENTROPY_SECRET:7ffcc398bd861a0c] --flag 1; gh pr checks 7";
+    privateValues.set("private:projected", original, owner);
+    // A program recorded wholly as a private value: nothing may be read from it.
+    privateValues.set("private:legacy", "canarylegacytool run", owner);
+    // Canary private values of the plan, which no command may name even if a program spells them.
+    privateValues.set("private:user", "canaryuser", owner);
+    privateValues.set("private:script", "scripts/canaryscript.py", owner);
+    const shell = (id: string, template: WorkflowValueTemplate, source = "") => ({
+      id,
+      callId: `call_${id}`,
+      callable: {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell" as const, source, argument: "command" },
+      },
+      arguments: [{ name: "command", source: { kind: "template" as const, template } }],
+      dependsOn: [],
+      failurePolicy: { onError: "abort" as const, policy: "default" as const },
+      observed: { outcome: "succeeded" as const },
+    });
+    const installed = await installPlan(
+      {
+        id: "tool_process_private_commands",
+        name: "wf_process_private_commands",
+        version: "1.0.0",
+        description: "recorded process programs with private values",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_process_private_commands",
+        inputs: [],
+        privateReferences: [
+          "private:projected",
+          "private:legacy",
+          "private:user",
+          "private:script",
+        ],
+        steps: [
+          shell(
+            "step0",
+            {
+              type: "program",
+              language: "shell",
+              source: { type: "literal", value: sanitized },
+              sourceReference: "private:projected",
+              protectedTokens: [0],
+              holes: [],
+            },
+            sanitized,
+          ),
+          shell("step1", { type: "private", reference: "private:legacy" }),
+          shell("step2", {
+            type: "literal",
+            value:
+              "sudo -u canaryuser stylua src; env -u canaryuser selene src; python3 scripts/canaryscript.py",
+          }),
+          shell("step3", { type: "private", reference: "private:user" }),
+          shell("step4", { type: "private", reference: "private:script" }),
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    const commands = executor.recordedWorkflowCommands(installed.artifactDigest, context);
+    expect(commands).toEqual(["gh pr checks", "stylua", "selene"]);
+    expect(JSON.stringify(commands)).not.toMatch(/canary/u);
   });
 
   it("describes a harness tool step by its tool and the arguments a caller sees", async () => {

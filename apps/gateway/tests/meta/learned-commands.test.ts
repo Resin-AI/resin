@@ -41,6 +41,73 @@ describe("programCommands", () => {
   it("does not split on separators inside quotes", () => {
     expect(programCommands(`npx tsc --noEmit 2>&1 | grep -E "error|FAIL|Tests"`)).toEqual(["tsc"]);
   });
+
+  it("never reads a command from a here-document body", () => {
+    const program = [
+      "psql -f - <<'SQL'",
+      "canarytable_select * from x;",
+      "canarytoken-abc | canarypipe",
+      "SQL",
+      "cat <<-EOF > out.txt",
+      "\tcanaryindented run",
+      "\tEOF",
+      "stylua src",
+      "cat <<< canaryherestring",
+    ].join("\n");
+    expect(programCommands(program)).toEqual(["psql", "stylua"]);
+    expect(programCommands(`out=$(cat <<EOF\ncanaryinner arg\nEOF\n); vitest`)).toEqual(["vitest"]);
+  });
+
+  it.each([
+    ["sudo -u canaryuser stylua src", ["stylua"]],
+    ["sudo --user=canaryuser -E stylua", ["stylua"]],
+    ["sudo -ucanaryuser stylua", ["stylua"]],
+    ["env -u CANARY_OTHER -C canarydir CANARY_TOKEN=canaryvalue selene src", ["selene"]],
+    ["timeout -s KILL -k 5 600 vitest", ["vitest"]],
+    ["nice -n 10 cargo build", ["cargo build"]],
+    ["nice -10 cargo build", ["cargo build"]],
+    ["find . -name '*.ts' | xargs -I canaryrepl -P 4 eslint canaryrepl", ["eslint"]],
+    ["stdbuf -oL pnpm test", ["pnpm test"]],
+    ["npx -p canarypkg tsc", ["tsc"]],
+    // An option a wrapper's grammar does not know may take an argument: name nothing.
+    ["sudo --canary-unknown canaryvalue stylua", []],
+    ["env -S 'canaryspell stylua'", []],
+    ["command -v canarytool", []],
+  ])("skips a wrapper's options and their arguments in %s", (program, expected) => {
+    expect(programCommands(program)).toEqual(expected);
+  });
+
+  it("names only a CLI's own subcommands, never a value in the subcommand slot", () => {
+    expect(programCommands("gh canaryrepo list; gh pr canaryaction")).toEqual(["gh", "gh pr"]);
+    expect(programCommands("git canarybranch; make canarytarget; pnpm canaryscript")).toEqual([
+      "git",
+      "make",
+      "pnpm",
+    ]);
+    expect(programCommands("aws s3 cp a b; aws canarysvc get-x; aws lambda canary-op")).toEqual([
+      "aws s3 cp",
+      "aws",
+      "aws lambda",
+    ]);
+    expect(programCommands(`git "push" origin`)).toEqual(["git"]);
+  });
+
+  it("never names a quoted word, a path outside the workspace, or an expansion", () => {
+    expect(programCommands(`"canaryquoted" run; 'canarysingle'`)).toEqual([]);
+    expect(programCommands("python3 /home/canaryuser/x.py; bash ../canary.sh")).toEqual([]);
+    expect(programCommands("python3 ~/canary.py; $CANARY_BIN run; ${CANARY} x")).toEqual([]);
+    expect(programCommands("/opt/canary/bin/vitest run")).toEqual(["vitest"]);
+  });
+
+  it("drops any command that names a private value", () => {
+    expect(
+      programCommands("canarytool run; python3 scripts/canary-x.py; stylua; gh pr view", [
+        "canarytool",
+        "canary-x",
+        "view",
+      ]),
+    ).toEqual(["stylua"]);
+  });
 });
 
 describe("summarizeLearnedCommands", () => {
