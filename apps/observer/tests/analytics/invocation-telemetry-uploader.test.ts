@@ -470,7 +470,12 @@ describe("InvocationTelemetryUploader", () => {
         invocationId: "inv_long_error",
         workspaceId: "ws_alpha",
         status: "error",
-        errorDetails: { errorType: "E".repeat(80), message: longMessage, stack: "at x (y.ts:1)" },
+        errorDetails: {
+          errorType: "E".repeat(80),
+          message: longMessage,
+          stack: "at x (y.ts:1)",
+          reason: "validation_error",
+        },
       }),
     );
 
@@ -495,6 +500,8 @@ describe("InvocationTelemetryUploader", () => {
     expect(details?.message.length).toBeLessThanOrEqual(128);
     expect(details?.message.startsWith("Missing required parameter 'cwd'")).toBe(true);
     expect(details?.stack).toBeUndefined();
+    // The failure reason survives the local store and the wire trimming.
+    expect(details?.reason).toBe("validation_error");
 
     // One attempt, then dead-lettered: the next cycle sends nothing.
     expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(0);

@@ -13718,10 +13718,25 @@ var InvocationResourceUsageSchema = external_exports.object({
   memoryBytes: external_exports.number().int().nonnegative(),
   shadowRun: external_exports.boolean().default(false)
 });
+var INVOCATION_FAILURE_REASONS = [
+  "tool_error",
+  "validation_error",
+  "tool_unavailable",
+  "runtime_unavailable",
+  "timeout",
+  "cancelled",
+  "capability_rejected"
+];
+var InvocationFailureReasonSchema = external_exports.enum(INVOCATION_FAILURE_REASONS);
 var InvocationErrorDetailsSchema = external_exports.object({
   errorType: external_exports.string().min(1),
   message: external_exports.string(),
-  stack: external_exports.string().optional()
+  stack: external_exports.string().optional(),
+  /**
+   * Optional so older clients stay valid; an unknown value from a newer client is dropped rather
+   * than rejecting the record (and with it the whole telemetry batch).
+   */
+  reason: InvocationFailureReasonSchema.optional().catch(void 0)
 });
 var TOOL_IO_UTF8_METHOD = "tool_io_utf8_v1";
 var InvocationUsageEstimateSchema = external_exports.object({

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  type InvocationFailureReason,
   type InvocationRecord,
   type InvocationUsageEstimate,
   type SafetyGateRefusal,
@@ -24,6 +25,11 @@ import {
   type SessionDiscoveryTracker,
   isDiscoveryTool,
 } from "./meta/discovery-tracker.js";
+import {
+  failureReasonOfError,
+  failureReasonOfResult,
+  invocationStatusFor,
+} from "./meta/invocation-failure.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   GET_TOOL_SCHEMA_MANIFEST,
@@ -371,7 +377,18 @@ export class RegistryGatewayRouter implements GatewayRouter {
     // from it) only ever sees the meta-tool path.
     const recorder = tool.isSystem ? undefined : this.registry.getInvocationRecorder();
     const startedAtMs = Date.now();
-    const executed = await this.executeTool(context, tool, name, params, options);
+    let executed: CallToolResult;
+    try {
+      executed = await this.executeTool(context, tool, name, params, options);
+    } catch (error) {
+      // A call the routing layer refused or lost is still a failed invocation of this tool.
+      if (recorder) {
+        this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
+          reason: failureReasonOfError(error),
+        });
+      }
+      throw error;
+    }
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
 
     if (tool.isSystem) {
@@ -386,39 +403,70 @@ export class RegistryGatewayRouter implements GatewayRouter {
         }
       }
     } else if (recorder) {
-      const inBytes = estimatePayloadBytes(params);
-      const outBytes = estimatePayloadBytes(executed);
-      let usageEstimate: InvocationUsageEstimate | undefined;
-      if (inBytes !== undefined && outBytes !== undefined) {
-        const inputTokens = bytesToTokens(inBytes);
-        const outputTokens = bytesToTokens(outBytes);
-        const discoveryTokens = this.discoveryTracker.consumeDiscoveryTokens(sessionId);
-        usageEstimate = createUsageEstimate({
-          inputTokens,
-          outputTokens,
-          discoveryTokens,
-        });
-      }
-
-      const record: InvocationRecord = {
-        invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
-        sessionId,
-        workspaceId: context.workspaceId,
-        toolId: tool.toolId,
-        toolVersion: /^\d+\.\d+\.\d+/.test(tool.version) ? tool.version : "1.0.0",
-        startedAt: new Date(startedAtMs).toISOString(),
-        completedAt: new Date().toISOString(),
-        durationMs: Math.max(0, Date.now() - startedAtMs),
-        status: executed.isError ? "error" : "success",
-        inputDigest: hashCanonicalContent(params),
-        outputDigest: hashCanonicalContent(executed),
-        ...(usageEstimate ? { usageEstimate } : {}),
-      };
-      void recorder(record).catch(() => {
-        // Recording never fails the call; the uploader reconciles from what was written.
+      this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
+        executed,
+        ...(executed.isError ? { reason: failureReasonOfResult(executed) } : {}),
       });
     }
     return executed;
+  }
+
+  private recordNativeInvocation(
+    recorder: (record: InvocationRecord) => Promise<void>,
+    context: WorkspaceContext,
+    tool: RegistryTool,
+    params: JsonRpcParams,
+    startedAtMs: number,
+    outcome: { executed?: CallToolResult; reason?: InvocationFailureReason },
+  ): void {
+    const { executed, reason } = outcome;
+    const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
+    const inBytes = estimatePayloadBytes(params);
+    const outBytes = executed === undefined ? undefined : estimatePayloadBytes(executed);
+    let usageEstimate: InvocationUsageEstimate | undefined;
+    if (inBytes !== undefined && outBytes !== undefined) {
+      const inputTokens = bytesToTokens(inBytes);
+      const outputTokens = bytesToTokens(outBytes);
+      const discoveryTokens = this.discoveryTracker.consumeDiscoveryTokens(sessionId);
+      usageEstimate = createUsageEstimate({
+        inputTokens,
+        outputTokens,
+        discoveryTokens,
+      });
+    }
+    const status = reason === undefined ? "success" : invocationStatusFor(reason);
+    const record: InvocationRecord = {
+      invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
+      sessionId,
+      workspaceId: context.workspaceId,
+      toolId: tool.toolId,
+      toolVersion: /^\d+\.\d+\.\d+/.test(tool.version) ? tool.version : "1.0.0",
+      startedAt: new Date(startedAtMs).toISOString(),
+      completedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+      status,
+      inputDigest: hashCanonicalContent(params),
+      ...(executed === undefined ? {} : { outputDigest: hashCanonicalContent(executed) }),
+      // The reason, never the error text: native calls record no message.
+      ...(reason === undefined
+        ? {}
+        : {
+            errorDetails: {
+              errorType:
+                status === "timeout"
+                  ? "TimeoutError"
+                  : status === "rejected_capability"
+                    ? "SafetyGateRefusal"
+                    : "ToolExecutionError",
+              message: "",
+              reason,
+            },
+          }),
+      ...(usageEstimate ? { usageEstimate } : {}),
+    };
+    void recorder(record).catch(() => {
+      // Recording never fails the call; the uploader reconciles from what was written.
+    });
   }
 
   private async executeTool(

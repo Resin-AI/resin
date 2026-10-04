@@ -99,12 +99,43 @@ export const InvocationResourceUsageSchema = z.object({
 export type InvocationResourceUsage = z.infer<typeof InvocationResourceUsageSchema>;
 
 /**
+ * Low-cardinality cause of a failed invocation, stable across clients so the cloud can count
+ * failures per tool without reading any error text:
+ * - `tool_error`: the tool ran and reported (or threw) a failure.
+ * - `validation_error`: the arguments were rejected before the tool ran.
+ * - `tool_unavailable`: the requested tool or version is unknown, retired or disabled here.
+ * - `runtime_unavailable`: the tool resolved, but nothing could execute it (missing or unverifiable
+ *   artifact, worker spawn failure, unreachable or refusing cloud route).
+ * - `timeout`: the call exceeded its deadline.
+ * - `cancelled`: the caller cancelled the call.
+ * - `capability_rejected`: a safety gate refused the call.
+ */
+export const INVOCATION_FAILURE_REASONS = [
+  "tool_error",
+  "validation_error",
+  "tool_unavailable",
+  "runtime_unavailable",
+  "timeout",
+  "cancelled",
+  "capability_rejected",
+] as const;
+
+export const InvocationFailureReasonSchema = z.enum(INVOCATION_FAILURE_REASONS);
+
+export type InvocationFailureReason = z.infer<typeof InvocationFailureReasonSchema>;
+
+/**
  * Error details for a failed invocation.
  */
 export const InvocationErrorDetailsSchema = z.object({
   errorType: z.string().min(1),
   message: z.string(),
   stack: z.string().optional(),
+  /**
+   * Optional so older clients stay valid; an unknown value from a newer client is dropped rather
+   * than rejecting the record (and with it the whole telemetry batch).
+   */
+  reason: InvocationFailureReasonSchema.optional().catch(undefined),
 });
 
 export type InvocationErrorDetails = z.infer<typeof InvocationErrorDetailsSchema>;
