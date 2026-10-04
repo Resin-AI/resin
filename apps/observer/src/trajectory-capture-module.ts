@@ -14,6 +14,7 @@ import type {
 } from "@resin/harness-contracts";
 import { z } from "zod";
 import {
+  CloudUploadStatusRecorder,
   type TrajectoryAttributionContext,
   TrajectoryAttributionContextSchema,
   type TrajectoryAttributionResolverFn,
@@ -225,6 +226,12 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
   privacyCheckpointPath?: string;
 
   /**
+   * Owner-only record of the last capture upload the cloud accepted, kept across restarts.
+   * In-memory only when omitted.
+   */
+  uploadStatusPath?: string;
+
+  /**
    * Injectable clock for deterministic privacy-boundary tests.
    */
   now?: () => number;
@@ -297,6 +304,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private readonly captureUserSessionsOnly: boolean;
   private readonly decodeStats?: HarnessVersionStatsRecorder;
   private readonly resolveHarnessVersion?: HarnessVersionResolver;
+  private readonly uploadStatus: CloudUploadStatusRecorder;
 
   constructor(options: TrajectoryCaptureRuntimeModuleOptions = {}) {
     this.logger = options.logger;
@@ -308,6 +316,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       options.refreshRemoteTelemetryConsent !== undefined;
     this.resolvedObservationClient = options.observationClient;
     this.privacyCheckpointPath = options.privacyCheckpointPath;
+    this.uploadStatus = new CloudUploadStatusRecorder({
+      filePath: options.uploadStatusPath,
+      now: options.now,
+    });
     this.captureUserSessionsOnly = options.captureUserSessionsOnly ?? true;
     this.now = options.now ?? Date.now;
     const requestedTelemetryEnabled =
@@ -445,6 +457,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
         resolveHarnessVersion: this.resolveHarnessVersion,
+        uploadStatus: this.uploadStatus,
         onPipelineResults: this.decodeStats
           ? (session, results) => this.decodeStats?.record(session, results)
           : undefined,
@@ -956,6 +969,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
         unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
         observationUpload: this.captureCoordinator.getBatchMetrics(),
+        cloudUpload: this.uploadStatus.snapshot(),
         captureDeadLetters: this.captureDeadLetters(),
       },
       lastCheckTime: Date.now(),
@@ -977,6 +991,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       finalizedSessions: this.captureCoordinator.getFinalizedSessionCount(),
       unattributedSessions: this.captureCoordinator.getUnattributedSessionCount(),
       observationUpload: this.captureCoordinator.getBatchMetrics(),
+      cloudUpload: this.uploadStatus.snapshot(),
       captureDeadLetters: this.captureDeadLetters(),
     };
   }

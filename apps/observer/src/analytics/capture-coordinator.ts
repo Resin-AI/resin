@@ -28,6 +28,7 @@ import {
 import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { TelemetryAggregator } from "../observability/telemetry-aggregator.js";
 import type { TailerRecordHandler } from "../tailing/tailer.js";
+import type { CloudUploadStatusRecorder } from "./cloud-upload-status.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { MetadataEventProjector } from "./metadata-event-projector.js";
@@ -284,6 +285,11 @@ export interface TrajectoryCaptureCoordinatorOptions {
    */
   telemetry?: TelemetryAggregator;
   /**
+   * Records each upload batch the cloud accepts, generic and trajectory alike, so status surfaces
+   * can show when capture last reached the cloud.
+   */
+  uploadStatus?: CloudUploadStatusRecorder;
+  /**
    * Optional local-only sink for metadata-projected normalized events. Invoked once per
    * processed batch (and once per terminal transition) so local consumers such as the
    * opportunity tracker observe the same event stream as cloud observation batches.
@@ -407,6 +413,7 @@ export class TrajectoryCaptureCoordinator {
   private totalGenericBatchesAccepted = 0;
   private totalGenericObservationsAccepted = 0;
   private readonly privateValueStore?: { flush(): void };
+  private readonly uploadStatus?: CloudUploadStatusRecorder;
   constructor(options: TrajectoryCaptureCoordinatorOptions);
   constructor(
     pipeline: NormalizationPipeline,
@@ -468,6 +475,7 @@ export class TrajectoryCaptureCoordinator {
         pipelineOrOptions.maxBatchBytes ?? OBSERVATION_UPLOAD_POLICY.maxBytes,
       );
       this.telemetry = pipelineOrOptions.telemetry;
+      this.uploadStatus = pipelineOrOptions.uploadStatus;
       this.onPipelineResults = pipelineOrOptions.onPipelineResults;
       this.resolveHarnessVersion = pipelineOrOptions.resolveHarnessVersion;
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
@@ -955,6 +963,7 @@ export class TrajectoryCaptureCoordinator {
             await this.observationClient.sendTrajectoryObservationBatch({
               observations: [observation],
             });
+            this.uploadStatus?.recordSuccess(1);
             this.trajectoryResourceForbiddenRetries.delete(sessionId);
           } catch (err) {
             if (err instanceof ResourceForbiddenError) {
@@ -1527,6 +1536,7 @@ export class TrajectoryCaptureCoordinator {
           batchId,
           observations: chunk,
         });
+        this.uploadStatus?.recordSuccess(chunk.length);
         if (receipt?.acceptedCount > 0) {
           this.totalGenericBatchesAccepted++;
           this.totalGenericObservationsAccepted += receipt.acceptedCount;

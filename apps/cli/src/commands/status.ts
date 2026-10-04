@@ -14,12 +14,14 @@ import {
   resolveHarnessUserHome,
 } from "@resin/harness-contracts";
 import {
+  CLOUD_UPLOAD_STATUS_FILE_NAME,
   type DaemonHealthReport,
   type HarnessVersionEvidence,
   IpcClient,
   StoredCloudCredentialsSchema,
   classifyHarnessVersionEvidence,
   daemonPipePresent,
+  parseCloudUploadStatus,
   resolvePaths,
 } from "@resin/observer";
 
@@ -313,6 +315,22 @@ export interface DaemonStatusSummary {
    * recorded it. Absent from reports written before this existed.
    */
   toolSignatures?: ToolSignaturesStatus;
+  /**
+   * The last capture upload Resin Cloud accepted, as the daemon last recorded it. Absent from
+   * reports written before this existed.
+   */
+  cloudUpload?: CloudUploadSummary;
+}
+
+export interface CloudUploadSummary {
+  /** False when the daemon has recorded no accepted upload yet (or the record is unreadable). */
+  available: boolean;
+  lastSuccessAt: string | null;
+  lastBatchObservations: number | null;
+  totalBatches: number;
+  totalObservations: number;
+  /** When the first upload counted in the totals was accepted. */
+  since: string | null;
 }
 
 export interface ToolSignaturesStatus {
@@ -626,6 +644,7 @@ export async function fetchDaemonStatusSummary(
   });
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
   const toolSignatures = await readToolSignaturesStatus(fsBridge, daemonPaths.stateDir);
+  const cloudUpload = await readCloudUploadSummary(fsBridge, daemonPaths.stateDir);
   const update = await readUpdateStatus(fsBridge, {
     home,
     resinHome,
@@ -720,6 +739,7 @@ export async function fetchDaemonStatusSummary(
     remediations,
     notifications: reportedNotifications,
     toolSignatures,
+    cloudUpload,
   };
 }
 
@@ -821,6 +841,9 @@ export function formatStatusForTerminal(
   } else if (gate && !gate.isOpen) {
     row("Production", gate.status === "uninitialized" ? "Not verified" : "Blocked");
   }
+  if (summary.cloudUpload?.available || summary.account?.linked) {
+    row("Uploads", formatLastCloudUpload(summary.cloudUpload));
+  }
   if (summary.toolSignatures?.available) {
     row("Signatures", formatToolSignatureCounts(summary.toolSignatures));
   }
@@ -891,6 +914,39 @@ export async function readToolSignaturesStatus(
     unpinned,
     failed,
     updatedAt: safeIsoTimestamp(summary.updatedAt),
+  };
+}
+
+/** e.g. `2026-10-04T09:30:00.000Z (37 observations)`, or `none recorded yet`. */
+export function formatLastCloudUpload(upload: CloudUploadSummary | undefined): string {
+  if (!upload?.available || upload.lastSuccessAt === null) return "none recorded yet";
+  return `${upload.lastSuccessAt} (${upload.lastBatchObservations ?? 0} observations)`;
+}
+
+/** Reads the daemon's recorded last cloud upload. Never throws; unreadable reads as none. */
+export async function readCloudUploadSummary(
+  fsBridge: ConfigFsBridge,
+  stateDir: string,
+): Promise<CloudUploadSummary> {
+  const raw = await safeReadFile(fsBridge, path.join(stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME));
+  const status = parseCloudUploadStatus(parseJson(raw));
+  if (status === null) {
+    return {
+      available: false,
+      lastSuccessAt: null,
+      lastBatchObservations: null,
+      totalBatches: 0,
+      totalObservations: 0,
+      since: null,
+    };
+  }
+  return {
+    available: true,
+    lastSuccessAt: status.lastSuccessAt,
+    lastBatchObservations: status.lastBatchObservations,
+    totalBatches: status.totalBatches,
+    totalObservations: status.totalObservations,
+    since: status.since,
   };
 }
 
@@ -1022,6 +1078,12 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
     lines.push(`  Metadata:   ${telemetry.enabled ? "ENABLED" : "DISABLED"}`);
     lines.push(
       `  Raw upload: ${telemetry.rawTranscriptsAllowed ? "EXPLICIT OPT-IN" : "OPT-OUT (default)"}`,
+    );
+  }
+  lines.push(`  Last upload: ${formatLastCloudUpload(summary.cloudUpload)}`);
+  if (summary.cloudUpload?.available) {
+    lines.push(
+      `  Uploaded:   ${summary.cloudUpload.totalObservations} observations in ${summary.cloudUpload.totalBatches} batches since ${summary.cloudUpload.since}`,
     );
   }
 
