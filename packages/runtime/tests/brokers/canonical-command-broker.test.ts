@@ -317,6 +317,50 @@ describe("Canonical Command Broker & Process Group Isolation", () => {
       expect(res.exitCode).toBe(0);
       expect(res.stdout.trim()).toBe("IN_SUBDIR");
     });
+
+    it("runs in the invocation's working directory and resolves a relative cwd against it", async () => {
+      const session = path.join(tempWorkspace, "session");
+      fs.mkdirSync(path.join(session, "nested"), { recursive: true });
+      const scriptPath = path.join(tempWorkspace, "print_cwd.js");
+      fs.writeFileSync(scriptPath, "console.log(process.cwd());");
+      const ctx = {
+        invocationId: "inv_canon_cmd_001",
+        grant: createGrant({ allowedBinaries: ["node"] }),
+        workspaceRoot: tempWorkspace,
+        workingDirectory: session,
+        scratchDir: tempScratch,
+      };
+
+      const bare = await broker.execute({ executable: "node", args: [scriptPath] }, ctx);
+      expect(bare.stdout.trim()).toBe(fs.realpathSync.native(session));
+      const nested = await broker.execute(
+        { executable: "node", args: [scriptPath], cwd: "nested" },
+        ctx,
+      );
+      expect(nested.stdout.trim()).toBe(fs.realpathSync.native(path.join(session, "nested")));
+      // The workspace root stays the boundary: a relative cwd may still climb to it, never past.
+      const root = await broker.execute({ executable: "node", args: [scriptPath], cwd: ".." }, ctx);
+      expect(root.stdout.trim()).toBe(fs.realpathSync.native(tempWorkspace));
+      await expect(
+        broker.execute({ executable: "node", args: [scriptPath], cwd: "../.." }, ctx),
+      ).rejects.toThrow(BrokerSecurityError);
+    });
+
+    it("refuses an invocation working directory outside the workspace root", async () => {
+      const scriptPath = path.join(tempWorkspace, "print_cwd_outside.js");
+      fs.writeFileSync(scriptPath, "console.log(process.cwd());");
+      const ctx = {
+        invocationId: "inv_canon_cmd_001",
+        grant: createGrant({ allowedBinaries: ["node"] }),
+        workspaceRoot: tempWorkspace,
+        workingDirectory: tempScratch,
+        scratchDir: tempScratch,
+      };
+
+      await expect(
+        broker.execute({ executable: "node", args: [scriptPath] }, ctx),
+      ).rejects.toMatchObject({ code: "WORKING_DIRECTORY_DENIED" });
+    });
   });
 
   describe("Process Group Termination, Timeouts, and Output Limits", () => {

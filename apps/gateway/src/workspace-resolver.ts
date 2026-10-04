@@ -373,6 +373,43 @@ export function findGitRoot(startDir: string): string | undefined {
 }
 
 /**
+ * The directory a learned tool's recorded programs and commands run in.
+ *
+ * A session launched in a subdirectory of its project (`startupPath` under the git root) recorded
+ * its commands relative to that subdirectory, so `stylua src` must find the same `src` on replay.
+ * The session's directory is used when it is the project root or inside it; any other startup
+ * path (outside the project, a `..` escape, a symlink resolving elsewhere, or one that no longer
+ * exists as a directory) falls back to the project root. Containment is decided on real paths;
+ * the result is expressed under `projectRoot`. Capability grants stay rooted at the project root:
+ * only the working directory moves.
+ */
+export function sessionWorkingDirectory(
+  workspace: Pick<WorkspaceContext, "startupPath"> | undefined,
+  projectRoot: string,
+): string {
+  const startupPath = workspace?.startupPath;
+  if (!startupPath) return projectRoot;
+  let relative: string;
+  try {
+    const realRoot = fs.realpathSync.native(projectRoot);
+    const realStartup = fs.realpathSync.native(path.resolve(projectRoot, startupPath));
+    if (!fs.statSync(realStartup).isDirectory()) return projectRoot;
+    relative = path.relative(realRoot, realStartup);
+  } catch {
+    return projectRoot;
+  }
+  if (
+    relative === "" ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    return projectRoot;
+  }
+  return path.join(projectRoot, relative);
+}
+
+/**
  * Generates a stable deterministic workspace identifier from canonical path for fallback unbootstrapped mode.
  */
 export function generateWorkspaceId(canonicalRoot: string): string {
