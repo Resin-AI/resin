@@ -24,8 +24,12 @@ export default defineConfig({
     hookTimeout: 30_000,
     include: ["**/*.test.{ts,js,mjs}"],
     // Tests never send error reports or usage events, including from the child processes they
-    // start with a constructed environment (see tools/test/no-telemetry.ts).
-    setupFiles: [fileURLToPath(new URL("./tools/test/no-telemetry.ts", import.meta.url))],
+    // start with a constructed environment (see tools/test/no-telemetry.ts), and never write the
+    // real user's ~/.resin (see tools/test/real-home-guard.ts).
+    setupFiles: [
+      fileURLToPath(new URL("./tools/test/no-telemetry.ts", import.meta.url)),
+      fileURLToPath(new URL("./tools/test/real-home-guard.ts", import.meta.url)),
+    ],
     env: {
       HOME: testHome,
       USERPROFILE: testHome,
