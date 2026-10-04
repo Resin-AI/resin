@@ -70,6 +70,8 @@ export interface McpStdioShimOptions {
   onToolSyncError?: (toolName: string, error: Error) => void;
   onOfflineDegraded?: (toolName: string, reason: string) => void;
   isPinned?: (toolId: string) => boolean;
+  /** Passed to the in-process gateway; see `GatewayServerOptions.releaseNotice`. */
+  releaseNotice?: () => string | undefined;
 }
 export type ShimMode = "daemon_ipc" | "standalone_inprocess" | "failed";
 
@@ -506,6 +508,9 @@ export class McpStdioShim {
       router,
       registry,
       cloudRuntime,
+      ...(this.options.releaseNotice === undefined
+        ? {}
+        : { releaseNotice: this.options.releaseNotice }),
       serverInfo: {
         name: "resin-mcp-standalone",
         version: "0.1.0",

@@ -14,7 +14,10 @@ import { getErrorReporter, reportHandledError } from "@resin/observer/error-repo
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
 import { HARNESS_DEFINITIONS, findHarnessDefinition } from "../harness-runtime-registry.js";
-import { registerRunningGateway } from "../updates/gateway-registry.js";
+import {
+  createActivatedReleaseNotice,
+  registerRunningGateway,
+} from "../updates/gateway-registry.js";
 
 const PackageJsonSchema = z.object({
   version: z.string().min(1),
@@ -211,6 +214,14 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
   }
 
   const nativeToolInvoker = findHarnessDefinition(parsedArgs.harnessId)?.nativeToolInvoker;
+  // The same Resin home the gateway's own state, the update engine and status resolve. Release
+  // tracking is diagnostic only, so a home that cannot be resolved never blocks the gateway.
+  let resinHome: string | undefined;
+  try {
+    resinHome = resolvePaths({ home: options.home, env: options.env ?? process.env }).homeDir;
+  } catch {
+    resinHome = undefined;
+  }
   const shimOptions: McpStdioShimOptions = {
     standaloneFallback: parsedArgs.standaloneFallback,
     enableToolSearch: parsedArgs.enableToolSearch,
@@ -227,6 +238,9 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     home: options.home,
     recordedWorkflowConnections: harnessMcpConnections(parsedArgs.harnessId, parsedArgs.cwd),
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
+    ...(resinHome === undefined
+      ? {}
+      : { releaseNotice: createActivatedReleaseNotice({ resinHome, runningVersion: VERSION }) }),
   };
 
   const shim = options.shimFactory
@@ -244,14 +258,9 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
   };
 
   let unregisterGateway = (): void => undefined;
-  if (!process.env.VITEST || options.registerGateway) {
+  if (resinHome !== undefined && (!process.env.VITEST || options.registerGateway)) {
     try {
       const register = options.registerGateway ?? registerRunningGateway;
-      // The same Resin home the gateway's own state, the update engine and status resolve.
-      const { homeDir: resinHome } = resolvePaths({
-        home: options.home,
-        env: options.env ?? process.env,
-      });
       unregisterGateway = register({ resinHome, version: VERSION });
       process.once("exit", unregisterGateway);
     } catch {

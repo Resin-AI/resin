@@ -38,6 +38,7 @@ import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
 import { HARNESS_DEFINITIONS, isSupportedHarnessId } from "../harness-registry.js";
 import { getActiveVersion } from "../installer/asset-downloader.js";
+import { compareSemver } from "../installer/channel-verifier.js";
 import {
   DEFAULT_GATEWAY_URL,
   resolveInstalledResinMcpCommand,
@@ -73,7 +74,11 @@ import {
   readAutoUpdateNotice,
   readAutoUpdateState,
 } from "../updates/auto-update-state.js";
-import { UpdateEngine, readUpdateStatusSnapshot } from "../updates/engine.js";
+import {
+  type UpdateDeferralSnapshot,
+  UpdateEngine,
+  readUpdateStatusSnapshot,
+} from "../updates/engine.js";
 import { listRunningGateways, listUnregisteredGatewayPids } from "../updates/gateway-registry.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -216,13 +221,19 @@ export interface DaemonStatusSummary {
     } | null;
   };
   update: {
+    /** Whether the update journal could be read; see `updateAvailable` for a newer release. */
     available: boolean;
+    /** True only when the journal's target release is newer than the current one. */
+    updateAvailable: boolean;
     channel: string | null;
     currentVersion: string | null;
     targetVersion: string | null;
     pendingVersion: string | null;
+    /** The newest check: an update run (journal) or an automatic availability check. */
     lastCheckAt: string | null;
     lastResult: string | null;
+    /** Since when a staged release has been waiting on active daemon work, if it is. */
+    deferral: { targetVersion: string; since: string; activeCount: number | null } | null;
     hasError: boolean;
     errorCode: "update_state_unreadable" | null;
     lastRollback: {
@@ -1103,6 +1114,12 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
     lines.push(`  Channel:    ${summary.update.channel ?? "unknown"}`);
     lines.push(`  Current:    ${summary.update.currentVersion ?? "unknown"}`);
     if (summary.update.pendingVersion) lines.push(`  Pending:    ${summary.update.pendingVersion}`);
+    if (summary.update.deferral) {
+      const count = summary.update.deferral.activeCount;
+      lines.push(
+        `  Deferred:   since ${summary.update.deferral.since}${count === null ? "" : ` (${count} active session(s))`}`,
+      );
+    }
     if (summary.update.lastResult) lines.push(`  Last check: ${summary.update.lastResult}`);
     if (summary.update.errorCode) {
       lines.push(`  State:      ERROR (${summary.update.errorCode})`);
@@ -1605,7 +1622,7 @@ function formatCustomToolsCount(tools: DaemonStatusSummary["tools"]): string {
 
 type UpdateJournalStatus = Omit<
   DaemonStatusSummary["update"],
-  "automatic" | "lastAutomaticUpdate" | "staleMcpGateways"
+  "automatic" | "lastAutomaticUpdate" | "staleMcpGateways" | "updateAvailable"
 >;
 
 async function readUpdateStatus(
@@ -1619,13 +1636,35 @@ async function readUpdateStatus(
     env: NodeJS.ProcessEnv;
   },
 ): Promise<DaemonStatusSummary["update"]> {
-  const [journal, automatic, lastAutomaticUpdate, staleMcpGateways] = await Promise.all([
+  const [journal, automaticCheck, lastAutomaticUpdate, staleMcpGateways] = await Promise.all([
     readUpdateJournalStatus(fsBridge, options.resinHome),
     readAutomaticUpdateStatus(fsBridge, options),
     readLastAutomaticUpdate(fsBridge, options.resinHome),
     readStaleMcpGateways(options.gatewayResinHome),
   ]);
-  return { ...journal, automatic, lastAutomaticUpdate, staleMcpGateways };
+  const { automatic } = automaticCheck;
+  // Automatic checks are read-only and never touch the journal, which only update runs write:
+  // report whichever of the two checked last.
+  const journalCheckMs =
+    journal.lastCheckAt === null ? Number.NaN : Date.parse(journal.lastCheckAt);
+  const automaticIsNewer =
+    automatic.lastCheckAt !== null &&
+    automatic.lastOutcome !== null &&
+    (Number.isNaN(journalCheckMs) || Date.parse(automatic.lastCheckAt) > journalCheckMs);
+  const targetVersion = automaticIsNewer ? automaticCheck.targetVersion : journal.targetVersion;
+  return {
+    ...journal,
+    ...(automaticIsNewer
+      ? { lastCheckAt: automatic.lastCheckAt, lastResult: automatic.lastOutcome }
+      : {}),
+    updateAvailable:
+      targetVersion !== null &&
+      journal.currentVersion !== null &&
+      compareSemver(targetVersion, journal.currentVersion) > 0,
+    automatic,
+    lastAutomaticUpdate,
+    staleMcpGateways,
+  };
 }
 
 /**
@@ -1668,6 +1707,16 @@ export function formatStaleMcpGateways(
   return `${stale.count} MCP gateway process(es) still run an older Resin (${versions.join(", ")}); restart the harness to load the updated version.`;
 }
 
+function readDeferralStatus(
+  deferral: UpdateDeferralSnapshot | null | undefined,
+): DaemonStatusSummary["update"]["deferral"] {
+  const targetVersion = safeVersion(deferral?.targetVersion);
+  const since = safeIsoTimestamp(deferral?.since);
+  return deferral && targetVersion && since
+    ? { targetVersion, since, activeCount: deferral.activeCount }
+    : null;
+}
+
 async function readUpdateJournalStatus(
   fsBridge: ConfigFsBridge,
   resinHome: string,
@@ -1683,6 +1732,7 @@ async function readUpdateJournalStatus(
       pendingVersion: snapshot.pendingVersion,
       lastCheckAt: snapshot.lastCheckAt,
       lastResult: snapshot.lastResult,
+      deferral: readDeferralStatus(snapshot.deferral),
       hasError: snapshot.lastError !== null || snapshot.lastResult === "failed",
       errorCode: null,
       lastRollback: snapshot.lastRollback
@@ -1710,6 +1760,7 @@ function emptyUpdate(
     pendingVersion: null,
     lastCheckAt: null,
     lastResult: null,
+    deferral: null,
     hasError: errorCode !== null,
     errorCode,
     lastRollback: null,
@@ -1725,7 +1776,11 @@ async function readAutomaticUpdateStatus(
     configPath: string;
     env: NodeJS.ProcessEnv;
   },
-): Promise<DaemonStatusSummary["update"]["automatic"]> {
+): Promise<{
+  automatic: DaemonStatusSummary["update"]["automatic"];
+  /** The release the latest automatic check found, when it named one. */
+  targetVersion: string | null;
+}> {
   const automatic: DaemonStatusSummary["update"]["automatic"] = {
     enabled: null,
     channel: null,
@@ -1760,6 +1815,7 @@ async function readAutomaticUpdateStatus(
   } catch {
     // An invalid update policy is reported as unknown; status never fails on it.
   }
+  let targetVersion: string | null = null;
   try {
     const state = await readAutoUpdateState({ resinHome: options.resinHome, fsBridge });
     if (state) {
@@ -1768,11 +1824,12 @@ async function readAutomaticUpdateStatus(
       automatic.hasError = Boolean(state.lastCheck?.error);
       automatic.nextCheckAt = safeIsoTimestamp(state.nextCheckAt ?? undefined);
       automatic.offlineFailureCount = state.scheduler.offlineFailureCount;
+      targetVersion = safeVersion(state.lastCheck?.targetVersion ?? undefined);
     }
   } catch {
     automatic.stateError = true;
   }
-  return automatic;
+  return { automatic, targetVersion };
 }
 
 export async function readLastAutomaticUpdate(

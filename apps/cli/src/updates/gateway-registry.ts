@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { z } from "zod";
+import { getActiveVersion } from "../installer/asset-downloader.js";
+import { compareSemver } from "../installer/channel-verifier.js";
 
 /**
  * Harness-owned `resin mcp` processes are not part of the resident service, so an
@@ -53,6 +55,45 @@ export function registerRunningGateway(options: {
     } catch {
       // A stale registration is pruned by the next reader.
     }
+  };
+}
+
+/** How often a gateway re-reads the active version pointer for its release notice. */
+export const RELEASE_NOTICE_CHECK_INTERVAL_MS = 60_000;
+
+/**
+ * The tool-result notice a long-lived gateway gives once a newer release is active. A stdio MCP
+ * server cannot swap in the new code itself: Node has no in-place exec, and a replacement process
+ * would not hold the harness's initialize handshake or in-flight requests. So the gateway tells
+ * the agent instead. Reads the `current` pointer at most once per interval; never throws.
+ */
+export function createActivatedReleaseNotice(options: {
+  readonly resinHome: string;
+  readonly runningVersion: string;
+  readonly readActiveVersion?: (resinHome: string) => string | null;
+  readonly clock?: () => number;
+  readonly intervalMs?: number;
+}): () => string | undefined {
+  const readActive = options.readActiveVersion ?? getActiveVersion;
+  const clock = options.clock ?? Date.now;
+  const intervalMs = options.intervalMs ?? RELEASE_NOTICE_CHECK_INTERVAL_MS;
+  const running = options.runningVersion.replace(/^v/u, "");
+  let checkedAtMs: number | undefined;
+  let notice: string | undefined;
+  return () => {
+    const nowMs = clock();
+    if (checkedAtMs !== undefined && nowMs - checkedAtMs < intervalMs) return notice;
+    checkedAtMs = nowMs;
+    try {
+      const active = readActive(options.resinHome)?.replace(/^v/u, "");
+      notice =
+        active && compareSemver(active, running) > 0
+          ? `Resin v${active} was activated, but this Resin MCP server still runs v${running}. Restart this session to use v${active}.`
+          : undefined;
+    } catch {
+      notice = undefined;
+    }
+    return notice;
   };
 }
 

@@ -64,6 +64,11 @@ import {
 export const UPDATE_STATUS_SNAPSHOT_VERSION = 1 as const;
 export const DEFAULT_UPDATE_PROBATION_MS = 15_000;
 export const DEFAULT_UPDATE_HEALTH_PROBE_INTERVAL_MS = 1_000;
+/**
+ * How long background updates may keep deferring a staged release while the daemon reports
+ * active work. Past it, a background run drains the daemon the way a manual `resin update` does.
+ */
+export const DEFAULT_MAX_ACTIVATION_DEFERRAL_MS = 24 * 60 * 60_000;
 export const UPDATE_JOURNAL_FILE_NAME = "journal.json";
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -86,6 +91,14 @@ export type UpdateRunStatus =
   | "activated"
   | "rolled-back"
   | "failed";
+
+/** Run results after which no staged release is waiting, so the deferral clock restarts. */
+const DEFERRAL_ENDING_RESULTS: Partial<Record<UpdateRunStatus, true>> = {
+  disabled: true,
+  "already-current": true,
+  activated: true,
+  "rolled-back": true,
+};
 
 export type UpdateDeferralReason = "active-sessions" | "session-activity-unavailable" | "offline";
 
@@ -142,6 +155,16 @@ export interface UpdateRollbackSnapshot {
   readonly reason: string;
 }
 
+/** The run of consecutive activation deferrals, kept until a release activates. */
+export interface UpdateDeferralSnapshot {
+  /** The release most recently deferred. */
+  readonly targetVersion: string;
+  /** When the first deferral of this run happened; a newer target keeps it. */
+  readonly since: string;
+  /** The daemon work count the latest deferral observed, when known. */
+  readonly activeCount: number | null;
+}
+
 /** Sanitized, local-only state intended for a future unified status command. */
 export interface UpdateStatusSnapshot {
   readonly schemaVersion: typeof UPDATE_STATUS_SNAPSHOT_VERSION;
@@ -154,6 +177,8 @@ export interface UpdateStatusSnapshot {
   readonly lastError: string | null;
   readonly lastRollback: UpdateRollbackSnapshot | null;
   readonly quarantine: UpdateQuarantineEntry[];
+  /** Absent in journals written before deferrals were tracked. */
+  readonly deferral?: UpdateDeferralSnapshot | null;
 }
 
 export interface UpdateSessionActivity {
@@ -290,6 +315,8 @@ export interface UpdateEngineOptions {
   ) => UpdateHealthProbeResult | Promise<UpdateHealthProbeResult>;
   readonly probationMs?: number;
   readonly healthProbeIntervalMs?: number;
+  /** Longest a background run defers activation for active work; see the default's docs. */
+  readonly maxActivationDeferralMs?: number;
   readonly drainTimeoutMs?: number;
   readonly clock?: () => number;
   readonly sleep?: (delayMs: number) => Promise<void>;
@@ -434,6 +461,13 @@ const UpdateRollbackSnapshotSchema = z
     reason: SnapshotTextSchema,
   })
   .strict();
+const UpdateDeferralSnapshotSchema = z
+  .object({
+    targetVersion: SnapshotTextSchema,
+    since: SnapshotTextSchema,
+    activeCount: z.number().int().nonnegative().nullable(),
+  })
+  .strict();
 const UpdateStatusSnapshotSchema = z.object({
   schemaVersion: z.literal(UPDATE_STATUS_SNAPSHOT_VERSION),
   channel: UpdateChannelSchema,
@@ -445,6 +479,7 @@ const UpdateStatusSnapshotSchema = z.object({
   lastError: SnapshotTextSchema.nullable(),
   lastRollback: UpdateRollbackSnapshotSchema.nullable(),
   quarantine: z.array(UpdateQuarantineEntrySchema).max(64),
+  deferral: UpdateDeferralSnapshotSchema.nullable().optional(),
 });
 const UpdateConfigEnvelopeSchema = z
   .object({
@@ -656,6 +691,7 @@ function cloneSnapshot(snapshot: UpdateStatusSnapshot): UpdateStatusSnapshot {
     ...snapshot,
     lastRollback: snapshot.lastRollback ? { ...snapshot.lastRollback } : null,
     quarantine: snapshot.quarantine.map((entry) => ({ ...entry })),
+    deferral: snapshot.deferral ? { ...snapshot.deferral } : null,
   };
 }
 
@@ -719,6 +755,7 @@ export class UpdateEngine {
   private readonly probationMs: number;
   private readonly healthProbeIntervalMs: number;
   private readonly drainTimeoutMs: number;
+  private readonly maxActivationDeferralMs: number;
   private readonly clock: () => number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly onSnapshot?: UpdateEngineOptions["onSnapshot"];
@@ -776,6 +813,11 @@ export class UpdateEngine {
     this.healthProbeIntervalMs =
       options.healthProbeIntervalMs ?? DEFAULT_UPDATE_HEALTH_PROBE_INTERVAL_MS;
     this.drainTimeoutMs = options.drainTimeoutMs ?? UPDATE_DRAIN_TIMEOUT_MS;
+    this.maxActivationDeferralMs =
+      options.maxActivationDeferralMs ?? DEFAULT_MAX_ACTIVATION_DEFERRAL_MS;
+    if (!Number.isInteger(this.maxActivationDeferralMs) || this.maxActivationDeferralMs < 0) {
+      throw new TypeError("Update activation deferral limit must be a non-negative integer.");
+    }
     if (!Number.isInteger(this.probationMs) || this.probationMs < 0) {
       throw new TypeError("Update probation duration must be a non-negative integer.");
     }
@@ -1217,7 +1259,17 @@ export class UpdateEngine {
     }
 
     this.stage = "activate";
-    const lease = await this.acquireActivationLease(request.signal, request.mode ?? "manual");
+    // Background runs never interrupt in-flight work, but a staged release cannot wait forever on a
+    // daemon that always has some: past the deferral limit they drain it as `resin update` does.
+    // The drain only restarts the resident daemon; harness sessions and their standalone
+    // `resin mcp` gateways are separate processes, and pruning keeps the versions those still run.
+    const deferralOverdue =
+      (request.mode ?? "manual") === "background" && this.isDeferralOverdue(snapshot);
+    if (deferralOverdue) steps.push("deferral_limit_reached");
+    const lease = await this.acquireActivationLease(
+      request.signal,
+      request.mode !== "background" || deferralOverdue,
+    );
     const activity = lease.activity;
     if (activity.state !== "inactive") {
       const deferralReason: UpdateDeferralReason =
@@ -1230,6 +1282,11 @@ export class UpdateEngine {
         lastResult: "activation-deferred",
         lastError: null,
         pendingVersion: targetVersion,
+        deferral: {
+          targetVersion,
+          since: snapshot.deferral?.since ?? this.nowIso(),
+          activeCount: activity.activeCount ?? null,
+        },
       });
       return this.createResult({
         request,
@@ -1771,9 +1828,19 @@ export class UpdateEngine {
     };
   }
 
+  /** True once the current run of deferrals has lasted the configured limit. */
+  private isDeferralOverdue(snapshot: UpdateStatusSnapshot): boolean {
+    const since = snapshot.deferral ? Date.parse(snapshot.deferral.since) : Number.NaN;
+    return Number.isFinite(since) && this.clock() - since >= this.maxActivationDeferralMs;
+  }
+
+  /**
+   * Waits for the daemon to stop work before cutover. With `drainActiveWork` false (background
+   * runs within the deferral limit), a daemon with work in flight is left alone and reported active.
+   */
   private async acquireActivationLease(
     signal?: AbortSignal,
-    mode: UpdateRunMode = "manual",
+    drainActiveWork = true,
   ): Promise<ActivationLease> {
     let serviceState: ServiceStatusInfo;
     try {
@@ -1868,7 +1935,7 @@ export class UpdateEngine {
 
       // Background updates never interrupt in-flight work: they only drain an idle daemon.
       const initialActiveCount = this.countActiveWork(initialHealth);
-      if (mode === "background" && initialActiveCount > 0) {
+      if (!drainActiveWork && initialActiveCount > 0) {
         return {
           activity: {
             state: "active",
@@ -2995,6 +3062,7 @@ export class UpdateEngine {
       lastError: null,
       lastRollback: null,
       quarantine: [],
+      deferral: null,
     };
   }
 
@@ -3043,7 +3111,7 @@ export class UpdateEngine {
     snapshot: UpdateStatusSnapshot,
     patch: Partial<UpdateStatusSnapshot>,
   ): UpdateStatusSnapshot {
-    return {
+    const next: UpdateStatusSnapshot = {
       ...snapshot,
       ...patch,
       schemaVersion: UPDATE_STATUS_SNAPSHOT_VERSION,
@@ -3051,6 +3119,10 @@ export class UpdateEngine {
         ? patch.quarantine.map((entry) => ({ ...entry }))
         : snapshot.quarantine.map((entry) => ({ ...entry })),
     };
+    // A release that activated (or a run that found none pending) ends the run of deferrals.
+    return patch.lastResult && DEFERRAL_ENDING_RESULTS[patch.lastResult]
+      ? { ...next, deferral: null }
+      : next;
   }
 
   private async recordSnapshot(

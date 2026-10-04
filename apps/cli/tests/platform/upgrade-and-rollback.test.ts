@@ -1489,6 +1489,162 @@ describe("UpdateEngine staging, activation, and rollback", () => {
     }
   });
 
+  it("drains active work once background activation has been deferred past the limit", async () => {
+    const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-deferral-limit-"));
+    const resinHome = path.join(homeDir, ".resin");
+    const platformInfo = TEST_PLATFORM_INFO;
+    const platformPaths = resolvePlatformPaths({ home: homeDir, platformInfo });
+    const events: string[] = [];
+    let serviceActive = true;
+    let shutdownStatus: "fully-ready" | "stopping" | "stopped" = "fully-ready";
+    let activeSessions = 2;
+    // SAFETY: Mock supervisor object implements subset of DaemonSupervisor required for IPC drain tests.
+    const supervisor = {
+      getConfig() {
+        return {};
+      },
+      async getHealth() {
+        return {
+          status: shutdownStatus,
+          uptimeSeconds: 1,
+          startedAt: Date.now(),
+          version: "1.0.0",
+          modules: {
+            trajectory: {
+              status: shutdownStatus === "stopped" ? "stopped" : "ready",
+              details: { activeSessions },
+              lastCheckTime: Date.now(),
+            },
+          },
+          timestamp: Date.now(),
+        };
+      },
+      async stop() {
+        events.push("ipc-drain");
+        activeSessions = 0;
+        shutdownStatus = "stopped";
+      },
+    } as DaemonSupervisor;
+    const server = new IpcServer({ supervisor, socketPath: platformPaths.socketPath });
+    const firstDeferralAt = Date.parse("2026-10-01T00:00:00.000Z");
+    let now = firstDeferralAt;
+    try {
+      await fs.mkdir(resinHome, { recursive: true });
+      await fs.writeFile(
+        path.join(resinHome, "version.json"),
+        JSON.stringify({ version: "1.0.0" }),
+      );
+      await server.start();
+      const release = signedRelease("1.1.0");
+      const engine = new UpdateEngine({
+        homeDir,
+        resinHome,
+        configPath: path.join(resinHome, "config.json"),
+        platformInfo,
+        acquireLock: async () => ({ async release() {} }),
+        resolveRelease: async () => release,
+        downloadAsset: async (request) => ({
+          path: path.join(resinHome, "downloads", request.asset.filename),
+          sha256: request.asset.sha256,
+          sizeBytes: request.asset.sizeBytes,
+          verified: true,
+        }),
+        installRelease: async (request) => {
+          const versionDir = path.join(resinHome, "versions", `v${request.version}`);
+          const daemonPath = path.join(versionDir, "bin", "resin-daemon");
+          const metadataPath = path.join(versionDir, "version.json");
+          await fs.mkdir(path.dirname(daemonPath), { recursive: true });
+          await fs.writeFile(daemonPath, "candidate");
+          await fs.writeFile(
+            metadataPath,
+            JSON.stringify({
+              version: request.version,
+              sha256: release.provenance.releaseAssetSha256,
+              provenance: release.provenance,
+            }),
+          );
+          return {
+            version: request.version,
+            versionDir,
+            installedFiles: [daemonPath, metadataPath],
+            entryPoints: { daemon: daemonPath, mcpShim: "mcp", cli: "cli" },
+          };
+        },
+        switchVersion: async (request) => {
+          events.push(`switch:${request.targetVersion}`);
+          return {
+            activeVersion: request.targetVersion,
+            previousVersion: "1.0.0",
+            activePath: path.join(resinHome, "current"),
+            rollbackRetained: true,
+          };
+        },
+        readActiveVersion: async () => "1.0.0",
+        serviceManager: {
+          async status() {
+            return {
+              installed: true,
+              active: serviceActive,
+              enabled: true,
+              serviceName: "resin",
+              unitPath: "/unit",
+            };
+          },
+          async stop() {
+            events.push("manager-stop");
+            serviceActive = false;
+          },
+          async start() {
+            events.push("start");
+            serviceActive = true;
+          },
+        },
+        healthProbe: async () => ({
+          serviceActive: true,
+          ipcResponsive: true,
+          mcpResponsive: true,
+          recoveryBreakerTripped: false,
+        }),
+        probationMs: 0,
+        drainTimeoutMs: 1_000,
+        healthProbeIntervalMs: 1,
+        maxActivationDeferralMs: 24 * 60 * 60_000,
+        clock: () => now,
+        sleep: async () => yieldEventLoop(),
+      });
+      const deferral = {
+        targetVersion: "1.1.0",
+        since: new Date(firstDeferralAt).toISOString(),
+        activeCount: 2,
+      };
+
+      const first = await engine.run({ mode: "background" });
+      expect(first).toMatchObject({ status: "activation-deferred", pendingVersion: "1.1.0" });
+      await expect(readUpdateStatusSnapshot({ resinHome })).resolves.toMatchObject({ deferral });
+
+      // Within the limit a later retry still leaves the busy daemon alone and keeps the start time.
+      now += 23 * 60 * 60_000;
+      const second = await engine.run({ mode: "background" });
+      expect(second.status).toBe("activation-deferred");
+      expect(events).toEqual([]);
+      await expect(readUpdateStatusSnapshot({ resinHome })).resolves.toMatchObject({ deferral });
+
+      now += 2 * 60 * 60_000;
+      const third = await engine.run({ mode: "background" });
+
+      expect(third).toMatchObject({ status: "activated", activeVersion: "1.1.0" });
+      expect(third.stepsCompleted).toContain("deferral_limit_reached");
+      expect(events.slice(0, 3)).toEqual(["ipc-drain", "manager-stop", "switch:1.1.0"]);
+      await expect(readUpdateStatusSnapshot({ resinHome })).resolves.toMatchObject({
+        lastResult: "activated",
+        deferral: null,
+      });
+    } finally {
+      await server.stop().catch(() => {});
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back and quarantines a candidate whose daemon does not report the target version", async () => {
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-ipc-version-gate-"));
     const resinHome = path.join(homeDir, ".resin");

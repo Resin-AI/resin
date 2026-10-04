@@ -40,6 +40,7 @@ import {
   type UpdateStatusSnapshot,
 } from "../src/updates/engine.js";
 import {
+  createActivatedReleaseNotice,
   listRunningGateways,
   registerRunningGateway,
   resolveGatewayRegistryDir,
@@ -940,6 +941,68 @@ describe("MCP gateway version registry", () => {
         versions: ["1.0.0"],
         unknownVersionCount: 0,
       });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("tells a long-lived gateway's agent once a newer release is active, re-reading at most per interval", () => {
+    let active: string | null = "1.0.0";
+    let now = 0;
+    const reads = vi.fn((_resinHome: string) => active);
+    const notice = createActivatedReleaseNotice({
+      resinHome: "/home/user/.resin",
+      runningVersion: "v1.0.0",
+      readActiveVersion: reads,
+      clock: () => now,
+      intervalMs: 60_000,
+    });
+
+    expect(notice()).toBeUndefined();
+    active = "1.1.0";
+    now = 59_999;
+    expect(notice()).toBeUndefined();
+    expect(reads).toHaveBeenCalledTimes(1);
+    now = 60_000;
+    expect(notice()).toBe(
+      "Resin v1.1.0 was activated, but this Resin MCP server still runs v1.0.0. Restart this session to use v1.1.0.",
+    );
+    expect(reads).toHaveBeenCalledTimes(2);
+    // A rollback to an older release, or a same-version reinstall, needs no restart.
+    active = "1.0.0+resin-reinstall.54d5b0120836";
+    now = 120_000;
+    expect(notice()).toBeUndefined();
+    active = "0.9.0";
+    now = 180_000;
+    expect(notice()).toBeUndefined();
+  });
+
+  it("gives `resin mcp` a release notice that reads the active install's pointer", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "resin-gateway-release-notice-"));
+    const home = path.join(root, "user");
+    const resinHome = path.join(home, ".resin");
+    try {
+      await fs.mkdir(path.join(resinHome, "versions", "v999.0.0"), { recursive: true });
+      await fs.symlink(
+        path.join(resinHome, "versions", "v999.0.0"),
+        path.join(resinHome, "current"),
+        "junction",
+      );
+      let releaseNotice: (() => string | undefined) | undefined;
+
+      await mcpCommand([], {
+        stderr: { write: () => true },
+        home,
+        env: {},
+        shimFactory: (options) => {
+          releaseNotice = options.releaseNotice;
+          return { start: async () => ({ mode: "failed" }), stop: async () => {} };
+        },
+      });
+
+      expect(releaseNotice?.()).toMatch(
+        /^Resin v999\.0\.0 was activated, but this Resin MCP server still runs v\d+\.\d+\.\d+.*\. Restart this session to use v999\.0\.0\.$/u,
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
