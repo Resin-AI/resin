@@ -5672,7 +5672,8 @@ Resin may have learned tools from earlier work in your projects. They are not li
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`;
     claudeCodeInstallHarness = {
       id: "claude-code",
       displayName: "Claude Code CLI",
@@ -6719,6 +6720,7 @@ Resin may have learned tools from earlier runs in this workspace. They are not l
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, search with the job in a few words (e.g. the commands or scripts you are about to run). With an \`exec\` tool (Code Mode), do it in that \`exec\` call: \`text(JSON.stringify(await tools.mcp__resin__search_tools({query: "<the job>"})))\`. Without \`exec\`, Resin's tools are deferred: call \`tool_search\` with \`resin search_tools\` to load them, then call \`mcp__resin__search_tools\` with \`{"query": "<the job>"}\`. No match: do the task.
 - A result that does your task's next step is a procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool({name: "<name>", parameters: {...}})\` instead of re-reading docs or \`--help\` to rediscover those steps, and use its output instead of rerunning its commands. Omitted inputs reuse the recorded values. Run several at once with \`Promise.all\` in \`exec\`.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
 `;
   }
 });
@@ -6981,6 +6983,7 @@ Resin may have learned tools from earlier work in this workspace. They are not i
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`resin-search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`resin-invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
 `;
   }
 });
@@ -7377,7 +7380,8 @@ Resin may have learned tools from earlier work in your projects. They are not li
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, call the \`resin\` server's \`search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`
     };
     cursorInstallHarness = {
       id: CURSOR_HARNESS_ID,
@@ -7576,7 +7580,8 @@ Resin may have learned tools from earlier work in this workspace. Grok runs MCP 
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\` (via \`use_tool\`), instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`;
     grokBuildInstallHarness = {
       id: GROK_HARNESS_ID,
       displayName: GROK_DISPLAY_NAME,
@@ -7801,6 +7806,7 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
 `;
   }
 });
@@ -8222,7 +8228,8 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, write \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\` to \`xd://mcp__resin_search_tools\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so call it directly with your task's values by writing \`{"name": "<name>", "parameters": {...}}\` to \`xd://mcp__resin_invoke_tool\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`;
     OMP_CATALOG_MARKERS = {
       start: "<!-- resin:catalog:start -->",
       end: "<!-- resin:catalog:end -->"
@@ -8582,6 +8589,7 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`resin_search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`resin_invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
 - Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
 `;
   }
 });
@@ -9034,7 +9042,8 @@ Resin may have learned tools from earlier work in this workspace. They are not i
 - If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
 - Otherwise, before running one of those commands or another multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job in a few words, e.g. the commands or scripts you are about to run>"}\`.
 - A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.`;
+- Its output is the commands' current output: use it instead of running those commands yourself.
+- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.`;
     PI_CONTEXT_FILE_NAMES = [
       "AGENTS.override.md",
       "AGENTS.md",
@@ -9132,46 +9141,45 @@ var init_harness_registry = __esm({
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/date.js
-var init_date = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/date.js"() {
-  }
-});
-
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/error.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js
 var init_error = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/error.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/error.js"() {
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/util.js
-var init_util2 = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/util.js"() {
-    init_error();
-  }
-});
-
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/primitive.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js
 var init_primitive = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/primitive.js"() {
-    init_date();
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/primitive.js"() {
     init_error();
-    init_util2();
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/extract.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js
+var init_date = __esm({
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/date.js"() {
+  }
+});
+
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js
 var init_extract = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/extract.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/extract.js"() {
     init_primitive();
     init_struct();
+    init_error();
+    init_date();
+  }
+});
+
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js
+var init_util2 = __esm({
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/util.js"() {
     init_error();
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/struct.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js
 var init_struct = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/struct.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/struct.js"() {
     init_primitive();
     init_extract();
     init_util2();
@@ -9179,9 +9187,9 @@ var init_struct = __esm({
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/parse.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js
 var init_parse = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/parse.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/parse.js"() {
     init_struct();
     init_extract();
     init_util2();
@@ -9189,15 +9197,17 @@ var init_parse = __esm({
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/stringify.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js
+var HAS_WELLFORMED;
 var init_stringify = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/stringify.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/stringify.js"() {
+    HAS_WELLFORMED = !!"".isWellFormed;
   }
 });
 
-// node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js
+// node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js
 var init_dist3 = __esm({
-  "node_modules/.pnpm/smol-toml@1.8.0/node_modules/smol-toml/dist/index.js"() {
+  "node_modules/.pnpm/smol-toml@1.9.0/node_modules/smol-toml/dist/index.js"() {
     init_parse();
     init_stringify();
     init_date();
@@ -20821,11 +20831,11 @@ export {
 };
 /*! Bundled license information:
 
-smol-toml/dist/date.js:
 smol-toml/dist/error.js:
-smol-toml/dist/util.js:
 smol-toml/dist/primitive.js:
+smol-toml/dist/date.js:
 smol-toml/dist/extract.js:
+smol-toml/dist/util.js:
 smol-toml/dist/struct.js:
 smol-toml/dist/parse.js:
 smol-toml/dist/stringify.js:
