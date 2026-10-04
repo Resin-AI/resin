@@ -21,9 +21,11 @@ export interface TrustedToolSigningKey {
 export type ToolSigningTrust = Readonly<Record<string, readonly TrustedToolSigningKey[]>>;
 
 export const PRODUCTION_CLOUD_ORIGIN = "https://api.resin.sh";
+// Staging has no custom domain; released clients run against staging in cloud E2E qualification
+// must verify its certificates, so this origin ships in the binary.
 export const STAGING_CLOUD_ORIGIN = "https://67sho46k61.execute-api.us-east-1.amazonaws.com";
 
-// KMS key resin-production-tool-signing (ECC_NIST_EDWARDS25519), account 104818751793.
+// Public half of the production tool-signing KMS key (ECC_NIST_EDWARDS25519).
 const PRODUCTION_TOOL_SIGNING_KEYS: readonly TrustedToolSigningKey[] = [
   {
     keyId: "production-tool-signing-2026-10",
@@ -38,7 +40,7 @@ const PRODUCTION_TOOL_SIGNING_KEYS: readonly TrustedToolSigningKey[] = [
   },
 ];
 
-// KMS key resin-staging-tool-signing (ECC_NIST_EDWARDS25519), account 631718647304.
+// Public half of the staging tool-signing KMS key (ECC_NIST_EDWARDS25519).
 const STAGING_TOOL_SIGNING_KEYS: readonly TrustedToolSigningKey[] = [
   {
     keyId: "staging-tool-signing-2026-10",
