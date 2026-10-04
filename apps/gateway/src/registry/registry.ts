@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import {
   type CapabilityEnvelope,
   type CatalogSnapshot,
@@ -20,7 +19,6 @@ import {
   validateV1ToolLock,
 } from "@resin/contracts";
 import { LocalDatabaseConnection, ToolRepository } from "@resin/db";
-import { resolvePaths } from "@resin/observer";
 import {
   ArtifactCache,
   DeterministicWorkerSandbox,
@@ -310,17 +308,10 @@ export const createExecutionHandler = createEvolvedToolHandler;
 export function extractToolRepo(
   db: ToolRepoLike | StateStoreLike | LocalDatabaseConnection | DbConnectionLike | null | undefined,
 ): ToolRepoLike | null {
+  // No store means an in-memory registry. Never fall back to the ambient `~/.resin` state
+  // database: a registry built without one (tests, embedders) would otherwise read and write the
+  // user's real catalog. Callers that persist (the stdio bridge) open their store explicitly.
   if (!db) {
-    try {
-      const paths = resolvePaths();
-      const dbPath = path.join(paths.dataDir, "state.db");
-      if (fs.existsSync(dbPath)) {
-        const conn = new LocalDatabaseConnection({ path: dbPath });
-        return new ToolRepository(conn);
-      }
-    } catch {
-      // Ignore
-    }
     return null;
   }
   if (!(db instanceof Object)) {
@@ -363,16 +354,6 @@ export function extractToolRepoWithDb(
   db: ToolRepoLike | StateStoreLike | LocalDatabaseConnection | DbConnectionLike | null | undefined,
 ): ExtractedToolRepoResult {
   if (!db) {
-    try {
-      const paths = resolvePaths();
-      const dbPath = path.join(paths.dataDir, "state.db");
-      if (fs.existsSync(dbPath)) {
-        const conn = new LocalDatabaseConnection({ path: dbPath });
-        return { repo: new ToolRepository(conn), db: conn };
-      }
-    } catch {
-      // Ignore
-    }
     return { repo: null, db: null };
   }
   let conn: LocalDatabaseConnection | null = null;
