@@ -1140,11 +1140,17 @@ export class WorkflowCallRecorder {
         // An unresolved reference supplies no demonstration or baseline value.
       }
     }
+    // The positions this call's upload keeps private are the swept origins' private leaves. Each
+    // one stands where the caller stated a literal, so its resolved argument leaf is the text the
+    // upload withheld: a redaction placeholder marks a secret, anything else a restated value.
     const local =
       existing ??
       this.recordLocalCall(
         state,
         { ...event, toolName: routedName, parameters: actualArguments },
+        actualArguments,
+        undefined,
+        origins,
         actualArguments,
       );
     carrier.executionIndex = local.executionIndex;
