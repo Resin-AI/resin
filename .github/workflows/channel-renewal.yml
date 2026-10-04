@@ -20,7 +20,9 @@ on:
   schedule:
     - cron: "17 */3 * * *"
     # Standing authorization for renewal only; expired-source restoration stays manual.
-    - cron: "47 */12 * * *"
+    # Renewal is idempotent and every three hours: GitHub delays scheduled runs by hours and
+    # drops some, so one late or missed run must still leave most of the 24-hour validity.
+    - cron: "47 */3 * * *"
 
 permissions:
   contents: read
@@ -81,7 +83,7 @@ jobs:
     name: Authorized channel-only metadata renewal
     if: >-
       ${{ github.ref == 'refs/heads/main' && github.ref_protected == true &&
-          ((github.event_name == 'schedule' && github.event.schedule == '47 */12 * * *') ||
+          ((github.event_name == 'schedule' && github.event.schedule == '47 */3 * * *') ||
            (github.event_name == 'workflow_dispatch' && (inputs.operation == 'renew' || inputs.operation == 'restore'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -110,8 +112,8 @@ jobs:
             exit 1
           fi
           if [ "$EVENT_NAME" = "schedule" ]; then
-            if [ "$EVENT_SCHEDULE" != "47 */12 * * *" ] || [ -n "$OPERATION" ] || [ -n "$CONFIRM_RENEWAL" ]; then
-              echo "::error::Only the authorized twelve-hour schedule may renew automatically."
+            if [ "$EVENT_SCHEDULE" != "47 */3 * * *" ] || [ -n "$OPERATION" ] || [ -n "$CONFIRM_RENEWAL" ]; then
+              echo "::error::Only the authorized three-hour schedule may renew automatically."
               exit 1
             fi
             OPERATION="renew"
