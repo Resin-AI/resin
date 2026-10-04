@@ -64,8 +64,11 @@ async function resolveWorkspaceId(cwd: string): Promise<{
     // Lazy: keeps @resin/gateway off every status path that has no catalog to read.
     const gateway = await import("@resin/gateway");
     const context = gateway.resolveWorkspaceContext({ cwd, disableBootstrap: true });
-    const project = gateway.bootstrapProject(context.projectRoot, { readOnly: true });
-    return { workspaceId: project.projectId, isSystemMetaTool: gateway.isSystemMetaTool };
+    // The gateway serves excluded roots ($HOME, the Resin home) as unbootstrapped workspaces.
+    const workspaceId = gateway.isExcludedProjectRoot(context.projectRoot)
+      ? context.workspaceId
+      : gateway.bootstrapProject(context.projectRoot, { readOnly: true }).projectId;
+    return { workspaceId, isSystemMetaTool: gateway.isSystemMetaTool };
   } catch {
     return null;
   }

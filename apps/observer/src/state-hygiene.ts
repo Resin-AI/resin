@@ -45,3 +45,29 @@ export async function pruneStaleStateFiles(
   }
   return removed;
 }
+
+/** The local safety attestation signing key; `resin init` and `resin doctor --fix` write it. */
+export const SAFETY_ATTESTATION_PRIVATE_KEY_FILE_NAME = "safety-attestation.key.pem";
+
+/**
+ * Narrows the safety attestation private key in `<resinHome>/state` to owner-only (0600) when
+ * group or other permission bits are set. Releases before the key was written with an explicit
+ * mode left it readable under the default umask, and only `init`/`doctor --fix` rewrote it, so the
+ * daemon narrows it on every start. Symlinks and non-regular files are left alone; POSIX only.
+ * Never throws; returns whether the mode changed.
+ */
+export async function narrowSafetyAttestationKeyMode(
+  resinHome: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (platform === "win32") return false;
+  const keyPath = path.join(resinHome, "state", SAFETY_ATTESTATION_PRIVATE_KEY_FILE_NAME);
+  try {
+    const stat = await fs.promises.lstat(keyPath);
+    if (!stat.isFile() || (stat.mode & 0o077) === 0) return false;
+    await fs.promises.chmod(keyPath, 0o600);
+    return true;
+  } catch {
+    return false;
+  }
+}

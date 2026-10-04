@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { V1ProjectMetadata, V1ToolLock } from "@resin/contracts";
+import { resolvePaths } from "@resin/observer";
 import { type ProjectBootstrapOptions, bootstrapProject } from "./project/project-bootstrap.js";
 import type { InitializeParams, McpClientInfo, McpRoot } from "./protocol/types.js";
 
@@ -419,6 +421,29 @@ export function generateWorkspaceId(canonicalRoot: string): string {
 }
 
 /**
+ * Whether `projectRoot` must not become a Resin project: the user's home directory, or a
+ * directory whose `.resin` would be the Resin home, or one inside the Resin home. The default
+ * Resin home is `~/.resin`, so bootstrapping `$HOME` would write `project.json` and `resin.lock`
+ * into the daemon's own directory. Sessions there resolve as unbootstrapped workspaces instead;
+ * metadata earlier releases left in the Resin home is never read or written again.
+ */
+export function isExcludedProjectRoot(
+  projectRoot: string,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const userHome = env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
+  const resinHome = canonicalizePath(resolvePaths({ env, home: userHome }).homeDir);
+  const root = canonicalizePath(projectRoot);
+  if (root === canonicalizePath(userHome) || path.join(root, ".resin") === resinHome) return true;
+  const inResinHome = path.relative(resinHome, root);
+  return (
+    !path.isAbsolute(inResinHome) &&
+    inResinHome !== ".." &&
+    !inResinHome.startsWith(`..${path.sep}`)
+  );
+}
+
+/**
  * Resolves workspace context using the 3-tier priority hierarchy:
  * 1. MCP roots capability / Initialize params (rootUri, rootPath, workspaceFolders, customRoots)
  * 2. Harness session association / Environment variables / Client metadata
@@ -544,7 +569,7 @@ export function resolveWorkspaceContext(
     isRealDirectory = false;
   }
 
-  if (options.disableBootstrap || !isRealDirectory) {
+  if (options.disableBootstrap || !isRealDirectory || isExcludedProjectRoot(projectRoot, env)) {
     const workspaceId = generateWorkspaceId(projectRoot);
     return {
       workspaceId,
