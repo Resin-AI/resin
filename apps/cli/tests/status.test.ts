@@ -1445,6 +1445,71 @@ describe("automatic update status", () => {
     expect(`${JSON.stringify(summary)}\n${verbose}`).not.toContain("AUTO_UPDATE_ERROR_SECRET");
   });
 
+  it("reports the newest check across the journal and automatic checks", async () => {
+    const files = healthyFiles();
+    // An update run 3 days ago left the journal naming the release it activated; automatic
+    // checks since then are read-only and only touch the scheduler state.
+    files[path.join(RESIN_HOME, "journal.json")] = JSON.stringify(
+      updateSnapshot({ targetVersion: "1.2.3", lastResult: "activated" }),
+    );
+    files[STATE_FILE] = JSON.stringify(autoUpdateState());
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update).toMatchObject({
+      available: true,
+      updateAvailable: false,
+      lastCheckAt: "2027-01-05T00:00:00.000Z",
+      lastResult: "already-current",
+      deferral: null,
+    });
+
+    files[path.join(RESIN_HOME, "journal.json")] = JSON.stringify(
+      updateSnapshot({ lastCheckAt: "2027-01-06T00:00:00.000Z", lastResult: "offline" }),
+    );
+    const journalNewer = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+    expect(journalNewer.update).toMatchObject({
+      lastCheckAt: "2027-01-06T00:00:00.000Z",
+      lastResult: "offline",
+    });
+  });
+
+  it("reports an available release and how long its activation has been deferred", async () => {
+    const files = healthyFiles();
+    files[path.join(RESIN_HOME, "journal.json")] = JSON.stringify(
+      updateSnapshot({
+        targetVersion: "1.2.4",
+        pendingVersion: "1.2.4",
+        lastResult: "activation-deferred",
+        deferral: { targetVersion: "1.2.4", since: "2027-01-01T00:00:00.000Z", activeCount: 5 },
+      }),
+    );
+    const summary = await collectStatus({
+      home: HOME,
+      env: ENV,
+      now: () => NOW,
+      fsBridge: createMockFsBridge(files),
+    });
+
+    expect(summary.update).toMatchObject({
+      updateAvailable: true,
+      pendingVersion: "1.2.4",
+      deferral: { targetVersion: "1.2.4", since: "2027-01-01T00:00:00.000Z", activeCount: 5 },
+    });
+    expect(formatStatusForTerminal(summary, { verbose: true })).toContain(
+      "Deferred:   since 2027-01-01T00:00:00.000Z (5 active session(s))",
+    );
+  });
+
   it.each([
     { label: "terminal", args: [] as string[] },
     { label: "JSON", args: ["--json"] },

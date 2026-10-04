@@ -112,6 +112,11 @@ export interface GatewayServerOptions {
   enableRefreshCoordinator?: boolean;
   onWorkspaceReady?: (workspace: WorkspaceContext, connection: McpConnection) => Promise<void>;
   cloudRuntime?: ProductionProxyRuntime;
+  /**
+   * A cheap, synchronous check for a notice every connection should see once in a tool result,
+   * such as a newer Resin release this long-lived process does not run. Undefined when none.
+   */
+  releaseNotice?: () => string | undefined;
 }
 export interface ConnectionSession {
   connection: McpConnection;
@@ -295,6 +300,9 @@ export class LocalMcpGateway {
   private isClosed = false;
   private unsubscribeRouterListener?: () => void;
   private readonly catalogNotices: CatalogResponseNotices;
+  private readonly releaseNotice?: () => string | undefined;
+  /** The release notice each connection was last given, so it is delivered once. */
+  private readonly deliveredReleaseNotices = new WeakMap<McpConnection, string>();
 
   constructor(options: GatewayServerOptions = {}) {
     let internalRegistry: ToolRegistry | undefined;
@@ -322,6 +330,7 @@ export class LocalMcpGateway {
     this.logger = options.logger;
     this.onWorkspaceReady = options.onWorkspaceReady;
     this.cloudRuntime = options.cloudRuntime;
+    this.releaseNotice = options.releaseNotice;
     this.catalogNotices = new CatalogResponseNotices({
       listTools: (context) =>
         this.router.listCatalogNoticeTools?.(context) ?? this.router.listTools(context),
@@ -840,13 +849,27 @@ export class LocalMcpGateway {
     const toolArgs: JsonRpcParams =
       rawParams && isParamsObject(rawParams.arguments) ? rawParams.arguments : {};
 
-    return this.catalogNotices.call(connection, signal, (context) =>
+    const result = await this.catalogNotices.call(connection, signal, (context) =>
       this.router.callTool(context, name, toolArgs, {
         signal,
         onProgress,
         timeoutMs: this.toolCallTimeoutMs,
       }),
     );
+    return this.withReleaseNotice(connection, result);
+  }
+
+  /** Appends the pending release notice to `result` the first time `connection` sees it. */
+  private withReleaseNotice(connection: McpConnection, result: CallToolResult): CallToolResult {
+    let notice: string | undefined;
+    try {
+      notice = this.releaseNotice?.();
+    } catch {
+      // The notice is advisory; a failed check never affects the tool result.
+    }
+    if (!notice || this.deliveredReleaseNotices.get(connection) === notice) return result;
+    this.deliveredReleaseNotices.set(connection, notice);
+    return { ...result, content: [...result.content, { type: "text", text: notice }] };
   }
 
   /**
