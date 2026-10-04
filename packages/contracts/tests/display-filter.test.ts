@@ -212,4 +212,26 @@ describe("displayFilter steps", () => {
       validateRecordedWorkflow(plan([step({}, PROGRAM, holeAt(PROGRAM, "-5"))])).errors,
     ).toContain("step checks binds a value inside the display filter it drops");
   });
+
+  it("lets a hole inside the filter stand when a boolean input switches the filter", () => {
+    const toggle = { name: "filter_output", type: "boolean", default: false };
+    const switched = (steps: unknown[], inputs: unknown[] = [toggle]) =>
+      validateRecordedWorkflow({ ...plan(steps), inputs: [...plan([]).inputs, ...inputs] });
+    const switchedStep = (extra: Record<string, unknown> = {}, holes = holeAt(PROGRAM, "-5")) =>
+      step({ displayFilter: { version: 1, input: "filter_output" }, ...extra }, PROGRAM, holes);
+    expect(switched([switchedStep()]).errors).toEqual([]);
+    // The input must exist, be a boolean defaulting to false, and switch only this filter.
+    expect(switched([switchedStep()], []).valid).toBe(false);
+    expect(switched([switchedStep()], [{ ...toggle, default: true }]).valid).toBe(false);
+    expect(switched([switchedStep()], [{ ...toggle, type: "string", default: "" }]).valid).toBe(
+      false,
+    );
+    expect(switched([switchedStep(), switchedStep({ id: "again", callId: "call-2" })]).valid).toBe(
+      false,
+    );
+    const readsSwitch = [{ token: 0, binding: { type: "input", name: "filter_output" } }];
+    expect(switched([switchedStep({}, readsSwitch)]).valid).toBe(false);
+    expect(switched([switchedStep({ optional: { input: "filter_output" } })]).valid).toBe(false);
+    expect(switched([step({ displayFilter: { version: 1, input: "" } })]).valid).toBe(false);
+  });
 });

@@ -56,7 +56,7 @@ describe.skipIf(process.platform === "win32")("display-filter steps", () => {
     const request = { step, arguments: { command: "./emit | tail -1" } };
     expect(await runRecordedCall(request, { cwd: workspace })).toBe("a\nb\nc\n");
     expect(
-      await runRecordedCall({ ...request, applyDisplayFilter: true }, { cwd: workspace }),
+      await runRecordedCall({ ...request, displayFilter: "replay" as const }, { cwd: workspace }),
     ).toBe("c\n");
   });
 
@@ -68,14 +68,18 @@ describe.skipIf(process.platform === "win32")("display-filter steps", () => {
       "step 'emit' failed: recorded shell program exited with code 1",
     );
     await expect(
-      runRecordedCall({ ...request, applyDisplayFilter: true }, { cwd: workspace }),
+      runRecordedCall({ ...request, displayFilter: "replay" as const }, { cwd: workspace }),
     ).rejects.toThrow("step 'emit' failed: recorded shell program exited with code 1");
   });
 
   it("answers an empty result when the replayed grep matches nothing, as the recording did", async () => {
     const workspace = await makeWorkspace();
     const step = filteredStep("./emit | grep zzz");
-    const request = { step, arguments: { command: "./emit | grep zzz" }, applyDisplayFilter: true };
+    const request = {
+      step,
+      arguments: { command: "./emit | grep zzz" },
+      displayFilter: "replay" as const,
+    };
     expect(await runRecordedCall(request, { cwd: workspace })).toBe("");
   });
 
@@ -108,6 +112,60 @@ describe.skipIf(process.platform === "win32")("display-filter steps", () => {
       applyDisplayFilters: true,
     });
     expect(replayed.result).toBe("c\n");
+  });
+
+  it("runs the recorded pipeline when the caller switches the filter on through its input", async () => {
+    const workspace = await makeWorkspace();
+    const adapters = new RuntimeAdapterRegistry();
+    adapters.register(createProcessAdapter({ cwd: workspace }));
+    const step: WorkflowStep = {
+      ...filteredStep("./emit | tail -1"),
+      // The filter's own value is the caller's: `tail -{lines}`.
+      arguments: [
+        {
+          name: "command",
+          source: {
+            kind: "template",
+            template: {
+              type: "text",
+              parts: [
+                { type: "literal", value: "./emit | tail -" },
+                { type: "input", name: "lines" },
+              ],
+            },
+          },
+        },
+      ],
+      displayFilter: { version: 1, input: "filter_output" },
+    };
+    const plan: RecordedWorkflow = {
+      schemaVersion: 1,
+      workflowId: "wf-display-filter-input",
+      inputs: [
+        { name: "lines", type: "string", default: "1" },
+        { name: "filter_output", type: "boolean", default: false },
+      ],
+      steps: [step],
+    };
+    const omitted = await executeRecordedWorkflow(plan, { inputs: { lines: "2" }, adapters });
+    expect(omitted.result).toBe("a\nb\nc\n");
+    const off = await executeRecordedWorkflow(plan, {
+      inputs: { lines: "2", filter_output: false },
+      adapters,
+    });
+    expect(off.result).toBe("a\nb\nc\n");
+    const on = await executeRecordedWorkflow(plan, {
+      inputs: { lines: "2", filter_output: true },
+      adapters,
+    });
+    expect(on.result).toBe("b\nc\n");
+    // Replay always pipes the command's output through the filter, whatever the input says.
+    const replayed = await executeRecordedWorkflow(plan, {
+      inputs: { lines: "2", filter_output: false },
+      adapters,
+      applyDisplayFilters: true,
+    });
+    expect(replayed.result).toBe("b\nc\n");
   });
 
   it("confirms a plan against a recording whose reference is the filtered output", async () => {

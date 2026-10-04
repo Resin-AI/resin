@@ -49,10 +49,12 @@ export interface RecordedCallRequest {
   /** Cancels owned I/O; adapter calls must settle after abort before replay cleanup. */
   signal?: AbortSignal;
   /**
-   * Replay confirmation only: a step marked `displayFilter` pipes its command's output through the
-   * display filter it drops, so its result compares with what the recording printed.
+   * How a step marked `displayFilter` treats the filter it drops. Absent: the command runs alone.
+   * `replay` (replay confirmation only): the command's output is piped through the filter, so the
+   * result compares with what the recording printed. `whole`: the caller switched the filter on
+   * through its input, so the recorded pipeline runs as recorded.
    */
-  applyDisplayFilter?: boolean;
+  displayFilter?: "replay" | "whole";
 }
 
 /**
@@ -105,7 +107,7 @@ export interface RecordedWorkflowExecutionOptions {
   onUnavailable?: (step: WorkflowStep, reason: string) => void;
   /**
    * Set only by replays that compare results with a recording (`binding-validation.ts`): see
-   * `RecordedCallRequest.applyDisplayFilter`. An invocation never sets it, so a caller gets the
+   * `RecordedCallRequest.displayFilter`. An invocation never sets it, so a caller gets the
    * command's whole output.
    */
   applyDisplayFilters?: boolean;
@@ -839,7 +841,11 @@ export async function executeRecordedWorkflow(
         ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
         ...(options.access ? { access: options.access } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
-        ...(options.applyDisplayFilters === true ? { applyDisplayFilter: true } : {}),
+        ...(options.applyDisplayFilters === true
+          ? { displayFilter: "replay" as const }
+          : step.displayFilter?.input !== undefined && inputs[step.displayFilter.input] === true
+            ? { displayFilter: "whole" as const }
+            : {}),
       });
       results.set(step.id, result);
       state.set(step.id, "completed");

@@ -1169,6 +1169,7 @@ function replayedPlan(plan: RecordedWorkflow): RecordedWorkflow {
   for (const step of pruned.steps) {
     for (const argument of step.arguments) collectReadInputs(argument.source, kept);
     if (step.optional !== undefined) kept.add(step.optional.input);
+    if (step.displayFilter?.input !== undefined) kept.add(step.displayFilter.input);
   }
   const removedReads = new Set<string>();
   for (const step of plan.steps) {

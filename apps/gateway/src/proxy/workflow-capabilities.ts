@@ -20,7 +20,8 @@
  * - `display-filter-v1`: plan steps marked `WorkflowStep.displayFilter` run their recorded program
  *   without its trailing `tail`/`head`/`grep` display filter (`splitDisplayFilter`, version 1),
  *   returning the command's whole output and exit status; replay confirmation pipes that output
- *   through the dropped stages before comparing it with the recording.
+ *   through the dropped stages before comparing it with the recording; a step's boolean
+ *   `displayFilter.input`, when the caller sets it, runs the whole recorded pipeline instead.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [

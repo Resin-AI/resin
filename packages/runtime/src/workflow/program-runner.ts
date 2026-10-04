@@ -1856,9 +1856,10 @@ export async function runRecordedCall(
     ...(request.signal ? { signal: request.signal } : {}),
   };
   // A display-filter step runs its command alone: the caller gets its whole output and exit status.
+  // A caller who switched the filter on through its input runs the recorded pipeline instead.
   let filter: string | undefined;
   let command = source;
-  if (step.displayFilter !== undefined) {
+  if (step.displayFilter !== undefined && request.displayFilter !== "whole") {
     const shell = displayFilterShell(step.callable.name, request.arguments, program);
     const split =
       shell === undefined
@@ -1881,7 +1882,7 @@ export async function runRecordedCall(
       `step '${step.id}' failed: recorded ${program.kind} program exited with code ${run.exitCode}${detail}`,
     );
   }
-  if (filter === undefined || request.applyDisplayFilter !== true) return run.value;
+  if (filter === undefined || request.displayFilter !== "replay") return run.value;
   // A replay compared with the recording passes the output through the dropped stages, in the
   // same shell, directory and environment. Their exit status is ignored as the recorded pipeline's
   // was (grep exits 1 printing nothing when nothing matches); a filter killed by a signal fails.

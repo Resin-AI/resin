@@ -393,8 +393,12 @@ export type WorkflowStep = {
    * `version`) its recording piped the output through — `| tail -30`, `| grep fail` — so the caller
    * gets the command's whole output and real exit status. A recording check replays the step by
    * passing that output through the dropped stages and comparing the result with the recording.
+   *
+   * `input` names a boolean plan input defaulting to `false` that nothing else reads: a caller who
+   * sets it to `true` runs the whole recorded pipeline, filter included. Only with it may the
+   * program's holes lie inside the filter (`tail -n {lines}`, `grep {pattern}`).
    */
-  displayFilter?: { version: number };
+  displayFilter?: { version: number; input?: string };
   /**
    * Where this step came from. Absent or `recorded`: a call the recording executed. `derivation`:
    * a small Python program a model wrote to compute values from the caller inputs (see
@@ -1263,23 +1267,48 @@ function validateWorkflowSegments(workflow: Record<string, unknown>, errors: str
 
 /**
  * Display-filter steps (see `WorkflowStep.displayFilter`): a recorded POSIX shell program step
- * whose projected program text splits before a display filter under its recorded shell, with no
- * hole of its program argument inside the dropped stages.
+ * whose projected program text splits before a display filter under its recorded shell. Without a
+ * filter `input`, no hole of its program argument lies inside the dropped stages; with one, that
+ * input is a boolean defaulting to `false` that nothing else reads or toggles.
  */
 function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, errors: string[]): void {
   const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  const inputs = Array.isArray(workflow.inputs) ? workflow.inputs.filter(isPlainObject) : [];
+  /** Each display-filter input, by name, with the step it switches. */
+  const switches = new Map<string, string>();
   for (const step of steps) {
     if (!Object.hasOwn(step, "displayFilter")) continue;
     const stepId = String(step.id);
     const displayFilter = step.displayFilter;
     if (
       !isPlainObject(displayFilter) ||
-      !hasOnlyKeys(displayFilter, ["version"]) ||
+      !hasOnlyKeys(displayFilter, ["version", "input"]) ||
       !Number.isSafeInteger(displayFilter.version) ||
-      displayFilter.version !== DISPLAY_FILTER_VERSION
+      displayFilter.version !== DISPLAY_FILTER_VERSION ||
+      (displayFilter.input !== undefined &&
+        (typeof displayFilter.input !== "string" || displayFilter.input.length === 0))
     ) {
-      errors.push(`step ${stepId} displayFilter must name a supported version`);
+      errors.push(
+        `step ${stepId} displayFilter must name a supported version and at most one filter input`,
+      );
       continue;
+    }
+    const switchName = displayFilter.input;
+    if (typeof switchName === "string") {
+      const input = inputs.find((entry) => entry.name === switchName);
+      if (input === undefined) {
+        errors.push(`step ${stepId} display filter is switched by unknown input ${switchName}`);
+      } else if (input.type !== "boolean" || input.default !== false) {
+        errors.push(
+          `step ${stepId} display filter input ${switchName} must be a boolean defaulting to false`,
+        );
+      }
+      const other = switches.get(switchName);
+      if (other !== undefined) {
+        errors.push(`input ${switchName} switches the display filters of ${other} and ${stepId}`);
+      } else {
+        switches.set(switchName, stepId);
+      }
     }
     const callable = isPlainObject(step.callable) ? step.callable : undefined;
     const program = isPlainObject(callable?.program) ? callable.program : undefined;
@@ -1322,6 +1351,8 @@ function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, error
       errors.push(`step ${stepId} displayFilter must carry its projected program text`);
       continue;
     }
+    // A filter input lets the caller keep the filter, so its holes are the caller's to bind.
+    if (switchName !== undefined) continue;
     const tokens = tokenizeProgram("shell", program!.source as string);
     const dropped = split.command.length;
     const holes = Array.isArray(template.holes) ? template.holes.filter(isPlainObject) : [];
@@ -1332,6 +1363,36 @@ function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, error
     });
     if (inFilter) {
       errors.push(`step ${stepId} binds a value inside the display filter it drops`);
+    }
+  }
+  if (switches.size === 0) return;
+  // A filter input only switches its filter: no value reads it and no step toggles on it.
+  const reported = new Set<string>();
+  const walk = (node: unknown, where: string): void => {
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, where);
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    const shape = typeof node.type === "string" ? node.type : node.kind;
+    if (shape === "literal") return;
+    if (shape === "input" && typeof node.name === "string" && switches.has(node.name)) {
+      const message = `${where} uses display filter input ${node.name}`;
+      if (!reported.has(message)) errors.push(message);
+      reported.add(message);
+    }
+    for (const entry of Object.values(node)) walk(entry, where);
+  };
+  for (const step of steps) {
+    walk(step.arguments, `step ${String(step.id)}`);
+    const toggle = isPlainObject(step.optional) ? step.optional.input : undefined;
+    if (typeof toggle === "string" && switches.has(toggle)) {
+      errors.push(`step ${String(step.id)} is toggled by display filter input ${toggle}`);
+    }
+  }
+  if (Array.isArray(workflow.candidates)) {
+    for (const candidate of workflow.candidates) {
+      if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
     }
   }
 }
