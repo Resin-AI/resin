@@ -26,16 +26,36 @@ subagents asynchronously and the headless session would otherwise end before the
 | `2026-10-04T09-31-03-015Z_01a10640-…` | Eval whose display was byte-truncated with the full stream in `0.eval.log`; a read-only Resin gateway call (`manage_tools` `list_versions`, recorded as tool discovery); bash `find` |
 | `2026-10-04T09-31-20-882Z_01a10640-…` | bash aborted by `--max-time` |
 
+## 18.6.1
+
+The 18.6.0 prompts, recorded under an isolated `HOME` (see below). The read-only Resin gateway call
+goes through the device surface (`write xd://mcp__resin_manage_tools`) and the find step ran as
+`glob`.
+
+| Session | Covers |
+| --- | --- |
+| `2026-10-04T17-44-12-357Z_01a10804-…` | bash, read, edit, write, an MCP call through the device surface (`write xd://mcp__fixture_echo_shout`), a `task` subagent and `wait`; argument-less `edit`/`task`/`wait` start markers as in 18.6.0 |
+| `…/CompactTiglon.jsonl` | the subagent: `session.parentSession` set, bash, `yield` |
+| `2026-10-04T17-43-32-460Z_01a10803-…` | Eval whose display was byte-truncated with the full stream in `0.eval.log`; a read-only Resin gateway call (`manage_tools` `list_versions`, recorded as tool discovery); `glob` |
+| `2026-10-04T17-43-51-727Z_01a10803-…` | bash aborted by `--max-time` |
+
 Not covered by these recordings: compaction (too costly to force headlessly; the frozen rometrics
 history contains 32 real compaction records and the decoder tests cover the shape).
 
 ### Regenerate
 
-`V` is the OMP release being recorded. OMP 18.6.0 waits only 250 ms for MCP servers in print mode;
+`V` is the OMP release being recorded. OMP 18.6.x waits only 250 ms for MCP servers in print mode;
 `OMP_MCP_STARTUP_TIMEOUT_MS=0` makes it wait for every configured server to connect.
 
+To keep the recording off your own OMP state, run with `HOME=$P/home`: OMP then creates a fresh
+`$P/home/.omp/agent/agent.db` on first start. Seed it with only the model provider's credential
+(an unexpired access token, refresh token blanked so the copy can never rotate it), and add a
+`resin` entry to the project `.omp/mcp.json` with `RESIN_HOME` set so `resin mcp` reaches your
+daemon for the read-only `list_versions` call. With an isolated home, `session_init.tools` lists
+only built-ins and the project's MCP tools.
+
 ```sh
-V=18.6.0 P=/tmp/resin-fixture-omp-$V
+V=18.6.1 P=/tmp/resin-fixture-omp-$V
 export OMP_MCP_STARTUP_TIMEOUT_MS=0
 mkdir -p $P/project/.omp $P/sessions && cd $P/project && git init -q
 printf '# Tiny demo\n\nA small greeting script.\n' > README.md

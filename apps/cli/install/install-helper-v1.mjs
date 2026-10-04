@@ -8041,7 +8041,7 @@ var init_discovery7 = __esm({
     init_zod();
     init_session_exit();
     ACTIVE_ONLY_TERMINAL_GRACE_MS = 5 * 6e4;
-    OMP_TESTED_VERSIONS = ["18.3.2", "18.6.0"];
+    OMP_TESTED_VERSIONS = ["18.3.2", "18.6.0", "18.6.1"];
     OmpWorkspaceEntrySchema = external_exports.union([
       external_exports.string().transform((entryPath) => {
         const metadata = {};
@@ -8251,7 +8251,7 @@ var init_install7 = __esm({
       testedVersions: OMP_TESTED_VERSIONS,
       knownLimits: [
         "Subagent sessions are learned as their own sessions; a workflow split between a parent and its subagents is not learned as one tool.",
-        "Built-in tool replay runs the OMP SDK Resin pins (18.6.0) under Bun; a built-in that SDK does not export fails with an explicit error."
+        "Built-in tool replay runs the OMP SDK Resin pins (18.6.1) under Bun; a built-in that SDK does not export fails with an explicit error."
       ],
       probeInstallation: ({ targetPath, home, env }) => probeOmpInstallation({ customConfigPath: targetPath, env, homeDir: home }),
       mcpConfig: {
