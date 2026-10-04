@@ -81,6 +81,8 @@ For a learned tool that replays recorded programs, the description in `search_to
 
 `search_tools` lists workspace tools; Resin's own meta-tools appear only with `"scope": "system"`. Each match includes the tool's `inputSchema`, so a caller can invoke it without a separate `get_tool_schema` call.
 
+A query matches whole words (`tests` finds `test`, but `test` does not find `latest`). Words that are rare among the listed tools count most, so searching with the command you are about to run (`gh pr checks --watch`, `pnpm test`) ranks the tools that run it first; words nearly every tool contains, such as the shared learned-tool text, do not make a tool match. A word in a tool's name counts more than one in its tags or description, and an exact or leading tool name ranks first. Tools that match much less of the query than the best result are left out, so `total` counts real matches.
+
 A learned tool may take optional parameters for values its recorded programs ran with, such as a file path, a flag's value, or a word several steps share (the project in `./release test alpha` and `./release build alpha`). Omit a parameter to run the recorded value; pass one to substitute it at every position it held. Parameter names come from the flag (`--month` → `month`) or the value's shape (`path`, `number`, `text`). The tool's description on this machine lists each parameter's recorded value; that value is resolved locally and never uploaded.
 
 ---
