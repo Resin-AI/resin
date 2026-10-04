@@ -114,8 +114,8 @@ importers:
   adapters/omp:
     dependencies:
       '@oh-my-pi/pi-coding-agent':
-        specifier: 18.3.2
-        version: 18.3.2(@types/node@22.20.1)
+        specifier: 18.6.0
+        version: 18.6.0(@types/node@22.20.1)
       '@resin/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -806,24 +806,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@jridgewell/gen-mapping@0.3.13':
-    resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
-
-  '@jridgewell/remapping@2.3.5':
-    resolution: {integrity: sha512-LI9u/+laYG4Ds1TDKSJW2YPrIlcVYOwi2fUC6xB43lueCjgxV4lffOCZCtYFiH6TNOX+tQKXx97T4IKHbhyHEQ==}
-
-  '@jridgewell/resolve-uri@3.1.2':
-    resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
-    engines: {node: '>=6.0.0'}
-
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
-
-  '@jridgewell/trace-mapping@0.3.31':
-    resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
-
-  '@kurkle/color@0.3.4':
-    resolution: {integrity: sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==}
 
   '@lezer/common@1.5.2':
     resolution: {integrity: sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==}
@@ -846,38 +830,38 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@oh-my-pi/omp-stats@18.3.2':
-    resolution: {integrity: sha512-GjJCrcSrWCv7VLsuYk+2VGNXlRCq42BFxiXsds3iYBwbWvKxrvyOrA9key8iG7ES6/cJPWn6dSfs+tDHDviHAQ==}
+  '@oh-my-pi/omp-stats@18.6.0':
+    resolution: {integrity: sha512-NwKOiuunv/fBZjz8W2m2DkKVhmV7Dl7drpOB0z21yF4fXiTpKP35NMKzp9xzQjpgkwgIjp99vGqSruq4HY5gYA==}
     engines: {bun: '>=1.3.14'}
     hasBin: true
 
-  '@oh-my-pi/omptype@18.3.2':
-    resolution: {integrity: sha512-x/vzutjo/cw3u/JU8uyuyE4XSbVUQIENwej3wc8iJRRYc6G0HFnvVdGrC/tfYBOSDR2hOGkVoIqKq5cPOCfVbg==}
+  '@oh-my-pi/omptype@18.6.0':
+    resolution: {integrity: sha512-WIZ/tXK7XPo3f6M5BbGlPizL8HqDc6NRAsutyHzk3eKwGIj6AZAnqFlS0ufXh06TI8etl0pywWA9XSum99UYwA==}
     engines: {bun: '>=1.3.14', node: '>=20'}
 
-  '@oh-my-pi/pi-agent-core@18.3.2':
-    resolution: {integrity: sha512-GJYtScoRq+a/EfMBO8k2jfD9kLBv3cQblKn5A8ctFDfdJB1mek2eG1kPrvJshr0kKsduOuOtP6ccGYVPFzPW+A==}
+  '@oh-my-pi/pi-agent-core@18.6.0':
+    resolution: {integrity: sha512-AvmCudgBklVMcOIRwGuc1ej7I6iYiZp/q2evDkqXKtoVjh51/Dc67q/kaIHOwgsa3xDj/t4s5M2KkFj9UFoMuw==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-ai@18.3.2':
-    resolution: {integrity: sha512-2VgxiCcNFgt5HJVYSDePYgWm72lIPPSWXD+eAj4rQwd83uZ8NwJJcgG/KkGr0Vwe0RqvfbxK2uDg7Gb8f/UruQ==}
+  '@oh-my-pi/pi-ai@18.6.0':
+    resolution: {integrity: sha512-lEYRBU0AoHd7xCty3AN9MyXvzW0A1+zRjk8Wizbq/oxkS7trPAoH8MIIbgQh2W/7FMuNQnhlmyImms5H+5EGHw==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-catalog@18.3.2':
-    resolution: {integrity: sha512-W+kaE56Wyn0yiL2pAc2LrojC2pmEBJTIqdwLfQSZty7dPMdO9sJ7nhJqu50Mjo3SdkCOILwV7bERWt3eu+xncQ==}
+  '@oh-my-pi/pi-catalog@18.6.0':
+    resolution: {integrity: sha512-BEpI4dKy9IvkbvPoPSJGAFzaMCXVt+VZDllbbLqE03jFsYmrfW1J5JCR6C42SCHM20YFzIx0CbVUsewpBGCUqw==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-coding-agent@18.3.2':
-    resolution: {integrity: sha512-cCJecQ6Ty48LNhvlDR01qNHxcdf+ZkuY9j1rWUTwN0TrgyO+7a1jFN73B3rsUPw8Kx+SDmRtVzJkHEp6k/QTaw==}
+  '@oh-my-pi/pi-coding-agent@18.6.0':
+    resolution: {integrity: sha512-aZkA4WU7sk8vjaJi51EN0Qv+arAYl1IfEgcFxmHioebdtafXF3NJWKDlTfwKFkocbSToq7KjLWwvbRG6rbroSw==}
     engines: {bun: '>=1.3.14'}
     hasBin: true
 
-  '@oh-my-pi/pi-mnemopi@18.3.2':
-    resolution: {integrity: sha512-JCMANedPbl++tpan/NR5vHGLdhy1DX1COvbTH2gTZfDFolKcF/FdYzbOOoosJuD8Xk4RknB01oKFuGd5U2NZng==}
+  '@oh-my-pi/pi-mnemopi@18.6.0':
+    resolution: {integrity: sha512-iiyp26BPeFSTc6lTncnhfLYWIifGBMhZdDX/hBC2gPVktl5gFvEaigwU54pmt4biWTQFtZgHSplofE4dr380RA==}
     engines: {bun: '>=1.3.14'}
     hasBin: true
     peerDependencies:
-      fastembed: 2.1.0
+      fastembed: 3.0.0
       onnxruntime-node: 1.21.0
     peerDependenciesMeta:
       fastembed:
@@ -885,60 +869,60 @@ packages:
       onnxruntime-node:
         optional: true
 
-  '@oh-my-pi/pi-natives-darwin-arm64@18.3.2':
-    resolution: {integrity: sha512-8F9t5+NZlHw14Z3vQySJJQTbWyxMUjGwIeDoogbRvRFMOyo+WQNqpo0scKZh0tNe6nbIz5+IIUVkUiwOXxKSKw==}
+  '@oh-my-pi/pi-natives-darwin-arm64@18.6.0':
+    resolution: {integrity: sha512-/5Aby/uwPpsBt8eNJEa/fvC1LrimUJoJCITCvHJWAb+ewuyebzwkPjYvH84vRn2Cbp/r0W/5CBCeyVpitDcjgQ==}
     engines: {bun: '>=1.3.14'}
     cpu: [arm64]
     os: [darwin]
 
-  '@oh-my-pi/pi-natives-darwin-x64@18.3.2':
-    resolution: {integrity: sha512-zcR+GopMVByfSh6jUllMh31HHS0RY2116kUS/yNFUpDEeIdm5fduVBkNolQe7mqsxk/o+SqlEFduFaFUYH1IPQ==}
+  '@oh-my-pi/pi-natives-darwin-x64@18.6.0':
+    resolution: {integrity: sha512-FK/gOrfLk4WwsVapyZpJWo78j/xSKk5yx5giCkX+4PekEiRADb9/Cv9hSvCNi3nR6mBcVziWP2vmkR1Plk8pmA==}
     engines: {bun: '>=1.3.14'}
     cpu: [x64]
     os: [darwin]
 
-  '@oh-my-pi/pi-natives-linux-arm64@18.3.2':
-    resolution: {integrity: sha512-JohwfrqhSLu13gnVyUXUlgCnsetL5wtXDdMBHrcgpynvP+9xa+bszHaVvVlifU26j3da6QIGUwTbe/jK52I+Yw==}
+  '@oh-my-pi/pi-natives-linux-arm64@18.6.0':
+    resolution: {integrity: sha512-MJsG+Lklo86+YizE3MMoOCNeT2ZX3qmt/xSkcYDW+ph4vd3SZy77VlC8d2fzHbQm4SFegIJHte/BrLyfoigSgA==}
     engines: {bun: '>=1.3.14'}
     cpu: [arm64]
     os: [linux]
 
-  '@oh-my-pi/pi-natives-linux-x64@18.3.2':
-    resolution: {integrity: sha512-bS7BeDKwhV7W3lnKv3ZuhzAjZJjc9lR6muTLC8BWDGVzd2LCiQuwyJchfxs0qOXqkZFMinNmBu2qciLwhxfWJg==}
+  '@oh-my-pi/pi-natives-linux-x64@18.6.0':
+    resolution: {integrity: sha512-QD6LlOo7vz2eavrF30ehiduwiUenbMN5L2RrjWCiiU4fzdwR3BmpEK9HMCWqRcTYJ6rQOlTUzpzrDxodgrq1eg==}
     engines: {bun: '>=1.3.14'}
     cpu: [x64]
     os: [linux]
 
-  '@oh-my-pi/pi-natives-win32-arm64@18.3.2':
-    resolution: {integrity: sha512-MBidlin1T1fmomN33ZsjIDv9fs7KbP8JdmqzO342VwU2IMpPeew3QlvQ2XNzllzT0fCOYC7baBrikBpR2FoY+w==}
+  '@oh-my-pi/pi-natives-win32-arm64@18.6.0':
+    resolution: {integrity: sha512-RGhLuv/SQijbi7ihiTLwQQg1PxAMAO0KwQwJ6hdZR2z1biQXXCkqwEI9a8VLATA/2fLLGILlh/zQdgNvHu62uw==}
     engines: {bun: '>=1.3.14'}
     cpu: [arm64]
     os: [win32]
 
-  '@oh-my-pi/pi-natives-win32-x64@18.3.2':
-    resolution: {integrity: sha512-eSTIyI7SmTu9YFa8D3QUO9FuTMR4KOGqg3fCjANkbbTkbCO8Le9bbmJAqyMJNfYvgvp8WI83davZ4BVv5Zcspg==}
+  '@oh-my-pi/pi-natives-win32-x64@18.6.0':
+    resolution: {integrity: sha512-YptfB2rN9mtpcUq6c6s30I1GcB/pYH1cA4TII2dy4ETk+PzD+j7Bo6gT4N3kwzzgkqhT0S8bb7DZMoz1G7wJBw==}
     engines: {bun: '>=1.3.14'}
     cpu: [x64]
     os: [win32]
 
-  '@oh-my-pi/pi-natives@18.3.2':
-    resolution: {integrity: sha512-CepYRiCR3G0dKP8k0/ufqsoj/wU0tkEEkvEON9q0dgHIGU98AFhWjsxZnjVtnlC3jSb8/2XgC3DD63hkkh53tA==}
+  '@oh-my-pi/pi-natives@18.6.0':
+    resolution: {integrity: sha512-zwat2THncKdeUYs0Tm/WsS2hVZwmQcharxyd02uBpbF9VjxKbv6FrBbZeN7gAPsaYFYHVCWVoNbtufg+C9/EPQ==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-tui@18.3.2':
-    resolution: {integrity: sha512-bV5dBXfmBS9OFW8Vw0rfDlJ9NuJ+tWOsPQaFrls1miSUmebkiuW7HksOBKU11fNsSTNvukMqsqdh6kFMBnnQaw==}
+  '@oh-my-pi/pi-tui@18.6.0':
+    resolution: {integrity: sha512-K+76PDG98YPsodzjgpP6SCUZaVRRXj7DY7UGeEZ1ohfFIigOXb7pBe+Izb1pJ8qlZllbybga8SvoKPwTSMs74A==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-utils@18.3.2':
-    resolution: {integrity: sha512-wY3cD7VuqulIUkIE9VLd/7ybhzrdRM5xx5wqziJUfZMWm1cEFscuGa9Z/ODAqi4anVAZyj+V7UKkVthoKl5Izg==}
+  '@oh-my-pi/pi-utils@18.6.0':
+    resolution: {integrity: sha512-MPfD1/mvsc/hZHpIM5C1I5JaHiMfXyZ05I54ng+aOaou6E9huatE7G26p54wpPALTy+RXB97XHyct/ScHxMuaQ==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/pi-wire@18.3.2':
-    resolution: {integrity: sha512-X/PvcYhJGe9KomSK+x2MMEw82M5Y4ajgj6/fhMZ27ZZxP97Q090321ps42KjgYfwDRuQOMNdxht5KN1mhkXKPQ==}
+  '@oh-my-pi/pi-wire@18.6.0':
+    resolution: {integrity: sha512-niDOWgRsSUYro2ZNoM/S6QDr0XMeChjHjmbWKj+vr9i6kgh5FufhfSngUqtsCzeF0OIjiwSDyFdJIL/wb+1ECA==}
     engines: {bun: '>=1.3.14'}
 
-  '@oh-my-pi/snapcompact@18.3.2':
-    resolution: {integrity: sha512-bGlQEFRw74/10gEs99RMyEggtxF29STdcIlxwpCAKlAi4sNs8tZh/j1YRelzmVQI3Bsd2SQzlg27O8O2zuThkg==}
+  '@oh-my-pi/snapcompact@18.6.0':
+    resolution: {integrity: sha512-uZ1ZH+aZs5yDXt+PI0kpwn20Y8L/xTbIjRfKjh0OX3VLjiQ6r/cDjV1iZhoq0BsvBNHBquzh1oxR9w9FXjc01Q==}
     engines: {bun: '>=1.3.14'}
 
   '@opentelemetry/api-logs@0.220.0':
@@ -1433,9 +1417,6 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@tailwindcss/node@4.3.3':
-    resolution: {integrity: sha512-/T8IKEsf9VTU6tLjgC7+sv2mOPtQxzE2jMw7u4Tt40Tx+QSZxpzh95/H6cMKoja9XuW7iMdLJYBB0o9G1CaAgg==}
-
   '@turbo/darwin-64@2.10.12':
     resolution: {integrity: sha512-9nKgKoF6ZOUsM+or0OtNf+TTJSfGvDNP7ZFv/ZGWVwOSCkumyctQiTeHwB4UNljHTnC41AqylgbunLDHoccNrA==}
     cpu: [x64]
@@ -1540,10 +1521,6 @@ packages:
     resolution: {integrity: sha512-NUPRluOfOiTKBKvWPtSD4PhFvWCqOi0BGStNWs57X9js7XGTprSmFoz5F0tWhR4WPjNeR9jXqdC7/UpSJTnlRg==}
     engines: {node: '>=18'}
 
-  chart.js@4.5.1:
-    resolution: {integrity: sha512-GIjfiT9dbmHRiYi6Nl2yFCq7kkwdkp1W/lp2J99rX0yo9tgJGn3lKQATztIjb5tVtevcBtIdICNWqlq5+E8/Pw==}
-    engines: {pnpm: '>=8'}
-
   chromium-bidi@16.0.1:
     resolution: {integrity: sha512-J63PGu/9PpeCwLIcKYyzWP6yaVL5pxuBc0shlYCYM8BaAkmlwiQboXO1iNbOgSDbVklEyYFfNEcHD8oOAWacUA==}
     engines: {node: '>=20.19.0 <22.0.0 || >=22.12.0'}
@@ -1574,10 +1551,6 @@ packages:
 
   emoji-regex@10.6.0:
     resolution: {integrity: sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A==}
-
-  enhanced-resolve@5.25.1:
-    resolution: {integrity: sha512-nGXts5znJzmWPu+mIE9izCOzdg63oJca2mDzGWWTth7sr4aCToKcoyFVBQwN75Ij5Pf6p510EwkTqViTRzDV+w==}
-    engines: {node: '>=10.13.0'}
 
   es-define-property@1.0.1:
     resolution: {integrity: sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==}
@@ -1646,9 +1619,6 @@ packages:
   gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
-
-  graceful-fs@4.2.11:
-    resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
 
   guid-typescript@1.0.9:
     resolution: {integrity: sha512-Y8T4vYhEfwJOTbouREvG+3XDsjr8E3kIr7uf+JZ0BYloFsttiHU0WfvANVsR7TxNUJa/WpCnw/Ino/p+DeBhBQ==}
@@ -1832,12 +1802,6 @@ packages:
     resolution: {integrity: sha512-0YvXxEhfEdpLfb/XkM2BFAeMROq0iMUX2bzzH9pOttyMcWkwq+HbE5uyuGD82LN7y2q+SNvi/6V5JEsOlD2R1A==}
     engines: {node: '>=18.0.0'}
 
-  react-chartjs-2@5.3.1:
-    resolution: {integrity: sha512-h5IPXKg9EXpjoBzUfyWJvllMjG2mQ4EiuHQFhms/AjUm0XSZHhyRy2xVmLXHKrtcdrPO4mnGqRtYoD0vp95A0A==}
-    peerDependencies:
-      chart.js: ^4.1.1
-      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
-
   react-dom@19.2.7:
     resolution: {integrity: sha512-t0BRVXvbiE/o20Hfw669rLbMCDWtYZLvmJigy2f0MxsXF+71pxhR3xOkspmsO8h3ZlNzyibAmtCa3l4lYKk6gQ==}
     peerDependencies:
@@ -1934,13 +1898,6 @@ packages:
   strip-ansi@7.2.0:
     resolution: {integrity: sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==}
     engines: {node: '>=12'}
-
-  tailwindcss@4.3.3:
-    resolution: {integrity: sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==}
-
-  tapable@2.3.3:
-    resolution: {integrity: sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==}
-    engines: {node: '>=6'}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -2365,26 +2322,7 @@ snapshots:
   '@img/sharp-win32-x64@0.35.4':
     optional: true
 
-  '@jridgewell/gen-mapping@0.3.13':
-    dependencies:
-      '@jridgewell/sourcemap-codec': 1.6.0
-      '@jridgewell/trace-mapping': 0.3.31
-
-  '@jridgewell/remapping@2.3.5':
-    dependencies:
-      '@jridgewell/gen-mapping': 0.3.13
-      '@jridgewell/trace-mapping': 0.3.31
-
-  '@jridgewell/resolve-uri@3.1.2': {}
-
   '@jridgewell/sourcemap-codec@1.6.0': {}
-
-  '@jridgewell/trace-mapping@0.3.31':
-    dependencies:
-      '@jridgewell/resolve-uri': 3.1.2
-      '@jridgewell/sourcemap-codec': 1.6.0
-
-  '@kurkle/color@0.3.4': {}
 
   '@lezer/common@1.5.2': {}
 
@@ -2411,58 +2349,54 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@oh-my-pi/omp-stats@18.3.2':
+  '@oh-my-pi/omp-stats@18.6.0':
     dependencies:
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@tailwindcss/node': 4.3.3
-      chart.js: 4.5.1
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
       lucide-react: 1.47.0(react@19.2.7)
       react: 19.2.7
-      react-chartjs-2: 5.3.1(chart.js@4.5.1)(react@19.2.7)
       react-dom: 19.2.7(react@19.2.7)
-      tailwindcss: 4.3.3
 
-  '@oh-my-pi/omptype@18.3.2': {}
+  '@oh-my-pi/omptype@18.6.0': {}
 
-  '@oh-my-pi/pi-agent-core@18.3.2':
+  '@oh-my-pi/pi-agent-core@18.6.0':
     dependencies:
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@oh-my-pi/pi-wire': 18.3.2
-      '@oh-my-pi/snapcompact': 18.3.2
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
+      '@oh-my-pi/pi-wire': 18.6.0
+      '@oh-my-pi/snapcompact': 18.6.0
       '@opentelemetry/api': 1.9.1
 
-  '@oh-my-pi/pi-ai@18.3.2':
+  '@oh-my-pi/pi-ai@18.6.0':
     dependencies:
-      '@oh-my-pi/omptype': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@oh-my-pi/pi-wire': 18.3.2
+      '@oh-my-pi/omptype': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
+      '@oh-my-pi/pi-wire': 18.6.0
 
-  '@oh-my-pi/pi-catalog@18.3.2':
+  '@oh-my-pi/pi-catalog@18.6.0':
     dependencies:
-      '@oh-my-pi/omptype': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
+      '@oh-my-pi/omptype': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
 
-  '@oh-my-pi/pi-coding-agent@18.3.2(@types/node@22.20.1)':
+  '@oh-my-pi/pi-coding-agent@18.6.0(@types/node@22.20.1)':
     dependencies:
       '@babel/parser': 7.29.9
-      '@oh-my-pi/omp-stats': 18.3.2
-      '@oh-my-pi/omptype': 18.3.2
-      '@oh-my-pi/pi-agent-core': 18.3.2
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-mnemopi': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-tui': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@oh-my-pi/pi-wire': 18.3.2
-      '@oh-my-pi/snapcompact': 18.3.2
+      '@oh-my-pi/omp-stats': 18.6.0
+      '@oh-my-pi/omptype': 18.6.0
+      '@oh-my-pi/pi-agent-core': 18.6.0
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-mnemopi': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-tui': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
+      '@oh-my-pi/pi-wire': 18.6.0
+      '@oh-my-pi/snapcompact': 18.6.0
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.220.0
       '@opentelemetry/context-async-hooks': 2.11.0(@opentelemetry/api@1.9.1)
@@ -2488,64 +2422,64 @@ snapshots:
       - utf-8-validate
       - yauzl
 
-  '@oh-my-pi/pi-mnemopi@18.3.2':
+  '@oh-my-pi/pi-mnemopi@18.6.0':
     dependencies:
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
 
-  '@oh-my-pi/pi-natives-darwin-arm64@18.3.2':
+  '@oh-my-pi/pi-natives-darwin-arm64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives-darwin-x64@18.3.2':
+  '@oh-my-pi/pi-natives-darwin-x64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives-linux-arm64@18.3.2':
+  '@oh-my-pi/pi-natives-linux-arm64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives-linux-x64@18.3.2':
+  '@oh-my-pi/pi-natives-linux-x64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives-win32-arm64@18.3.2':
+  '@oh-my-pi/pi-natives-win32-arm64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives-win32-x64@18.3.2':
+  '@oh-my-pi/pi-natives-win32-x64@18.6.0':
     optional: true
 
-  '@oh-my-pi/pi-natives@18.3.2':
+  '@oh-my-pi/pi-natives@18.6.0':
     optionalDependencies:
-      '@oh-my-pi/pi-natives-darwin-arm64': 18.3.2
-      '@oh-my-pi/pi-natives-darwin-x64': 18.3.2
-      '@oh-my-pi/pi-natives-linux-arm64': 18.3.2
-      '@oh-my-pi/pi-natives-linux-x64': 18.3.2
-      '@oh-my-pi/pi-natives-win32-arm64': 18.3.2
-      '@oh-my-pi/pi-natives-win32-x64': 18.3.2
+      '@oh-my-pi/pi-natives-darwin-arm64': 18.6.0
+      '@oh-my-pi/pi-natives-darwin-x64': 18.6.0
+      '@oh-my-pi/pi-natives-linux-arm64': 18.6.0
+      '@oh-my-pi/pi-natives-linux-x64': 18.6.0
+      '@oh-my-pi/pi-natives-win32-arm64': 18.6.0
+      '@oh-my-pi/pi-natives-win32-x64': 18.6.0
 
-  '@oh-my-pi/pi-tui@18.3.2':
+  '@oh-my-pi/pi-tui@18.6.0':
     dependencies:
-      '@oh-my-pi/omptype': 18.3.2
-      '@oh-my-pi/pi-agent-core': 18.3.2
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@oh-my-pi/pi-wire': 18.3.2
-      '@oh-my-pi/snapcompact': 18.3.2
+      '@oh-my-pi/omptype': 18.6.0
+      '@oh-my-pi/pi-agent-core': 18.6.0
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
+      '@oh-my-pi/pi-wire': 18.6.0
+      '@oh-my-pi/snapcompact': 18.6.0
 
-  '@oh-my-pi/pi-utils@18.3.2':
+  '@oh-my-pi/pi-utils@18.6.0':
     dependencies:
-      '@oh-my-pi/pi-natives': 18.3.2
+      '@oh-my-pi/pi-natives': 18.6.0
 
-  '@oh-my-pi/pi-wire@18.3.2': {}
+  '@oh-my-pi/pi-wire@18.6.0': {}
 
-  '@oh-my-pi/snapcompact@18.3.2':
+  '@oh-my-pi/snapcompact@18.6.0':
     dependencies:
-      '@oh-my-pi/pi-ai': 18.3.2
-      '@oh-my-pi/pi-catalog': 18.3.2
-      '@oh-my-pi/pi-natives': 18.3.2
-      '@oh-my-pi/pi-utils': 18.3.2
-      '@oh-my-pi/pi-wire': 18.3.2
+      '@oh-my-pi/pi-ai': 18.6.0
+      '@oh-my-pi/pi-catalog': 18.6.0
+      '@oh-my-pi/pi-natives': 18.6.0
+      '@oh-my-pi/pi-utils': 18.6.0
+      '@oh-my-pi/pi-wire': 18.6.0
 
   '@opentelemetry/api-logs@0.220.0':
     dependencies:
@@ -2905,16 +2839,6 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@tailwindcss/node@4.3.3':
-    dependencies:
-      '@jridgewell/remapping': 2.3.5
-      enhanced-resolve: 5.25.1
-      jiti: 2.7.0
-      lightningcss: 1.32.0
-      magic-string: 0.30.21
-      source-map-js: 1.2.1
-      tailwindcss: 4.3.3
-
   '@turbo/darwin-64@2.10.12':
     optional: true
 
@@ -3021,10 +2945,6 @@ snapshots:
 
   chai@6.2.2: {}
 
-  chart.js@4.5.1:
-    dependencies:
-      '@kurkle/color': 0.3.4
-
   chromium-bidi@16.0.1(devtools-protocol@0.0.1638949):
     dependencies:
       devtools-protocol: 0.0.1638949
@@ -3053,16 +2973,12 @@ snapshots:
       object-keys: 1.1.1
     optional: true
 
-  detect-libc@2.1.2: {}
+  detect-libc@2.1.2:
+    optional: true
 
   devtools-protocol@0.0.1638949: {}
 
   emoji-regex@10.6.0: {}
-
-  enhanced-resolve@5.25.1:
-    dependencies:
-      graceful-fs: 4.2.11
-      tapable: 2.3.3
 
   es-define-property@1.0.1:
     optional: true
@@ -3143,8 +3059,6 @@ snapshots:
   gopd@1.2.0:
     optional: true
 
-  graceful-fs@4.2.11: {}
-
   guid-typescript@1.0.9:
     optional: true
 
@@ -3153,7 +3067,8 @@ snapshots:
       es-define-property: 1.0.1
     optional: true
 
-  jiti@2.7.0: {}
+  jiti@2.7.0:
+    optional: true
 
   lightningcss-android-arm64@1.32.0:
     optional: true
@@ -3203,6 +3118,7 @@ snapshots:
       lightningcss-linux-x64-musl: 1.32.0
       lightningcss-win32-arm64-msvc: 1.32.0
       lightningcss-win32-x64-msvc: 1.32.0
+    optional: true
 
   long@5.3.2:
     optional: true
@@ -3333,11 +3249,6 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
-
-  react-chartjs-2@5.3.1(chart.js@4.5.1)(react@19.2.7):
-    dependencies:
-      chart.js: 4.5.1
-      react: 19.2.7
 
   react-dom@19.2.7(react@19.2.7):
     dependencies:
@@ -3474,10 +3385,6 @@ snapshots:
   strip-ansi@7.2.0:
     dependencies:
       ansi-regex: 6.3.0
-
-  tailwindcss@4.3.3: {}
-
-  tapable@2.3.3: {}
 
   tinybench@2.9.0: {}
 

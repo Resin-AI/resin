@@ -274,7 +274,7 @@ export function ompSubagentLinkMetadata(
 }
 
 /** Exact OMP versions qualified with recorded fixtures. */
-export const OMP_TESTED_VERSIONS: readonly string[] = ["18.3.2"];
+export const OMP_TESTED_VERSIONS: readonly string[] = ["18.3.2", "18.6.0"];
 
 /**
  * Resolves the OMP home directory (~/.omp or $OMP_HOME).

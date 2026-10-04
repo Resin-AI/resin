@@ -400,6 +400,25 @@ describe("capturing a call made through the device surface", () => {
     expect(discoveries).toHaveLength(0);
   });
 
+  it("records an invocation whose start marker carries no path, from the assistant record", () => {
+    // OMP can write a start marker with no arguments at all before the assistant record.
+    const { calls, results } = decodeAll([
+      {
+        type: "custom",
+        customType: "tool_execution_start",
+        data: { toolCallId: "call_7", toolName: "write", intent: "invoke" },
+      },
+      assistantWrite("call_7", "xd://mcp__alpha_run", '{"query":"rows"}'),
+      toolResult("call_7", "{}"),
+    ]);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.toolName).toBe("run");
+    expect(calls[0]!.connection).toBe("alpha");
+    expect(calls[0]!.parameters).toEqual({ query: "rows" });
+    expect(results.map((result) => result.toolName)).toEqual(["run"]);
+  });
+
   it("records an invocation whose arguments never arrive, when its result does", () => {
     // A transcript can be cut short between the start marker and the assistant record; the call
     // that ran is still recorded, over the connection its path names.

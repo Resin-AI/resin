@@ -13,7 +13,9 @@ import { GROK_HARNESS_ID } from "./paths.js";
  * `_x.ai/session/update` extensions) into intermediate session events.
  *
  * - `tool_call` opens a call; only the terminal `tool_call_update` (`status` completed/failed)
- *   becomes its result. Intermediate updates only carry display detail.
+ *   becomes its result. A `tool_call` that carries its `rawInput` is recorded at once; one that
+ *   carries none is held until an update supplies it (or, failing that, its terminal update), so
+ *   its arguments are not frozen as `{}`. Other intermediate updates only carry display detail.
  * - MCP tools are hidden behind Grok's `use_tool` meta-tool (`tool_name: "<server>__<tool>"`);
  *   the decoder reports the MCP tool itself with `connection` set to the server.
  * - `rewind_marker` is appended when `/rewind` (or ACP `_x.ai/rewind/execute`) drops prompts
@@ -71,6 +73,8 @@ interface OpenCall {
 
 interface SessionState {
   readonly calls: Map<string, OpenCall>;
+  /** Argument-less `tool_call` updates not yet recorded, awaiting the update carrying their input. */
+  readonly heldCalls: Map<string, Json>;
   /** The `spawn_subagent` call that started each child session, keyed by child session id. */
   readonly subagentCalls: Map<string, string>;
   modelId?: string;
@@ -99,6 +103,46 @@ function resolveCall(update: Json): OpenCall & { connection?: string } {
     builtinName,
     input: toMetadata(rawInput),
     ...(isMcp ? { connection: builtinName.slice(0, separator) } : {}),
+  };
+}
+
+/**
+ * A held argument-less `tool_call` completed by an update's `title`, `_meta` and `rawInput`. Grok's
+ * updates restate a call's input with its serde tag (`variant: "Bash"`) and filled defaults; the tag
+ * is not an argument the tool takes, so it is dropped to match what a `tool_call` records.
+ */
+function refinedCall(held: Json, update: Json): Json {
+  const merged: Json = { ...held };
+  for (const key of ["title", "_meta", "rawInput"] as const) {
+    if (update[key] !== undefined) merged[key] = update[key];
+  }
+  const rawInput = asRecord(merged.rawInput);
+  if (rawInput && typeof rawInput.variant === "string") {
+    const { variant: _variant, ...input } = rawInput;
+    merged.rawInput = input;
+  }
+  return merged;
+}
+
+function callEvent(
+  base: { sessionId: string; timestamp: string },
+  toolCallId: string,
+  call: OpenCall & { connection?: string },
+): IntermediateSessionEvent {
+  // Grok's own shell is namespace `grok_build`; MCP tools arrive behind `use_tool`, so only this
+  // decoder proves the call is the built-in shell, with a local-only marker for the recorder.
+  const builtinShell =
+    SHELL_TOOLS[call.builtinName] === true &&
+    call.connection === undefined &&
+    typeof call.input?.command === "string";
+  return {
+    ...base,
+    type: "tool_call",
+    callId: toolCallId,
+    toolName: call.toolName,
+    ...(call.connection ? { connection: call.connection } : {}),
+    parameters: call.input ?? {},
+    ...(builtinShell ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "grok-shell" } } : {}),
   };
 }
 
@@ -198,7 +242,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     if (!update) return null;
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { calls: new Map(), subagentCalls: new Map() };
+      state = { calls: new Map(), heldCalls: new Map(), subagentCalls: new Map() };
       this.sessions.set(sessionId, state);
     }
 
@@ -254,30 +298,13 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
       case "tool_call": {
         const toolCallId = asString(update.toolCallId);
         if (!toolCallId) return null;
-        const call = {
-          ...resolveCall(update),
-          ...(agentTimestampMs !== undefined ? { startedAtMs: agentTimestampMs } : {}),
-        };
-        state.calls.set(toolCallId, call);
-        // Grok's own shell is namespace `grok_build`; MCP tools arrive behind `use_tool`, so only this
-        // decoder proves the call is the built-in shell, with a local-only marker for the recorder.
-        const builtinShell =
-          SHELL_TOOLS[call.builtinName] === true &&
-          call.connection === undefined &&
-          typeof call.input?.command === "string";
-        return [
-          {
-            ...base,
-            type: "tool_call",
-            callId: toolCallId,
-            toolName: call.toolName,
-            ...(call.connection ? { connection: call.connection } : {}),
-            parameters: call.input ?? {},
-            ...(builtinShell
-              ? { metadata: { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "grok-shell" } }
-              : {}),
-          },
-        ];
+        const call = this.openCall(state, toolCallId, update, agentTimestampMs);
+        if (asRecord(update.rawInput) === undefined) {
+          // Its input comes with a later update; the call stays open (a spawn names it) unrecorded.
+          state.heldCalls.set(toolCallId, update);
+          return null;
+        }
+        return [callEvent(base, toolCallId, call)];
       }
       case "tool_call_update":
         return this.decodeToolUpdate(update, state, base, agentTimestampMs);
@@ -360,6 +387,17 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
     }
   }
 
+  private openCall(
+    state: SessionState,
+    toolCallId: string,
+    update: Json,
+    startedAtMs: number | undefined,
+  ): OpenCall & { connection?: string } {
+    const call = { ...resolveCall(update), ...(startedAtMs !== undefined ? { startedAtMs } : {}) };
+    state.calls.set(toolCallId, call);
+    return call;
+  }
+
   private decodeToolUpdate(
     update: Json,
     state: SessionState,
@@ -368,7 +406,23 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
   ): IntermediateSessionEvent[] | null {
     const status = update.status;
     const toolCallId = asString(update.toolCallId);
-    if ((status !== "completed" && status !== "failed") || !toolCallId) return null;
+    if (!toolCallId) return null;
+    const terminal = status === "completed" || status === "failed";
+    // A held argument-less call is recorded by the first update that carries its input, or by its
+    // terminal update with the only arguments any record carried: none.
+    const held = state.heldCalls.get(toolCallId);
+    const announced: IntermediateSessionEvent[] = [];
+    if (held && (terminal || asRecord(update.rawInput) !== undefined)) {
+      state.heldCalls.delete(toolCallId);
+      const call = this.openCall(
+        state,
+        toolCallId,
+        refinedCall(held, update),
+        state.calls.get(toolCallId)?.startedAtMs,
+      );
+      announced.push(callEvent(base, toolCallId, call));
+    }
+    if (!terminal) return announced.length > 0 ? announced : null;
     const call = state.calls.get(toolCallId);
     state.calls.delete(toolCallId);
     // A shell call that ran but exited non-zero failed; its tool result is the one record of that.
@@ -388,6 +442,7 @@ export class GrokRecordDecoder implements HarnessRecordDecoder {
         ? Math.max(0, completedAtMs - call.startedAtMs)
         : 0;
     const events: IntermediateSessionEvent[] = [
+      ...announced,
       {
         ...base,
         type: "tool_result",

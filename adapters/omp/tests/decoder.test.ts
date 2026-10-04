@@ -2571,7 +2571,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
     });
 
     // OMP writes an eval's execution start before the assistant record and without the cell's
-    // arguments (bash and read starts carry theirs). These records keep OMP's own shape.
+    // arguments. These records keep OMP's own shape.
     const ompEvalCallId = "call_eval_cell|fc_0123456789abcdef";
     const ompEvalStart = {
       type: "custom",
@@ -2660,6 +2660,56 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
       // The held call is recorded once: a repeated result does not announce it again.
       const replay = decoder.decode(makeRecord(sessionId, 2, ompEvalResult));
       expect(Array.isArray(replay)).toBe(false);
+    });
+
+    // OMP writes argument-less start markers before the assistant record for many tools, not only
+    // eval: real 18.x sessions show it for edit, MCP tools, grep, task and others.
+    it.each([
+      { toolName: "bash", args: { command: "pnpm test --filter api", timeout: 120 } },
+      {
+        toolName: "edit",
+        args: { input: "[src/app.ts#1A2B]\nPUT 3.=3:\n+export const ready = true;\n" },
+      },
+      { toolName: "mcp__fixture_echo_shout", args: { text: "resin fixture" } },
+    ])("records an OMP $toolName call with the arguments its assistant record carries after an argument-less start", ({
+      toolName,
+      args,
+    }) => {
+      const sessionId = `session-omp-${toolName}-start-first`;
+      const callId = `toolu_${toolName}_argless`;
+      const start = {
+        type: "custom",
+        customType: "tool_execution_start",
+        data: { toolCallId: callId, toolName, startedAt: "2026-10-04T09:20:21.437Z", intent: "Doing it" },
+      };
+      const assistant = {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: callId, name: toolName, arguments: args }],
+        },
+      };
+      const result = {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: callId,
+          toolName,
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+        },
+      };
+
+      expect(decoder.decode(makeRecord(sessionId, 1, start))).toBeNull();
+      const calls = (decoder.decode(makeRecord(sessionId, 2, assistant)) as IntermediateSessionEvent[])
+        .filter((entry): entry is IntermediateToolCallEvent => entry.type === "tool_call");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ toolName, callId, parameters: args });
+      expect(calls[0]?.metadata?.intent).toBe("Doing it");
+
+      const resultEvents = decoder.decode(makeRecord(sessionId, 3, result));
+      expect(Array.isArray(resultEvents)).toBe(false);
+      expect(resultEvents).toMatchObject({ type: "tool_result", toolName, result: "ok" });
     });
 
     it("deduplicates an embedded request that follows its own execution start", () => {
