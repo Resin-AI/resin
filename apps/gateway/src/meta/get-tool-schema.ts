@@ -156,10 +156,12 @@ export function createGetToolSchemaHandler(
     const learned =
       !resolvedTool.isSystem &&
       (resolvedTool.scope === "workspace" || resolvedTool.scope === "session");
-    const baseSchema = registry.learnedToolInputSchema(
+    // get_tool_schema describes a learned tool in full, so each input it may omit also carries its
+    // recorded value as `default` when that value is not private.
+    const baseSchema = registry.withLearnedToolDefaults(
       resolvedTool,
       context,
-      toolInputSchema(resolvedTool),
+      registry.learnedToolInputSchema(resolvedTool, context, toolInputSchema(resolvedTool)),
     );
     const forEach = learned && offersForEach(baseSchema);
     const inputSchema = forEach ? withForEachInput(baseSchema as McpToolInput) : baseSchema;

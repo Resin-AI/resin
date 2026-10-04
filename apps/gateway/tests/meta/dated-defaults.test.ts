@@ -17,6 +17,7 @@ import {
   missingDatedInputs,
   missingDatedInputsMessage,
   requireDatedInputs,
+  withRecordedDefaults,
 } from "../../src/meta/dated-defaults.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
@@ -231,5 +232,64 @@ describe("serving a learned tool with a dated recorded default", () => {
       }),
     );
     expect(response.inputSchema.required).toEqual([]);
+  });
+});
+
+describe("recorded values as schema defaults", () => {
+  it("reads each recorded value in its input's type, leaving mismatches and existing defaults", () => {
+    const served = withRecordedDefaults(
+      {
+        type: "object",
+        properties: {
+          profile: { type: "string" },
+          count: { type: "integer" },
+          ratio: { type: "number" },
+          dry: { type: "boolean" },
+          files: { type: "array", items: { type: "string" } },
+          bad: { type: "integer" },
+          kept: { type: "string", default: "catalog" },
+        },
+      },
+      new Map([
+        ["profile", "acme-production"],
+        ["count", "3"],
+        ["ratio", "0.5"],
+        ["dry", "true"],
+        ["files", '["a.txt","b.txt"]'],
+        ["bad", "three"],
+        ["kept", "recorded"],
+        ["undeclared", "x"],
+      ]),
+    );
+    expect(served.properties).toEqual({
+      profile: { type: "string", default: "acme-production" },
+      count: { type: "integer", default: 3 },
+      ratio: { type: "number", default: 0.5 },
+      dry: { type: "boolean", default: true },
+      files: { type: "array", items: { type: "string" }, default: ["a.txt", "b.txt"] },
+      bad: { type: "integer" },
+      kept: { type: "string", default: "catalog" },
+    });
+  });
+
+  it("get_tool_schema emits each recorded default; search_tools does not", async () => {
+    const registry = new ToolRegistry();
+    const context = makeContext("ws-dated");
+    await registry.registerTool(costManifest(), undefined, { workspaceId: "ws-dated" });
+    registry.setLocalToolDatedInputs(() => new Map([["cost_time_period", RECORDED_PERIOD]]));
+    registry.setLocalToolRecordedDefaults(() => new Map([["aws_profile", "acme-production"]]));
+    const schema = parseText<{
+      inputSchema: { properties: Record<string, { default?: unknown }> };
+    }>(
+      await createGetToolSchemaHandler(registry)(context, {
+        toolId: "verify_identity_and_get_cost_usage",
+      }),
+    );
+    expect(schema.inputSchema.properties.aws_profile?.default).toBe("acme-production");
+    expect(schema.inputSchema.properties.cost_time_period).not.toHaveProperty("default");
+    const search = parseText<SearchToolsResponse>(
+      await createSearchToolsHandler(registry)(context, { query: "cost usage" }),
+    );
+    expect(JSON.stringify(search)).not.toContain('"default"');
   });
 });

@@ -101,6 +101,8 @@ interface RecordedWorkflowSummary {
   dated: ReadonlyMap<string, string>;
   /** Every resolved private value of the plan (4+ characters), longest first, for scrubbing. */
   privateValues: readonly string[];
+  /** Each recorded-default input's one recorded value, when the plan itself carries it. */
+  defaults: ReadonlyMap<string, string>;
 }
 
 /** Where one private value sits in a recorded text resolved on this machine. */
@@ -658,6 +660,18 @@ export class LocalArtifactExecutor {
     return this.recordedWorkflowSummary(artifactDigest, context)?.dated ?? new Map();
   }
 
+  /**
+   * The recorded value of each recorded-default input that runs it when omitted, for the input
+   * schema's `default`: only a single value the plan itself carries, never a private, dated or
+   * ambiguous one. Empty for any other tool.
+   */
+  recordedWorkflowDefaults(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): ReadonlyMap<string, string> {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.defaults ?? new Map();
+  }
+
   private recordedWorkflowSummary(
     artifactDigest: string,
     context: WorkspaceContext,
@@ -1048,6 +1062,9 @@ export class LocalArtifactExecutor {
     };
     const steps: RecordedStep[] = [];
     const parameters = new Set<string>();
+    // Each recorded-default input's recorded values, a private one as PRIVATE_RECORDED_VALUE.
+    const recordedValues = new Map<string, Set<string>>();
+    const PRIVATE_RECORDED_VALUE = "\u0000private";
     // Each recorded-default input whose recorded value is a date: it is required, not defaulted.
     const dated = new Map<string, string>();
     const commands: string[] = [];
@@ -1150,6 +1167,9 @@ export class LocalArtifactExecutor {
         } else {
           parameters.add(`${name} = ${shown}`);
         }
+        const values = recordedValues.get(name) ?? new Set<string>();
+        values.add(shown === value ? value : PRIVATE_RECORDED_VALUE);
+        recordedValues.set(name, values);
       }
       const toggle =
         step.optional === undefined
@@ -1202,8 +1222,29 @@ export class LocalArtifactExecutor {
     }
     // Step text is scrubbed before any preview is cut, so no part of a private value survives a cut.
     const shownDated = new Map([...dated].map(([name, value]) => [name, scrub(value)]));
+    // A schema default only for an input with one recorded value the plan itself carries: never a
+    // private, scrubbed, dated or ambiguous one.
+    const defaults = new Map<string, string>();
+    for (const [name, values] of recordedValues) {
+      const [value] = values;
+      if (
+        values.size === 1 &&
+        value !== undefined &&
+        value !== PRIVATE_RECORDED_VALUE &&
+        !dated.has(name) &&
+        scrub(value) === value
+      ) {
+        defaults.set(name, value);
+      }
+    }
     if (steps.length === 0) {
-      return { description: undefined, commands, dated: shownDated, privateValues: scrubValues };
+      return {
+        description: undefined,
+        commands,
+        dated: shownDated,
+        defaults,
+        privateValues: scrubValues,
+      };
     }
     // An input bound in several places is dated if any of its recorded values is.
     const defaulted = [...parameters]
@@ -1225,6 +1266,7 @@ export class LocalArtifactExecutor {
       description: `Recorded on this machine:\n${renderRecordedSteps(shownSteps)}${inputs}${required}`,
       commands,
       dated: shownDated,
+      defaults,
       privateValues: scrubValues,
     };
     this.recordedWorkflowSummaries.set(key, summary);

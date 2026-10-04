@@ -220,6 +220,10 @@ describe("learned tool descriptions never show a resolved private value", () => 
     expect(description).toContain(envSanitized);
     expect(description).toContain(heredocSanitized);
     expect(description).toContain("out = args.txt");
+    // The plan carries `args.txt`, so it is also the input's schema default.
+    expect([...executor().recordedWorkflowDefaults(installed.artifactDigest, context)]).toEqual([
+      ["out", "args.txt"],
+    ]);
     expectNoSecret(description);
 
     const result = await run(installed, {});
@@ -291,6 +295,8 @@ describe("learned tool descriptions never show a resolved private value", () => 
         "Parameters (each replaces its {name} above; omitted, the recorded value runs): profile = <private:1>\n" +
         "Required parameters (each replaces its {name} above; its recorded value was a date, so pass the current one in the same form): period (recorded: <private:1>)",
     );
+    // A private recorded value is never a schema default, nor is a dated one.
+    expect([...described.recordedWorkflowDefaults(installed.artifactDigest, context)]).toEqual([]);
     expect([...described.recordedWorkflowDatedInputs(installed.artifactDigest, context)]).toEqual([
       ["period", "<private:1>"],
     ]);
