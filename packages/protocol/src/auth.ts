@@ -155,6 +155,8 @@ export const TokenRotationRequestSchema = z.object({
   refreshToken: z.string().min(1),
   deviceId: AuthEntityIdentifierSchema,
   installationId: AuthEntityIdentifierSchema,
+  /** The release the refreshing client runs, so the cloud's installation record follows upgrades. */
+  clientVersion: SchemaVersionSchema.optional(),
 });
 
 export type TokenRotationRequest = z.infer<typeof TokenRotationRequestSchema>;

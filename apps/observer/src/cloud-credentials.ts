@@ -74,6 +74,8 @@ export interface CloudCredentialStoreOptions {
   tokenFilePath?: string;
   secretManager?: SecretManager;
   fetchImpl?: typeof fetch;
+  /** The running Resin release, reported on every token refresh. Ignored when not a version. */
+  clientVersion?: string;
 }
 
 /**
@@ -195,6 +197,7 @@ export class CloudCredentialStore {
   private readonly tokenFilePath: string;
   private readonly secretManager?: SecretManager;
   private readonly fetchImpl: typeof fetch;
+  private readonly clientVersion?: string;
   private refreshPromise: Promise<CloudRequestIdentity | null> | null = null;
   private lastRefreshFailure: CloudCredentialRefreshFailure | null = null;
   private credentialLockDepth = 0;
@@ -212,6 +215,10 @@ export class CloudCredentialStore {
 
     this.secretManager = options.secretManager;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    // An unparseable version is dropped rather than failing every refresh's payload validation.
+    this.clientVersion = TokenRotationRequestSchema.shape.clientVersion.safeParse(
+      options.clientVersion,
+    ).data;
   }
 
   getTokenFilePath(): string {
@@ -717,6 +724,7 @@ export class CloudCredentialStore {
       refreshToken: intendedRefreshToken,
       deviceId: currentCredentials.deviceId,
       installationId: currentCredentials.claims.installationId,
+      ...(this.clientVersion ? { clientVersion: this.clientVersion } : {}),
     };
     TokenRotationRequestSchema.parse(refreshPayload);
 

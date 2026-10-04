@@ -17,6 +17,8 @@ import {
   PROTOCOL_VERSION,
 } from "@resin/protocol";
 import { z } from "zod";
+import { CLI_VERSION } from "../bin/version.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
@@ -387,7 +389,11 @@ export async function controlCommand(
 
   const credentialStore =
     options.credentialStore ??
-    new CloudCredentialStore({ home: options.home, fetchImpl: options.customFetch });
+    new CloudCredentialStore({
+      home: options.home,
+      fetchImpl: options.customFetch,
+      clientVersion: CLI_VERSION,
+    });
   const identityProvider = async (forceRefresh = false): Promise<CloudRequestIdentity | null> =>
     credentialStore.getRequestIdentity(forceRefresh ? { forceRefresh: true } : undefined);
   const fetchImpl = options.customFetch ?? fetch;

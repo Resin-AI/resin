@@ -8,7 +8,6 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
-import { z } from "zod";
 import { controlCommand } from "../commands/control.js";
 import { doctorCommand, repairCommand } from "../commands/doctor.js";
 import { feedbackCommand } from "../commands/feedback.js";
@@ -32,35 +31,7 @@ import {
   isReusableCredentialRecord,
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
-
-const PackageJsonSchema = z.object({
-  version: z.string().min(1),
-});
-
-function resolveVersion(): string {
-  const candidates = [
-    new URL("../../../../package.json", import.meta.url),
-    new URL("../../package.json", import.meta.url),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const parsed = PackageJsonSchema.safeParse(
-        JSON.parse(fs.readFileSync(fileURLToPath(candidate), "utf8")),
-      );
-      if (parsed.success) {
-        return parsed.data.version;
-      }
-    } catch {
-      // Continue to the next enclosing package candidate.
-    }
-  }
-  return "0.1.0";
-}
-
-const VERSION = process.env.RESIN_RELEASE_VERSION ?? resolveVersion();
-
-/** The running CLI release version (what `resin --version` prints). */
-export const CLI_VERSION = VERSION;
+import { CLI_VERSION } from "./version.js";
 
 export interface InteractiveEnvironmentOptions {
   getuid?: () => number | undefined;
@@ -270,7 +241,7 @@ function printGlobalHelp(
   outStream: { write: (chunk: string) => boolean | undefined } = process.stdout,
 ): void {
   const text = `
-Resin CLI (v${VERSION})
+Resin CLI (v${CLI_VERSION})
 
 Usage:
   resin <command> [options]
@@ -367,7 +338,7 @@ export async function main(
   options: MainOptions = {},
 ): Promise<number> {
   const reporter = setupCliErrorReporting(argv, {
-    version: VERSION,
+    version: CLI_VERSION,
     env: options.env,
     home: options.home,
     installCrashHandlers: true,
@@ -621,7 +592,7 @@ async function dispatch(argv: string[], options: MainOptions): Promise<number> {
     case "version":
     case "--version":
     case "-V":
-      stdout.write(`resin v${VERSION}\n`);
+      stdout.write(`resin v${CLI_VERSION}\n`);
       return 0;
 
     default:

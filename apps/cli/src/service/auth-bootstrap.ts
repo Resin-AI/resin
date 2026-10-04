@@ -26,6 +26,7 @@ import {
   areClaimsExpired,
 } from "@resin/protocol";
 import { z } from "zod";
+import { CLI_VERSION } from "../bin/version.js";
 
 export {
   type CloudCredentialLoadResult,
@@ -235,6 +236,7 @@ export class DeviceAuthClient {
         tokenFilePath: options.tokenFilePath,
         home: options.home,
         resinHome: options.resinHome,
+        clientVersion: CLI_VERSION,
       });
     }
   }
@@ -259,7 +261,7 @@ export class DeviceAuthClient {
         ? rawArch
         : "other";
 
-    const clientVersion = params.clientVersion ?? "1.0.0";
+    const clientVersion = params.clientVersion ?? CLI_VERSION;
     const scopes = params.scopes ?? params.requestedScopes ?? [...DEFAULT_DEVICE_AUTH_SCOPES];
 
     const requestPayload: DeviceAuthBootstrapRequest = {
