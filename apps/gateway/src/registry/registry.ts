@@ -26,7 +26,12 @@ import {
   DeterministicWorkerSandbox,
   type SafetyGateEvaluator,
 } from "@resin/runtime";
-import { type LocalToolDatedInputs, requireDatedInputs } from "../meta/dated-defaults.js";
+import {
+  type LocalToolDatedInputs,
+  type LocalToolRecordedDefaults,
+  requireDatedInputs,
+  withRecordedDefaults,
+} from "../meta/dated-defaults.js";
 import {
   type LocalToolDescriber,
   type ToolInvocationRouter,
@@ -35,6 +40,7 @@ import {
   isSystemMetaTool,
 } from "../meta/index.js";
 import type { LocalToolCommands } from "../meta/learned-commands.js";
+import { type LocalToolPrivateValues, scrubPrivateValues } from "../meta/private-values.js";
 import {
   type CallToolResult,
   type JsonRpcParamValue,
@@ -474,6 +480,8 @@ export class ToolRegistry {
   private localToolDescriber?: LocalToolDescriber;
   private localToolCommands?: LocalToolCommands;
   private localToolDatedInputs?: LocalToolDatedInputs;
+  private localToolPrivateValues?: LocalToolPrivateValues;
+  private localToolRecordedDefaults?: LocalToolRecordedDefaults;
   // Scope activations: scopeKey -> Map<toolId, version>
   // System scope
   private readonly systemActiveTools = new Map<string, string>();
@@ -742,7 +750,56 @@ export class ToolRegistry {
     schema: T,
   ): T {
     const dated = this.localToolDatedInputs?.(tool, context);
-    return dated === undefined ? schema : requireDatedInputs(schema, dated);
+    const served = dated === undefined ? schema : requireDatedInputs(schema, dated);
+    const values = this.localToolPrivateValues?.(tool, context) ?? [];
+    const properties = (served as { properties?: unknown }).properties;
+    if (values.length === 0 || properties === null || typeof properties !== "object") return served;
+    let scrubbed: Record<string, unknown> | undefined;
+    for (const [name, property] of Object.entries(properties)) {
+      const description = (property as { description?: unknown } | null)?.description;
+      if (typeof description !== "string") continue;
+      const shown = scrubPrivateValues(description, values);
+      if (shown === description) continue;
+      scrubbed ??= { ...(properties as Record<string, unknown>) };
+      scrubbed[name] = { ...(property as object), description: shown };
+    }
+    return scrubbed === undefined ? served : { ...served, properties: scrubbed };
+  }
+
+  /** Installs the local-only reader of the private values a learned tool's plan resolves. */
+  setLocalToolPrivateValues(reader: LocalToolPrivateValues): void {
+    this.localToolPrivateValues = reader;
+  }
+
+  /**
+   * Meta-tool text about a learned tool with each private value its plan resolves on this machine
+   * scrubbed: defense in depth, so no description path can show one to the model.
+   */
+  scrubLearnedToolText(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+    text: string,
+  ): string {
+    const values = this.localToolPrivateValues?.(tool, context) ?? [];
+    return values.length === 0 ? text : scrubPrivateValues(text, values);
+  }
+
+  /** Installs the local-only reader of a learned tool's non-private recorded defaults. */
+  setLocalToolRecordedDefaults(reader: LocalToolRecordedDefaults): void {
+    this.localToolRecordedDefaults = reader;
+  }
+
+  /**
+   * `schema` with each learned-tool input's recorded value as its JSON Schema `default`, only for a
+   * value the plan itself carries (see `withRecordedDefaults`); unchanged without a reader.
+   */
+  withLearnedToolDefaults<T extends object>(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+    schema: T,
+  ): T {
+    const defaults = this.localToolRecordedDefaults?.(tool, context);
+    return defaults === undefined ? schema : withRecordedDefaults(schema, defaults);
   }
 
   getSafetyGateEvaluator(): SafetyGateEvaluator | undefined {

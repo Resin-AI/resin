@@ -79,8 +79,8 @@ export interface SearchToolsParams {
 }
 
 /**
- * Local-only detail about what a tool runs, such as a learned tool's recorded program. It is
- * resolved on this machine for the local agent's discovery and never uploaded.
+ * Local-only detail about what a tool runs, such as a learned tool's recorded program. It is built
+ * on this machine and never uploaded, but it reaches the model: it shows no resolved private value.
  */
 export type LocalToolDescriber = (
   tool: Pick<RegistryTool, "artifactDigest">,
@@ -714,7 +714,7 @@ export function createSearchToolsHandler(
           version: tool.version,
           scope: tool.scope ?? "workspace",
           status: isDisabled ? "disabled" : tool.status || "active",
-          description: joinDescription(description),
+          description: registry.scrubLearnedToolText(tool, context, joinDescription(description)),
           inputSchema: registry.learnedToolInputSchema(tool, context, toolInputSchema(tool)),
           tags,
           capabilities: capSummary,
