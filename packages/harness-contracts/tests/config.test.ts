@@ -177,6 +177,29 @@ describe("Configuration Mutation, Preconditions & Atomic Rollback", () => {
     }
   });
 
+  // POSIX-only: Windows has no POSIX permission bits.
+  it.skipIf(process.platform === "win32")(
+    "applies a requested mode to new and existing files with NodeConfigFsBridge",
+    async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "harness-config-mode-"));
+      try {
+        const nodeBridge = new NodeConfigFsBridge();
+        const created = path.join(tempDir, "new", "key.pem");
+        await nodeBridge.writeFile(created, "secret", { mode: 0o600 });
+        expect((await fs.stat(created)).mode & 0o777).toBe(0o600);
+
+        const existing = path.join(tempDir, "existing.pem");
+        await fs.writeFile(existing, "old", { mode: 0o664 });
+        await fs.chmod(existing, 0o664);
+        await nodeBridge.writeFile(existing, "secret", { mode: 0o600 });
+        expect((await fs.stat(existing)).mode & 0o777).toBe(0o600);
+        expect(await fs.readFile(existing, "utf8")).toBe("secret");
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   describe("Canonical MCP Server Naming and Safe Migration", () => {
     it("defines canonical resin key, stdio command, and legacy aliases", () => {
       expect(CANONICAL_RESIN_MCP_SERVER_KEY).toBe("resin");

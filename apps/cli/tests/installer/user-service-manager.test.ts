@@ -233,6 +233,160 @@ describe("user-service-manager: Non-root user-level service supervisors", () => 
         /Cannot issue login-session supervisor commands/,
       );
     });
+
+    // POSIX-only: the alternate runtime is a symlink to the running Node.
+    describe.skipIf(process.platform === "win32")("Node runtime independence", () => {
+      let otherNode: string;
+
+      beforeEach(() => {
+        otherNode = path.join(tempDir, "other-node", "bin", "node");
+        fs.mkdirSync(path.dirname(otherNode), { recursive: true });
+        fs.symlinkSync(process.execPath, otherNode);
+      });
+
+      function execStartOf(unit: string): string {
+        return /^ExecStart=(.*)$/m.exec(unit)?.[1] ?? "";
+      }
+
+      it("does not treat a unit as stale when only a usable Node runtime differs", async () => {
+        const installer = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          nodePath: otherNode,
+          runner: mockRunner,
+        });
+        await installer.install({ autoStart: false });
+        const onDisk = fs.readFileSync(installer.getUnitPath(), "utf8");
+        const caller = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        });
+
+        expect(execStartOf(onDisk).startsWith(`${otherNode} `)).toBe(true);
+        expect(execStartOf(caller.getUnitDefinition()).startsWith(`${process.execPath} `)).toBe(
+          true,
+        );
+        expect(isStaleSupervisorUnitContent(onDisk, caller.getUnitDefinition())).toBe(false);
+        // The rest of the command still decides staleness.
+        expect(
+          isStaleSupervisorUnitContent(
+            onDisk.replace("__service-supervisor", "__other-command"),
+            caller.getUnitDefinition(),
+          ),
+        ).toBe(true);
+        // A runtime that no longer exists is stale.
+        const missingNode = path.join(tempDir, "removed-node", "bin", "node");
+        expect(
+          isStaleSupervisorUnitContent(
+            onDisk.replaceAll(otherNode, missingNode),
+            caller.getUnitDefinition(),
+          ),
+        ).toBe(true);
+      });
+
+      it("ignores the runtime in a Node-run daemon child command too", () => {
+        const daemonPath = path.join(fakeHome, "src", "daemon.js");
+        const onDisk = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          daemonPath,
+          nodePath: otherNode,
+          runner: mockRunner,
+        }).getUnitDefinition();
+        const expected = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          daemonPath,
+          runner: mockRunner,
+        }).getUnitDefinition();
+
+        expect(execStartOf(onDisk)).toContain(`-- ${otherNode} ${daemonPath}`);
+        expect(isStaleSupervisorUnitContent(onDisk, expected)).toBe(false);
+      });
+
+      it("keeps the installed unit's usable runtime when reinstalled from another shell", async () => {
+        const installer = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          nodePath: otherNode,
+          runner: mockRunner,
+        });
+        await installer.install({ autoStart: false });
+        const caller = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        });
+
+        const result = await caller.install({ autoStart: false });
+
+        expect(execStartOf(result.unitContent).startsWith(`${otherNode} `)).toBe(true);
+        expect(fs.readFileSync(caller.getUnitPath(), "utf8")).toBe(result.unitContent);
+      });
+
+      it("replaces an installed runtime that no longer exists with the caller's", async () => {
+        const missingNode = path.join(tempDir, "removed-node", "bin", "node");
+        await new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          nodePath: missingNode,
+          runner: mockRunner,
+        }).install({ autoStart: false });
+        const caller = new SystemdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        });
+
+        const result = await caller.install({ autoStart: false });
+
+        expect(execStartOf(result.unitContent).startsWith(`${process.execPath} `)).toBe(true);
+      });
+
+      it("compares launchd ProgramArguments without the runtime", () => {
+        const onDisk = new LaunchdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          nodePath: otherNode,
+          runner: mockRunner,
+        }).getUnitDefinition();
+        const expected = new LaunchdUserServiceManager({
+          homeDir: fakeHome,
+          resinHome,
+          runner: mockRunner,
+        }).getUnitDefinition();
+
+        expect(isStaleSupervisorUnitContent(onDisk, expected)).toBe(false);
+        expect(
+          isStaleSupervisorUnitContent(onDisk.replace("--resin-home", "--other-flag"), expected),
+        ).toBe(true);
+      });
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "leaves temporary directories out of the service PATH",
+      () => {
+        const temporaryEntries = [
+          "/tmp/resin-skip-test-1/bin",
+          "/tmp/resin-bootstrap-home-x/bin",
+          path.join(os.tmpdir(), "resin-fixture", "bin"),
+        ];
+        vi.stubEnv("PATH", [...temporaryEntries, "/usr/local/bin", "/usr/bin"].join(":"));
+        try {
+          const unit = new SystemdUserServiceManager({
+            homeDir: fakeHome,
+            resinHome,
+            nodePath: "/opt/node/bin/node",
+            runner: mockRunner,
+          }).getUnitDefinition();
+
+          expect(unit).toContain("Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin\n");
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
   });
 
   describe("LaunchdUserServiceManager", () => {

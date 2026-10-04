@@ -1152,7 +1152,8 @@ export async function certifyRuntimeSafety(options: {
     ...options.safetyCertification,
     denoExecutable,
   });
-  await fsBridge.writeFile(privateKeyPath, certification.privateKeyPem);
+  // Rewriting also narrows a key that earlier releases left readable under the default umask.
+  await fsBridge.writeFile(privateKeyPath, certification.privateKeyPem, { mode: 0o600 });
   await fsBridge.writeFile(publicKeyPath, certification.publicKeyPem);
   await fsBridge.writeFile(targetAttPath, JSON.stringify(certification.attestation, null, 2));
   return targetAttPath;

@@ -4565,11 +4565,21 @@ var init_config = __esm({
           throw err;
         }
       }
-      async writeFile(filePath, content) {
+      async writeFile(filePath, content, options) {
         try {
           const dir = path.dirname(filePath);
           await fs.mkdir(dir, { recursive: true });
-          await fs.writeFile(filePath, content, "utf8");
+          const mode = options?.mode;
+          if (mode === void 0) {
+            await fs.writeFile(filePath, content, "utf8");
+          } else {
+            await fs.chmod(filePath, mode).catch((err) => {
+              if (!(err instanceof Error && "code" in err && err.code === "ENOENT"))
+                throw err;
+            });
+            await fs.writeFile(filePath, content, { encoding: "utf8", mode });
+            await fs.chmod(filePath, mode);
+          }
         } catch (err) {
           if (err instanceof Error && "code" in err && err.code === "EACCES") {
             throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
@@ -10492,7 +10502,7 @@ var PRODUCTION_RELEASE_TRUST_RECORD = Object.freeze({
 });
 
 // apps/cli/src/service/manager.ts
-import { execFile as execFile3, spawn } from "node:child_process";
+import { execFile as execFile3, spawn, spawnSync } from "node:child_process";
 import fsSync2 from "node:fs";
 import os6 from "node:os";
 import path34 from "node:path";
@@ -11653,6 +11663,42 @@ function resolveSupervisorEntryPath(resinHome, explicitPath) {
   }
   return SERVICE_SUPERVISOR_ENTRY_PATH;
 }
+var MINIMUM_SERVICE_NODE_MAJOR = Number.parseInt(V1_SUPPORT_MATRIX.toolchain.node.minimum, 10);
+function isUsableServiceNodeRuntime(runtimePath) {
+  if (!path34.isAbsolute(runtimePath)) return false;
+  try {
+    fsSync2.accessSync(runtimePath, fsSync2.constants.X_OK);
+    const probe = spawnSync(runtimePath, ["--version"], {
+      encoding: "utf8",
+      timeout: 5e3,
+      windowsHide: true
+    });
+    const major = /^v(\d+)\./.exec(probe.stdout?.trim() ?? "")?.[1];
+    return probe.status === 0 && major !== void 0 && Number(major) >= MINIMUM_SERVICE_NODE_MAJOR;
+  } catch {
+    return false;
+  }
+}
+function parseSystemdRuntime(execStart) {
+  const token = /^("(?:[^"\\]|\\.)*"|\S+)/.exec(execStart.trim())?.[1];
+  if (!token) return null;
+  const unquoted = token.startsWith('"') ? token.slice(1, -1).replace(
+    /\\(.)/g,
+    (_match, escaped) => escaped === "n" ? "\n" : escaped === "r" ? "\r" : escaped === "t" ? "	" : escaped
+  ) : token;
+  return { token, path: unquoted.replaceAll("%%", "%") };
+}
+function parseLaunchdRuntime(programArguments) {
+  const match = /<string>([^<]*)<\/string>/.exec(programArguments);
+  if (!match) return null;
+  const runtimePath = match[1].replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
+  return { token: match[0], path: runtimePath };
+}
+function parseShellRuntime(command) {
+  const token = /^'(?:[^']|'"'"')*'/.exec(command.trim())?.[0];
+  if (!token) return null;
+  return { token, path: token.slice(1, -1).replaceAll(`'"'"'`, "'") };
+}
 function daemonChildCommand(daemonPath, nodePath, windows) {
   if (!windows) {
     return daemonPath.endsWith(".js") ? [nodePath, daemonPath, "--foreground"] : [daemonPath, "--foreground"];
@@ -11696,9 +11742,35 @@ function formatShellEnvironment(name, value) {
 }
 function serviceSearchPath(nodePath) {
   const inheritedPath = process4.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  return Array.from(/* @__PURE__ */ new Set([path34.dirname(nodePath), ...inheritedPath.split(path34.delimiter)])).join(
-    path34.delimiter
+  const temporaryRoots = new Set(
+    [os6.tmpdir(), ...process4.platform === "win32" ? [] : ["/tmp"]].map(
+      (root) => path34.resolve(root)
+    )
   );
+  const inheritedEntries = inheritedPath.split(path34.delimiter).filter((entry) => {
+    if (entry.length === 0) return false;
+    const resolved = path34.resolve(entry);
+    for (const root of temporaryRoots) {
+      if (resolved === root || resolved.startsWith(`${root}${path34.sep}`)) return false;
+    }
+    return true;
+  });
+  return Array.from(/* @__PURE__ */ new Set([path34.dirname(nodePath), ...inheritedEntries])).join(path34.delimiter);
+}
+async function resolveInstallNodePath(input) {
+  if (input.explicitNodePath !== void 0) return input.explicitNodePath;
+  let installed = null;
+  try {
+    installed = await input.fsBridge.readFile(input.definitionPath);
+  } catch {
+    installed = null;
+  }
+  const installedRuntime = installed ? input.parseInstalledRuntime(installed)?.path : void 0;
+  return installedRuntime !== void 0 && installedRuntime !== input.fallbackNodePath && isUsableServiceNodeRuntime(installedRuntime) ? installedRuntime : input.fallbackNodePath;
+}
+function parseInstalledSystemdRuntime(content) {
+  const execStart = /^ExecStart=(.*)$/m.exec(content)?.[1];
+  return execStart === void 0 ? null : parseSystemdRuntime(execStart);
 }
 var SystemdUserServiceManager = class {
   name = "systemd";
@@ -11708,6 +11780,7 @@ var SystemdUserServiceManager = class {
   resinHome;
   defaultDaemonPath;
   nodePath;
+  explicitNodePath;
   supervisorEntryPath;
   fsBridge;
   runner;
@@ -11717,6 +11790,7 @@ var SystemdUserServiceManager = class {
     this.resinHome = options.resinHome ?? path34.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path34.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process4.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -11779,7 +11853,14 @@ WantedBy=default.target
   }
   async install(options = {}) {
     const unitPath = this.getUnitPath();
-    const unitContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: unitPath,
+      parseInstalledRuntime: parseInstalledSystemdRuntime
+    });
+    const unitContent = this.getUnitDefinition({ ...options, nodePath });
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
@@ -11960,6 +12041,7 @@ var LaunchdUserServiceManager = class {
   resinHome;
   defaultDaemonPath;
   nodePath;
+  explicitNodePath;
   supervisorEntryPath;
   fsBridge;
   runner;
@@ -11969,6 +12051,7 @@ var LaunchdUserServiceManager = class {
     this.resinHome = options.resinHome ?? path34.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path34.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process4.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -12049,7 +12132,19 @@ ${envXml}
   }
   async install(options = {}) {
     const unitPath = this.getUnitPath();
-    const unitContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: unitPath,
+      parseInstalledRuntime: (content) => {
+        const programArguments = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(
+          content
+        )?.[1];
+        return programArguments === void 0 ? null : parseLaunchdRuntime(programArguments);
+      }
+    });
+    const unitContent = this.getUnitDefinition({ ...options, nodePath });
     const autoStart = options.autoStart ?? true;
     try {
       this.ensureLoginHomeForCommands();
@@ -12198,6 +12293,7 @@ var WslUserServiceManager = class {
   resinHome;
   defaultDaemonPath;
   nodePath;
+  explicitNodePath;
   supervisorEntryPath;
   fsBridge;
   runner;
@@ -12208,6 +12304,7 @@ var WslUserServiceManager = class {
     this.resinHome = options.resinHome ?? path34.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path34.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process4.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -12279,7 +12376,17 @@ echo $! > ${quoteShellArgument(path34.join(runDir, "daemon.pid"))}
       return this.systemdDelegate.install(options);
     }
     const scriptPath = this.getFallbackScriptPath();
-    const scriptContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: scriptPath,
+      parseInstalledRuntime: (content) => {
+        const command = /^(?:nohup|exec)\s+(.*)$/m.exec(content)?.[1];
+        return command === void 0 ? null : parseShellRuntime(command);
+      }
+    });
+    const scriptContent = this.getUnitDefinition({ ...options, nodePath });
     const unitPath = this.getUnitPath();
     try {
       await this.fsBridge.mkdirp(path34.dirname(scriptPath));
