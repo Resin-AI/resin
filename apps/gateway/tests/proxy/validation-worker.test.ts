@@ -202,6 +202,7 @@ describe("WorkflowValidationClient", () => {
       "and-chain-segments-v2",
       "joint-token-spans-v1",
       "cross-harness-shell-heldout-v1",
+      "display-filter-v1",
     ]);
     // An entry that is not a well-formed ask cannot be replayed; it is left out, not guessed at.
     expect(requests).toHaveLength(1);
@@ -287,6 +288,7 @@ describe("WorkflowValidationWorker", () => {
       "and-chain-segments-v2",
       "joint-token-spans-v1",
       "cross-harness-shell-heldout-v1",
+      "display-filter-v1",
     ]);
     expect(headerOf(post, "content-type")).toBe("application/json");
 

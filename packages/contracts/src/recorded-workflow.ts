@@ -12,6 +12,11 @@
 
 import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
 import {
+  DISPLAY_FILTER_VERSION,
+  displayFilterShell,
+  splitDisplayFilter,
+} from "./display-filter.js";
+import {
   type ProgramLanguage,
   embeddedProgramProtectedTokens,
   embeddedPrograms,
@@ -383,6 +388,13 @@ export type WorkflowStep = {
    * segment's result may be read: the recording observed the chain's output as a whole.
    */
   segment?: { index: number; count: number; version: number };
+  /**
+   * The step runs its program without the trailing display filter (see `splitDisplayFilter`, rules
+   * `version`) its recording piped the output through — `| tail -30`, `| grep fail` — so the caller
+   * gets the command's whole output and real exit status. A recording check replays the step by
+   * passing that output through the dropped stages and comparing the result with the recording.
+   */
+  displayFilter?: { version: number };
   /**
    * Where this step came from. Absent or `recorded`: a call the recording executed. `derivation`:
    * a small Python program a model wrote to compute values from the caller inputs (see
@@ -1245,6 +1257,81 @@ function validateWorkflowSegments(workflow: Record<string, unknown>, errors: str
   if (Array.isArray(workflow.candidates)) {
     for (const candidate of workflow.candidates) {
       if (isPlainObject(candidate)) walk(candidate.proposed, "candidate");
+    }
+  }
+}
+
+/**
+ * Display-filter steps (see `WorkflowStep.displayFilter`): a recorded POSIX shell program step
+ * whose projected program text splits before a display filter under its recorded shell, with no
+ * hole of its program argument inside the dropped stages.
+ */
+function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, errors: string[]): void {
+  const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  for (const step of steps) {
+    if (!Object.hasOwn(step, "displayFilter")) continue;
+    const stepId = String(step.id);
+    const displayFilter = step.displayFilter;
+    if (
+      !isPlainObject(displayFilter) ||
+      !hasOnlyKeys(displayFilter, ["version"]) ||
+      !Number.isSafeInteger(displayFilter.version) ||
+      displayFilter.version !== DISPLAY_FILTER_VERSION
+    ) {
+      errors.push(`step ${stepId} displayFilter must name a supported version`);
+      continue;
+    }
+    const callable = isPlainObject(step.callable) ? step.callable : undefined;
+    const program = isPlainObject(callable?.program) ? callable.program : undefined;
+    const args = Array.isArray(step.arguments) ? step.arguments.filter(isPlainObject) : [];
+    // The recorded shell is read from literal arguments only (a Codex shell profile).
+    const literals: Record<string, unknown> = {};
+    for (const argument of args) {
+      const source = isPlainObject(argument.source) ? argument.source : undefined;
+      if (typeof argument.name === "string" && source?.kind === "literal") {
+        literals[argument.name] = source.value;
+      }
+    }
+    const shell =
+      step.origin === "derivation" || typeof callable?.name !== "string"
+        ? undefined
+        : displayFilterShell(callable.name, literals, program as WorkflowRecordedProgram);
+    const split =
+      shell === undefined || typeof program?.source !== "string"
+        ? undefined
+        : splitDisplayFilter(shell, program.source, displayFilter.version as number);
+    if (split === undefined) {
+      errors.push(
+        `step ${stepId} displayFilter needs a recorded POSIX shell program ending in a display filter`,
+      );
+      continue;
+    }
+    const programArgument = args.find((entry) => entry.name === program!.argument);
+    const source = isPlainObject(programArgument?.source) ? programArgument.source : undefined;
+    const template =
+      isPlainObject(source) && source.kind === "template" && isPlainObject(source.template)
+        ? source.template
+        : undefined;
+    if (template?.type !== "program") continue;
+    // Holes index the tokens of the template's literal text, which must be the split program.
+    if (
+      !isPlainObject(template.source) ||
+      template.source.type !== "literal" ||
+      template.source.value !== program!.source
+    ) {
+      errors.push(`step ${stepId} displayFilter must carry its projected program text`);
+      continue;
+    }
+    const tokens = tokenizeProgram("shell", program!.source as string);
+    const dropped = split.command.length;
+    const holes = Array.isArray(template.holes) ? template.holes.filter(isPlainObject) : [];
+    const inFilter = holes.some((hole) => {
+      const last = Number.isSafeInteger(hole.through) ? hole.through : hole.token;
+      const token = Number.isSafeInteger(last) ? tokens[last as number] : undefined;
+      return token === undefined || token.end > dropped;
+    });
+    if (inFilter) {
+      errors.push(`step ${stepId} binds a value inside the display filter it drops`);
     }
   }
 }
@@ -2138,6 +2225,7 @@ export function validateRecordedWorkflow(value: unknown): {
   }
   validateWorkflowOptionalSteps(value, errors);
   validateWorkflowSegments(value, errors);
+  validateWorkflowDisplayFilters(value, errors);
   // A derivation was never executed by the recording, so no demonstration can have observed it.
   for (const label of ["baseline", "heldOut"] as const) {
     const demonstration = value[label];

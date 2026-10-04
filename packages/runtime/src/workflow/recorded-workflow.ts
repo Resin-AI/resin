@@ -48,6 +48,11 @@ export interface RecordedCallRequest {
   access?: { workspaceId?: string };
   /** Cancels owned I/O; adapter calls must settle after abort before replay cleanup. */
   signal?: AbortSignal;
+  /**
+   * Replay confirmation only: a step marked `displayFilter` pipes its command's output through the
+   * display filter it drops, so its result compares with what the recording printed.
+   */
+  applyDisplayFilter?: boolean;
 }
 
 /**
@@ -98,6 +103,12 @@ export interface RecordedWorkflowExecutionOptions {
   ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
   /** Reported when a required adapter or binding is missing, instead of pretending to succeed. */
   onUnavailable?: (step: WorkflowStep, reason: string) => void;
+  /**
+   * Set only by replays that compare results with a recording (`binding-validation.ts`): see
+   * `RecordedCallRequest.applyDisplayFilter`. An invocation never sets it, so a caller gets the
+   * command's whole output.
+   */
+  applyDisplayFilters?: boolean;
 }
 
 export type RecordedStepOutcome =
@@ -828,6 +839,7 @@ export async function executeRecordedWorkflow(
         ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
         ...(options.access ? { access: options.access } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.applyDisplayFilters === true ? { applyDisplayFilter: true } : {}),
       });
       results.set(step.id, result);
       state.set(step.id, "completed");
