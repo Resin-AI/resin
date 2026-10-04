@@ -96,3 +96,59 @@ export async function listRunningGateways(options: {
   }
   return live;
 }
+
+const RESIN_ENTRY_BASENAME = /^resin(?:\.m?js)?$/u;
+
+function realpathOrSelf(filePath: string): string {
+  try {
+    return fsSync.realpathSync(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+/**
+ * Finds live `resin mcp` processes of this Resin home that never registered (gateways started
+ * by releases older than the registry). Scans `/proc/<pid>/cmdline` for a Resin entry point
+ * inside `resinHome` followed by `mcp`; returns nothing where `/proc` is unavailable.
+ */
+export async function listUnregisteredGatewayPids(options: {
+  readonly resinHome: string;
+  readonly registeredPids: Iterable<number>;
+  readonly procRoot?: string;
+  readonly selfPid?: number;
+}): Promise<number[]> {
+  const procRoot = options.procRoot ?? "/proc";
+  let entries: string[];
+  try {
+    entries = (await fs.readdir(procRoot)).filter((name) => /^\d+$/u.test(name));
+  } catch {
+    return [];
+  }
+  const resolvedHome = path.resolve(options.resinHome);
+  const homePrefixes = [resolvedHome, realpathOrSelf(resolvedHome)].map(
+    (home) => `${home}${path.sep}`,
+  );
+  const skip = new Set(options.registeredPids);
+  skip.add(options.selfPid ?? process.pid);
+  const pids: number[] = [];
+  for (const entry of entries) {
+    const pid = Number(entry);
+    if (skip.has(pid)) continue;
+    let args: string[];
+    try {
+      args = (await fs.readFile(path.join(procRoot, entry, "cmdline"), "utf8")).split("\0");
+    } catch {
+      continue;
+    }
+    const isGateway = args.some((arg, index) => {
+      if (args[index + 1] !== "mcp" || !path.isAbsolute(arg)) return false;
+      if (!RESIN_ENTRY_BASENAME.test(path.basename(arg))) return false;
+      return [path.resolve(arg), realpathOrSelf(arg)].some((candidate) =>
+        homePrefixes.some((prefix) => candidate.startsWith(prefix)),
+      );
+    });
+    if (isGateway) pids.push(pid);
+  }
+  return pids.sort((left, right) => left - right);
+}

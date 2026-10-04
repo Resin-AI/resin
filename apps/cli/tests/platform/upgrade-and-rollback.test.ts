@@ -16,6 +16,7 @@ import {
   readUpdateStatusSnapshot,
   updateFailureStageOf,
 } from "../../src/updates/engine.js";
+import { registerRunningGateway } from "../../src/updates/gateway-registry.js";
 import { UpdateLockUnavailableError } from "../../src/updates/update-lock.js";
 import { createFakeReporter, createTestTelemetry } from "../support/update-telemetry-fakes.js";
 
@@ -2283,6 +2284,74 @@ describe("UpdateEngine old release pruning", () => {
         "1.0.0",
         "1.0.0+resin-reinstall.54d5b0120836",
         "1.1.0",
+      ]);
+    } finally {
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the versions live MCP gateways still run", async () => {
+    const { homeDir, resinHome } = await createVersionsHome([
+      "v0.5.0",
+      "v0.6.0",
+      "v0.9.0",
+      "v1.0.0",
+      "v1.1.0",
+    ]);
+    try {
+      // A harness-owned `resin mcp` (this live test process) still runs v0.6.0.
+      registerRunningGateway({ resinHome, version: "0.6.0", pid: process.pid });
+      const fixture = createEngineFixture({ homeDir, removeVersion: removeForReal });
+
+      const result = await fixture.engine.run({ mode: "background" });
+
+      expect(result).toMatchObject({ success: true, status: "activated", activeVersion: "1.1.0" });
+      expect(await listVersions(resinHome)).toEqual(["v0.6.0", "v0.9.0", "v1.0.0", "v1.1.0"]);
+    } finally {
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes downloaded artifacts of versions it does not retain", async () => {
+    const { homeDir, resinHome } = await createVersionsHome([
+      "v0.5.0",
+      "v0.6.0",
+      "v0.9.0",
+      "v1.0.0",
+      "v1.1.0",
+    ]);
+    const downloadsDir = path.join(resinHome, "downloads");
+    try {
+      registerRunningGateway({ resinHome, version: "0.6.0", pid: process.pid });
+      await fs.mkdir(downloadsDir);
+      const files = [
+        "resin-v0.4.0-linux-x64.tar.gz",
+        "resin-v0.5.0-linux-arm64.tar.gz",
+        "resin-v0.6.0-linux-x64.tar.gz",
+        "resin-v0.9.0-linux-x64.tar.gz",
+        "resin-v1.0.0-linux-x64.tar.gz",
+        "resin-v1.1.0-linux-x64.tar.gz",
+        "resin-v1.1.0-linux-x64.tar.gz.download.tmp",
+        // The fixture release installs from `deno.zip`; other Deno archives are stale.
+        "deno.zip",
+        "deno-2.9.5.zip",
+        "deno-x86_64-unknown-linux-gnu.zip",
+        "notes.txt",
+      ];
+      for (const file of files) await fs.writeFile(path.join(downloadsDir, file), "x");
+      const fixture = createEngineFixture({ homeDir, removeVersion: removeForReal });
+
+      const result = await fixture.engine.run({ mode: "background" });
+
+      expect(result).toMatchObject({ success: true, status: "activated", activeVersion: "1.1.0" });
+      expect((await fs.readdir(downloadsDir)).sort()).toEqual([
+        "deno.zip",
+        "notes.txt",
+        "resin-v0.6.0-linux-x64.tar.gz",
+        "resin-v0.9.0-linux-x64.tar.gz",
+        "resin-v1.0.0-linux-x64.tar.gz",
+        "resin-v1.1.0-linux-x64.tar.gz",
+        "resin-v1.1.0-linux-x64.tar.gz.download.tmp",
       ]);
     } finally {
       await fs.rm(homeDir, { recursive: true, force: true });

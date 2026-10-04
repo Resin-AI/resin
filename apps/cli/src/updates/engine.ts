@@ -20,6 +20,7 @@ import {
   downloadAndVerifyAsset,
   getActiveVersion,
   installReleaseVersion,
+  pruneDownloadedReleaseAssets,
   pruneInstalledVersions,
   switchActiveVersion,
 } from "../installer/asset-downloader.js";
@@ -43,6 +44,7 @@ import {
   type VerificationReport,
   runVerificationSuite,
 } from "../service/verification.js";
+import { listRunningGateways } from "./gateway-registry.js";
 import {
   type PolicyValue,
   type UpdateChannel,
@@ -1508,14 +1510,17 @@ export class UpdateEngine {
       }
       await this.cleanupReinstallSwap(reinstallSwap);
       await this.cleanupBackup(backup);
-      await this.pruneRetiredVersions([
-        targetVersion,
-        installed.version,
-        reinstallSwap?.candidateVersion,
-        rollbackTarget,
-        metadata.version,
-        release?.channel.rollbackReferences?.targetVersion,
-      ]);
+      await this.pruneRetiredVersions(
+        [
+          targetVersion,
+          installed.version,
+          reinstallSwap?.candidateVersion,
+          rollbackTarget,
+          metadata.version,
+          release?.channel.rollbackReferences?.targetVersion,
+        ],
+        release?.denoAsset.filename,
+      );
       return this.createResult({
         request,
         snapshot,
@@ -2387,14 +2392,22 @@ export class UpdateEngine {
 
   /**
    * Shared post-activation cleanup for manual upgrades and background auto-updates: removes
-   * release directories other than the active, previous and rollback-target versions (including
-   * the physical directories their trusted records point at). Never fails the update.
+   * release directories other than the active, previous and rollback-target versions and those
+   * live `resin mcp` gateways still run (including the physical directories their trusted
+   * records point at), then the downloaded artifacts of every version not retained. Never fails
+   * the update.
    */
   private async pruneRetiredVersions(
     retainVersions: readonly (string | null | undefined)[],
+    currentDenoFilename: string | undefined,
   ): Promise<void> {
     try {
-      const logical = retainVersions.filter((version): version is string => Boolean(version));
+      const gatewayVersions = (await listRunningGateways({ resinHome: this.resinHome })).map(
+        (gateway) => gateway.version,
+      );
+      const logical = [...retainVersions, ...gatewayVersions].filter((version): version is string =>
+        Boolean(version),
+      );
       const physical = await Promise.all(
         logical.map(async (version) => {
           try {
@@ -2405,10 +2418,17 @@ export class UpdateEngine {
           }
         }),
       );
+      const retained = [...logical, ...physical];
       await pruneInstalledVersions({
         resinHome: this.resinHome,
-        retainVersions: [...logical, ...physical],
+        retainVersions: retained,
         removeDirectory: this.removeVersion,
+        logger: this.logger,
+      });
+      await pruneDownloadedReleaseAssets({
+        resinHome: this.resinHome,
+        retainVersions: retained,
+        currentDenoFilename,
         logger: this.logger,
       });
     } catch (error) {
