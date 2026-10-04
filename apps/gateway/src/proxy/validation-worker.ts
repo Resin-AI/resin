@@ -818,13 +818,24 @@ export class WorkflowValidationWorker {
       ),
       ...[...references].map((reference) => `reference:${reference}`),
     ];
-    if (
-      this.askLedger !== undefined &&
-      !this.askLedger.admit({ requestId: request.requestId, planDigest, keys })
-    ) {
+    const admission = this.askLedger?.admit({ requestId: request.requestId, planDigest, keys });
+    if (admission?.admitted === false) {
+      if (admission.reason === "ledger-unavailable") {
+        this.log(
+          `workflow validation: refused ask '${request.requestId}': the local check ledger is unavailable`,
+        );
+        return undefined;
+      }
+      // Nothing changes before the window frees a check, so the ask waits for it instead of being
+      // refused again on every pass. It stays pending for the cloud, which re-issues or expires it.
+      const retryAt = new Date(admission.retryAt).toISOString();
       this.log(
-        `workflow validation: refused ask '${request.requestId}': a recorded call or private value it checks reached its daily check limit, or the local check ledger is unavailable`,
+        `workflow validation: refused ask '${request.requestId}': ${admission.key.startsWith("reference:") ? "a private value" : "a recorded call"} it checks reached its daily check limit; checking it again after ${retryAt}`,
       );
+      this.skippedAsks.set(askKey(request), {
+        until: admission.retryAt,
+        recheckAt: admission.retryAt,
+      });
       return undefined;
     }
     let result: LocalWorkflowValidationResult;

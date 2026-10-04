@@ -42,6 +42,17 @@ export interface ValidationAskAdmission {
   keys: readonly string[];
 }
 
+/**
+ * Whether an ask was admitted. A refusal says why: `limit-reached` names a key at its daily bound
+ * and when the window frees a check for every bound key (`retryAt`, epoch ms), so a caller can wait
+ * for it instead of asking again; `ledger-unavailable` means the ledger could not be read or
+ * locked, and nothing is known about the bound.
+ */
+export type ValidationAskAdmissionResult =
+  | { admitted: true }
+  | { admitted: false; reason: "limit-reached"; key: string; retryAt: number }
+  | { admitted: false; reason: "ledger-unavailable" };
+
 function sleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -64,27 +75,35 @@ export class FileValidationAskLedger {
    * plan digest) is admitted again without counting twice, so a decision whose delivery failed can
    * be re-sent.
    */
-  admit(ask: ValidationAskAdmission): boolean {
+  admit(ask: ValidationAskAdmission): ValidationAskAdmissionResult {
     ensurePrivateDirectorySync(path.dirname(this.filePath));
     const lock = this.lock();
-    if (lock === undefined) return false;
+    if (lock === undefined) return { admitted: false, reason: "ledger-unavailable" };
     try {
       const entries = this.read();
-      if (entries === undefined) return false;
+      if (entries === undefined) return { admitted: false, reason: "ledger-unavailable" };
       if (
         entries.some(
           (entry) => entry.requestId === ask.requestId && entry.planDigest === ask.planDigest,
         )
       ) {
-        return true;
+        return { admitted: true };
       }
       const now = this.now();
       const recent = entries.filter((entry) => now - Date.parse(entry.at) < DAY_MS);
       const keys = [...new Set(ask.keys)];
+      let blocked: { key: string; retryAt: number } | undefined;
       for (const key of keys) {
-        const checks = recent.filter((entry) => entry.keys.includes(key)).length;
-        if (checks >= this.maxChecksPerKeyPerDay) return false;
+        const checks = recent
+          .filter((entry) => entry.keys.includes(key))
+          .map((entry) => Date.parse(entry.at))
+          .sort((left, right) => left - right);
+        if (checks.length < this.maxChecksPerKeyPerDay) continue;
+        // The key frees a check once all but `max - 1` of its counted checks have aged out.
+        const retryAt = checks[checks.length - this.maxChecksPerKeyPerDay]! + DAY_MS;
+        if (blocked === undefined || retryAt > blocked.retryAt) blocked = { key, retryAt };
       }
+      if (blocked !== undefined) return { admitted: false, reason: "limit-reached", ...blocked };
       const entry: ValidationAskLedgerEntry = {
         at: new Date(now).toISOString(),
         requestId: ask.requestId,
@@ -99,7 +118,7 @@ export class FileValidationAskLedger {
       } finally {
         fs.closeSync(fd);
       }
-      return true;
+      return { admitted: true };
     } finally {
       fs.rmSync(lock, { force: true });
     }
