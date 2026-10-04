@@ -1,4 +1,4 @@
-import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn, spawnSync } from "node:child_process";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -15,6 +15,7 @@ import {
   startHarnessHealthScheduler,
 } from "../installer/harness-health.js";
 import { detectPlatform } from "../installer/platform.js";
+import { V1_SUPPORT_MATRIX } from "../platform/platform.js";
 import {
   CRASH_WINDOW_MS,
   INITIAL_RESTART_DELAY_MS,
@@ -570,13 +571,104 @@ export function resolveSupervisorEntryPath(resinHome: string, explicitPath?: str
   return SERVICE_SUPERVISOR_ENTRY_PATH;
 }
 
+const MINIMUM_SERVICE_NODE_MAJOR = Number.parseInt(V1_SUPPORT_MATRIX.toolchain.node.minimum, 10);
+
+/**
+ * Whether a Node executable can still run the supervisor: an absolute, executable path whose
+ * `--version` reports a supported major. Only consulted when a unit's runtime differs from the
+ * caller's, so the version probe is rare.
+ */
+export function isUsableServiceNodeRuntime(runtimePath: string): boolean {
+  if (!path.isAbsolute(runtimePath)) return false;
+  try {
+    fsSync.accessSync(runtimePath, fsSync.constants.X_OK);
+    const probe = spawnSync(runtimePath, ["--version"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    const major = /^v(\d+)\./.exec(probe.stdout?.trim() ?? "")?.[1];
+    return probe.status === 0 && major !== undefined && Number(major) >= MINIMUM_SERVICE_NODE_MAJOR;
+  } catch {
+    return false;
+  }
+}
+
+interface UnitRuntime {
+  /** The runtime argument exactly as the unit format spells it. */
+  readonly token: string;
+  readonly path: string;
+}
+
+function parseSystemdRuntime(execStart: string): UnitRuntime | null {
+  const token = /^("(?:[^"\\]|\\.)*"|\S+)/.exec(execStart.trim())?.[1];
+  if (!token) return null;
+  const unquoted = token.startsWith('"')
+    ? token
+        .slice(1, -1)
+        .replace(/\\(.)/g, (_match, escaped: string) =>
+          escaped === "n" ? "\n" : escaped === "r" ? "\r" : escaped === "t" ? "\t" : escaped,
+        )
+    : token;
+  return { token, path: unquoted.replaceAll("%%", "%") };
+}
+
+function parseLaunchdRuntime(programArguments: string): UnitRuntime | null {
+  const match = /<string>([^<]*)<\/string>/.exec(programArguments);
+  if (!match) return null;
+  const runtimePath = match[1]
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+  return { token: match[0], path: runtimePath };
+}
+
+function parseShellRuntime(command: string): UnitRuntime | null {
+  const token = /^'(?:[^']|'"'"')*'/.exec(command.trim())?.[0];
+  if (!token) return null;
+  return { token, path: token.slice(1, -1).replaceAll(`'"'"'`, "'") };
+}
+
+/**
+ * Rewrites the on-disk command to the expected runtime when the only difference is which
+ * usable Node runs it. The unit's runtime comes from whichever shell installed it, so a caller
+ * with another `node` on PATH must not see the unit as stale. The runtime is replaced as a whole
+ * whitespace-delimited argument, which also covers a Node-run daemon child command.
+ */
+function withExpectedRuntime(
+  onDiskCommand: string,
+  expectedCommand: string,
+  parse: (command: string) => UnitRuntime | null,
+  isUsableRuntime: (runtimePath: string) => boolean,
+): string {
+  const onDisk = parse(onDiskCommand);
+  const expected = parse(expectedCommand);
+  if (!onDisk || !expected || onDisk.path === expected.path || !isUsableRuntime(onDisk.path)) {
+    return onDiskCommand;
+  }
+  const escapedToken = onDisk.token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return onDiskCommand.replace(
+    new RegExp(`(^|\\s)${escapedToken}(?=\\s|$)`, "g"),
+    (_match, leading: string) => `${leading}${expected.token}`,
+  );
+}
+
+export interface SupervisorUnitComparisonOptions {
+  /** Decides whether the on-disk unit's Node runtime can still run the supervisor. */
+  readonly isUsableRuntime?: (runtimePath: string) => boolean;
+}
+
 export function isStaleSupervisorUnitContent(
   onDiskContent: string | null | undefined,
   expectedContent: string,
+  options: SupervisorUnitComparisonOptions = {},
 ): boolean {
   if (!onDiskContent || onDiskContent.trim().length === 0) {
     return true;
   }
+  const isUsableRuntime = options.isUsableRuntime ?? isUsableServiceNodeRuntime;
 
   // 1. Obsolete versioned supervisor paths are always stale
   if (
@@ -590,9 +682,15 @@ export function isStaleSupervisorUnitContent(
   const onDiskExecMatch = onDiskContent.match(/^ExecStart=(.*)$/m);
   const expectedExecMatch = expectedContent.match(/^ExecStart=(.*)$/m);
   if (onDiskExecMatch && expectedExecMatch) {
-    return onDiskExecMatch[1].trim() !== expectedExecMatch[1].trim();
+    const expectedExec = expectedExecMatch[1].trim();
+    const onDiskExec = withExpectedRuntime(
+      onDiskExecMatch[1].trim(),
+      expectedExec,
+      parseSystemdRuntime,
+      isUsableRuntime,
+    );
+    return onDiskExec !== expectedExec;
   }
-
   // 3. Launchd: compare ProgramArguments array only
   const onDiskArgsMatch = onDiskContent.match(
     /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/,
@@ -602,10 +700,17 @@ export function isStaleSupervisorUnitContent(
   );
   if (onDiskArgsMatch && expectedArgsMatch) {
     const normalizeArgs = (str: string) => str.replace(/\s+/g, " ").trim();
+    const expectedArgs = normalizeArgs(expectedArgsMatch[1]);
+    const onDiskArgs = withExpectedRuntime(
+      normalizeArgs(onDiskArgsMatch[1]),
+      expectedArgs,
+      parseLaunchdRuntime,
+      isUsableRuntime,
+    );
     // Plists written before launchd agents carried PATH cannot start `#!/usr/bin/env node`.
     const pathKey = "<key>PATH</key>";
     return (
-      normalizeArgs(onDiskArgsMatch[1]) !== normalizeArgs(expectedArgsMatch[1]) ||
+      onDiskArgs !== expectedArgs ||
       (expectedContent.includes(pathKey) && !onDiskContent.includes(pathKey))
     );
   }
@@ -622,7 +727,14 @@ export function isStaleSupervisorUnitContent(
   const onDiskNohupMatch = onDiskContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   const expectedNohupMatch = expectedContent.match(/^(?:nohup|exec)\s+(.*)$/m);
   if (onDiskNohupMatch && expectedNohupMatch) {
-    return onDiskNohupMatch[1].trim() !== expectedNohupMatch[1].trim();
+    const expectedNohup = expectedNohupMatch[1].trim();
+    const onDiskNohup = withExpectedRuntime(
+      onDiskNohupMatch[1].trim(),
+      expectedNohup,
+      parseShellRuntime,
+      isUsableRuntime,
+    );
+    return onDiskNohup !== expectedNohup;
   }
 
   // Fallback: full trim comparison if specific directives are missing
@@ -773,12 +885,59 @@ export interface UserServiceManager {
 // Systemd User Service Manager (Linux & WSL with Systemd)
 // -----------------------------------------------------------------------------
 
-/** Service PATH: the directory of the Node that runs Resin first, then the installing shell's PATH. */
+/**
+ * Service PATH: the directory of the Node that runs Resin first, then the installing shell's PATH
+ * without entries under temporary directories. Those come from test fixtures or bootstrap
+ * staging in the installing shell, vanish later, and must not shadow real tools for the service.
+ */
 function serviceSearchPath(nodePath: string): string {
   const inheritedPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  return Array.from(new Set([path.dirname(nodePath), ...inheritedPath.split(path.delimiter)])).join(
-    path.delimiter,
+  const temporaryRoots = new Set(
+    [os.tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])].map((root) =>
+      path.resolve(root),
+    ),
   );
+  const inheritedEntries = inheritedPath.split(path.delimiter).filter((entry) => {
+    if (entry.length === 0) return false;
+    const resolved = path.resolve(entry);
+    for (const root of temporaryRoots) {
+      if (resolved === root || resolved.startsWith(`${root}${path.sep}`)) return false;
+    }
+    return true;
+  });
+  return Array.from(new Set([path.dirname(nodePath), ...inheritedEntries])).join(path.delimiter);
+}
+
+/**
+ * The Node runtime a (re)install writes: an explicit choice, else the installed unit's own runtime
+ * while it stays usable, else the caller's. Without this, `resin repair` from a shell with another
+ * `node` on PATH would swap the service's runtime.
+ */
+async function resolveInstallNodePath(input: {
+  readonly explicitNodePath: string | undefined;
+  readonly fallbackNodePath: string;
+  readonly fsBridge: ConfigFsBridge;
+  readonly definitionPath: string;
+  readonly parseInstalledRuntime: (content: string) => UnitRuntime | null;
+}): Promise<string> {
+  if (input.explicitNodePath !== undefined) return input.explicitNodePath;
+  let installed: string | null = null;
+  try {
+    installed = await input.fsBridge.readFile(input.definitionPath);
+  } catch {
+    installed = null;
+  }
+  const installedRuntime = installed ? input.parseInstalledRuntime(installed)?.path : undefined;
+  return installedRuntime !== undefined &&
+    installedRuntime !== input.fallbackNodePath &&
+    isUsableServiceNodeRuntime(installedRuntime)
+    ? installedRuntime
+    : input.fallbackNodePath;
+}
+
+function parseInstalledSystemdRuntime(content: string): UnitRuntime | null {
+  const execStart = /^ExecStart=(.*)$/m.exec(content)?.[1];
+  return execStart === undefined ? null : parseSystemdRuntime(execStart);
 }
 
 export class SystemdUserServiceManager implements UserServiceManager {
@@ -790,6 +949,7 @@ export class SystemdUserServiceManager implements UserServiceManager {
   protected readonly resinHome: string;
   protected readonly defaultDaemonPath: string;
   protected readonly nodePath: string;
+  protected readonly explicitNodePath?: string;
   protected readonly supervisorEntryPath?: string;
   protected readonly fsBridge: ConfigFsBridge;
   protected readonly runner: ServiceCommandRunner;
@@ -800,6 +960,7 @@ export class SystemdUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -875,7 +1036,14 @@ WantedBy=default.target
 
   async install(options: ServiceInstallOptions = {}): Promise<ServiceInstallResult> {
     const unitPath = this.getUnitPath();
-    const unitContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: unitPath,
+      parseInstalledRuntime: parseInstalledSystemdRuntime,
+    });
+    const unitContent = this.getUnitDefinition({ ...options, nodePath });
     const autoStart = options.autoStart ?? true;
 
     try {
@@ -1091,6 +1259,7 @@ export class LaunchdUserServiceManager implements UserServiceManager {
   protected readonly resinHome: string;
   protected readonly defaultDaemonPath: string;
   protected readonly nodePath: string;
+  protected readonly explicitNodePath?: string;
   protected readonly supervisorEntryPath?: string;
   protected readonly fsBridge: ConfigFsBridge;
   protected readonly runner: ServiceCommandRunner;
@@ -1101,6 +1270,7 @@ export class LaunchdUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -1199,7 +1369,19 @@ ${envXml}
 
   async install(options: ServiceInstallOptions = {}): Promise<ServiceInstallResult> {
     const unitPath = this.getUnitPath();
-    const unitContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: unitPath,
+      parseInstalledRuntime: (content) => {
+        const programArguments = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(
+          content,
+        )?.[1];
+        return programArguments === undefined ? null : parseLaunchdRuntime(programArguments);
+      },
+    });
+    const unitContent = this.getUnitDefinition({ ...options, nodePath });
     const autoStart = options.autoStart ?? true;
 
     try {
@@ -1367,6 +1549,7 @@ export class WslUserServiceManager implements UserServiceManager {
   private readonly resinHome: string;
   private readonly defaultDaemonPath: string;
   private readonly nodePath: string;
+  private readonly explicitNodePath?: string;
   private readonly supervisorEntryPath?: string;
   private readonly fsBridge: ConfigFsBridge;
   private readonly runner: ServiceCommandRunner;
@@ -1378,6 +1561,7 @@ export class WslUserServiceManager implements UserServiceManager {
     this.resinHome = options.resinHome ?? path.join(this.homeDir, ".resin");
     this.defaultDaemonPath = options.daemonPath ?? path.join(this.resinHome, "bin", "resin-daemon");
     this.nodePath = options.nodePath ?? process.execPath;
+    this.explicitNodePath = options.nodePath;
     this.supervisorEntryPath = options.supervisorEntryPath;
     this.fsBridge = options.fsBridge ?? defaultFsBridge;
     this.runner = options.runner ?? defaultServiceCommandRunner;
@@ -1469,7 +1653,17 @@ echo $! > ${quoteShellArgument(path.join(runDir, "daemon.pid"))}
     }
 
     const scriptPath = this.getFallbackScriptPath();
-    const scriptContent = this.getUnitDefinition(options);
+    const nodePath = await resolveInstallNodePath({
+      explicitNodePath: options.nodePath ?? this.explicitNodePath,
+      fallbackNodePath: this.nodePath,
+      fsBridge: this.fsBridge,
+      definitionPath: scriptPath,
+      parseInstalledRuntime: (content) => {
+        const command = /^(?:nohup|exec)\s+(.*)$/m.exec(content)?.[1];
+        return command === undefined ? null : parseShellRuntime(command);
+      },
+    });
+    const scriptContent = this.getUnitDefinition({ ...options, nodePath });
     const unitPath = this.getUnitPath();
 
     try {

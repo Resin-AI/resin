@@ -4,9 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { SafetyAttestationRecordSchema } from "@resin/contracts";
+import { defaultFsBridge } from "@resin/harness-contracts";
 import { FrameDecoder, encodeFrame, resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import {
+  certifyRuntimeSafety,
   createDoctorUserServiceManager,
   doctorCommand,
   formatDoctorForTerminal,
@@ -820,6 +822,82 @@ describe("doctor & repair commands", () => {
     expect(mockServiceManager.restart).not.toHaveBeenCalled();
     expect(actions.some((a) => a.includes("daemon user service"))).toBe(false);
   });
+
+  // POSIX-only: the unit's runtime is a symlink to the running Node.
+  it.skipIf(process.platform === "win32")(
+    "does not flag the service as outdated when only the caller's Node runtime differs",
+    async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-node-"));
+      try {
+        const unitNode = path.join(tempDir, "node-v22", "bin", "node");
+        await fs.mkdir(path.dirname(unitNode), { recursive: true });
+        await fs.symlink(process.execPath, unitNode);
+        const unitPath = path.join(homeDir, ".config", "systemd", "user", "resin.service");
+        const command = `${resinHome}/current/apps/cli/dist/index.js __service-supervisor --resin-home ${resinHome} -- ${resinHome}/bin/resin-daemon --foreground`;
+        const fsBridge = createMockFsBridge({
+          [unitPath]: `[Service]\nExecStart=${unitNode} ${command}\n`,
+          [daemonPaths.socketPath]: "socket",
+        });
+        const mockServiceManager = createMockServiceManager(unitPath);
+        mockServiceManager.status = vi.fn().mockResolvedValue({
+          installed: true,
+          active: true,
+          enabled: true,
+          serviceName: "resin.service",
+          unitPath,
+          pid: 1234,
+          state: "active",
+        });
+        mockServiceManager.getUnitDefinition = vi
+          .fn()
+          .mockReturnValue(`[Service]\nExecStart=${process.execPath} ${command}\n`);
+
+        const diagnostics = await runDiagnostics({
+          home: homeDir,
+          fsBridge,
+          serviceManager: mockServiceManager,
+        });
+
+        expect(diagnostics.find((d) => d.id === "service_installed")?.status).toBe("pass");
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: Windows has no POSIX permission bits.
+  it.skipIf(process.platform === "win32")(
+    "keeps the safety attestation private key owner-only, including an existing readable key",
+    async () => {
+      const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-key-"));
+      const previousUmask = process.umask(0o002);
+      try {
+        const tempResinHome = path.join(tempHome, ".resin");
+        const privateKeyPath = path.join(tempResinHome, "state", "safety-attestation.key.pem");
+        const certify = () =>
+          certifyRuntimeSafety({
+            resinHome: tempResinHome,
+            env: { HOME: tempHome },
+            fsBridge: defaultFsBridge,
+            safetyCertification: {
+              probeOverrides: { denoAvailable: true, denoVersion: "2.0.0" },
+            },
+          });
+
+        await certify();
+        expect((await fs.stat(privateKeyPath)).mode & 0o777).toBe(0o600);
+
+        const existingKey = await fs.readFile(privateKeyPath, "utf8");
+        await fs.chmod(privateKeyPath, 0o664);
+        await certify();
+        expect((await fs.stat(privateKeyPath)).mode & 0o777).toBe(0o600);
+        expect(await fs.readFile(privateKeyPath, "utf8")).toBe(existingKey);
+      } finally {
+        process.umask(previousUmask);
+        await fs.rm(tempHome, { recursive: true, force: true });
+      }
+    },
+  );
   it("installs missing user background service when running in default/current login home or with injected service manager", async () => {
     const fsBridge = createMockFsBridge();
     const mockServiceManager = createMockServiceManager();

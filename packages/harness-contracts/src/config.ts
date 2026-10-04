@@ -33,7 +33,8 @@ export function verifyPreconditionHash(
  */
 export interface ConfigFsBridge {
   readFile(filePath: string): Promise<string | null>;
-  writeFile(filePath: string, content: string): Promise<void>;
+  /** `mode` sets the file's permissions, narrowing an existing file before new content lands. */
+  writeFile(filePath: string, content: string, options?: { mode?: number }): Promise<void>;
   exists(filePath: string): Promise<boolean>;
   mkdirp(dirPath: string): Promise<void>;
   copyFile(srcPath: string, destPath: string): Promise<void>;
@@ -61,11 +62,21 @@ export class NodeConfigFsBridge implements ConfigFsBridge {
     }
   }
 
-  async writeFile(filePath: string, content: string): Promise<void> {
+  async writeFile(filePath: string, content: string, options?: { mode?: number }): Promise<void> {
     try {
       const dir = path.dirname(filePath);
       await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(filePath, content, "utf8");
+      const mode = options?.mode;
+      if (mode === undefined) {
+        await fs.writeFile(filePath, content, "utf8");
+      } else {
+        // The create mode only applies to new files, so narrow an existing one before writing.
+        await fs.chmod(filePath, mode).catch((err: unknown) => {
+          if (!(err instanceof Error && "code" in err && err.code === "ENOENT")) throw err;
+        });
+        await fs.writeFile(filePath, content, { encoding: "utf8", mode });
+        await fs.chmod(filePath, mode);
+      }
     } catch (err: unknown) {
       if (err instanceof Error && "code" in err && err.code === "EACCES") {
         throw new HarnessPermissionError(`Permission denied writing ${filePath}`, {
