@@ -3,3 +3,15 @@ packages:
   - 'packages/*'
   - 'adapters/*'
   - 'fixtures/*'
+
+# Registry versions must be at least 3 days old before they can be resolved. This matches the
+# Dependabot cooldown (.github/dependabot.yml), which Dependabot passes to pnpm as
+# --config.minimum-release-age=4320 and which makes pnpm re-resolve every locked package: one
+# lockfile entry younger than the cooldown fails the whole weekly run. An urgent bump of a younger
+# release (such as adopting a newly qualified OMP) goes in minimumReleaseAgeExclude and comes out
+# once the release is 3 days old.
+minimumReleaseAge: 4320
+# @oh-my-pi/pi-coding-agent 18.6.0 (and its @oh-my-pi/* 18.6.0 siblings) was published
+# 2026-10-03T22:15Z. Remove this entry after 2026-10-06T22:15Z.
+minimumReleaseAgeExclude:
+  - '@oh-my-pi/*'

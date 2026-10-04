@@ -27,7 +27,7 @@ Resin registers any installed version of these harnesses; only the listed versio
 | **Codex CLI** | `0.156.1`, `0.157.1` | MCP stdio / JSONL rollouts |
 | **Oh My Pi (OMP)** | `18.3.2`, `18.6.0` | MCP stdio / JSONL transcripts |
 | **Pi** | `0.87.1` | Resin extension / JSONL transcripts |
-| **Cursor CLI** | none yet (needs `cursor-agent login` for fixtures) | MCP stdio / hook spool |
+| **Cursor CLI** | `2026.9.26-dd393fe` | MCP stdio / hook spool |
 | **Grok Build** | `1.0.13` | MCP stdio / JSONL transcripts |
 | **Muse Code** | `1.4.0` | MCP stdio / JSONL session logs |
 | **OpenCode** | `1.18.32`, `1.1.65` | MCP stdio / SQLite or legacy JSON store |

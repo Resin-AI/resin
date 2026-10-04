@@ -76,9 +76,9 @@ gh secret set RESIN_RELEASE_PRIVATE_KEY_PEM -R Resin-AI/resin -e production < re
 
 #### Infisical Secret Vault
 
-- **Project**: `Resin` (ID: `1f0fb031-a010-42ab-a3e9-58f0befa8ad3`)
+- **Project**: the release-signing project in the maintainers' secret vault (`<vault-project-id>`)
 - **Environment**: `prod`
-- **Path**: `/release-signing`
+- **Path**: `<release-signing-path>`
 - **Secrets**:
   - `RESIN_RELEASE_KEY_ID`: `resin-release-2026a`
   - `RESIN_RELEASE_PUBLIC_KEY_PEM`: Public key PEM content.
@@ -141,7 +141,7 @@ node -e '
 ### 3.2 Custody Transfer & Vault Ingestion
 
 1. **Infisical Ingestion**:
-   - Open Infisical -> Project `Resin` (`1f0fb031-a010-42ab-a3e9-58f0befa8ad3`) -> Environment `prod` -> Path `/release-signing`.
+   - Open the maintainers' secret vault -> project `<vault-project-id>` -> environment `prod` -> path `<release-signing-path>`.
    - Set `RESIN_RELEASE_KEY_ID` to the new key identifier (e.g., `resin-release-2026b`).
    - Store `RESIN_RELEASE_PUBLIC_KEY_PEM`, `RESIN_RELEASE_PRIVATE_KEY_PEM`, `RESIN_RELEASE_PUBLIC_KEY_HEX`, and `RESIN_RELEASE_PUBLIC_KEY_FINGERPRINT_SHA256`.
 2. **GitHub Actions Ingestion (`production` Environment)**:
@@ -255,7 +255,7 @@ If a private signing key is compromised or suspected of exposure, execute this p
    infisical login --method=universal-auth --client-id="$INFISICAL_CLIENT_ID" --client-secret="$INFISICAL_CLIENT_SECRET" --plain > "$INFISICAL_TOKEN_FILE"
 
    # Execute emergency signed notice generation using Infisical-injected uncompromised key
-   infisical run --token="$(cat "$INFISICAL_TOKEN_FILE")" --env=prod --path=/release-signing --projectId=1f0fb031-a010-42ab-a3e9-58f0befa8ad3 -- node --input-type=module -e '
+   infisical run --token="$(cat "$INFISICAL_TOKEN_FILE")" --env=prod --path="<release-signing-path>" --projectId="<vault-project-id>" -- node --input-type=module -e '
      import fs from "node:fs";
      import path from "node:path";
      import {
@@ -327,14 +327,14 @@ If a private signing key is compromised or suspected of exposure, execute this p
    aws s3 cp dist/channels-frozen.json s3://dist.resin.sh/releases/v1/channels.json --cache-control "no-cache, no-store, must-revalidate"
 
    # Attach signed incident freeze plan and key revocation notice to GitHub Release
-   gh release upload v1.0.0 dist/incident-freeze-plan.json dist/key-revocation-notice.json -R Resin-AI/resin --clobber
+   gh release upload <affected-tag> dist/incident-freeze-plan.json dist/key-revocation-notice.json -R Resin-AI/resin --clobber
    ```
 
 ### 5.3 Step 3: Release Deprecation (T+30m - T+1h)
 1. **GitHub Releases**:
    - Update release notes and tag advisory:
      ```bash
-     gh release edit v1.0.0 -R Resin-AI/resin --title "[REVOKED - DO NOT USE] Release v1.0.0" --notes "CRITICAL SECURITY ADVISORY: The release signing key for this version has been revoked. Do not download or execute these artifacts."
+     gh release edit <affected-tag> -R Resin-AI/resin --title "[REVOKED - DO NOT USE] Release <affected-tag>" --notes "CRITICAL SECURITY ADVISORY: The release signing key for this version has been revoked. Do not download or execute these artifacts."
      ```
 
 ### 5.4 Step 4: Codebase Revocation & Emergency Key Ingestion (T+1h - T+2h)
@@ -390,9 +390,9 @@ pnpm exec vitest run scripts/verify-release.test.mjs -t "creates, cryptographica
 pnpm exec vitest run apps/cli/tests/installer/signed-channel-verifier.test.ts -t "Channel metadata verification"
 ```
 
-### 6.2 Packaging & Verification Drill (`pnpm release:package:test` & `pnpm release:verify:test`)
+### 6.2 Packaging & Verification Drill (test-only `pnpm release:package` & `pnpm release:verify`)
 
-Execute local test-mode packaging and verification using the workspace npm scripts:
+Execute local test-mode packaging and verification, the same commands the release candidate runs:
 
 ```bash
 # Step 1: Clean build environment and ensure clean working tree
@@ -403,22 +403,22 @@ rm -rf dist/
 pnpm build
 
 # Step 3: Package release in test-only mode (uses ephemeral test signing key)
-pnpm release:package:test
+RESIN_RELEASE_TEST_ONLY=1 pnpm release:package
 
 # Step 4: Run full cryptographic verification against the packaged test release
-pnpm release:verify:test
+RESIN_RELEASE_TEST_ONLY=1 pnpm release:verify
 ```
 
 ### 6.3 Expected Drill Outputs & Real Failure Rule Names
 
-- **Evidence Path**: `dist/release/v1.0.0/release-evidence.json` generated and populated with SHA-256 digests.
-- **Expected Success Verification Output (`pnpm release:verify:test`)**:
-  Verification must complete with exit code 0, displaying the success banner and reported counts for all verified artifacts and documentation files:
+- **Evidence Path**: `dist/release/v1.0.3/release-evidence.json` (the test-only default version) generated and populated with SHA-256 digests.
+- **Expected Success Verification Output (`pnpm release:verify`)**:
+  Verification must complete with exit code 0 and print the success banner with the verified counts:
   ```text
-  🔍 Verifying Resin V1.0.0 Release Artifacts & Documentation...
-  📂 Release Directory: /.../dist/release/v1.0.0
-
-  ✅ Release verification PASSED! All <platform-count> platform tarballs, signed manifest, SBOM, channel metadata, and <doc-count> documentation files verified.
+  ✅ Release verification passed successfully.
+     Packages verified: <package-count>
+     Platforms verified: <platform-count>
+     SBOM components: <component-count>
   ```
 - **Real Failure Rule Names & Remediation Reference**:
   When verification fails, `verifyRelease` emits structured violations (`[RULE_NAME] file: message`). The real failure rule names defined in `scripts/verify-release.mjs` include:
@@ -431,9 +431,9 @@ pnpm release:verify:test
   | `TEST_EVIDENCE_NOT_ALLOWED`                   | Test-only evidence or test signing keys detected during production verification (`--production`) | Re-run evidence qualification and packaging in full production mode               |
   | `MANIFEST_EXPIRED`                            | Manifest `expiresAt` timestamp is in the past                                                    | Re-package and re-sign release with fresh timestamp                               |
   | `MANIFEST_COMMIT_MISMATCH`                    | Manifest `releaseIdentity.commitSha` does not match expected commit SHA                          | Build and sign release from exact commit SHA                                      |
-  | `MISSING_ARTIFACT`                            | Expected platform tarball or metadata file is absent from `dist/release/v1.0.0/`                 | Ensure build and packaging steps completed without error                          |
+  | `MISSING_ARTIFACT`                            | Expected platform tarball or metadata file is absent from the release directory                  | Ensure build and packaging steps completed without error                          |
   | `DIGEST_MISMATCH`                             | Calculated SHA-256 digest of artifact does not match manifest                                    | Verify build reproducibility and artifact integrity                               |
-  | `MISSING_EVIDENCE_JSON`                       | `release-evidence.json` missing from `dist/release/v1.0.0/`                                      | Execute release packaging (`pnpm release:package:test` or `pnpm release:package`) |
+  | `MISSING_EVIDENCE_JSON`                       | `release-evidence.json` missing from the release directory                                       | Execute release packaging (`pnpm release:package`)                                |
   | `EVIDENCE_DIGEST_MISMATCH`                    | `release-evidence.json` digest does not match manifest evidence binding                          | Re-run release packaging before verification                                      |
   | `BROKEN_DOC_LINK` / `MISSING_DOC_LINK_TARGET` | Relative Markdown documentation links contain broken anchors or missing targets                  | Fix broken Markdown links before release verification                             |
 
@@ -480,8 +480,6 @@ pnpm release:test
 
 ## Related Documentation
 
-- [Release Evidence Trace](release-evidence.md)
-- [Client & Cloud Rollback Procedures](rollback-procedure.md)
-- [Release Notes](v1.0.3-release-notes.md)
-- [Cross-Component Compatibility Matrix](compatibility-matrix.md)
+- [Client Rollback Procedures](rollback-procedure.md)
+- [Compatibility Matrix](compatibility-matrix.md)
 - [Security & Privacy Guide](../user/security-and-privacy.md)

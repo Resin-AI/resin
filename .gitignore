@@ -23,7 +23,6 @@ tmp/
 .env.*
 !.env.example
 *.pem
-!apps/cloud/certs/aws-rds-global-bundle.pem
 *.key
 
 # Database & Local Storage

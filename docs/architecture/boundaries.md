@@ -35,7 +35,7 @@ Resin defines five distinct, non-overlapping trust zones:
                                              | [Trust Boundary D: Cloud Network Boundary]
                                              v
 +-----------------------------------------------------------------------------------------+
-| Zone 5: Cloud Evolution Plane (PostgreSQL, S3, Evolution Engine, Task Queue)            |
+| Zone 5: Hosted Cloud Evolution Plane (operated privately; not part of this repository)  |
 | - Multi-tenant cloud environment; receives sanitized/redacted observations only         |
 +-----------------------------------------------------------------------------------------+
 ```

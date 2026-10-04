@@ -28,9 +28,9 @@ Selecting the appropriate language runtimes, embedded databases, cloud datastore
    - *Pros*: High write throughput.
    - *Cons*: Key-value only, lacks relational querying for complex tool lifecycle queries, complex C++ native bindings prone to build failures.
 
-3. **Option 3: SQLite (WAL mode) Locally + Node.js/TypeScript Control Plane + Postgres/S3/Queue in Cloud + Pinned Deno Sandbox (Selected)**
-   - *Pros*: Proven reliability of SQLite; WAL mode provides concurrent read/write performance; pure TypeScript codebase; PostgreSQL provides robust relational guarantees; S3 provides infinite immutable blob storage; Deno provides sandboxed tool execution.
-   - *Cons*: Must manage schema migrations across both SQLite and PostgreSQL.
+3. **Option 3: SQLite (WAL mode) Locally + Node.js/TypeScript Control Plane + Hosted Cloud Services + Pinned Deno Sandbox (Selected)**
+   - *Pros*: Proven reliability of SQLite; WAL mode provides concurrent read/write performance; pure TypeScript codebase; Deno provides sandboxed tool execution.
+   - *Cons*: The local schema must evolve without breaking clients that sync with the hosted service.
 
 ## Decision
 
@@ -65,10 +65,11 @@ We decide on the following storage and runtime technology stack for V1:
 
 ### 3. Cloud Persistence & Infrastructure
 
-- **Relational Store (PostgreSQL >= 16)**: Multi-tenant metadata, user/team accounts, global tool catalogs, authorization policies, and aggregation metrics.
-- **Object / Blob Storage (S3-Compatible)**: Immutable storage for tool bundle tarballs, compiled AST snapshots, candidate test fixtures, and benchmark datasets.
-- **Asynchronous Task Queue (Redis / BullMQ / SQS)**: Decoupled background processing for tool synthesis jobs, LLM inference pipelines, multi-version benchmark matrices, and telemetry aggregation.
+The hosted Resin cloud stores accounts, catalogs and signed tool bundles. Its storage and queueing technology is operated privately, is not part of this repository, and may change without a client release; the client depends only on the signed API contracts in `@resin/contracts` and `@resin/protocol`.
+
 - **Execution Boundary**: Cloud hosts tool packages, catalogs, and synthesis pipelines, but **never executes tools against developer repositories or customer code**.
+
+_Amended 2026-10-04: this section originally named specific cloud datastores; those are the hosted service's private concern and were removed from the public record._
 
 ```
 +---------------------------------------------------------------+
@@ -97,16 +98,6 @@ We decide on the following storage and runtime technology stack for V1:
 |  | - project.json (UUID) - resin.lock (Exact Digests)       | |
 |  +----------------------------------------------------------+ |
 +---------------------------------------------------------------+
-
-+---------------------------------------------------------------+
-| Cloud Infrastructure Storage Architecture                     |
-|                                                               |
-|  +---------------------+  +-----------------+  +------------+ |
-|  | PostgreSQL (>=16)   |  | S3-Compatible   |  | Queue /    | |
-|  | Relational Metadata |  | Immutable Tools |  | Task Bus   | |
-|  | Multi-Tenant Tables |  | Tarball Bundles |  | BullMQ/SQS | |
-|  +---------------------+  +-----------------+  +------------+ |
-+---------------------------------------------------------------+
 ```
 
 ## Consequences
@@ -115,15 +106,15 @@ We decide on the following storage and runtime technology stack for V1:
 - Zero external daemon dependencies on the developer's local machine; installation is self-contained.
 - Embedded SQLite with WAL mode delivers microsecond query latencies for local tool resolution.
 - Standardized TypeScript across the entire monorepo maximizes code reuse between `@resin/contracts`, `@resin/protocol`, local daemon, and cloud services.
-- S3 + PostgreSQL in the cloud provides industry-standard scalability, backup, and disaster recovery.
+- The client depends only on signed API contracts, so the hosted service can change its storage without a client release.
 - Strict separation between committed project metadata (`.resin/`), OS-standard identity storage, and cloud catalogs ensures zero credential leakage and prevents cross-account repository hijacking.
 
 ### Negative / Trade-offs
-- Maintaining two database dialects (SQLite locally and PostgreSQL in cloud) requires careful ORM/migration abstraction.
+- Clients that sync with the hosted service must tolerate additive contract changes.
 
 ### Mitigations
 - Use shared schema definition patterns and strict contract validation packages (`@resin/contracts`) to prevent schema divergence.
-- Automated CI integration tests run against both in-memory SQLite and PostgreSQL test instances.
+- Contract tests in `@resin/contracts` and `@resin/protocol` pin the wire shapes the client accepts.
 
 ## Compliance and Verification
 

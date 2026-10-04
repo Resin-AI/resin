@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Must equal pnpm-workspace.yaml minimumReleaseAge (4320 minutes): Dependabot passes this
+    # cooldown to pnpm, which then rejects any locked registry version younger than it.
+    cooldown:
+      default-days: 3
     groups:
       workspace-minor-and-patch:
         update-types:
