@@ -43,6 +43,7 @@ import { WORKFLOW_CAPABILITIES, WORKFLOW_CAPABILITIES_HEADER } from "./workflow-
 import {
   type LocalWorkflowValidationResult,
   createRecordingCheckValidator,
+  planRecordedHere,
 } from "./workflow-validation.js";
 
 /** Where an ask is listed from, and where its answer is delivered. */
@@ -389,6 +390,8 @@ const SKIPPED_ASK_RETENTION_MS = 60 * 60 * 1000;
  * this is the workspace's only device), so a skip is a short backoff, never a verdict.
  */
 const SKIPPED_ASK_RECHECK_MS = 2 * 60 * 1000;
+/** How long an ask refused because the check ledger was unavailable waits before trying again. */
+const LEDGER_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000;
 
 function boundedTimeout(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) {
@@ -818,12 +821,45 @@ export class WorkflowValidationWorker {
       ),
       ...[...references].map((reference) => `reference:${reference}`),
     ];
-    const admission = this.askLedger?.admit({ requestId: request.requestId, planDigest, keys });
+    // An ask another device recorded is that device's to answer: finding that out reads only
+    // whether this device holds the calls, so it is settled before the ask spends a check.
+    const localCalls =
+      this.localCalls ??
+      (this.createValidator === undefined
+        ? createLocalCallIdentity({
+            workspaceId: this.workspaceId,
+            privateValues: this.privateValues ?? FilePrivateValueStore.default(),
+          })
+        : undefined);
+    if (localCalls !== undefined) {
+      // A lookup that fails another way is left to the recording check, which reports it.
+      let recordedHere = true;
+      try {
+        recordedHere = await planRecordedHere(request.plan, localCalls);
+      } catch (error) {
+        if (error instanceof LocalSessionDiscoveryUnavailableError) {
+          this.log(
+            `workflow validation: ask '${request.requestId}' deferred because local session discovery is unavailable`,
+          );
+          return undefined;
+        }
+      }
+      if (!recordedHere) return this.skipNotRecordedHere(request);
+    }
+    const admission = await this.askLedger?.admit({
+      requestId: request.requestId,
+      planDigest,
+      keys,
+    });
     if (admission?.admitted === false) {
       if (admission.reason === "ledger-unavailable") {
+        // Nothing says when the ledger frees up, so the ask backs off rather than being refused
+        // and logged again on every pass.
+        const retryAt = now + LEDGER_UNAVAILABLE_RETRY_MS;
         this.log(
-          `workflow validation: refused ask '${request.requestId}': the local check ledger is unavailable`,
+          `workflow validation: refused ask '${request.requestId}': the local check ledger is unavailable; checking it again after ${new Date(retryAt).toISOString()}`,
         );
+        this.skippedAsks.set(askKey(request), { until: retryAt, recheckAt: retryAt });
         return undefined;
       }
       // Nothing changes before the window frees a check, so the ask waits for it instead of being
@@ -840,7 +876,7 @@ export class WorkflowValidationWorker {
     }
     let result: LocalWorkflowValidationResult;
     try {
-      result = await this.buildValidator(request)(request.plan);
+      result = await this.buildValidator(request, localCalls)(request.plan);
     } catch (error) {
       if (error instanceof LocalSessionDiscoveryUnavailableError) {
         this.log(
@@ -857,22 +893,7 @@ export class WorkflowValidationWorker {
         "the local recording check failed before it could verify the recorded workflow",
       );
     }
-    if (result.notRecordedHere === true) {
-      // Another device recorded this demonstration; it answers, or the ask lapses at its TTL.
-      this.log(
-        `workflow validation: skipped ask '${request.requestId}': this device did not record its demonstration`,
-      );
-      const skippedAt = this.now().getTime();
-      const until =
-        request.expiresAt !== undefined && Number.isFinite(Date.parse(request.expiresAt))
-          ? Date.parse(request.expiresAt)
-          : skippedAt + SKIPPED_ASK_RETENTION_MS;
-      this.skippedAsks.set(askKey(request), {
-        until,
-        recheckAt: Math.min(skippedAt + SKIPPED_ASK_RECHECK_MS, until),
-      });
-      return undefined;
-    }
+    if (result.notRecordedHere === true) return this.skipNotRecordedHere(request);
     if (
       result.unavailable !== undefined ||
       (result.verdicts.length === 0 && result.verification === undefined)
@@ -951,7 +972,27 @@ export class WorkflowValidationWorker {
     };
   }
 
-  private buildValidator(request: WorkflowValidationRequest): WorkflowPlanValidator {
+  /** Remembers an ask another device recorded; it answers, or the ask lapses at its TTL. */
+  private skipNotRecordedHere(request: WorkflowValidationRequest): undefined {
+    this.log(
+      `workflow validation: skipped ask '${request.requestId}': this device did not record its demonstration`,
+    );
+    const skippedAt = this.now().getTime();
+    const until =
+      request.expiresAt !== undefined && Number.isFinite(Date.parse(request.expiresAt))
+        ? Date.parse(request.expiresAt)
+        : skippedAt + SKIPPED_ASK_RETENTION_MS;
+    this.skippedAsks.set(askKey(request), {
+      until,
+      recheckAt: Math.min(skippedAt + SKIPPED_ASK_RECHECK_MS, until),
+    });
+    return undefined;
+  }
+
+  private buildValidator(
+    request: WorkflowValidationRequest,
+    localCalls: LocalCallIdentity | undefined,
+  ): WorkflowPlanValidator {
     const create = this.createValidator;
     if (create) return create(request);
     const privateValues = this.privateValues ?? FilePrivateValueStore.default();
@@ -961,8 +1002,7 @@ export class WorkflowValidationWorker {
       workspaceId: this.workspaceId,
       privateValues,
       localCalls:
-        this.localCalls ??
-        createLocalCallIdentity({ workspaceId: this.workspaceId, privateValues }),
+        localCalls ?? createLocalCallIdentity({ workspaceId: this.workspaceId, privateValues }),
       timeoutMs: this.timeoutMs,
     });
   }

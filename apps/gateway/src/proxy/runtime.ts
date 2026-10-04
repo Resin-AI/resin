@@ -481,6 +481,7 @@ export async function createProductionProxyRuntime(
       }),
       askLedger: new FileValidationAskLedger({
         filePath: path.join(paths.stateDir, WORKFLOW_VALIDATION_ASK_LEDGER_FILE_NAME),
+        ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
       }),
       ...(options.onValidationLog === undefined ? {} : { log: options.onValidationLog }),
     });
