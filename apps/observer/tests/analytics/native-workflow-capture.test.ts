@@ -547,6 +547,40 @@ describe("native capture of ordinary calls", () => {
       setup: [],
     });
   });
+  it("reads the names an awaited Python Eval expression uses", () => {
+    const evalCall = (sequence: number, code: string): NormalizedSessionEvent => {
+      const entry = call(sequence, "eval", { language: "py", code });
+      return {
+        ...entry,
+        metadata: { ...entry.metadata, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "python-eval" },
+      };
+    };
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computationRecorder = createComputationEvidenceRecorder();
+    const observed = [
+      evalCall(31, "import asyncio\nvalues = [3, 4, 5]"),
+      result(31, "eval", ""),
+      evalCall(32, "print(await asyncio.sleep(0, sum(values)))"),
+      result(32, "eval", "12"),
+      // `tool` is the kernel's harness bridge: no recorded cell binds it, so nothing closes it.
+      evalCall(33, "await tool.todo({'op': 'done', 'task': 'ship'})"),
+      result(33, "eval", ""),
+    ].map((entry) =>
+      computationRecorder.observe(workflowRecorder.observe(entry, { workspaceId: "ws_native" })),
+    );
+
+    // The awaited expression reads `asyncio` and `values`, so the cell closes over the cell binding them.
+    expect(carrierOf(observed[2]!)?.program?.pythonState).toMatchObject({
+      status: "closed",
+      setup: [expect.objectContaining({ callId: "call_31" })],
+    });
+    expect(carrierOf(observed[4]!)?.program?.pythonState).toMatchObject({
+      status: "unresolved",
+      setup: [],
+    });
+  });
   it("keeps candidate steps addressable when Python setup cells fold into a later cell", () => {
     const evalCall = (sequence: number, code: string): NormalizedSessionEvent => {
       const entry = call(sequence, "eval", { language: "py", code });
@@ -655,6 +689,54 @@ describe("native capture of ordinary calls", () => {
     expect(carrierOf(observed)?.origins.code?.type).toBe("program");
     expect(carrierOf(computationObserved)?.program?.pythonState).toMatchObject({
       status: "closed",
+      setup: [],
+    });
+  });
+
+  it("records an unanalyzed Python program as unresolved, never without a state decision", () => {
+    const sessionId = "session-python-eval-consumed-call-id";
+    const workflowRecorder = new WorkflowCallRecorder({
+      privateValues: new InMemoryPrivateValueStore(),
+    });
+    const computation = createComputationEvidenceRecorder();
+    const observe = (observed: NormalizedSessionEvent) =>
+      computation.observe(workflowRecorder.observe(observed, { workspaceId: "ws_native" }));
+    const evalCall = (eventId: string, sequence: number) =>
+      observe(
+        event({
+          eventId,
+          sessionId,
+          type: "tool_call",
+          callId: "call-consumed",
+          toolName: "eval",
+          parameters: { language: "py", code: "print(sum([3, 4, 5]))" },
+          causalRef: { causalSequence: sequence, parentId: null, turnIndex: 0, stepIndex: 0 },
+        }),
+      );
+
+    expect(carrierOf(evalCall("evt-call", 1))?.program?.pythonState).toMatchObject({
+      status: "closed",
+    });
+    observe(
+      event({
+        eventId: "evt-result",
+        sessionId,
+        type: "tool_result",
+        callId: "call-consumed",
+        toolName: "eval",
+        result: "12",
+        isError: false,
+        executionDurationMs: 12,
+        causalRef: { causalSequence: 2, parentId: null, turnIndex: 0, stepIndex: 0 },
+      }),
+    );
+    // The same call recorded again after its result was consumed is never paired, so never analyzed.
+    const unanalyzed = evalCall("evt-call-again", 3);
+    expect(carrierOf(unanalyzed)?.program?.kind).toBe("python");
+    expect(carrierOf(unanalyzed)?.program?.pythonState).toEqual({
+      schemaVersion: 1,
+      status: "unresolved",
+      unresolvedReadCount: 1,
       setup: [],
     });
   });

@@ -80,6 +80,30 @@ function preludeNamesOf(event: NormalizedToolCallEvent): readonly string[] | und
 }
 
 /**
+ * Every recorded Python program carries its state decision. A call the recorder could not analyze (a
+ * session whose pairing is disabled, a reused call id, a refused pending entry, an internal error)
+ * has no proven closure, so it is `unresolved`: never closed by default, and never left without a
+ * decision that would read as a record from a client older than the closure contract.
+ */
+function withPythonStateDecision(event: NormalizedSessionEvent): NormalizedSessionEvent {
+  if (event.type !== "tool_call") return event;
+  const carrier = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+  if (carrier?.program?.kind !== "python" || carrier.program.pythonState !== undefined) {
+    return event;
+  }
+  carrier.program.pythonState = {
+    schemaVersion: 1,
+    status: "unresolved",
+    unresolvedReadCount: 1,
+    setup: [],
+  };
+  return {
+    ...event,
+    metadata: { ...event.metadata, [RESIN_WORKFLOW_CALL_METADATA_KEY]: carrier },
+  } as NormalizedSessionEvent;
+}
+
+/**
  * Session source recorder: turns observed native tool traffic into bounded, privacy-safe computation
  * evidence carriers attached to the *same* normalized event that the local sink and the cloud
  * projection both consume.
@@ -281,7 +305,9 @@ export class ComputationEvidenceRecorder {
           replayed.event.deref() === event ? (replayed.observed.deref() ?? event) : event,
         );
       }
-      const observed = withoutLocalNativeMetadata(this.observeEvent(event));
+      const observed = withPythonStateDecision(
+        withoutLocalNativeMetadata(this.observeEvent(event)),
+      );
       if (this.replayIds.size >= MAX_REPLAY_EVENTS) {
         const oldest = this.replayIds.values().next().value;
         if (oldest !== undefined) {
@@ -297,7 +323,7 @@ export class ComputationEvidenceRecorder {
       });
       return observed;
     } catch {
-      return withoutLocalNativeMetadata(event);
+      return withPythonStateDecision(withoutLocalNativeMetadata(event));
     }
   }
 

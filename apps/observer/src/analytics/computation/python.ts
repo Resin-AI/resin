@@ -2315,7 +2315,8 @@ class PythonFrameAnalyzer {
         case "MemberExpression":
           return this.emitMember(node, scope);
         case "AwaitExpression": {
-          const inner = pyContentChildren(node)[0];
+          // The operand follows the `await` keyword token; its reads are the cell's reads.
+          const inner = pyContentChildren(node).find((child) => child.name !== "await");
           return inner === undefined
             ? this.unsupported("unsupported_construct")
             : this.node("await", [this.emitExpression(inner, scope)]);
