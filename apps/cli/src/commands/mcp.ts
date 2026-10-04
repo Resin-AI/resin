@@ -1,6 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { LocalDatabaseConnection } from "@resin/db";
@@ -11,6 +9,7 @@ import {
   type ShimStatus,
   shimExitCode,
 } from "@resin/gateway";
+import { resolvePaths } from "@resin/observer";
 import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { z } from "zod";
@@ -198,7 +197,7 @@ export interface McpCommandOptions {
   env?: NodeJS.ProcessEnv;
   shimFactory?: (options: McpStdioShimOptions) => McpShimRunner;
   /** Records the running gateway version so `resin status` can report stale gateways. */
-  registerGateway?: (version: string) => () => void;
+  registerGateway?: (registration: { resinHome: string; version: string }) => () => void;
 }
 
 export async function mcpCommand(args: string[], options: McpCommandOptions = {}): Promise<number> {
@@ -247,14 +246,13 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
   let unregisterGateway = (): void => undefined;
   if (!process.env.VITEST || options.registerGateway) {
     try {
-      const register =
-        options.registerGateway ??
-        ((version: string) =>
-          registerRunningGateway({
-            resinHome: path.join(options.home ?? os.homedir(), ".resin"),
-            version,
-          }));
-      unregisterGateway = register(VERSION);
+      const register = options.registerGateway ?? registerRunningGateway;
+      // The same Resin home the gateway's own state, the update engine and status resolve.
+      const { homeDir: resinHome } = resolvePaths({
+        home: options.home,
+        env: options.env ?? process.env,
+      });
+      unregisterGateway = register({ resinHome, version: VERSION });
       process.once("exit", unregisterGateway);
     } catch {
       // Version tracking is diagnostic only and must never block the MCP gateway.
