@@ -248,6 +248,9 @@ jobs:
       - name: Run derivation sandbox tests
         run: pnpm test:sandbox
 
+      - name: Verify the committed install helper matches the build
+        run: node scripts/build-install-helper.mjs --check
+
   ci-gate:
     name: CI Gate Rollup
     needs: [static, repo-gates, test-unit, test-sandbox]
