@@ -141,8 +141,13 @@ describe("immutable private reference persistence", () => {
         expect(reopened.get(`private:v2:${writer}:${i}`)).toEqual({ writer, i });
     }
     const entries = path.join(root, "private-values", "entries-v2");
-    expect(readdirSync(entries)).toHaveLength(192);
-    for (const name of readdirSync(entries)) {
+    const files = readdirSync(entries, { recursive: true, encoding: "utf8" }).filter((name) =>
+      name.endsWith(".json"),
+    );
+    expect(files).toHaveLength(192);
+    for (const name of files) {
+      // Sharded by the first byte of the reference hash.
+      expect(path.dirname(name)).toBe(path.basename(name).slice(0, 2));
       const file = path.join(entries, name);
       if (process.platform === "win32") {
         // Published through a temporary file and a hard link inside the owner-only directory.
