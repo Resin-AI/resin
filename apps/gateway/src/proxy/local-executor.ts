@@ -64,7 +64,7 @@ import {
   RESIN_OUTPUT_STEPS_META,
 } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
-import type { WorkspaceContext } from "../workspace-resolver.js";
+import { type WorkspaceContext, sessionWorkingDirectory } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
 
@@ -1381,6 +1381,8 @@ export class LocalArtifactExecutor {
         invocationId,
         grant,
         workspaceRoot,
+        // Commands run where the session runs; the grants above stay at the project root.
+        workingDirectory: sessionWorkingDirectory(context, workspaceRoot),
         sessionId: context.sessionId,
         workspaceId: context.workspaceId,
         toolId: manifest.id,

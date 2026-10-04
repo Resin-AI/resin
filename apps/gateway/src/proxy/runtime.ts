@@ -40,13 +40,13 @@ import type { LocalToolDescriber } from "../meta/search-tools.js";
 import { ProjectLockManager, type ReconcileOutcome } from "../project/lock-manager.js";
 import type { JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
-import type { WorkspaceContext } from "../workspace-resolver.js";
+import { type WorkspaceContext, sessionWorkingDirectory } from "../workspace-resolver.js";
 import { CloudCatalogCache } from "./cache.js";
 import { CloudCircuitBreaker } from "./circuit-breaker.js";
 import { CloudCatalogClient, type CloudIdentityProvider } from "./client.js";
 import { DeviceSyncStore } from "./device-sync-store.js";
 import { loadLocalArtifactTrust } from "./local-artifact-trust.js";
-import { LocalArtifactExecutor } from "./local-executor.js";
+import { LocalArtifactExecutor, type RecordedWorkflowHostContext } from "./local-executor.js";
 import { CloudInvocationRouter } from "./router.js";
 import { SharedCloudSync } from "./shared-sync.js";
 import {
@@ -216,6 +216,75 @@ function workspaceRootFromContext(workspace: WorkspaceContext | undefined): stri
 }
 
 /**
+ * The runtime families a recorded plan runs through on this host: a recorded program on the host,
+ * a harness builtin through the active harness, and a tool by name either over the connection the
+ * recording names or through the invocation's own routing, so scope, pins and permissions apply
+ * identically.
+ *
+ * Programs and harness builtins run in the session's own directory (see
+ * `sessionWorkingDirectory`): a session launched in a subdirectory of its git project recorded its
+ * commands relative to that subdirectory. Steps that carry their own recorded directory — a
+ * patch's absolute `workdir`, a Codex shell profile's `workdir` — keep it.
+ */
+export function recordedWorkflowRuntimeAdapters(
+  host: RecordedWorkflowHostContext,
+  options: {
+    resolveConnection?: (name: string) => Promise<McpToolConnection | undefined>;
+    recordedHarnessToolInvoker?: ProductionProxyRuntimeOptions["recordedHarnessToolInvoker"];
+  },
+): RuntimeAdapter[] {
+  const projectRoot =
+    host.workspace.projectRoot ?? host.workspace.canonicalRoot ?? host.workspace.roots?.[0]?.path;
+  const cwd = projectRoot ? sessionWorkingDirectory(host.workspace, projectRoot) : undefined;
+  const bounds = {
+    ...(cwd ? { cwd } : {}),
+    ...(host.timeoutMs === undefined ? {} : { timeoutMs: host.timeoutMs }),
+  };
+  const { recordedHarnessToolInvoker, resolveConnection } = options;
+  return [
+    createProcessAdapter(bounds),
+    createProgramAdapter(bounds),
+    ...(recordedHarnessToolInvoker === undefined
+      ? []
+      : ([
+          {
+            runtime: RESIN_HARNESS_TOOL_RUNTIME,
+            call: async (request) => {
+              const result = await recordedHarnessToolInvoker({
+                name: request.step.callable.name,
+                parameters: request.arguments as Record<string, unknown>,
+                cwd: cwd ?? process.cwd(),
+                ...(host.signal ? { signal: host.signal } : {}),
+              });
+              if (result.isError) {
+                throw new Error(
+                  result.content[0]?.text ??
+                    `harness tool '${request.step.callable.name}' answered with an error`,
+                );
+              }
+              return composedResultValue(result);
+            },
+          },
+        ] satisfies RuntimeAdapter[])),
+    createToolProtocolAdapter({
+      ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
+      dispatch: async (request) => {
+        const result = await host.routeToHost({
+          name: request.name,
+          ...(request.connection ? { connection: request.connection } : {}),
+          parameters: request.arguments as Record<string, unknown>,
+        });
+        if (result.isError) {
+          const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
+          throw new Error(text ?? `callable '${request.name}' answered with an error`);
+        }
+        return composedResultValue(result);
+      },
+    }),
+  ];
+}
+
+/**
  * Production runtime composition factory.
  * Loads CloudCredentialStore and, only for valid identity, constructs one shared
  * circuit breaker, CloudCatalogClient, CloudCatalogCache, CloudInvocationRouter,
@@ -324,58 +393,13 @@ export async function createProductionProxyRuntime(
         // reach: a recorded program on the host, and a tool by name either over the connection the
         // recording names or through the same router the original call used, so scope, pins and
         // permissions apply identically.
-        recordedWorkflowAdapters: (host) => {
-          const workspaceRoot =
-            host.workspace.projectRoot ??
-            host.workspace.canonicalRoot ??
-            host.workspace.roots?.[0]?.path;
-          const bounds = {
-            ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
-            ...(host.timeoutMs === undefined ? {} : { timeoutMs: host.timeoutMs }),
-          };
-          return [
-            createProcessAdapter(bounds),
-            createProgramAdapter(bounds),
+        recordedWorkflowAdapters: (host) =>
+          recordedWorkflowRuntimeAdapters(host, {
+            ...(resolveConnection === undefined ? {} : { resolveConnection }),
             ...(options.recordedHarnessToolInvoker === undefined
-              ? []
-              : ([
-                  {
-                    runtime: RESIN_HARNESS_TOOL_RUNTIME,
-                    call: async (request) => {
-                      const result = await options.recordedHarnessToolInvoker!({
-                        name: request.step.callable.name,
-                        parameters: request.arguments as Record<string, unknown>,
-                        cwd: workspaceRoot ?? process.cwd(),
-                        ...(host.signal ? { signal: host.signal } : {}),
-                      });
-                      if (result.isError) {
-                        throw new Error(
-                          result.content[0]?.text ??
-                            `harness tool '${request.step.callable.name}' answered with an error`,
-                        );
-                      }
-                      return composedResultValue(result);
-                    },
-                  },
-                ] satisfies RuntimeAdapter[])),
-            createToolProtocolAdapter({
-              ...(resolveConnection === undefined ? {} : { openConnection: resolveConnection }),
-              dispatch: async (request) => {
-                const result = await host.routeToHost({
-                  name: request.name,
-                  ...(request.connection ? { connection: request.connection } : {}),
-                  parameters: request.arguments as Record<string, unknown>,
-                });
-                if (result.isError) {
-                  const text =
-                    result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
-                  throw new Error(text ?? `callable '${request.name}' answered with an error`);
-                }
-                return composedResultValue(result);
-              },
-            }),
-          ];
-        },
+              ? {}
+              : { recordedHarnessToolInvoker: options.recordedHarnessToolInvoker }),
+          }),
         stepInvoker: async (request) => {
           const router = routerBox.current;
           if (!router) {

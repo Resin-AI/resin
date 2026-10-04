@@ -548,6 +548,7 @@ export class CommandBroker extends BaseCapabilityBroker {
     requestedCwd: string | undefined,
     workspaceRoot: string,
     scratchDir?: string,
+    workingDirectory?: string,
   ): string {
     // 1. Resolve canonical workspace and scratch roots
     let realWorkspaceRoot: string;
@@ -588,10 +589,32 @@ export class CommandBroker extends BaseCapabilityBroker {
       }
     }
 
-    // 2. Resolve nominal target cwd
-    const nominalTargetCwd = requestedCwd
-      ? path.resolve(realWorkspaceRoot, requestedCwd)
-      : realWorkspaceRoot;
+    // 2. Resolve nominal target cwd against the invocation's working directory, which must itself
+    // resolve inside the workspace root; without one, against the workspace root.
+    let baseCwd = realWorkspaceRoot;
+    if (workingDirectory) {
+      try {
+        baseCwd = normalizeSlashes(
+          fs.realpathSync.native
+            ? fs.realpathSync.native(path.resolve(realWorkspaceRoot, workingDirectory))
+            : fs.realpathSync(path.resolve(realWorkspaceRoot, workingDirectory)),
+        );
+      } catch (err) {
+        throw new BrokerSecurityError(
+          "WORKING_DIRECTORY_DENIED",
+          `Failed to resolve realpath for working directory '${workingDirectory}': ${err instanceof Error ? err.message : String(err)}`,
+          { workingDirectory },
+        );
+      }
+      if (!isPathInsideRoot(baseCwd, realWorkspaceRoot)) {
+        throw new BrokerSecurityError(
+          "WORKING_DIRECTORY_DENIED",
+          `Invocation working directory '${workingDirectory}' resolves outside the workspace root (${realWorkspaceRoot}): ${baseCwd}`,
+          { workingDirectory, resolvedCwd: baseCwd, workspaceRoot: realWorkspaceRoot },
+        );
+      }
+    }
+    const nominalTargetCwd = requestedCwd ? path.resolve(baseCwd, requestedCwd) : baseCwd;
 
     // 3. Reject non-existent cwd or non-directory
     let lstat: fs.Stats;
@@ -911,7 +934,12 @@ export class CommandBroker extends BaseCapabilityBroker {
 
     // 6. Validate working directory boundaries
     // 6. Validate working directory boundaries and symlink containment
-    const targetCwd = this.validateAndResolveCwd(params.cwd, workspaceRoot, scratchDir);
+    const targetCwd = this.validateAndResolveCwd(
+      params.cwd,
+      workspaceRoot,
+      scratchDir,
+      context.workingDirectory,
+    );
 
     // 7. Construct minimal sanitized child environment
     const childEnv: SanitizedChildEnvironment = {
@@ -1028,7 +1056,12 @@ export class CommandBroker extends BaseCapabilityBroker {
       const scratchDir = context.scratchDir
         ? normalizeSlashes(path.resolve(context.scratchDir))
         : undefined;
-      const verifiedCwd = this.validateAndResolveCwd(params.cwd, workspaceRoot, scratchDir);
+      const verifiedCwd = this.validateAndResolveCwd(
+        params.cwd,
+        workspaceRoot,
+        scratchDir,
+        context.workingDirectory,
+      );
       if (verifiedCwd !== cwd) {
         throw new BrokerSecurityError(
           "WORKING_DIRECTORY_DENIED",

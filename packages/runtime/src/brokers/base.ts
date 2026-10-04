@@ -113,6 +113,12 @@ export interface BrokerContext {
   invocationId: string;
   grant?: InvocationGrant;
   workspaceRoot?: string;
+  /**
+   * Directory commands run in when they name no cwd, and that a relative cwd resolves against.
+   * It must resolve inside `workspaceRoot`, which stays the root every grant is checked against.
+   * Defaults to `workspaceRoot`.
+   */
+  workingDirectory?: string;
   scratchDir?: string;
   toolId?: string;
   toolVersion?: string;
