@@ -12,6 +12,10 @@ import {
   WorkflowCallRecorder,
   readWorkflowCallCarrier,
 } from "../../src/analytics/workflow-call-recorder.js";
+import {
+  WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+  workflowPrivateReference,
+} from "../../src/analytics/workflow-private-reference.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
@@ -217,6 +221,53 @@ describe("exact local values across the real normalization boundary", () => {
       type: "literal",
       value: recordedPath,
     });
+  });
+
+  it("records a composed call's private positions exactly as its upload kept them", async () => {
+    const { directory, store } = temporaryStore();
+    const captured = await capture(store, "session-positions");
+    const recordedPath = captured.parameters[0]!.path;
+    const recorder = new WorkflowCallRecorder({
+      privateValues: new FilePrivateValueStore(directory),
+    });
+    const pipeline = new NormalizationPipeline({
+      redactionConfig: { scanContent: false, customSecrets: [secret] },
+    });
+    const result = await pipeline.processIntermediateEvent(
+      {
+        sessionId: "session-composed-positions",
+        type: "tool_call",
+        toolName: "invoke_tool",
+        callId: "call-positions",
+        parameters: {
+          toolName: "local.render_result",
+          parameters: {
+            path: recordedPath,
+            token: { literal: secret },
+            meta: { literal: { source: "proof", tags: ["a"] } },
+          },
+        },
+        timestamp: "2026-09-19T00:00:00.000Z",
+        causalRef: { causalSequence: 1, parentId: null },
+      },
+      origin,
+    );
+    if (result.status !== "success") throw new Error(result.errorReason);
+    recorder.observe(result.event, origin);
+
+    const positions = store.get(
+      workflowPrivateReference("demonstration", origin.workspaceId, "redacted", [
+        "session-composed-positions",
+        "call-positions",
+        WORKFLOW_CALL_PRIVATE_POSITIONS_SLOT,
+      ]),
+    );
+    // The caller's literals reached the upload as literals; only the restated value and the
+    // secret were withheld, and only the secret was removed by redaction.
+    expect(positions).toEqual([
+      { argument: "path", path: [], redacted: false },
+      { argument: "token", path: [], redacted: true },
+    ]);
   });
 
   it("keeps references stable across sessions, fresh instances, and clear/restart", async () => {

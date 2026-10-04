@@ -250,6 +250,30 @@ describe("a recorded invoke_tool step", () => {
     expect(answer.unavailable).toBeUndefined();
     expect(answer.verification?.status).toBe("verified");
   });
+
+  it("verifies a step whose caller stated a literal the upload carried as one", async () => {
+    const store = new InMemoryPrivateValueStore();
+    const plan = record(store, [
+      { user: "Look up order A-1001 from the proof source" },
+      {
+        callId: "invoke-literal",
+        toolName: "invoke_tool",
+        parameters: {
+          name: "lookup_order",
+          arguments: {
+            order: { value: "A-1001" },
+            meta: { literal: { source: "proof", tags: ["a"] } },
+          },
+        },
+        result: "A-1001 shipped",
+      },
+    ]);
+    const answer = await validator(store)({ ...plan, candidates: [] });
+    expect(answer.verification?.status).toBe("verified");
+    // The upload carried the caller's literals as literals: none is a private recorded position.
+    const recorded = await localCallsFor(store, owner, [SESSION]).lookup("invoke-literal");
+    expect(recorded?.privatePositions).toEqual([]);
+  });
 });
 
 describe("held-out demonstrations", () => {
