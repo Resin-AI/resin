@@ -93,13 +93,6 @@ export class LocalStateStore {
   getDiagnostics(extraMetadata?: DiagnosticMetadataRecord): DatabaseDiagnosticsReport {
     return exportDatabaseDiagnostics(this.conn, extraMetadata);
   }
-
-  /**
-   * Executes SQLite VACUUM to reclaim free space.
-   */
-  vacuum(): void {
-    this.conn.exec("VACUUM;");
-  }
 }
 
 /**

@@ -17,6 +17,9 @@ export * from "./repositories/opportunity-local-repository.js";
 // Retention & Compaction Engine
 export * from "./retention.js";
 
+// Free-page reclamation & WAL truncation
+export * from "./maintenance.js";
+
 // Diagnostics & Redaction Exporter
 export * from "./diagnostics.js";
 

@@ -47,6 +47,7 @@ import {
 } from "../notifications.js";
 import { OpportunityTrackingModule } from "../opportunity-module.js";
 import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
+import { StateDbMaintenanceModule } from "../state-db-maintenance-module.js";
 import { narrowSafetyAttestationKeyMode, pruneStaleStateFiles } from "../state-hygiene.js";
 import {
   type ConfigReloadResult,
@@ -1143,6 +1144,7 @@ async function runForeground(options: {
     enableSignalHandlers: false,
   });
   supervisor.enableNotificationPersistence(paths.stateDir);
+  supervisor.registerModule(new StateDbMaintenanceModule({ conn: stateStore.conn }));
   const credentialStore = new CloudCredentialStore({
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),

@@ -74,6 +74,18 @@ export interface IntegrityCheckResult {
 }
 
 /**
+ * Result of PRAGMA wal_checkpoint. `busy` means a reader or writer blocked completion.
+ */
+export interface WalCheckpointResult {
+  busy: boolean;
+  logFrames: number;
+  checkpointedFrames: number;
+}
+
+/** Size a reset WAL is truncated back to (PRAGMA journal_size_limit). */
+export const JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/**
  * Normalizes any JavaScript value to a valid SQLite bind parameter.
  */
 export function toSQLInputValue(val: SQLBindValue): SQLInputValue {
@@ -161,10 +173,18 @@ export class LocalDatabaseConnection {
     const timeout = this.options.busyTimeoutMs ?? 5000;
     this.db.exec(`PRAGMA busy_timeout = ${timeout};`);
 
+    if (!this.options.readOnly && this.pragmaNumber("page_count") === 0) {
+      // auto_vacuum only applies before the first page is written; existing databases are
+      // converted by runStateDbMaintenance's VACUUM instead.
+      this.db.exec("PRAGMA auto_vacuum = INCREMENTAL;");
+    }
+
     if (this.location !== ":memory:") {
       try {
         this.db.exec("PRAGMA journal_mode = WAL;");
         this.db.exec("PRAGMA synchronous = NORMAL;");
+        // Without a limit a WAL keeps its high-water size after every checkpoint.
+        this.db.exec(`PRAGMA journal_size_limit = ${JOURNAL_SIZE_LIMIT_BYTES};`);
       } catch {
         // Fall back gracefully if journal mode alteration fails (e.g. read-only)
       }
@@ -313,13 +333,47 @@ export class LocalDatabaseConnection {
   }
 
   /**
-   * Flushes WAL pages to disk checkpoint.
+   * Returns true while a transaction or savepoint opened through transaction() is active.
    */
-  checkpoint(mode: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE" = "PASSIVE"): void {
+  inTransaction(): boolean {
+    return this.savepointDepth > 0;
+  }
+
+  /**
+   * Returns true when the connection was opened read-only.
+   */
+  isReadOnly(): boolean {
+    return this.options.readOnly === true;
+  }
+
+  /**
+   * Reads a single-valued numeric PRAGMA such as page_count or freelist_count.
+   */
+  pragmaNumber(name: string): number {
     this.ensureOpen();
-    if (this.location !== ":memory:") {
-      this.db!.exec(`PRAGMA wal_checkpoint(${mode});`);
+    const row = this.db!.prepare(`PRAGMA ${name};`).get() as Record<string, unknown> | undefined;
+    return Number(row ? Object.values(row)[0] : 0);
+  }
+
+  /**
+   * Checkpoints the WAL into the main database file. Returns SQLite's result row, or null for
+   * in-memory databases that have no WAL.
+   */
+  checkpoint(
+    mode: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE" = "PASSIVE",
+  ): WalCheckpointResult | null {
+    this.ensureOpen();
+    if (this.location === ":memory:") {
+      return null;
     }
+    const row = this.db!.prepare(`PRAGMA wal_checkpoint(${mode});`).get() as
+      | { busy: number; log: number; checkpointed: number }
+      | undefined;
+    return {
+      busy: Number(row?.busy ?? 0) !== 0,
+      logFrames: Number(row?.log ?? 0),
+      checkpointedFrames: Number(row?.checkpointed ?? 0),
+    };
   }
 
   private ensureOpen(): void {
