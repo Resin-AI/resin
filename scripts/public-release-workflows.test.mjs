@@ -1044,7 +1044,7 @@ describe("Public Release Workflows Contract", () => {
             PATH: process.env.PATH,
             GITHUB_OUTPUT: outputPath,
             EVENT_NAME: "schedule",
-            EVENT_SCHEDULE: "47 */12 * * *",
+            EVENT_SCHEDULE: "47 */3 * * *",
             WORKFLOW_REF: "refs/heads/main",
             REF_PROTECTED: "true",
             OPERATION: "",
@@ -1068,6 +1068,8 @@ describe("Public Release Workflows Contract", () => {
       });
       for (const overrides of [
         { EVENT_SCHEDULE: "17 */3 * * *" },
+        // The retired twelve-hour schedule no longer authorizes renewal.
+        { EVENT_SCHEDULE: "47 */12 * * *" },
         { EVENT_SCHEDULE: "" },
         { EVENT_NAME: "push" },
         { EVENT_NAME: "pull_request_target" },
@@ -1208,12 +1210,12 @@ describe("Public Release Workflows Contract", () => {
       expect(predicate(renew.if, { inputs: { operation: "notification-drill" } })).toBe(false);
       expect(workflow.doc.on.schedule).toEqual([
         { cron: "17 */3 * * *" },
-        { cron: "47 */12 * * *" },
+        { cron: "47 */3 * * *" },
       ]);
     });
 
     it("selects exactly one independent job for each known schedule and rejects unauthorized renewal refs", () => {
-      for (const schedule of ["17 */3 * * *", "47 */12 * * *", "0 * * * *", ""]) {
+      for (const schedule of ["17 */3 * * *", "47 */3 * * *", "47 */12 * * *", "0 * * * *", ""]) {
         const context = {
           github: {
             event_name: "schedule",
@@ -1224,7 +1226,7 @@ describe("Public Release Workflows Contract", () => {
           inputs: {},
         };
         expect(predicate(monitor.if, context)).toBe(schedule === "17 */3 * * *");
-        expect(predicate(renew.if, context)).toBe(schedule === "47 */12 * * *");
+        expect(predicate(renew.if, context)).toBe(schedule === "47 */3 * * *");
       }
       for (const event of ["push", "pull_request", "workflow_dispatch", "schedule"]) {
         for (const ref of ["refs/heads/main", "refs/heads/other"]) {
@@ -1233,7 +1235,7 @@ describe("Public Release Workflows Contract", () => {
               predicate(renew.if, {
                 github: {
                   event_name: event,
-                  event: { schedule: "47 */12 * * *" },
+                  event: { schedule: "47 */3 * * *" },
                   ref,
                   ref_protected: protectedRef,
                 },
