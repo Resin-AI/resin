@@ -270,6 +270,61 @@ export function isPythonModule(modulePath: string): boolean {
   return Object.prototype.hasOwnProperty.call(PYTHON_MODULE_APIS, modulePath);
 }
 
+/**
+ * Builtins that neither read nor change kernel bindings: calling one at module level runs no code the
+ * parser has not seen, and reading one never needs an earlier cell. They have no canonical API (the
+ * tables above stay closed), so a call still lowers to `unsupported`; this only keeps the persistent
+ * kernel closure from mistaking them for state. Reflection (`getattr`, `vars`, …), namespace
+ * mutators, `open` and I/O such as `input` are deliberately absent.
+ */
+const PYTHON_STATELESS_BUILTIN_NAMES: ReadonlySet<string> = new Set([
+  "ArithmeticError",
+  "AssertionError",
+  "AttributeError",
+  "BaseException",
+  "Exception",
+  "FileNotFoundError",
+  "ImportError",
+  "IndexError",
+  "KeyError",
+  "LookupError",
+  "NotImplementedError",
+  "OSError",
+  "PermissionError",
+  "RuntimeError",
+  "StopIteration",
+  "TimeoutError",
+  "TypeError",
+  "UnicodeDecodeError",
+  "ValueError",
+  "ZeroDivisionError",
+  "ascii",
+  "bin",
+  "bool",
+  "bytearray",
+  "callable",
+  "chr",
+  "complex",
+  "divmod",
+  "enumerate",
+  "format",
+  "frozenset",
+  "hex",
+  "id",
+  "issubclass",
+  "oct",
+  "ord",
+  "pow",
+  "repr",
+  "slice",
+  "tuple",
+]);
+
+/** True for a builtin that cannot read or change kernel bindings (see the table above). */
+export function isPythonStatelessBuiltinName(name: string): boolean {
+  return PYTHON_STATELESS_BUILTIN_NAMES.has(name);
+}
+
 /** True when the builtin performs reflection or dynamic evaluation. */
 export function isPythonReflectionName(name: string): boolean {
   return PYTHON_REFLECTION_NAMES[name] === true;

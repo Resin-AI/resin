@@ -769,10 +769,11 @@ describe("Python persistent closure bookkeeping", () => {
     expect(result.program.complete).toBe(false);
   });
 
-  it("invalidates closure replay for mutable receiver calls", () => {
+  it("reports an in-place mutation of an earlier binding by name instead of invalidating", () => {
     const result = parse("rows.append(1)");
     expect(result.local.requiredNames).toEqual(["rows"]);
-    expect(result.local.invalidatesState).toBe(true);
+    expect(result.local.invalidatesState).toBe(false);
+    expect(result.local.mutatedNames).toEqual(["rows"]);
   });
 
   it("keeps read-before-write augmented assignments dependent on the prior binding", () => {
@@ -915,11 +916,12 @@ describe("Python persistent closure bookkeeping", () => {
     expect(result.program.complete).toBe(true);
   });
 
-  it("still invalidates a mutation of an externally sourced container", () => {
+  it("still attributes a mutation of an externally sourced container to its source", () => {
     const result = parse("rows = _ROWS; rows.append(1)");
 
     expect(result.local.requiredNames).toEqual(["_ROWS"]);
-    expect(result.local.invalidatesState).toBe(true);
+    expect(result.local.invalidatesState).toBe(false);
+    expect(result.local.mutatedNames).toEqual(["_ROWS"]);
   });
 
   it("keeps imported Fraction aliases and builtin bytes out of false external slots", () => {

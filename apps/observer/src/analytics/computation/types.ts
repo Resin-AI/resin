@@ -239,6 +239,13 @@ export interface ComputationParseLocal {
   /** True when the source mutates state the parser could not represent (reset/invalidations). */
   invalidatesState: boolean;
   /**
+   * Earlier bindings whose objects the source mutates in place through a known container path
+   * (`rows.append(x)`, `seen[k] = v`), reported only when `invalidatesState` is false. The objects may
+   * also be reachable from other bindings, so a consumer must treat every binding that can share
+   * them as changed by this source. Absent or empty: the source changes nothing it did not bind.
+   */
+  mutatedNames?: string[];
+  /**
    * Bounded provenance for the definitions materialized into `program`. Optional for backward
    * compatibility: absent means the caller may only rely on `local.definitions`.
    */

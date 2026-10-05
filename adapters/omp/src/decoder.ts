@@ -28,6 +28,15 @@ import type {
 } from "@resin/harness-contracts";
 import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
 import {
+  OMP_ASYNC_RESULT_CUSTOM_TYPE,
+  type OmpJobCompletion,
+  isOmpJobJoinCall,
+  isOmpJobReportOnly,
+  ompAsyncResultCompletions,
+  ompBackgroundLaunchJobId,
+  ompJobReportCompletions,
+} from "./background-jobs.js";
+import {
   OMP_DEVICE_SURFACE_PREFIX,
   OMP_DEVICE_SURFACE_READ_TOOL,
   OMP_DEVICE_SURFACE_WRITE_TOOL,
@@ -944,6 +953,24 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   private readonly harnessInternalReads = new BoundedSessionCallMap<true>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /**
+   * Job-joining calls (see {@link isOmpJobJoinCall}) announced but not yet answered, keyed by call
+   * id. Whether one is a step of the work is known only from its result, so it is held until then:
+   * a result that only reports background jobs drops it as harness bookkeeping, any other result
+   * records it, with the call's own timestamp and position, just before that result.
+   */
+  private readonly heldJobJoinCalls = new BoundedSessionCallMap<IntermediateToolCallEvent>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+  /**
+   * Background bash jobs whose launch acknowledgement was held, keyed by job id and valued by the
+   * call that launched them. The call's single result is the job's completion, whichever record
+   * reports it first; a job never seen completing leaves its call without a result, as a call
+   * still running is. A relaunch under a reused job id replaces the earlier entry.
+   */
+  private readonly backgroundJobs = new BoundedSessionCallMap<{ callId: string; toolName: string }>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
   private readonly deviceSurfaceServers?: () => readonly string[];
 
   constructor(options: OmpRecordDecoderOptions = {}) {
@@ -991,6 +1018,8 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.pendingArgumentlessCalls.clearSession(sessionId);
     this.deviceSurfaceResultCalls.clearSession(sessionId);
     this.harnessInternalReads.clearSession(sessionId);
+    this.heldJobJoinCalls.clearSession(sessionId);
+    this.backgroundJobs.clearSession(sessionId);
   }
 
   /**
@@ -1031,6 +1060,68 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.pendingDeviceSurfaceCalls.getAndClear(sessionId, key);
     this.deviceSurfaceResultCalls.getAndClear(sessionId, callId);
     return true;
+  }
+
+  /**
+   * Holds a job-joining call until its result settles whether it is harness bookkeeping; any
+   * other call passes through, and so does one that carries provider usage, which is never
+   * dropped.
+   */
+  private holdJobJoinCall(sessionId: string, event: IntermediateToolCallEvent): boolean {
+    const callId = event.callId;
+    if (
+      callId === undefined ||
+      !isOmpJobJoinCall(event.toolName, event.parameters) ||
+      event.providerUsage !== undefined
+    ) {
+      return false;
+    }
+    this.heldJobJoinCalls.set(sessionId, callId, event);
+    return true;
+  }
+
+  /**
+   * The results of the held background calls whose jobs a record reports finished: each launching
+   * call's single terminal result, carrying the job's own output, positioned at the record that
+   * reported it. A job only a job-joining report stated `completed` exited 0, and is marked as a
+   * completed bash run like a foreground one; a completion read from a notice that states no status
+   * is not. A job no held call launched (one already joined, or launched before this decoder saw
+   * the session) is ignored. The record's own events take its first `firstStep` steps, so each
+   * joined result takes the next step of the record and none collides with another.
+   */
+  private joinBackgroundJobs(
+    completions: readonly OmpJobCompletion[],
+    sessionId: string,
+    timestamp: string,
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+    firstStep: number,
+  ): IntermediateToolResultEvent[] {
+    const { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
+    const joined: IntermediateToolResultEvent[] = [];
+    for (const completion of completions) {
+      const launch = this.backgroundJobs.getAndClear(sessionId, completion.jobId);
+      if (launch === undefined) continue;
+      const exitedZero = completion.statusStated && !completion.failed;
+      joined.push({
+        sessionId,
+        timestamp,
+        schemaVersion: "1.0.0",
+        causalRef: { ...causalRef, stepIndex: firstStep + joined.length },
+        metadata: exitedZero
+          ? { ...unproven, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
+          : { ...unproven },
+        type: "tool_result",
+        toolName: launch.toolName,
+        callId: launch.callId,
+        toolCallId: launch.callId,
+        result: completion.output,
+        isError: completion.failed,
+        error: completion.failed ? completion.output : undefined,
+        executionDurationMs: completion.durationMs ?? 0,
+      });
+    }
+    return joined;
   }
 
   /**
@@ -1277,6 +1368,8 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         toolCallId: callId,
         parameters: recordedParameters,
       };
+      // A wait on the harness's own background jobs is settled by its result.
+      if (surface === undefined && this.holdJobJoinCall(sessionId, event)) continue;
       events.push(
         surface === undefined
           ? event
@@ -1793,6 +1886,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       rawEventType: rawType || "unknown",
       rawPayload: obj,
     };
+    // An auto-delivered background-job notice is also the result of each held bash launch it
+    // reports finished; the notice itself passes through as it did.
+    if (customType === OMP_ASYNC_RESULT_CUSTOM_TYPE) {
+      const joined = this.joinBackgroundJobs(
+        ompAsyncResultCompletions(obj.content, asObject(obj.details)),
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+        1,
+      );
+      if (joined.length > 0) return [fallback, ...joined];
+    }
     return fallback;
   }
   private extractPayload(record: RawHarnessRecord): OmpTranscriptValue {
@@ -2166,9 +2272,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     if (providerUsage) {
       evt.providerUsage = providerUsage;
     }
-    return surface === undefined
-      ? evt
-      : this.asDeviceSurfaceCall(evt, surface.identity, surface.arguments);
+    if (surface !== undefined) {
+      return this.asDeviceSurfaceCall(evt, surface.identity, surface.arguments);
+    }
+    // A wait on the harness's own background jobs is settled by its result.
+    return this.holdJobJoinCall(sessionId, evt) ? null : evt;
   }
 
   private normalizeToolResult(
@@ -2321,50 +2429,93 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     }
     // A device-surface call whose arguments never arrived is still recorded, when its result is:
     // an invocation that ran is not dropped because the record that carried its arguments did not.
-    if (pendingSurface !== undefined) {
-      return [
-        this.asDeviceSurfaceCall(
-          {
-            sessionId,
-            timestamp,
-            schemaVersion: "1.0.0",
-            causalRef,
-            metadata: eventMetadata,
-            type: "tool_call",
-            toolName: OMP_DEVICE_SURFACE_WRITE_TOOL,
-            callId,
-            toolCallId: callId,
-            parameters: {},
-          },
-          pendingSurface,
-          undefined,
-        ),
-        evt,
-      ];
-    }
-    // A call held at its argument-less start marker whose assistant record never came is still
+    // A call held at its argument-less start marker whose assistant record never came is likewise
     // recorded when its result is, with the only arguments any record carried: none.
-    if (heldCall !== undefined) {
-      return [
-        {
-          sessionId,
-          timestamp,
-          schemaVersion: "1.0.0",
-          causalRef,
-          metadata:
-            heldCall.intent !== undefined && unproven.intent === undefined
-              ? { ...unproven, intent: heldCall.intent }
-              : unproven,
-          type: "tool_call",
-          toolName,
-          callId,
-          toolCallId: callId,
-          parameters: {},
-        },
-        evt,
-      ];
+    const lateCall: IntermediateToolCallEvent | undefined =
+      pendingSurface !== undefined
+        ? this.asDeviceSurfaceCall(
+            {
+              sessionId,
+              timestamp,
+              schemaVersion: "1.0.0",
+              causalRef,
+              metadata: eventMetadata,
+              type: "tool_call",
+              toolName: OMP_DEVICE_SURFACE_WRITE_TOOL,
+              callId,
+              toolCallId: callId,
+              parameters: {},
+            },
+            pendingSurface,
+            undefined,
+          )
+        : heldCall !== undefined
+          ? {
+              sessionId,
+              timestamp,
+              schemaVersion: "1.0.0",
+              causalRef,
+              metadata:
+                heldCall.intent !== undefined && unproven.intent === undefined
+                  ? { ...unproven, intent: heldCall.intent }
+                  : unproven,
+              type: "tool_call",
+              toolName,
+              callId,
+              toolCallId: callId,
+              parameters: {},
+            }
+          : undefined;
+
+    // Any record listing background jobs may report one finished (a `wait`, or a `hub` snapshot
+    // or cancellation): the call that launched it gets its result here.
+    const completions = ompJobReportCompletions(details);
+    const joinCall =
+      this.heldJobJoinCalls.getAndClear(sessionId, callId) ??
+      (lateCall !== undefined &&
+      pendingSurface === undefined &&
+      isOmpJobJoinCall(lateCall.toolName, lateCall.parameters)
+        ? lateCall
+        : undefined);
+    // A wait that only reports background jobs is the harness's bookkeeping, not a step of the
+    // work: neither it nor its result is recorded, and a repeated record of that result is dropped
+    // too. The jobs it joined are recorded as their launching calls' results.
+    if (joinCall !== undefined && isOmpJobReportOnly(details, isError) && !providerUsage) {
+      this.harnessInternalReads.set(sessionId, rawCallId ?? callId, true);
+      const joined = this.joinBackgroundJobs(
+        completions,
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+        0,
+      );
+      return joined.length > 0 ? joined : null;
     }
-    return evt;
+    // A background launch's acknowledgement is not its result: the job's completion is (see
+    // `joinBackgroundJobs`), so it is held until a record reports the job finished.
+    const launchedJobId = providerUsage
+      ? undefined
+      : ompBackgroundLaunchJobId(toolName, details, isError);
+    if (launchedJobId !== undefined) {
+      this.backgroundJobs.set(sessionId, launchedJobId, { callId, toolName });
+    }
+    const call = lateCall ?? joinCall;
+    const own: IntermediateSessionEvent[] = [
+      ...(call === undefined ? [] : [call]),
+      ...(launchedJobId === undefined ? [evt] : []),
+    ];
+    const joined = this.joinBackgroundJobs(
+      completions,
+      sessionId,
+      timestamp,
+      causalRef,
+      metadata,
+      own.filter((event) => event.causalRef?.causalSequence === causalRef.causalSequence).length,
+    );
+    const events = [...own, ...joined];
+    if (events.length === 0) return null;
+    return events.length === 1 && events[0] === evt ? evt : events;
   }
 
   private normalizeCommandExec(

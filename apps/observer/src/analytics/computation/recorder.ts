@@ -181,7 +181,68 @@ interface PythonCell {
   sourceReference: string;
   requiredNames: string[];
   writtenNames: string[];
+  /**
+   * For each name the cell both read and (re)bound, the binding it read: a read-modify-write such as
+   * `rows += [x]`, or an in-place mutation that made this cell a new version of a shared binding.
+   * `undefined` records that nothing bound the name then.
+   */
+  prior: Map<string, PythonCell | undefined>;
   order: number;
+}
+
+/** The names one Python frame reads from, binds into and mutates in the persistent kernel. */
+function pythonFrameNames(local: ComputationParseLocal): {
+  written: Set<string>;
+  required: string[];
+  mutated: string[];
+} {
+  const written = new Set([
+    ...local.writtenNames,
+    ...local.imports.flatMap((entry) => entry.names),
+    ...local.definitions.map((entry) => entry.name),
+  ]);
+  const mutated = local.mutatedNames ?? [];
+  const read =
+    local.requiredNames === undefined
+      ? local.referencedNames.filter((name) => !written.has(name))
+      : local.requiredNames;
+  // A mutated binding is read: replaying the cell needs the object it changes.
+  return { written, required: [...new Set([...read, ...mutated])], mutated };
+}
+
+/**
+ * Every currently bound value name whose objects may be shared with `roots`: the connected component
+ * of names that recorded cells read or bound together, starting at the roots. Two names one cell
+ * touched may hold the same objects (`mine = [a for a in real]`), and so may two cells reading the
+ * same name. Imports and helper definitions do not connect values (a helper's global reads are
+ * attributed to the cells that call it), so they are neither followed nor returned.
+ */
+function pythonSharingComponent(
+  python: PythonKernelState,
+  kernel: KernelState,
+  roots: readonly string[],
+): string[] {
+  const lexical = new Set([
+    ...kernel.definitions.keys(),
+    ...[...kernel.imports.values()].flatMap((entry) => entry.names),
+  ]);
+  const names = new Set<string>();
+  const visited = new Set<PythonCell>();
+  const queue = roots.filter((name) => !lexical.has(name));
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    if (names.has(name)) continue;
+    names.add(name);
+    for (const cell of python.cells.values()) {
+      if (visited.has(cell)) continue;
+      if (!cell.requiredNames.includes(name) && !cell.writtenNames.includes(name)) continue;
+      visited.add(cell);
+      for (const touched of [...cell.requiredNames, ...cell.writtenNames]) {
+        if (!lexical.has(touched) && !names.has(touched)) queue.push(touched);
+      }
+    }
+  }
+  return [...names].filter((name) => python.bindings.has(name));
 }
 
 interface PythonKernelState {
@@ -1201,31 +1262,50 @@ export class ComputationEvidenceRecorder {
     const kernel = this.kernel(session, "python");
     const python = kernel.python;
     if (python === undefined) return;
-    const written = new Set([
-      ...prepared.local.writtenNames,
-      ...prepared.local.imports.flatMap((entry) => entry.names),
-      ...prepared.local.definitions.map((entry) => entry.name),
-    ]);
-    const required =
-      prepared.local.requiredNames === undefined
-        ? prepared.local.referencedNames.filter((name) => !written.has(name))
-        : prepared.local.requiredNames;
+    const { written, required, mutated } = pythonFrameNames(prepared.local);
+    // Objects the cell changed in place may be shared by every binding connected to them, so the
+    // cell becomes a new version of each such binding: a later reader then replays it after them.
+    const affected = mutated.length === 0 ? [] : pythonSharingComponent(python, kernel, mutated);
+    const reads = new Set([...required, ...affected]);
+    const writes = new Set([...written, ...affected]);
+    const prior = new Map<string, PythonCell | undefined>();
+    for (const name of reads) {
+      if (writes.has(name)) prior.set(detachedPrivateText(name), python.bindings.get(name));
+    }
     const cell: PythonCell = {
       callId,
       sourceEventId: prepared.sourceEventId,
       resultEventId,
       sourceReference,
-      requiredNames: required.map(detachedPrivateText),
-      writtenNames: [...written].map(detachedPrivateText),
+      requiredNames: [...reads].map(detachedPrivateText),
+      writtenNames: [...writes].map(detachedPrivateText),
+      prior,
       order: this.nextOrder++,
     };
     if (python.cells.size >= MAX_WORKFLOW_PYTHON_SETUP_CELLS) {
       // Do not leave a partially remembered closure after eviction: old setup cannot be trusted.
       this.clearPythonState(session, "python");
+      // The earlier versions this cell builds on were just forgotten with everything else.
+      for (const name of prior.keys()) prior.set(name, undefined);
     }
     python.cells.set(callId, cell);
-    for (const name of written) {
+    for (const name of writes) {
       python.bindings.set(name, cell);
+    }
+  }
+
+  /**
+   * A failed cell that mutated earlier objects in place may have done so partially. It cannot be
+   * replayed, so every binding that may share those objects is forgotten instead; unrelated
+   * bindings and helper definitions stay resolvable.
+   */
+  private forgetPythonMutation(session: RecordedSession, prepared: PreparedFrame): void {
+    const kernel = session.kernels.get("python");
+    const python = kernel?.python;
+    if (kernel === undefined || python === undefined) return;
+    const { mutated } = pythonFrameNames(prepared.local);
+    for (const name of pythonSharingComponent(python, kernel, mutated)) {
+      python.bindings.delete(name);
     }
   }
 
@@ -1241,20 +1321,24 @@ export class ComputationEvidenceRecorder {
     if (prepared.language !== "python" || prepared.executionScope === "file_observation") {
       return undefined;
     }
-    const written = new Set([
-      ...prepared.local.writtenNames,
-      ...prepared.local.imports.flatMap((entry) => entry.names),
-      ...prepared.local.definitions.map((entry) => entry.name),
-    ]);
-    const required =
-      prepared.local.requiredNames === undefined
-        ? prepared.local.referencedNames.filter((name) => !written.has(name))
-        : prepared.local.requiredNames;
+    const { required } = pythonFrameNames(prepared.local);
     const unresolved = new Set<string>();
     const selected = new Map<string, PythonCell>();
     const visiting = new Set<string>();
     const python =
       prepared.executionScope === "persistent" ? session.kernels.get("python")?.python : undefined;
+
+    /**
+     * The binding a setup cell read: the version it built on when it also rebinds the name, and
+     * never a later in-place version of what it read (that version replays after it on its own).
+     */
+    const bindingReadBy = (name: string, reader: PythonCell): PythonCell | undefined => {
+      let binding = reader.prior.has(name) ? reader.prior.get(name) : python?.bindings.get(name);
+      while (binding !== undefined && binding.order > reader.order && binding.prior.has(name)) {
+        binding = binding.prior.get(name);
+      }
+      return binding;
+    };
 
     const visitCell = (cell: PythonCell): void => {
       if (selected.has(cell.callId)) return;
@@ -1264,7 +1348,7 @@ export class ComputationEvidenceRecorder {
       }
       visiting.add(cell.callId);
       for (const name of cell.requiredNames) {
-        const dependency = python?.bindings.get(name);
+        const dependency = bindingReadBy(name, cell);
         if (dependency === undefined) {
           unresolved.add(name);
         } else {
@@ -1401,12 +1485,19 @@ export class ComputationEvidenceRecorder {
     if (prepared.executionScope !== "persistent") {
       return;
     }
+    // A Python frame's kernel effects are classified by the parser independently of whether its IR
+    // is complete (as on the success path), so an incomplete Python program alone resets nothing.
     if (
       prepared.local.invalidatesState ||
-      (prepared.observationKind === "invocation" && !prepared.program.complete)
+      (prepared.language !== "python" &&
+        prepared.observationKind === "invocation" &&
+        !prepared.program.complete)
     ) {
       this.resetKernel(session, prepared.language);
       return;
+    }
+    if (prepared.language === "python") {
+      this.forgetPythonMutation(session, prepared);
     }
     const kernel = session.kernels.get(prepared.language);
     if (kernel === undefined) {
@@ -1417,6 +1508,10 @@ export class ComputationEvidenceRecorder {
       ...prepared.local.definitions.map((definition) => definition.name),
       ...prepared.local.imports.flatMap((imported) => imported.names),
     ]);
+    // The failed cell may have rebound any of these before failing; it cannot be replayed.
+    for (const name of written) {
+      kernel.python?.bindings.delete(name);
+    }
     for (const name of Array.from(kernel.definitions.keys())) {
       if (written.has(name)) {
         this.dropDefinition(session, kernel, name);
