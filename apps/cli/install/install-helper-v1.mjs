@@ -15737,6 +15737,10 @@ var IpcClient = class {
   async gracefulShutdown(options) {
     return this.invoke("gracefulShutdown", options);
   }
+  /** `resin logout`: asks the daemon to withdraw everything observed so far from upload. */
+  async applySignOutBoundary() {
+    return this.invoke("applySignOutBoundary");
+  }
   /**
    * Closes the client connection.
    */

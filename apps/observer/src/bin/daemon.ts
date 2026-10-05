@@ -60,6 +60,7 @@ import {
   PrivateValueRetentionModule,
   daemonPrivateValueReferenceRoots,
 } from "../private-value-retention-module.js";
+import { SIGN_OUT_BOUNDARY_FILE_NAME, readSignOutBoundary } from "../sign-out-boundary.js";
 import { StateDbMaintenanceModule } from "../state-db-maintenance-module.js";
 import { narrowSafetyAttestationKeyMode, pruneStaleStateFiles } from "../state-hygiene.js";
 import {
@@ -94,6 +95,8 @@ const CloudPrivacyEnvelopeSchema = z.object({ privacy: CloudPrivacySettingsSchem
 export interface CloudTelemetryConsentOptions {
   credentialStore: Pick<CloudCredentialStore, "getRequestIdentity">;
   fetchImpl?: typeof fetch;
+  /** Receives the workspace of the credentials a returned snapshot was read with. */
+  onVerifiedWorkspace?: (workspaceId: string) => void;
 }
 
 /**
@@ -141,27 +144,17 @@ export async function readCloudTelemetryConsent(
     } catch {
       return null;
     }
-    const directSettings = CloudPrivacySettingsSchema.safeParse(body);
-    if (directSettings.success) {
-      return {
-        metadataTelemetryEnabled: directSettings.data.metadataTelemetryEnabled,
-        updatedAt: directSettings.data.updatedAt,
-      };
-    }
-    const settingsEnvelope = CloudPrivacySettingsEnvelopeSchema.safeParse(body);
-    if (settingsEnvelope.success) {
-      return {
-        metadataTelemetryEnabled: settingsEnvelope.data.settings.metadataTelemetryEnabled,
-        updatedAt: settingsEnvelope.data.settings.updatedAt,
-      };
-    }
-    const privacyEnvelope = CloudPrivacyEnvelopeSchema.safeParse(body);
-    if (!privacyEnvelope.success) {
+    const settings =
+      CloudPrivacySettingsSchema.safeParse(body).data ??
+      CloudPrivacySettingsEnvelopeSchema.safeParse(body).data?.settings ??
+      CloudPrivacyEnvelopeSchema.safeParse(body).data?.privacy;
+    if (!settings) {
       return null;
     }
+    options.onVerifiedWorkspace?.(identity.workspaceId);
     return {
-      metadataTelemetryEnabled: privacyEnvelope.data.privacy.metadataTelemetryEnabled,
-      updatedAt: privacyEnvelope.data.privacy.updatedAt,
+      metadataTelemetryEnabled: settings.metadataTelemetryEnabled,
+      updatedAt: settings.updatedAt,
     };
   }
   return null;
@@ -1204,11 +1197,21 @@ async function runForeground(options: {
     config.telemetryEnabled,
     Boolean(configRecoveryWarning),
   );
+  // Read before consent: an unchanged marker after a verified read means a login followed it.
+  const signOutBoundaryPath = path.join(paths.stateDir, SIGN_OUT_BOUNDARY_FILE_NAME);
+  const signOutBoundaryAtConsentRead = readSignOutBoundary(signOutBoundaryPath);
+  let verifiedWorkspaceId: string | null = null;
+  const consentOptions: CloudTelemetryConsentOptions = {
+    credentialStore,
+    onVerifiedWorkspace: (workspaceId) => {
+      verifiedWorkspaceId = workspaceId;
+    },
+  };
   let cloudConsent: RemoteTelemetryConsentSnapshot | null = deviceTelemetryEnabled
-    ? await readCloudTelemetryConsent({ credentialStore })
+    ? await readCloudTelemetryConsent(consentOptions)
     : null;
   const refreshCloudConsent = async (): Promise<RemoteTelemetryConsentSnapshot | null> => {
-    cloudConsent = await readCloudTelemetryConsent({ credentialStore });
+    cloudConsent = await readCloudTelemetryConsent(consentOptions);
     return cloudConsent;
   };
   const trajectoryCaptureModule = new TrajectoryCaptureRuntimeModule({
@@ -1220,6 +1223,9 @@ async function runForeground(options: {
     telemetryConsentUnknown: deviceTelemetryEnabled && cloudConsent === null,
     remoteTelemetryConsent: cloudConsent,
     refreshRemoteTelemetryConsent: refreshCloudConsent,
+    getVerifiedWorkspaceId: () => verifiedWorkspaceId,
+    signOutBoundaryPath,
+    signOutBoundaryAtConsentRead,
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
     uploadStatusPath: path.join(paths.stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME),
     captureWatermarkPath: path.join(paths.stateDir, CAPTURE_WATERMARK_FILE_NAME),
@@ -1337,6 +1343,10 @@ async function runForeground(options: {
     socketPath: paths.socketPath,
     logger,
     reloadConfig,
+    applySignOutBoundary: () => ({
+      applied: true,
+      persisted: trajectoryCaptureModule.applySignOutBoundary(),
+    }),
   });
   logger.info(`Starting Resin daemon in foreground (PID: ${process.pid})`);
 

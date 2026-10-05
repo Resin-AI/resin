@@ -1001,6 +1001,7 @@ describe("init onboarding & pairing workflow", () => {
       return await logoutCommand(["--home", home], {
         // SAFETY: Mock fetch implementing fetch interface for testing.
         customFetch: customFetch as typeof fetch,
+        notifyDaemon: async () => false,
       });
     });
 

@@ -40,6 +40,7 @@ import type {
 import { NormalizationPipeline } from "./normalization/pipeline.js";
 import type { JsonObject } from "./normalization/redaction.js";
 import { ensurePrivateDirectorySync } from "./private-fs.js";
+import { consumeSignOutBoundary, readSignOutBoundary } from "./sign-out-boundary.js";
 import { ObserverCoordinator } from "./tailing/coordinator.js";
 import { SourceCursorManager } from "./tailing/cursor-manager.js";
 
@@ -281,6 +282,29 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
   refreshRemoteTelemetryConsent?: () => Promise<RemoteTelemetryConsentSnapshot | null | undefined>;
 
   /**
+   * Workspace of the credentials behind the most recent verified consent snapshot. Read right
+   * after every verification: deliveries deferred while consent was unverifiable belong to the
+   * workspace capture was bound to, and are discarded (never uploaded) when the verified
+   * credentials belong to another workspace. Without it the bound workspace is never checked.
+   */
+  getVerifiedWorkspaceId?: () => string | null | undefined;
+
+  /**
+   * The `resin logout` marker (`SIGN_OUT_BOUNDARY_FILE_NAME` in the state directory). While it
+   * exists, every verified consent snapshot moves the privacy cutoff to the verification time;
+   * the first verification that started after the marker was written (credentials saved by a
+   * later `resin login`) consumes it.
+   */
+  signOutBoundaryPath?: string;
+
+  /**
+   * What `signOutBoundaryPath` held before `remoteTelemetryConsent` was read. When it is
+   * unchanged at construction, that verified read started after the logout, so construction
+   * consumes the marker; otherwise the next verification does.
+   */
+  signOutBoundaryAtConsentRead?: string | null;
+
+  /**
    * Owner-only checkpoint recording the latest privacy boundary across daemon restarts.
    */
   privacyCheckpointPath?: string;
@@ -364,6 +388,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private readonly privacyCheckpointPath?: string;
   private readonly captureWatermarkPath?: string;
   private readonly privateValueOwnerWorkspaceId: string | null;
+  private readonly getVerifiedWorkspaceIdFn?: () => string | null | undefined;
+  /** The workspace whose verified consent deferred deliveries wait for. */
+  private consentWorkspaceId: string | null;
+  private readonly signOutBoundaryPath?: string;
   /** Downtime catch-up boundary for the first start only; cleared once used or on consent change. */
   private pendingCatchUpFromMs?: number;
   private watermarkHeartbeat?: NodeJS.Timeout;
@@ -419,6 +447,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       (persistedCheckpoint?.version === 2 && persistedCheckpoint.remoteHistoryAvailable);
     this.captureWatermarkPath = options.captureWatermarkPath;
     this.privateValueOwnerWorkspaceId = options.privateValueOwnerWorkspaceId ?? null;
+    this.getVerifiedWorkspaceIdFn = options.getVerifiedWorkspaceId;
+    this.consentWorkspaceId = this.privateValueOwnerWorkspaceId;
+    this.signOutBoundaryPath = options.signOutBoundaryPath;
     // Only a run that ended with consent may extend capture into the downtime after it.
     const watermark =
       requestedTelemetryEnabled && persistedCheckpoint?.telemetryEnabled === true
@@ -440,6 +471,16 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     );
     if (options.remoteTelemetryConsent) {
       this.reconcileRemoteTelemetryConsent(options.remoteTelemetryConsent);
+      // Signed in after a `resin logout`: capture starts now and never reaches into the window.
+      const signOutBoundary = this.signOutBoundaryPath
+        ? readSignOutBoundary(this.signOutBoundaryPath)
+        : null;
+      if (this.signOutBoundaryPath && signOutBoundary !== null) {
+        this.advanceRemoteConsentCutoff(this.now());
+        if (signOutBoundary === options.signOutBoundaryAtConsentRead) {
+          consumeSignOutBoundary(this.signOutBoundaryPath, signOutBoundary);
+        }
+      }
     }
     // A consent change advances the privacy cutoff; the catch-up never reaches behind it.
     if (catchUpFromMs !== undefined && this.privacyCutoffMs < this.now()) {
@@ -876,6 +917,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     if (!this.refreshRemoteTelemetryConsentFn) {
       return false;
     }
+    const signOutBoundaryBefore = this.signOutBoundaryPath
+      ? readSignOutBoundary(this.signOutBoundaryPath)
+      : null;
     let snapshot: RemoteTelemetryConsentSnapshot | null;
     try {
       snapshot = (await this.refreshRemoteTelemetryConsentFn()) ?? null;
@@ -891,7 +935,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         subscribeToRecovery: (listener) => this.onConsentVerifiable(listener),
       });
     }
+    const checkpointHealthy = this.crossVerifiedIdentityBoundary(signOutBoundaryBefore);
     this.markConsentVerified();
+    if (!checkpointHealthy) {
+      return false;
+    }
 
     const reconciliation = this.reconcileRemoteTelemetryConsent(snapshot);
     if (reconciliation.cutoffAdvanced) {
@@ -900,12 +948,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     if (reconciliation.changed) {
       this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(this.telemetryEnabled);
       if (!this.privacyCheckpointHealthy) {
-        this.telemetryEnabled = false;
-        this.captureCoordinator.setTelemetryEnabled(false);
-        if (this.unsubscribeRecords) {
-          this.unsubscribeRecords();
-          this.unsubscribeRecords = undefined;
-        }
+        this.closeCaptureOnCheckpointFailure();
         return false;
       }
     }
@@ -919,6 +962,94 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     return recordTimestampMs.every(
       (timestampMs) => Number.isFinite(timestampMs) && timestampMs > this.remoteConsentCutoffMs,
     );
+  }
+
+  /** Closes both capture gates because the privacy checkpoint could not be persisted. */
+  private closeCaptureOnCheckpointFailure(): void {
+    this.telemetryEnabled = false;
+    this.captureCoordinator.setTelemetryEnabled(false);
+    if (this.unsubscribeRecords) {
+      this.unsubscribeRecords();
+      this.unsubscribeRecords = undefined;
+    }
+  }
+
+  /**
+   * Moves the privacy cutoff to now so nothing observed so far can leave the device: the
+   * coordinator drops its buffered batches, every delivery deferred while consent was
+   * unverifiable (in memory or in `auth-pending/`) is discarded when it is redelivered, the
+   * watermark goes so no restart catches up behind it, and the checkpoint keeps the cutoff across
+   * restarts. Returns whether the checkpoint was persisted; when it was not, capture is closed.
+   */
+  private withdrawObservedSoFar(): boolean {
+    this.advanceRemoteConsentCutoff(this.now());
+    this.captureCoordinator.setPrivacyCutoff(this.privacyCutoffMs);
+    this.pendingCatchUpFromMs = undefined;
+    this.clearCaptureWatermark();
+    this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(this.telemetryEnabled);
+    if (!this.privacyCheckpointHealthy) {
+      this.closeCaptureOnCheckpointFailure();
+    }
+    return this.privacyCheckpointHealthy;
+  }
+
+  /**
+   * Runs on every verified consent snapshot, before deferred deliveries resume. A `resin logout`
+   * since capture last verified consent, or verified credentials for a different workspace than
+   * the one deferred deliveries wait for, is a hard boundary ({@link withdrawObservedSoFar}). The
+   * logout marker is consumed only when it is unchanged since before this verification started:
+   * only then were the verifying credentials saved after the logout. Returns false when the
+   * boundary could not be persisted (capture is then closed).
+   */
+  private crossVerifiedIdentityBoundary(signOutBoundaryBefore: string | null): boolean {
+    const signOutBoundary = this.signOutBoundaryPath
+      ? readSignOutBoundary(this.signOutBoundaryPath)
+      : null;
+    const workspaceId = this.getVerifiedWorkspaceIdFn
+      ? (this.getVerifiedWorkspaceIdFn() ?? null)
+      : this.consentWorkspaceId;
+    if (signOutBoundary === null && workspaceId === this.consentWorkspaceId) {
+      return true;
+    }
+    this.logger?.info(
+      signOutBoundary === null
+        ? "Verified credentials belong to a different workspace; nothing observed before is uploaded"
+        : "Verified credentials after `resin logout`; nothing observed while signed out is uploaded",
+    );
+    this.consentWorkspaceId = workspaceId;
+    if (!this.withdrawObservedSoFar()) {
+      return false;
+    }
+    if (
+      this.signOutBoundaryPath &&
+      signOutBoundary !== null &&
+      signOutBoundary === signOutBoundaryBefore
+    ) {
+      consumeSignOutBoundary(this.signOutBoundaryPath, signOutBoundary);
+    }
+    return true;
+  }
+
+  /**
+   * `resin logout` reached this daemon: a hard privacy boundary in every daemon mode. Everything
+   * observed so far is withdrawn from upload ({@link withdrawObservedSoFar}) and the tailer
+   * redelivers its auth-deferred batches now, so they are discarded instead of waiting for a
+   * login. Capture keeps deferring while signed out; the logout's durable marker then moves the
+   * cutoff past the whole signed-out window at the next verification. Returns whether the
+   * boundary was persisted.
+   */
+  applySignOutBoundary(): boolean {
+    const persisted = this.withdrawObservedSoFar();
+    if (
+      "getTailer" in this.observerCoordinator &&
+      this.observerCoordinator.getTailer instanceof Function
+    ) {
+      this.observerCoordinator.getTailer().redeliverAuthDeferred();
+    }
+    this.logger?.info(
+      "Applied the `resin logout` privacy boundary; nothing observed so far will be uploaded",
+    );
+    return persisted;
   }
 
   /** Logs (once) and records that capture is suspended until consent can be verified. */
@@ -974,6 +1105,9 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   }
 
   private async pollConsentRecovery(): Promise<void> {
+    const signOutBoundaryBefore = this.signOutBoundaryPath
+      ? readSignOutBoundary(this.signOutBoundaryPath)
+      : null;
     let snapshot: RemoteTelemetryConsentSnapshot | null = null;
     try {
       snapshot = (await this.refreshRemoteTelemetryConsentFn?.()) ?? null;
@@ -982,6 +1116,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
     this.consentRecoveryTimer = undefined;
     if (snapshot) {
+      // The boundary moves before deferred deliveries resume, so they are re-filtered against it.
+      this.crossVerifiedIdentityBoundary(signOutBoundaryBefore);
       this.markConsentVerified();
     } else {
       this.scheduleConsentRecoveryPoll();

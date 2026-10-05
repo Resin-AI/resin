@@ -14,6 +14,7 @@ import type { JsonObject, JsonValue } from "../normalization/redaction.js";
 import type { ConfigReloadResult, DaemonSupervisor } from "../supervisor.js";
 import { FrameDecoder, encodeFrame } from "./framing.js";
 import {
+  type ApplySignOutBoundaryResult,
   type GetModuleStatusParams,
   type GracefulShutdownParams,
   type GracefulShutdownResult,
@@ -61,6 +62,11 @@ export interface IpcServerOptions {
   reloadConfig?: (
     config?: ReloadConfigParams["config"],
   ) => Promise<ConfigReloadResult | undefined | boolean | JsonObject>;
+  /**
+   * Applies the `resin logout` privacy boundary to trajectory capture. Without it the method
+   * answers `applied: false`.
+   */
+  applySignOutBoundary?: () => ApplySignOutBoundaryResult;
 }
 
 /**
@@ -102,6 +108,7 @@ export class IpcServer {
   private pipeServer: SecurePipeServer | null = null;
   private activeSockets = new Set<Duplex>();
   private readonly reloadConfigHandler?: IpcServerOptions["reloadConfig"];
+  private readonly applySignOutBoundaryHandler?: IpcServerOptions["applySignOutBoundary"];
   private reloadQueue: Promise<void> = Promise.resolve();
   private activeTransports = new Set<IpcTransport>();
   private isRunning = false;
@@ -111,6 +118,7 @@ export class IpcServer {
     this.socketPath = options.socketPath ?? options.supervisor.getPaths().socketPath;
     this.logger = options.logger;
     this.reloadConfigHandler = options.reloadConfig;
+    this.applySignOutBoundaryHandler = options.applySignOutBoundary;
   }
 
   get listening(): boolean {
@@ -413,6 +421,14 @@ export class IpcServer {
         const result: GracefulShutdownResult = {
           accepted: true,
           message: "Graceful shutdown initiated",
+        };
+        return result;
+      }
+
+      case "applySignOutBoundary": {
+        const result: ApplySignOutBoundaryResult = this.applySignOutBoundaryHandler?.() ?? {
+          applied: false,
+          persisted: false,
         };
         return result;
       }

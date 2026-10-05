@@ -10,6 +10,7 @@ import type {
 import { FrameDecoder, encodeFrame } from "./framing.js";
 import { openDaemonConnection } from "./pipe-trust.js";
 import {
+  type ApplySignOutBoundaryResult,
   type GetModuleStatusParams,
   type GracefulShutdownParams,
   type GracefulShutdownResult,
@@ -255,6 +256,11 @@ export class IpcClient {
 
   async gracefulShutdown(options?: GracefulShutdownParams): Promise<GracefulShutdownResult> {
     return this.invoke<GracefulShutdownParams, GracefulShutdownResult>("gracefulShutdown", options);
+  }
+
+  /** `resin logout`: asks the daemon to withdraw everything observed so far from upload. */
+  async applySignOutBoundary(): Promise<ApplySignOutBoundaryResult> {
+    return this.invoke<undefined, ApplySignOutBoundaryResult>("applySignOutBoundary");
   }
 
   /**

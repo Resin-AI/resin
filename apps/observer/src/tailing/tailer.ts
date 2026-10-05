@@ -585,16 +585,7 @@ export class TranscriptTailer extends EventEmitter {
             if (this.isClosed || this.sessions.get(context.session.sessionId) !== context) {
               return;
             }
-            context.authRecoveryUnsubscribe = undefined;
-            context.isAuthDegraded = false;
-            context.lastDeliveryError = undefined;
-            this.emit("auth:recovered", {
-              sessionId: context.session.sessionId,
-              pendingCount: context.queue.pendingCount,
-            });
-            context.queue.resume();
-            void this.dispatchQueue(context);
-            this.notifyProgress(context);
+            this.resumeAuthDeferred(context);
           });
           this.emit("auth:degraded", {
             sessionId: context.session.sessionId,
@@ -638,6 +629,40 @@ export class TranscriptTailer extends EventEmitter {
     } finally {
       if (context.inFlightDelivery === deliveryPromise) {
         context.inFlightDelivery = undefined;
+      }
+    }
+  }
+
+  /** Resumes delivery of a session's auth-deferred batches through the record handler. */
+  private resumeAuthDeferred(context: TailerSessionContext): void {
+    context.authRecoveryUnsubscribe?.();
+    context.authRecoveryUnsubscribe = undefined;
+    context.isAuthDegraded = false;
+    context.lastDeliveryError = undefined;
+    this.emit("auth:recovered", {
+      sessionId: context.session.sessionId,
+      pendingCount: context.queue.pendingCount,
+    });
+    context.queue.resume();
+    void this.dispatchQueue(context);
+    this.notifyProgress(context);
+  }
+
+  /**
+   * Redelivers every auth-deferred batch now instead of waiting for authentication to recover.
+   * A consumer that moved its privacy boundary past them (`resin logout`) acknowledges them
+   * without upload, which also removes their durable `auth-pending/` copy; anything it still
+   * cannot authorize is deferred again.
+   */
+  redeliverAuthDeferred(): void {
+    for (const context of this.sessions.values()) {
+      if (!context.isAuthDegraded) {
+        continue;
+      }
+      if (context.needsAuthRecoveryProbe) {
+        void this.dispatchQueue(context, true);
+      } else {
+        this.resumeAuthDeferred(context);
       }
     }
   }
