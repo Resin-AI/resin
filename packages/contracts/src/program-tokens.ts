@@ -1105,17 +1105,24 @@ function patchTokens(source: string): ProgramToken[] {
 
 /**
  * A program embedded in a shell command: a heredoc body an interpreter reads, a heredoc body written
- * to a script file a later command of the same text runs, or a `-c`/`-e` code string.
+ * to a script file a later command of the same text runs, a `-c`/`-e` code string, or a POSIX shell
+ * program another shell runs from one quoted word (see {@link embeddedShellProgram}).
  */
 export interface EmbeddedProgram {
-  /** Top-level shell token that anchors it: the -c/-e code string token, or the heredoc delimiter token. */
+  /** Top-level shell token that anchors it: the code string token, or the heredoc delimiter token. */
   anchor: number;
-  language: "python" | "javascript";
+  language: "python" | "javascript" | "shell";
   /** Half-open span of the embedded source inside the shell text. */
   start: number;
   end: number;
   /** How the embedded text sits in the shell source; decides the escaping a rendered value needs. */
   context: "literal-heredoc" | "expanding-heredoc" | "single-quoted" | "double-quoted";
+  /**
+   * A shell program `ssh` sends to the remote account's login shell, whose grammar the device cannot
+   * see: a value is rendered into it only when every common shell reads it as data (see
+   * {@link renderEmbeddedProgramTokenValue}).
+   */
+  remote?: true;
   /** tokenizeProgram(language, embeddedSource) with offsets made absolute in the shell text. */
   tokens: ProgramToken[];
 }
@@ -1384,14 +1391,171 @@ function inlineProgram(
   return undefined;
 }
 
+/** A POSIX shell's name: the shells whose `-c` string is a POSIX shell program. */
+const POSIX_SHELL_NAME = /^(?:ba|da|k|mk|a)?sh$/;
+/** A shell option cluster ending in `-c` with no option that takes a value (`-o`, `-O`). */
+const SHELL_CODE_FLAG = /^-[A-NP-Za-np-z]*c$/;
+/** OpenSSH options that take a value (its `getopt` string): in a cluster they take the rest. */
+const SSH_VALUE_OPTIONS = "BbcDEeFIiJLlmOoPpQRSWw";
+/** OpenSSH modes that run no remote shell command (`-N`, `-s` subsystem, `-W`, `-O`, `-G`, …). */
+const SSH_NON_COMMAND_OPTIONS = "GNOQsVW";
+/** `docker exec` / `podman exec` options: flag clusters, and options that take the next word. */
+const EXEC_FLAG_CLUSTER = /^-[dit]+$/;
+const EXEC_LONG_FLAGS: Record<string, true> = {
+  "--interactive": true,
+  "--tty": true,
+  "--detach": true,
+  "--privileged": true,
+};
+const EXEC_VALUE_OPTIONS: Record<string, true> = {
+  "-e": true,
+  "--env": true,
+  "--env-file": true,
+  "-u": true,
+  "--user": true,
+  "-w": true,
+  "--workdir": true,
+  "--detach-keys": true,
+};
+
+/** A plain unquoted word without expansion, as written. */
+function plainWord(token: ProgramToken | undefined): string | undefined {
+  return token?.kind === "word" && token.value === token.raw ? token.raw : undefined;
+}
+
+/**
+ * The span and quoting context of a code string token whose text, as written between its quotes,
+ * is exactly what the program receives: `'…'` with no `'`, or `"…"` with no `"`, `\`, `$` or `` ` ``.
+ */
+function literalCodeString(
+  code: ProgramToken,
+): { start: number; end: number; context: "single-quoted" | "double-quoted" } | undefined {
+  if (code.kind !== "string" || code.raw.length < 2 || typeof code.value !== "string") {
+    return undefined;
+  }
+  const quote = code.raw[0]!;
+  const content = code.raw.slice(1, -1);
+  if ((quote !== "'" && quote !== '"') || code.raw.at(-1) !== quote) return undefined;
+  if (content.includes(quote) || (quote === '"' && /[\\$`]/.test(content))) return undefined;
+  if (content !== code.value) return undefined;
+  return {
+    start: code.start + 1,
+    end: code.end - 1,
+    context: quote === "'" ? "single-quoted" : "double-quoted",
+  };
+}
+
+/**
+ * The POSIX shell program one simple command hands to another shell as one quoted word:
+ *
+ * - `sh|bash|dash|ksh|mksh|ash -c '<program>'` (a cluster ending in `c`, like `-lc`, too), run
+ *   directly or by `docker exec`/`podman exec [options] <container>`;
+ * - `ssh [options] <host> '<program>'`: ssh sends its one command word to the remote account's
+ *   login shell, which parses it. That shell is not seen from here, so the program is `remote`.
+ *
+ * Detection fails closed: the command must be written exactly so (no wrapper, no expansion in the
+ * command, shell, host or option words, no other command words for ssh), ssh must run a remote
+ * command (no `-N`, `-s`, `-W`, `-O`, …) and its command word may not read as an option, and the
+ * program's text must be the quoted word's literal content (see {@link literalCodeString}).
+ */
+function embeddedShellProgram(
+  source: string,
+  tokens: readonly ProgramToken[],
+  command: ShellSimpleCommand,
+): EmbeddedProgram | undefined {
+  const words = command.words;
+  let at = words.findIndex((index) => !SHELL_ASSIGNMENT.test(tokens[index]!.raw));
+  if (at === -1) return undefined;
+  const name = plainWord(tokens[words[at]!]);
+  const base = name?.slice(name.lastIndexOf("/") + 1);
+  let code: number | undefined;
+  let remote = false;
+  if (base === "ssh") {
+    at += 1;
+    for (; at < words.length; at += 1) {
+      const option = plainWord(tokens[words[at]!]);
+      if (option === undefined) return undefined;
+      if (option === "--") {
+        at += 1;
+        break;
+      }
+      if (option === "-") return undefined;
+      if (!option.startsWith("-")) break;
+      for (let position = 1; position < option.length; position += 1) {
+        const letter = option[position]!;
+        if (SSH_NON_COMMAND_OPTIONS.includes(letter)) return undefined;
+        if (SSH_VALUE_OPTIONS.includes(letter)) {
+          // The rest of the cluster is the value, or the next word is.
+          if (position === option.length - 1) at += 1;
+          break;
+        }
+      }
+    }
+    // The host, then exactly one command word.
+    if (at + 2 !== words.length || plainWord(tokens[words[at]!]) === undefined) return undefined;
+    code = words[at + 1]!;
+    remote = true;
+    // ssh reads options after the host too: a command word starting with `-` would be one.
+    if (String(tokens[code]!.value ?? "").startsWith("-")) return undefined;
+  } else {
+    if (base === "docker" || base === "podman") {
+      if (plainWord(tokens[words[at + 1]!]) !== "exec") return undefined;
+      at += 2;
+      for (; at < words.length; at += 1) {
+        const option = plainWord(tokens[words[at]!]);
+        if (option === undefined) return undefined;
+        if (!option.startsWith("-")) break;
+        if (EXEC_FLAG_CLUSTER.test(option) || EXEC_LONG_FLAGS[option]) continue;
+        if (EXEC_VALUE_OPTIONS[option]) {
+          at += 1;
+          continue;
+        }
+        if (EXEC_VALUE_OPTIONS[option.split("=")[0]!] && option.includes("=")) continue;
+        return undefined;
+      }
+      // The container, then the command it runs.
+      if (plainWord(tokens[words[at]!]) === undefined) return undefined;
+      at += 1;
+    }
+    const shell = plainWord(tokens[words[at]!]);
+    if (shell === undefined || !POSIX_SHELL_NAME.test(shell.slice(shell.lastIndexOf("/") + 1))) {
+      return undefined;
+    }
+    const flag = words[at + 1];
+    if (flag === undefined || !SHELL_CODE_FLAG.test(plainWord(tokens[flag]) ?? "")) {
+      return undefined;
+    }
+    code = words[at + 2];
+    if (code === undefined || code !== flag + 1) return undefined;
+  }
+  const literal = literalCodeString(tokens[code]!);
+  if (literal === undefined) return undefined;
+  const programTokens = embeddedTokens("shell", source, literal.start, literal.end);
+  if (programTokens === undefined) return undefined;
+  return {
+    anchor: code,
+    language: "shell",
+    start: literal.start,
+    end: literal.end,
+    context: literal.context,
+    ...(remote ? { remote: true as const } : {}),
+    tokens: programTokens,
+  };
+}
+
 /**
  * The programs embedded in a shell command: heredoc bodies fed to python or node, heredoc bodies
- * `cat`/`tee` save to a script file a later command of the same text runs, and `-c`/`-e` code
- * strings. Detection fails closed: a construct whose quoting, expansion or interpreter is not certain
- * yields nothing, a body saved to a file nothing runs is data and yields nothing, and a heredoc whose
- * body cannot be delimited ends the scan (everything after it would be guessed).
+ * `cat`/`tee` save to a script file a later command of the same text runs, `-c`/`-e` code
+ * strings, and the POSIX shell program of `sh -c '…'`, `docker exec c sh -c '…'` or `ssh host '…'`
+ * (see {@link embeddedShellProgram}). Detection fails closed: a construct whose quoting, expansion
+ * or interpreter is not certain yields nothing, a body saved to a file nothing runs is data and
+ * yields nothing, and a heredoc whose body cannot be delimited ends the scan (everything after it
+ * would be guessed).
  *
- * Top-level tokens are untouched; embedded tokens carry absolute offsets into `shellSource`.
+ * Top-level tokens are untouched — the code string of a shell program stays unbindable as a whole
+ * (see `code-evaluation.ts`) — and embedded tokens carry absolute offsets into `shellSource`. An
+ * embedded shell program's tokens are read by the same POSIX tokenizer, so its own evaluators and
+ * code strings bind nothing either; only one level is read.
  */
 export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
   const { tokens, body, heredocs, opaqueFrom } = analyzeShell(shellSource);
@@ -1478,19 +1642,49 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
   for (const each of commands) {
     const inline = inlineProgram(shellSource, tokens, each);
     if (inline !== undefined) programs.push(inline);
+    const shell = embeddedShellProgram(shellSource, tokens, each);
+    if (shell !== undefined) programs.push(shell);
   }
   return programs.sort((left, right) => left.start - right.start);
 }
 
 /**
+ * Characters of a value a remote program may take: letters, digits, space and `_ . / : = + , ~ -`.
+ * Quoted as the recorded token was, none of them is syntax in any common login shell (POSIX
+ * shells, fish, csh/tcsh, cmd.exe, PowerShell), so the value stays data whichever one parses it.
+ */
+const REMOTE_VALUE = /^[A-Za-z0-9 _./:=+,~-]*$/;
+
+/**
  * Renders a bound value for a token of an embedded program, escaped for the shell context the
  * program's text sits in. A heredoc value may not carry a newline: it could end the heredoc early.
+ *
+ * A value in an embedded shell program is rendered twice: as data for the inner shell (quoted as
+ * the recorded token was, by {@link renderProgramTokenValue}), then escaped for the quoted word that
+ * carries the program, so the outer shell hands the inner one exactly that text. It may not carry
+ * a NUL (an argument ends there), nor start with `-` where the recorded value did not (a command
+ * would read it as an option it never received). A remote program (`ssh`) is parsed by a shell the
+ * device cannot see, so its values are limited to {@link REMOTE_VALUE}.
  */
 export function renderEmbeddedProgramTokenValue(
   program: EmbeddedProgram,
   token: ProgramToken,
   value: ProgramTokenValue,
 ): string {
+  if (program.language === "shell") {
+    const text = typeof value === "string" ? value : String(value);
+    if (text.includes("\0")) throw new Error("a shell program value cannot contain a NUL");
+    if (text.startsWith("-") && !(typeof token.value === "string" && token.value.startsWith("-"))) {
+      throw new Error(
+        `value '${text}' looks like an option, which the recording never passed there`,
+      );
+    }
+    if (program.remote === true && !REMOTE_VALUE.test(text)) {
+      throw new Error(
+        "a value in a remote shell program may hold only letters, digits, spaces and _ . / : = + , ~ -",
+      );
+    }
+  }
   const rendered = renderProgramTokenValue(token, value, program.language);
   switch (program.context) {
     case "single-quoted":
