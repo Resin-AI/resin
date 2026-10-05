@@ -13,6 +13,7 @@ import {
   isPythonNamespaceMutatorName,
   isPythonReadOnlyOpenMode,
   isPythonReflectionName,
+  isPythonStatelessBuiltinName,
   parsePythonImportText,
   pythonBuiltinApi,
   pythonBuiltinMemberApi,
@@ -21,6 +22,11 @@ import {
   pythonMethodApi,
   pythonModuleApi,
 } from "./python-api.js";
+import {
+  type PythonKnownCallable,
+  type PythonRootKind,
+  analyzePythonStateEffects,
+} from "./python-state.js";
 import { draftSlot, draftSymbol } from "./types.js";
 import type {
   ComputationParseContext,
@@ -121,23 +127,43 @@ const PY_EXPRESSION_NAMES: Readonly<Record<string, true>> = {
   YieldExpression: true,
 };
 
-/** Methods whose receiver mutation cannot be replayed from a name-only closure safely. */
-const PYTHON_MUTATING_METHODS: Readonly<Record<string, true>> = {
-  add: true,
-  append: true,
-  clear: true,
-  discard: true,
-  difference_update: true,
-  extend: true,
-  insert: true,
-  pop: true,
-  remove: true,
-  reverse: true,
-  setdefault: true,
-  sort: true,
-  symmetric_difference_update: true,
-  update: true,
-};
+/** Builtins whose state-analysis meaning is fixed while their name is not rebound. */
+const PYTHON_BUILTIN_STATE_CALLABLES: ReadonlyMap<string, PythonKnownCallable> = new Map<
+  string,
+  PythonKnownCallable
+>(
+  (
+    [
+      "bool",
+      "bytes",
+      "dict",
+      "float",
+      "frozenset",
+      "int",
+      "list",
+      "set",
+      "sorted",
+      "str",
+      "tuple",
+    ] as const
+  ).map((name) => [name, name]),
+);
+
+/** Keywords that do not change whether `open(...)` can write: the file, mode and text decoding. */
+const OPEN_READ_KEYWORDS: ReadonlySet<string> = new Set([
+  "buffering",
+  "encoding",
+  "errors",
+  "file",
+  "mode",
+  "newline",
+]);
+
+/** `collections` members that construct a fresh container. */
+const PYTHON_COLLECTIONS_CONSTRUCTORS: ReadonlyMap<string, PythonKnownCallable> = new Map<
+  string,
+  PythonKnownCallable
+>((["Counter", "OrderedDict", "defaultdict", "deque"] as const).map((name) => [name, name]));
 
 function pyChildren(node: PyNode): PyNode[] {
   const children: PyNode[] = [];
@@ -354,6 +380,12 @@ class PythonFrameAnalyzer {
 
   private hasInvocation = false;
   private invalidatesState = false;
+  /** Earlier bindings this cell mutates in place through a known container path. */
+  private readonly mutatedRoots: string[] = [];
+  /** A mutation reached earlier state through a cell-local alias or call result. */
+  private mutatesThroughAlias = false;
+  /** Top-level imports authored in this frame, by bound name; `null` when two imports disagree. */
+  private readonly authoredImportOrigins = new Map<string, PyImportBinding | null>();
 
   constructor(source: string, context: ComputationParseContext | undefined) {
     this.source = source;
@@ -481,12 +513,25 @@ class PythonFrameAnalyzer {
         hasInvocation: this.hasInvocation,
         imports: this.localImports,
         invalidatesState: this.invalidatesState,
+        ...(this.invalidatesState ? {} : { mutatedNames: this.mutatedNames() }),
         referencedNames: this.referencedNames,
         requiredNames: this.requiredNames,
         writtenNames: this.writtenNames,
       },
       program: built.program,
     };
+  }
+
+  /**
+   * Earlier bindings this cell may have mutated in place. A mutation through a cell-local alias or a
+   * call result may reach anything the cell reads from earlier cells, so it names all of them.
+   */
+  private mutatedNames(): string[] {
+    const names = new Set(this.mutatedRoots);
+    if (this.mutatesThroughAlias) {
+      for (const name of this.requiredNames) names.add(name);
+    }
+    return [...names];
   }
 
   /**
@@ -704,7 +749,29 @@ class PythonFrameAnalyzer {
       if (statement.name === "ImportStatement") {
         const parsed = parsePythonImportText(this.text(statement));
         if (parsed !== undefined) {
-          for (const name of parsed.names) this.authoredImportNames.add(name);
+          for (const name of parsed.names) {
+            this.authoredImportNames.add(name);
+            const member = parsed.members[name];
+            const origin: PyImportBinding =
+              parsed.kind === "member"
+                ? { kind: "member", member: member ?? name, module: parsed.module }
+                : {
+                    kind: "module",
+                    member: member ?? parsed.module,
+                    module: member ?? parsed.module,
+                  };
+            const previous = this.authoredImportOrigins.get(name);
+            this.authoredImportOrigins.set(
+              name,
+              previous === undefined ||
+                (previous !== null &&
+                  previous.kind === origin.kind &&
+                  previous.module === origin.module &&
+                  previous.member === origin.member)
+                ? origin
+                : null,
+            );
+          }
         }
         continue;
       }
@@ -1071,205 +1138,121 @@ class PythonFrameAnalyzer {
     const argList = children.find((child) => child.name === "ArgList");
     return argList !== undefined && this.openModeIsReadOnly(argList);
   }
+  /**
+   * Classify this cell's module-level effects on kernel state (see `python-state.ts`). Opaque
+   * effects invalidate the whole kernel model; in-place mutation of earlier bindings through a known
+   * container path is reported by root name so the recorder can version only what it may affect.
+   */
   private detectStateMutation(): void {
-    const locallyConstructedMutableNames = new Set<string>();
-    const locallySafeUpdateNames = new Set<string>();
-    const isFreshMutableValue = (node: PyNode): boolean => {
-      if (node.name === "ParenthesizedExpression") {
-        const inner = pyContentChildren(node);
-        return inner.length === 1 && isFreshMutableValue(inner[0]!);
-      }
-      if (
-        node.name === "ArrayExpression" ||
-        node.name === "ArrayComprehensionExpression" ||
-        node.name === "DictionaryExpression" ||
-        node.name === "DictionaryComprehensionExpression" ||
-        node.name === "SetExpression" ||
-        node.name === "SetComprehensionExpression"
-      ) {
-        return true;
-      }
-      if (node.name !== "CallExpression") return false;
-      const callee = pyChildren(node)[0];
-      if (callee?.name !== "VariableName") return false;
+    const effects = analyzePythonStateEffects(this.tree.topNode, {
+      text: (node) => this.source.slice(node.from, node.to),
+      knownCallable: (callee) => this.knownStateCallable(callee as PyNode),
+      rootKind: (name) => this.stateRootKind(name),
+      isModuleAlias: (name) =>
+        this.stateImportOrigin(name)?.kind === "module" && this.stateRootKind(name) === "module",
+      isOpaqueCallee: (name, call) => this.isOpaqueStateCallee(name, call as PyNode),
+      isImmutableScalarCallee: (name) =>
+        (name === "int" || name === "float" || name === "str") && this.isUnshadowedBuiltin(name),
+    });
+    if (effects.opaque) {
+      this.invalidatesState = true;
+    }
+    this.mutatedRoots.push(...effects.mutatedRoots);
+    this.mutatesThroughAlias = effects.mutatesThroughAlias;
+  }
+
+  /** True when `name` still means the builtin: nothing in this cell or its context rebinds it. */
+  private isUnshadowedBuiltin(name: string): boolean {
+    return (
+      this.resolveBoundName(name, this.moduleScope) === undefined &&
+      !this.importBindings.has(name) &&
+      !this.authoredImportNames.has(name) &&
+      !this.moduleScope.defs.has(name) &&
+      !(this.context?.definitions ?? []).some((entry) => entry.name === name)
+    );
+  }
+
+  /**
+   * Where an import binding of `name` comes from, when every import that binds it in this cell or in
+   * the observed kernel agrees. Authored imports are read from the source because the visitor only
+   * records them while emitting, after this analysis runs.
+   */
+  private stateImportOrigin(name: string): PyImportBinding | undefined {
+    const inherited = this.importBindings.get(name);
+    const authored = this.authoredImportOrigins.get(name);
+    if (authored === null) return undefined;
+    if (inherited === undefined) return authored;
+    if (authored === undefined) return inherited;
+    return inherited.kind === authored.kind &&
+      inherited.module === authored.module &&
+      (inherited.member ?? inherited.module) === (authored.member ?? authored.module)
+      ? authored
+      : undefined;
+  }
+
+  private stateRootKind(name: string): PythonRootKind {
+    if (this.importBindings.has(name) || this.authoredImportNames.has(name)) return "module";
+    if (
+      this.moduleScope.defs.has(name) ||
+      (this.context?.definitions ?? []).some((entry) => entry.name === name)
+    ) {
+      return "definition";
+    }
+    return this.context?.preludeNames?.includes(name) === true ? "prelude" : "value";
+  }
+
+  /** The builtin or `collections` callable a callee provably names, for container ownership. */
+  private knownStateCallable(callee: PyNode): PythonKnownCallable | undefined {
+    if (callee.name === "VariableName") {
       const name = this.text(callee);
-      return (
-        (name === "list" || name === "dict" || name === "set") &&
-        this.resolveBoundName(name, this.moduleScope) === undefined &&
-        !this.importBindings.has(name) &&
-        !this.authoredImportNames.has(name) &&
-        !this.moduleScope.defs.has(name) &&
-        !(this.context?.definitions ?? []).some((entry) => entry.name === name)
-      );
-    };
-    const isKnownLocallyConstructedMutableValue = (node: PyNode): boolean => {
-      if (node.name === "ParenthesizedExpression") {
-        const inner = pyContentChildren(node);
-        return inner.length === 1 && isKnownLocallyConstructedMutableValue(inner[0]!);
-      }
-      return (
-        isFreshMutableValue(node) ||
-        (node.name === "VariableName" && locallyConstructedMutableNames.has(this.text(node)))
-      );
-    };
-    const isKnownImmutableUpdateValue = (node: PyNode): boolean => {
-      if (node.name === "ParenthesizedExpression") {
-        const inner = pyContentChildren(node);
-        return inner.length === 1 && isKnownImmutableUpdateValue(inner[0]!);
-      }
       if (
-        node.name === "Number" ||
-        node.name === "String" ||
-        node.name === "Boolean" ||
-        node.name === "None" ||
-        node.name === "TupleExpression"
+        this.resolveBoundName(name, this.moduleScope) !== undefined ||
+        this.stateRootKind(name) === "definition"
       ) {
-        return true;
+        return undefined;
       }
-      if (node.name === "VariableName") {
-        return locallySafeUpdateNames.has(this.text(node));
+      if (this.importBindings.has(name) || this.authoredImportNames.has(name)) {
+        const origin = this.stateImportOrigin(name);
+        const member = origin?.kind === "member" ? (origin.member ?? name) : undefined;
+        return origin?.module === "collections" && member !== undefined
+          ? PYTHON_COLLECTIONS_CONSTRUCTORS.get(member)
+          : undefined;
       }
-      if (node.name !== "CallExpression") return false;
-      const callee = pyChildren(node)[0];
-      if (callee?.name !== "VariableName") return false;
-      const name = this.text(callee);
-      return (
-        (name === "int" || name === "float" || name === "str") &&
-        this.resolveBoundName(name, this.moduleScope) === undefined &&
-        !this.importBindings.has(name) &&
-        !this.authoredImportNames.has(name)
-      );
-    };
-    const updateLocalBindings = (statement: PyNode, inBody: boolean): void => {
-      const children = pyChildren(statement);
-      const equalIndexes = children.flatMap((child, index) =>
-        child.name === "AssignOp" ? [index] : [],
-      );
-      if (equalIndexes.length === 0) return;
-      const valueNodes = children
-        .slice(equalIndexes[equalIndexes.length - 1]! + 1)
-        .filter(
-          (child) =>
-            PY_STRUCTURAL_TOKENS[child.name] !== true &&
-            child.name !== "Comment" &&
-            child.name !== "AssignOp",
-        );
-      const value = valueNodes.length === 1 ? valueNodes[0] : undefined;
-      const isMutable = value !== undefined && isKnownLocallyConstructedMutableValue(value);
-      const isSafeUpdate = value !== undefined && !isMutable && isKnownImmutableUpdateValue(value);
-      let start = 0;
-      for (const equalIndex of equalIndexes) {
-        const targets = this.assignmentTargetElements(children.slice(start, equalIndex));
-        const directTarget =
-          !inBody &&
-          equalIndexes.length === 1 &&
-          targets.length === 1 &&
-          targets[0]?.name === "VariableName";
-        for (const target of targets) {
-          for (const name of this.namesInTarget(target)) {
-            locallyConstructedMutableNames.delete(name);
-            locallySafeUpdateNames.delete(name);
-            if (directTarget && target.name === "VariableName") {
-              if (isMutable) locallyConstructedMutableNames.add(name);
-              else if (isSafeUpdate) locallySafeUpdateNames.add(name);
-            }
-          }
-        }
-        start = equalIndex + 1;
-      }
-    };
-    const visit = (node: PyNode, functionDepth: number, bodyDepth: number): void => {
-      if (node.name === "DeleteStatement" || node.name === "ScopeStatement") {
-        this.invalidatesState = true;
-      }
-      if (
-        functionDepth === 0 &&
-        (node.name === "AssignStatement" || node.name === "UpdateStatement")
-      ) {
-        if (node.name === "AssignStatement") {
-          updateLocalBindings(node, bodyDepth > 0);
-        }
-        // An augmented assignment is read-before-write. It is safe only when this source proves a
-        // local mutable container or immutable builtin value, not just a prior name assignment.
-        for (const target of this.assignmentTargetsOf(node)) {
-          if (target.name === "VariableName") {
-            const name = this.text(target);
-            if (
-              node.name === "UpdateStatement" &&
-              !locallyConstructedMutableNames.has(name) &&
-              !locallySafeUpdateNames.has(name)
-            ) {
-              this.invalidatesState = true;
-            }
-            continue;
-          }
-          const receiver = target.name === "MemberExpression" ? pyChildren(target)[0] : undefined;
-          if (
-            receiver?.name !== "VariableName" ||
-            !locallyConstructedMutableNames.has(this.text(receiver))
-          ) {
-            this.invalidatesState = true;
-          }
-        }
-      }
-      if (node.name === "ForStatement") {
-        const children = pyChildren(node);
-        const inIndex = children.findIndex((child) => child.name === "in");
-        for (const target of this.assignmentTargetElements(children.slice(0, inIndex))) {
-          for (const name of this.namesInTarget(target)) {
-            locallyConstructedMutableNames.delete(name);
-            locallySafeUpdateNames.delete(name);
-          }
-        }
-      }
-      if (node.name === "CallExpression") {
-        const children = pyChildren(node);
-        const callee = children[0];
-        if (functionDepth === 0 && callee?.name === "VariableName") {
-          const name = this.text(callee);
-          if (isPythonNamespaceMutatorName(name)) {
-            this.invalidatesState = true;
-          } else if (
-            !isPythonReflectionName(name) &&
-            pythonBuiltinApi(name) === undefined &&
-            pythonConstructorApi(name) === undefined &&
-            !isPythonBuiltinType(name) &&
-            !this.isReadOnlyOpenCall(node) &&
-            !this.importBindings.has(name) &&
-            !this.authoredImportNames.has(name) &&
-            !this.moduleScope.defs.has(name) &&
-            !(this.context?.definitions ?? []).some((entry) => entry.name === name) &&
-            this.context?.preludeNames?.includes(name) !== true
-          ) {
-            // A dynamically resolved callable may mutate interpreter state. It is not enough to
-            // keep the surrounding source: without a qualified observed definition this cell cannot
-            // safely seed future setup.
-            this.invalidatesState = true;
-          }
-        }
-        if (functionDepth === 0 && callee?.name === "MemberExpression") {
-          const calleeChildren = pyChildren(callee);
-          const receiver = calleeChildren[0];
-          const property = calleeChildren.find((child) => child.name === "PropertyName");
-          const receiverName = receiver?.name === "VariableName" ? this.text(receiver) : undefined;
-          if (
-            property !== undefined &&
-            PYTHON_MUTATING_METHODS[this.text(property)] === true &&
-            (receiverName === undefined || !locallyConstructedMutableNames.has(receiverName))
-          ) {
-            this.invalidatesState = true;
-          }
-        }
-      }
-      const childFunctionDepth =
-        functionDepth +
-        (node.name === "FunctionDefinition" || node.name === "LambdaExpression" ? 1 : 0);
-      const childBodyDepth = bodyDepth + (node.name === "Body" ? 1 : 0);
-      for (const child of pyChildren(node)) {
-        visit(child, childFunctionDepth, childBodyDepth);
-      }
-    };
-    visit(this.tree.topNode, 0, 0);
+      return PYTHON_BUILTIN_STATE_CALLABLES.get(name);
+    }
+    if (callee.name !== "MemberExpression") return undefined;
+    const [object, ...rest] = pyChildren(callee);
+    const property = rest.find((child) => child.name === "PropertyName");
+    if (object?.name !== "VariableName" || property === undefined) return undefined;
+    const alias = this.text(object);
+    const origin = this.stateImportOrigin(alias);
+    return this.resolveBoundName(alias, this.moduleScope) === undefined &&
+      origin?.kind === "module" &&
+      (origin.member ?? origin.module) === "collections"
+      ? PYTHON_COLLECTIONS_CONSTRUCTORS.get(this.text(property))
+      : undefined;
+  }
+
+  /**
+   * A module-level call to a bare name may run code the parser has not seen: anything that is not a
+   * builtin, an observed helper or import, or a harness prelude name. Namespace mutators
+   * (`setattr`, `globals`, `exec`, …) are always opaque.
+   */
+  private isOpaqueStateCallee(name: string, call: PyNode): boolean {
+    if (isPythonNamespaceMutatorName(name)) return true;
+    return (
+      !isPythonReflectionName(name) &&
+      pythonBuiltinApi(name) === undefined &&
+      pythonConstructorApi(name) === undefined &&
+      !isPythonBuiltinType(name) &&
+      !isPythonStatelessBuiltinName(name) &&
+      !this.isReadOnlyOpenCall(call) &&
+      !this.importBindings.has(name) &&
+      !this.authoredImportNames.has(name) &&
+      !this.moduleScope.defs.has(name) &&
+      !(this.context?.definitions ?? []).some((entry) => entry.name === name) &&
+      this.context?.preludeNames?.includes(name) !== true
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -1453,7 +1436,7 @@ class PythonFrameAnalyzer {
           return yieldNode;
         }
         case "DeleteStatement":
-          this.invalidatesState = true;
+          // Whether a `del` invalidates kernel state is decided by `detectStateMutation`.
           return this.unsupported("unsupported_hidden_state");
         case "ScopeStatement":
           this.invalidatesState = true;
@@ -2873,9 +2856,32 @@ class PythonFrameAnalyzer {
     ]);
   }
 
+  /**
+   * The mode is the second positional argument or `mode=`. Only the text-decoding keywords may
+   * accompany it (`open(path, errors="replace")`); any other keyword or `*`/`**` argument could change
+   * how the file is opened, so the call is never claimed as read-only.
+   */
   private openModeIsReadOnly(argList: PyNode): boolean {
     const groups = this.argumentGroups(argList);
-    const mode = groups[1]?.[0];
+    const keywordOf = (group: readonly PyNode[]): string | undefined =>
+      group[1]?.name === "AssignOp" && group[0]?.name === "VariableName"
+        ? this.text(group[0])
+        : undefined;
+    const positional = groups.filter((group) => keywordOf(group) === undefined);
+    if (
+      positional.some((group) => group[0]?.name === "*" || group[0]?.name === "**") ||
+      groups.some((group) => {
+        const keyword = keywordOf(group);
+        return keyword !== undefined && !OPEN_READ_KEYWORDS.has(keyword);
+      })
+    ) {
+      return false;
+    }
+    const mode = positional[1]?.[0] ?? groups.find((group) => keywordOf(group) === "mode")?.[2];
+    if (positional.length > 6) {
+      // `closefd` and `opener` follow `newline`.
+      return false;
+    }
     if (mode === undefined) {
       return true;
     }
@@ -3230,6 +3236,7 @@ class PythonFrameAnalyzer {
       name === "open" ||
       pythonBuiltinApi(name) !== undefined ||
       pythonConstructorApi(name) !== undefined ||
+      isPythonStatelessBuiltinName(name) ||
       isPythonReflectionName(name) ||
       this.context?.preludeNames?.includes(name) === true ||
       this.requiredNameSet.has(name)
