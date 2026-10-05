@@ -1,11 +1,22 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { InvocationRecord } from "@resin/contracts";
 import { type LocalStateStore, createInMemoryStateStore } from "@resin/db";
 import { ProtocolError, type TelemetryBatchResponse } from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InvocationTelemetryUploader } from "../../src/analytics/invocation-telemetry-uploader.js";
+import {
+  InvocationTelemetryUploader,
+  type InvocationUploadIdentity,
+} from "../../src/analytics/invocation-telemetry-uploader.js";
 import { ResourceForbiddenError } from "../../src/auth-recovery.js";
 import type { CloudObservationClient, SendTelemetryBatchInput } from "../../src/cloud-runtime.js";
 import type { Logger } from "../../src/lifecycle.js";
+import {
+  SIGN_OUT_BOUNDARY_FILE_NAME,
+  readSignOutBoundary,
+  writeSignOutBoundary,
+} from "../../src/sign-out-boundary.js";
 
 function makeInvocation(
   overrides: Partial<InvocationRecord> & { invocationId: string; workspaceId: string },
@@ -532,5 +543,115 @@ describe("InvocationTelemetryUploader", () => {
       await uploader.flushOnce();
     }
     expect(store.audit.listPendingInvocationUploads(10)).toHaveLength(1);
+  });
+
+  describe("identity boundary", () => {
+    const LOGOUT_AT = "2026-08-27T12:00:00.000Z";
+    const LOGIN_AT = "2026-08-27T13:00:00.000Z";
+    const marker = JSON.stringify({ version: 1, id: "logout-1", signedOutAt: LOGOUT_AT });
+    let stateDir: string;
+    let identity: InvocationUploadIdentity | null;
+    let sent: string[];
+
+    const cloudClient = () =>
+      ({
+        sendTelemetryBatch: vi.fn(async (input: SendTelemetryBatchInput) => {
+          sent.push(...input.invocations.map((invocation) => invocation.invocationId));
+          return { batchId: "tb", status: "accepted", processedCount: input.invocations.length };
+        }),
+      }) as unknown as CloudObservationClient;
+
+    const uploader = () =>
+      new InvocationTelemetryUploader({
+        auditRepository: store.audit,
+        cloudClient: cloudClient(),
+        logger: mockLogger,
+        currentIdentity: async () => identity,
+        identityStatePath: path.join(stateDir, "invocation-upload-identity.json"),
+        signOutBoundaryPath: path.join(stateDir, SIGN_OUT_BOUNDARY_FILE_NAME),
+      });
+
+    const record = (invocationId: string, startedAt: string) =>
+      store.audit.recordInvocation(
+        makeInvocation({ invocationId, workspaceId: "ws_local", startedAt }),
+      );
+
+    beforeEach(() => {
+      stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-invocation-identity-"));
+      identity = { workspaceId: "ws_cloud_a", storedAt: "2026-08-27T09:00:00.000Z" };
+      sent = [];
+    });
+
+    afterEach(() => {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    it("never uploads rows recorded before a logout or while signed out, to any workspace", async () => {
+      const first = uploader();
+      await first.flushOnce();
+      await record("inv_before_logout", "2026-08-27T11:00:00.000Z");
+
+      // `resin logout`: the credentials are purged and the daemon is signalled.
+      identity = null;
+      expect(first.applySignOutBoundary(marker)).toBe(true);
+      expect(store.audit.listPendingInvocationUploads(10)).toEqual([]);
+      await record("inv_signed_out", "2026-08-27T12:30:00.000Z");
+      expect(await first.flushOnce()).toEqual({ uploaded: 0 });
+
+      // Credentials that predate the logout (a stale read) never carry the backlog.
+      identity = { workspaceId: "ws_cloud_a", storedAt: "2026-08-27T09:00:00.000Z" };
+      expect(await first.flushOnce()).toEqual({ uploaded: 0 });
+      expect(sent).toEqual([]);
+
+      // A later login, to another workspace, after a daemon restart.
+      await record("inv_after_login", "2026-08-27T13:30:00.000Z");
+      identity = { workspaceId: "ws_cloud_b", storedAt: LOGIN_AT };
+      const restarted = uploader();
+      expect(await restarted.flushOnce()).toEqual({ uploaded: 1 });
+      expect(sent).toEqual(["inv_after_login"]);
+      expect(store.audit.listPendingInvocationUploads(10)).toEqual([]);
+    });
+
+    it("applies a logout the daemon missed from the marker, once", async () => {
+      await uploader().flushOnce();
+      await record("inv_before_logout", "2026-08-27T11:00:00.000Z");
+      await record("inv_signed_out", "2026-08-27T12:30:00.000Z");
+      writeSignOutBoundary(stateDir);
+      const written = readSignOutBoundary(path.join(stateDir, SIGN_OUT_BOUNDARY_FILE_NAME));
+      expect(written).not.toBeNull();
+      const loginAt = new Date(Date.now() + 60_000).toISOString();
+      identity = { workspaceId: "ws_cloud_a", storedAt: loginAt };
+      const later = new Date(Date.now() + 120_000).toISOString();
+
+      const running = uploader();
+      expect(await running.flushOnce()).toEqual({ uploaded: 0 });
+      // The marker stays until the capture module consumes it; rows recorded after the login
+      // are not withheld again by the same logout.
+      await record("inv_after_login", later);
+      expect(await running.flushOnce()).toEqual({ uploaded: 1 });
+      expect(sent).toEqual(["inv_after_login"]);
+    });
+
+    it("withholds the backlog from a different workspace but keeps it across credential loss", async () => {
+      const running = uploader();
+      await running.flushOnce();
+
+      // Credentials lost without a logout, then restored for the same workspace.
+      identity = null;
+      await record("inv_during_loss", "2026-08-27T11:00:00.000Z");
+      expect(await running.flushOnce()).toEqual({ uploaded: 0 });
+      identity = { workspaceId: "ws_cloud_a", storedAt: LOGIN_AT };
+      expect(await running.flushOnce()).toEqual({ uploaded: 1 });
+      expect(sent).toEqual(["inv_during_loss"]);
+
+      // Lost again, then signed in to another workspace: the old backlog stays local.
+      identity = null;
+      await record("inv_workspace_a", "2026-08-27T14:00:00.000Z");
+      identity = { workspaceId: "ws_cloud_b", storedAt: "2026-08-27T15:00:00.000Z" };
+      await record("inv_workspace_b", "2026-08-27T15:30:00.000Z");
+      expect(await running.flushOnce()).toEqual({ uploaded: 1 });
+      expect(sent).toEqual(["inv_during_loss", "inv_workspace_b"]);
+      expect(store.audit.listPendingInvocationUploads(10)).toEqual([]);
+    });
   });
 });

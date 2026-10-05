@@ -12,13 +12,17 @@
  *   when the code under test swallowed the error;
  * - gives children started with an explicit `env` that names neither `HOME` nor `RESIN_HOME` the
  *   worker's `HOME`, so they do not fall back to the password-database home;
- * - protects and then removes inherited directory overrides of the Resin home layout
- *   (`RESIN_DATA_DIR`, `RESIN_STATE_DIR`, ...), which would otherwise point default paths at the
- *   developer's installation whatever `HOME` says.
+ * - protects and then removes inherited overrides of the Resin home layout (`RESIN_DATA_DIR`,
+ *   `RESIN_STATE_DIR`, ..., and the file overrides `RESIN_SOCKET_PATH`, `RESIN_CONFIG_FILE`,
+ *   `RESIN_LOCK_FILE`, `RESIN_PID_FILE`), which would otherwise point default paths at the
+ *   developer's installation whatever `HOME` says;
+ * - refuses socket connects to a path under a protected root, so IPC tests cannot reach the
+ *   developer's live daemon (`~/.resin/state/daemon.sock` or an inherited `RESIN_SOCKET_PATH`).
  */
 import childProcess from "node:child_process";
 import fs from "node:fs";
 import { registerHooks, syncBuiltinESMExports } from "node:module";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +31,21 @@ import { afterEach } from "vitest";
 
 const PATCHED = Symbol.for("resin.test.realHomeGuardPatched");
 
-function protectedRoots(): string[] {
+/** Overrides of the Resin home layout that default paths honour. */
+const RESIN_LAYOUT_OVERRIDES = [
+  "RESIN_CONFIG_DIR",
+  "RESIN_DATA_DIR",
+  "RESIN_STATE_DIR",
+  "RESIN_LOG_DIR",
+  "RESIN_STORAGE_DIR",
+  "RESIN_SOCKET_PATH",
+  "RESIN_CONFIG_FILE",
+  "RESIN_LOCK_FILE",
+  "RESIN_PID_FILE",
+] as const;
+
+/** The developer's Resin roots implied by `env` and the password-database `homedir`. */
+export function resinRootsFor(env: NodeJS.ProcessEnv, homedir: string): string[] {
   const roots = new Set<string>();
   const add = (candidate: string | undefined) => {
     if (!candidate?.trim()) return;
@@ -39,34 +57,29 @@ function protectedRoots(): string[] {
       // A root that does not exist yet is still protected by its resolved spelling.
     }
   };
-  add(path.join(os.userInfo().homedir, ".resin"));
-  // A RESIN_HOME inherited from the developer's shell is their installation too.
-  add(process.env.RESIN_HOME);
-  for (const name of RESIN_DIRECTORY_OVERRIDES) add(process.env[name]);
+  add(path.join(homedir, ".resin"));
+  // A RESIN_HOME inherited from the developer's shell is their installation too, and so are the
+  // directories and files its layout overrides name.
+  add(env.RESIN_HOME);
+  for (const name of RESIN_LAYOUT_OVERRIDES) add(env[name]);
   return [...roots];
 }
 
-/** Per-directory overrides of the Resin home layout that default paths honour. */
-const RESIN_DIRECTORY_OVERRIDES = [
-  "RESIN_CONFIG_DIR",
-  "RESIN_DATA_DIR",
-  "RESIN_STATE_DIR",
-  "RESIN_LOG_DIR",
-  "RESIN_STORAGE_DIR",
-] as const;
-
 /** The real user's Resin roots this worker refuses to write. */
-export const REAL_RESIN_ROOTS: readonly string[] = protectedRoots();
+export const REAL_RESIN_ROOTS: readonly string[] = resinRootsFor(
+  process.env,
+  os.userInfo().homedir,
+);
 
-/** Removes the Resin layout directory overrides from `env`, returning the names it removed. */
-export function stripResinDirectoryOverrides(env: NodeJS.ProcessEnv): string[] {
-  const names = RESIN_DIRECTORY_OVERRIDES.filter((name) => Object.hasOwn(env, name));
+/** Removes the Resin layout overrides from `env`, returning the names it removed. */
+export function stripResinLayoutOverrides(env: NodeJS.ProcessEnv): string[] {
+  const names = RESIN_LAYOUT_OVERRIDES.filter((name) => Object.hasOwn(env, name));
   for (const name of names) delete env[name];
   return names;
 }
 
 // Default paths then derive from the isolated HOME; a test that wants an override sets its own.
-stripResinDirectoryOverrides(process.env);
+stripResinLayoutOverrides(process.env);
 
 const violations: string[] = [];
 
@@ -251,6 +264,29 @@ function wrapChild(name: string): void {
   Reflect.set(childProcess, name, wrapped);
 }
 
+/** The IPC path a `net.Socket#connect` call dials, if it dials one rather than a TCP port. */
+export function socketConnectPath(args: readonly unknown[]): string | undefined {
+  // `net.connect(...)` passes its normalized arguments to `Socket#connect` as one array.
+  const first = Array.isArray(args[0]) ? args[0][0] : args[0];
+  if (typeof first === "string") return /^\d+$/.test(first) ? undefined : first;
+  if (first !== null && typeof first === "object" && "path" in first) {
+    return typeof first.path === "string" ? first.path : undefined;
+  }
+  return undefined;
+}
+
+function wrapSocketConnect(): void {
+  const prototype = net.Socket.prototype;
+  const original = prototype.connect as AnyFunction;
+  Reflect.set(prototype, "connect", function (this: net.Socket, ...args: unknown[]) {
+    const error = guardError("connect", socketConnectPath(args));
+    if (!error) return original.apply(this, args);
+    // Fail the way an unreachable socket does, so callers see an ordinary `error` event.
+    process.nextTick(() => this.destroy(error));
+    return this;
+  });
+}
+
 if (!Reflect.get(fs, PATCHED)) {
   for (const name of [...Object.keys(MUTATORS), "open", "createWriteStream"]) {
     wrapSync(fs, name);
@@ -269,6 +305,7 @@ if (!Reflect.get(fs, PATCHED)) {
   ]) {
     wrapChild(name);
   }
+  wrapSocketConnect();
   Reflect.set(fs, PATCHED, true);
   // Named ESM imports (`import { writeFileSync } from "node:fs"`) see the wrappers too.
   syncBuiltinESMExports();

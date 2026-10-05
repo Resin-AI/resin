@@ -2295,6 +2295,14 @@ const RELEASE_TARBALL_FILENAME =
 /** Deno runtime archives: per-target release assets and the older `deno-<version>.zip` name. */
 const DENO_ARCHIVE_FILENAME =
   /^deno-(?:\d+\.\d+\.\d+|(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin|pc-windows-msvc))\.zip$/u;
+/** `<asset>.<pid>.<uuid>.download.tmp`, a downloadReleaseAsset partial file (see above). */
+const DOWNLOAD_TEMP_FILENAME =
+  /^(.+)\.(\d+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.download\.tmp$/u;
+/**
+ * A writer renames or removes its partial file moments after creating it (the download is already
+ * in memory), so one this old was left by a crash or SIGKILL.
+ */
+export const STALE_DOWNLOAD_TEMP_MS = 60 * 60 * 1000;
 
 export interface PruneDownloadedReleaseAssetsOptions {
   readonly resinHome: string;
@@ -2303,18 +2311,52 @@ export interface PruneDownloadedReleaseAssetsOptions {
   /** The Deno archive the active release installed from; other Deno archives are pruned only when set. */
   readonly currentDenoFilename?: string;
   readonly logger?: (message: string) => void;
+  /** Test seams for crash-left partial downloads. */
+  readonly now?: number;
+  readonly isProcessAlive?: (pid: number) => boolean;
+}
+
+/** Whether `pid` still runs; EPERM means it runs under another user. */
+function writerProcessAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
+
+/**
+ * Whether `name` is a crash-left partial download of a release asset: older than
+ * {@link STALE_DOWNLOAD_TEMP_MS} and written by a process that no longer runs.
+ */
+function isStaleDownloadTemp(
+  name: string,
+  mtimeMs: number,
+  now: number,
+  processAlive: (pid: number) => boolean,
+): boolean {
+  const match = DOWNLOAD_TEMP_FILENAME.exec(name);
+  if (!match) return false;
+  const [, asset = "", pid = ""] = match;
+  if (!RELEASE_TARBALL_FILENAME.test(asset) && !DENO_ARCHIVE_FILENAME.test(asset)) return false;
+  return now - mtimeMs >= STALE_DOWNLOAD_TEMP_MS && !processAlive(Number(pid));
 }
 
 /**
  * Removes downloaded release tarballs and Deno archives under <resinHome>/downloads that belong
- * to no retained version. They are only installer input: every install downloads afresh. Files
- * outside the known release asset names are never touched. Failures are logged, never thrown.
+ * to no retained version, and partial downloads a crashed writer left behind. They are only
+ * installer input: every install downloads afresh. Files outside the known release asset names
+ * are never touched. Failures are logged, never thrown.
  */
 export async function pruneDownloadedReleaseAssets(
   options: PruneDownloadedReleaseAssetsOptions,
 ): Promise<PruneInstalledVersionsResult> {
   const { resinHome } = options;
   const log = options.logger ?? (() => {});
+  const now = options.now ?? Date.now();
+  const processAlive = options.isProcessAlive ?? writerProcessAlive;
   const downloadsDir = path.resolve(resinHome, "downloads");
   const removed: string[] = [];
   const failed: string[] = [];
@@ -2336,11 +2378,17 @@ export async function pruneDownloadedReleaseAssets(
   for (const entry of fs.readdirSync(downloadsDir, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const tarballVersion = RELEASE_TARBALL_FILENAME.exec(entry.name)?.[1];
-    const prunable = tarballVersion
+    let prunable = tarballVersion
       ? !retained.has(`v${tarballVersion}`)
       : options.currentDenoFilename !== undefined &&
         entry.name !== options.currentDenoFilename &&
         DENO_ARCHIVE_FILENAME.test(entry.name);
+    if (!prunable && entry.name.endsWith(".download.tmp")) {
+      const stats = lstatIfExists(path.join(downloadsDir, entry.name), fs);
+      prunable =
+        stats?.isFile() === true &&
+        isStaleDownloadTemp(entry.name, stats.mtimeMs, now, processAlive);
+    }
     if (!prunable) continue;
     try {
       await fsPromises.rm(path.join(downloadsDir, entry.name), { force: true });
