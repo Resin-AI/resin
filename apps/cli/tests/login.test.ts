@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type Mock, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { main } from "../src/bin/cli.js";
 import {
@@ -758,6 +758,193 @@ describe("performPairing reuse and rollback", () => {
     }
     const content = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
     expect(content.accessToken).toBe("pre-existing-access-token");
+  });
+
+  describe("saved sign-in with an expired access token", () => {
+    const expiredClaims = () => ({
+      accountId: "acc_expired_01",
+      workspaceId: "ws_expired_01",
+      deviceId: "dev_expired_01",
+      installationId: "inst_expired_01",
+      userId: "usr_expired_01",
+      subject: "usr_expired_01",
+      scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+      rawUploadConsent: false,
+      issuedAt: new Date(Date.now() - 7_200_000).toISOString(),
+      expiresAt: new Date(Date.now() - 3_600_000).toISOString(),
+      tokenType: "access",
+    });
+    const jwt = (payload: object) =>
+      `${Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url")}.${Buffer.from(
+        JSON.stringify(payload),
+      ).toString("base64url")}.mock-signature`;
+
+    async function writeExpiredCredential(): Promise<string> {
+      const tokenFilePath = path.join(home, ".resin", "state", "device-token.json");
+      await fs.mkdir(path.dirname(tokenFilePath), { recursive: true });
+      await fs.writeFile(
+        tokenFilePath,
+        JSON.stringify({
+          accessToken: "expired-access-token",
+          refreshToken: "saved-refresh-family",
+          cloudUrl: "https://api.resin.sh",
+          deviceId: "dev_expired_01",
+          workspaceId: "ws_expired_01",
+          storedAt: new Date(Date.now() - 7_200_000).toISOString(),
+          claims: expiredClaims(),
+        }),
+      );
+      return tokenFilePath;
+    }
+
+    /** Answers the refresh endpoint with `refreshAnswer` and the device flow like the cloud. */
+    function refreshFetch(refreshAnswer: () => Response): Mock<typeof fetch> {
+      const deviceFlow = successfulDeviceFetch();
+      return vi.fn<typeof fetch>(async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        return url.endsWith("/v1/auth/token/refresh") ? refreshAnswer() : deviceFlow(input, init);
+      });
+    }
+
+    function rotatedAnswer(): Response {
+      const claims = {
+        ...expiredClaims(),
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      };
+      return Response.json({
+        accessToken: jwt(claims),
+        refreshToken: "rotated-refresh-family",
+        tokenType: "Bearer",
+        expiresIn: 3600,
+        claims,
+      });
+    }
+
+    const calledUrls = (fetchMock: Mock<typeof fetch>) =>
+      fetchMock.mock.calls.map(([input]) => String(input));
+
+    it("init renews the saved family instead of pairing a new device", async () => {
+      const tokenFilePath = await writeExpiredCredential();
+      const customFetch = refreshFetch(rotatedAnswer);
+      const openBrowser = vi.fn(async () => true);
+
+      const mutation = await performPairing({
+        home,
+        cloudUrl: "https://api.resin.sh",
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
+        openBrowser,
+        restartService: false,
+      });
+
+      expect(mutation).toMatchObject({
+        paired: true,
+        reused: true,
+        accountId: "acc_expired_01",
+        deviceId: "dev_expired_01",
+      });
+      expect(calledUrls(customFetch)).toEqual(["https://api.resin.sh/v1/auth/token/refresh"]);
+      expect(openBrowser).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
+      expect(onDisk.refreshToken).toBe("rotated-refresh-family");
+
+      // Rollback must never resurrect the spent pre-refresh token.
+      await mutation.rollback?.();
+      expect(JSON.parse(await fs.readFile(tokenFilePath, "utf8")).refreshToken).toBe(
+        "rotated-refresh-family",
+      );
+    });
+
+    it("init pairs a new device once the cloud revoked the saved family", async () => {
+      await writeExpiredCredential();
+      const customFetch = refreshFetch(() =>
+        Response.json(
+          { error: "invalid_grant", error_description: "Token family has been revoked" },
+          { status: 400 },
+        ),
+      );
+
+      const mutation = await performPairing({
+        home,
+        cloudUrl: "https://api.resin.sh",
+        // SAFETY: Mock fetch function implementing fetch interface for testing.
+        customFetch: customFetch as typeof fetch,
+        openBrowser: () => false,
+        stdout: { write: () => true },
+        restartService: false,
+      });
+
+      expect(mutation).toMatchObject({ paired: true, reused: false, accountId: "acc_live_01" });
+      expect(calledUrls(customFetch)).toContain("https://api.resin.sh/v1/auth/device/code");
+    });
+
+    it("init keeps the saved sign-in and does not pair when the cloud is unavailable", async () => {
+      const tokenFilePath = await writeExpiredCredential();
+      const customFetch = refreshFetch(() =>
+        Response.json({ error: "temporarily_unavailable" }, { status: 503 }),
+      );
+      const openBrowser = vi.fn(async () => true);
+
+      await expect(
+        performPairing({
+          home,
+          cloudUrl: "https://api.resin.sh",
+          // SAFETY: Mock fetch function implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+          restartService: false,
+        }),
+      ).rejects.toThrow("The saved sign-in was kept");
+
+      expect(calledUrls(customFetch)).toEqual(["https://api.resin.sh/v1/auth/token/refresh"]);
+      expect(openBrowser).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
+      expect(onDisk.refreshToken).toBe("saved-refresh-family");
+    });
+
+    it("standalone login renews the saved family without a browser", async () => {
+      const tokenFilePath = await writeExpiredCredential();
+      const customFetch = refreshFetch(rotatedAnswer);
+      const openBrowser = vi.fn(async () => true);
+
+      const result = await captureOutput(() =>
+        loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
+          // SAFETY: Mock fetch function implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(calledUrls(customFetch)).toEqual(["https://api.resin.sh/v1/auth/token/refresh"]);
+      expect(openBrowser).not.toHaveBeenCalled();
+      expect(result.stdout).toContain("acc_expired_01");
+      expect(result.stdout).not.toContain("rotated-refresh-family");
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
+      expect(onDisk.refreshToken).toBe("rotated-refresh-family");
+    });
+
+    it("standalone login fails without pairing when the cloud is unavailable", async () => {
+      const tokenFilePath = await writeExpiredCredential();
+      const customFetch = refreshFetch(() => new Response("<html>502</html>", { status: 502 }));
+      const openBrowser = vi.fn(async () => true);
+
+      const result = await captureOutput(() =>
+        loginCommand(["--home", home, "--cloud-url", "https://api.resin.sh"], {
+          // SAFETY: Mock fetch function implementing fetch interface for testing.
+          customFetch: customFetch as typeof fetch,
+          openBrowser,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain("The saved sign-in was kept");
+      expect(calledUrls(customFetch)).toEqual(["https://api.resin.sh/v1/auth/token/refresh"]);
+      expect(openBrowser).not.toHaveBeenCalled();
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8"));
+      expect(onDisk.refreshToken).toBe("saved-refresh-family");
+    });
   });
 
   it("reports the authenticated tenant rather than requested pairing hints", async () => {
