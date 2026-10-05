@@ -16,6 +16,7 @@ import {
 import { DEFAULT_DEVICE_AUTH_SCOPES, DeviceAuthClient } from "../src/service/auth-bootstrap.js";
 import type { ServiceStatusInfo, UserServiceManager } from "../src/service/manager.js";
 import type { DaemonReadinessVerifier } from "../src/service/verification.js";
+import { registerRunningGateway } from "../src/updates/gateway-registry.js";
 
 // Catch missing browser injection without opening anything on the developer's desktop.
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -1167,5 +1168,147 @@ describe("performPairing reuse and rollback", () => {
 
     // Local state is still purged
     expect(await fs.stat(tokenFilePath).catch(() => null)).toBeNull();
+  });
+});
+
+describe("pairing while pre-hardening MCP gateways run", () => {
+  let home: string;
+  let resinHome: string;
+
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "resin-login-old-gateways-"));
+    resinHome = path.join(home, ".resin");
+  });
+
+  afterEach(async () => {
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  /** Registers this live test process as a `resin mcp` gateway of the given release. */
+  function registerLiveGateway(version: string): void {
+    registerRunningGateway({ resinHome, version, pid: process.pid });
+  }
+
+  it("refuses a fresh pairing, naming the old gateway's PID, before contacting the cloud", async () => {
+    registerLiveGateway("1.0.118");
+    const customFetch = successfulDeviceFetch();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: customFetch as typeof fetch,
+      }),
+    );
+
+    expect(result.exitCode).toBe(1);
+    const payload = JSON.parse(result.stdout.trim());
+    expect(payload).toMatchObject({ type: "error", success: false });
+    expect(payload.error).toContain(`PID ${process.pid} (v1.0.118)`);
+    expect(payload.error).toContain("older than v1.0.122");
+    expect(payload.error).toContain("--allow-old-gateways");
+    expect(customFetch).not.toHaveBeenCalled();
+    await expect(fs.stat(path.join(resinHome, "state", "device-token.json"))).rejects.toThrow();
+  });
+
+  it("pairs with --allow-old-gateways and still warns with the PIDs", async () => {
+    registerLiveGateway("1.0.106");
+    const result = await captureOutput(() =>
+      loginCommand(
+        ["--json", "--allow-old-gateways", "--home", home, "--cloud-url", "https://api.resin.sh"],
+        { customFetch: successfulDeviceFetch() as typeof fetch },
+      ),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain(`PID ${process.pid} (v1.0.106)`);
+    expect(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}")).toMatchObject({
+      type: "success",
+    });
+  });
+
+  it("does not block on hardened releases or source builds", async () => {
+    registerLiveGateway("1.0.122");
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: successfulDeviceFetch() as typeof fetch,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("older than v1.0.122");
+  });
+
+  it("does not block credentials written to a file the gateways never read", async () => {
+    registerLiveGateway("1.0.118");
+    const result = await captureOutput(() =>
+      loginCommand(
+        [
+          "--json",
+          "--home",
+          home,
+          "--cloud-url",
+          "https://api.resin.sh",
+          "--token-file",
+          path.join(home, "elsewhere", "token.json"),
+        ],
+        { customFetch: successfulDeviceFetch() as typeof fetch },
+      ),
+    );
+
+    expect(result.stdout).not.toContain("older than v1.0.122");
+    expect(result.stderr).not.toContain("older than v1.0.122");
+  });
+
+  it("warns but keeps reusing a saved sign-in those gateways already share", async () => {
+    registerLiveGateway("1.0.118");
+    const tokenFilePath = path.join(resinHome, "state", "device-token.json");
+    await fs.mkdir(path.dirname(tokenFilePath), { recursive: true });
+    await fs.writeFile(
+      tokenFilePath,
+      JSON.stringify({
+        accessToken: "cached-access-token",
+        refreshToken: "cached-refresh-token",
+        cloudUrl: "https://api.resin.sh",
+        deviceId: "dev_cached",
+        workspaceId: "ws_cached",
+        storedAt: new Date().toISOString(),
+        claims: {
+          accountId: "acc_cached",
+          workspaceId: "ws_cached",
+          deviceId: "dev_cached",
+          installationId: "inst_cached",
+          userId: "usr_cached",
+          subject: "usr_cached",
+          scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+          rawUploadConsent: false,
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          tokenType: "access",
+        },
+      }),
+    );
+    const customFetch = vi.fn();
+    const result = await captureOutput(() =>
+      loginCommand(["--json", "--home", home, "--cloud-url", "https://api.resin.sh"], {
+        customFetch: customFetch as typeof fetch,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(customFetch).not.toHaveBeenCalled();
+    expect(result.stderr).toContain(`Warning: 1 running MCP gateway process(es)`);
+    expect(result.stderr).toContain(`PID ${process.pid} (v1.0.118)`);
+  });
+
+  it("refuses init's fresh pairing and points at --local-only", async () => {
+    const customFetch = successfulDeviceFetch();
+    await expect(
+      performPairing({
+        home,
+        cloudUrl: "https://api.resin.sh",
+        customFetch: customFetch as typeof fetch,
+        openBrowser: async () => false,
+        listCredentialUnsafeGateways: async () => [{ pid: 4242, version: null }],
+      }),
+    ).rejects.toThrow(/PID 4242 \(unknown version\).*--local-only/su);
+    expect(customFetch).not.toHaveBeenCalled();
   });
 });

@@ -77,6 +77,7 @@ resin status
 - Interactive login opens the complete verification URL (unless `--no-browser`) and prints the URL + user code (or emits structured JSON in `--json` mode).
 - Non-interactive init requires both an authorization grant (`--auto-approve` or `--capabilities-file`) and a pairing mechanism (valid pre-provisioned `~/.resin/state/device-token.json` or `--local-only`).
 - Fresh and cached `resin login` automatically restart and verify an installed, running user service. Status/restart/readiness failures exit `1` while preserving credentials; JSON reports `authenticationSucceeded: true` with the failed `daemonRefresh` stage. Follow the remediation and retry login. Absent or inactive services remain untouched.
+- A new pairing (`resin login` or `resin init`) is refused while `resin mcp` gateways older than v1.0.122 run in this Resin home; the error and `resin status` list their PIDs. Their credential client can race the daemon's token refresh and replay a rotated refresh token, which revokes this device's sign-in. Exit and reopen the harness sessions that own those PIDs, then log in again. `resin login --allow-old-gateways` pairs anyway (not recommended).
 - With `RESIN_NO_SERVICE=1`, login reports external management without touching user services. Restart the foreground or externally managed daemon through its own supervisor and check `resin status`; login does not claim external daemon readiness.
 - `resin logout` revokes remotely when possible, then purges the owner-only file and optional ancillary vault. Local MCP continues.
 

@@ -79,7 +79,13 @@ import {
   UpdateEngine,
   readUpdateStatusSnapshot,
 } from "../updates/engine.js";
-import { listRunningGateways, listUnregisteredGatewayPids } from "../updates/gateway-registry.js";
+import {
+  type CredentialUnsafeGateway,
+  formatCredentialUnsafeGateways,
+  listRunningGateways,
+  listUnregisteredGatewayPids,
+  selectCredentialUnsafeGateways,
+} from "../updates/gateway-registry.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
@@ -266,6 +272,11 @@ export interface DaemonStatusSummary {
       versions: string[];
       /** Live `resin mcp` processes that never registered a version (older releases). */
       unknownVersionCount: number;
+      /**
+       * Live gateways whose credential client predates the refresh hardening (resin#294), by PID;
+       * `version` is null for unregistered ones. They must restart before this device pairs.
+       */
+      credentialUnsafe: CredentialUnsafeGateway[];
     };
   };
   harnessHealth: {
@@ -1675,24 +1686,29 @@ export async function readStaleMcpGateways(
   resinHome: string,
   options: { readonly procRoot?: string; readonly isAlive?: (pid: number) => boolean } = {},
 ): Promise<DaemonStatusSummary["update"]["staleMcpGateways"]> {
-  const none = { count: 0, versions: [], unknownVersionCount: 0 };
+  const none = { count: 0, versions: [], unknownVersionCount: 0, credentialUnsafe: [] };
   try {
-    const activeVersion = getActiveVersion(resinHome);
-    if (!activeVersion) return none;
-    const active = activeVersion.replace(/^v/u, "");
     const registered = await listRunningGateways({ resinHome, isAlive: options.isAlive });
+    const unregisteredPids = await listUnregisteredGatewayPids({
+      resinHome,
+      registeredPids: registered.map((gateway) => gateway.pid),
+      procRoot: options.procRoot,
+    });
+    const credentialUnsafe = selectCredentialUnsafeGateways(registered, unregisteredPids);
+    const activeVersion = getActiveVersion(resinHome);
+    if (!activeVersion) return { ...none, credentialUnsafe };
+    const active = activeVersion.replace(/^v/u, "");
     const stale = registered.filter((gateway) => gateway.version !== active);
     const versions = [...new Set(stale.map((gateway) => safeVersion(gateway.version)))]
       .filter((version): version is string => version !== null)
       .sort();
-    const unknownVersionCount = (
-      await listUnregisteredGatewayPids({
-        resinHome,
-        registeredPids: registered.map((gateway) => gateway.pid),
-        procRoot: options.procRoot,
-      })
-    ).length;
-    return { count: stale.length + unknownVersionCount, versions, unknownVersionCount };
+    const unknownVersionCount = unregisteredPids.length;
+    return {
+      count: stale.length + unknownVersionCount,
+      versions,
+      unknownVersionCount,
+      credentialUnsafe,
+    };
   } catch {
     return none;
   }
@@ -1701,10 +1717,19 @@ export async function readStaleMcpGateways(
 export function formatStaleMcpGateways(
   stale: DaemonStatusSummary["update"]["staleMcpGateways"] | undefined,
 ): string | null {
-  if (!stale || stale.count === 0) return null;
-  const versions = stale.versions.map((version) => `v${version}`);
-  if (stale.unknownVersionCount > 0) versions.push("unknown version");
-  return `${stale.count} MCP gateway process(es) still run an older Resin (${versions.join(", ")}); restart the harness to load the updated version.`;
+  if (!stale) return null;
+  const notices: string[] = [];
+  if (stale.count > 0) {
+    const versions = stale.versions.map((version) => `v${version}`);
+    if (stale.unknownVersionCount > 0) versions.push("unknown version");
+    notices.push(
+      `${stale.count} MCP gateway process(es) still run an older Resin (${versions.join(", ")}); restart the harness to load the updated version.`,
+    );
+  }
+  const credentialUnsafe = formatCredentialUnsafeGateways(stale.credentialUnsafe);
+  if (credentialUnsafe)
+    notices.push(`${credentialUnsafe} \`resin login\` will not pair while they run.`);
+  return notices.length > 0 ? notices.join(" ") : null;
 }
 
 function readDeferralStatus(

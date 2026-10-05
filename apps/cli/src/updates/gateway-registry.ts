@@ -193,3 +193,78 @@ export async function listUnregisteredGatewayPids(options: {
   }
   return pids.sort((left, right) => left - right);
 }
+
+/**
+ * First release whose shared credential client takes over the refresh lock only after its holder
+ * stops heartbeating and refreshes only on 401 (resin#294). Older gateways keep a 30 s lock
+ * takeover and refresh on 403 too, so sharing `device-token.json` with them can replay a rotated
+ * refresh token and get the whole device sign-in revoked.
+ */
+export const FIRST_HARDENED_CREDENTIAL_CLIENT_VERSION = "1.0.122";
+
+const RELEASE_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+
+/** A live gateway whose credential client predates the hardening; `version` null = unregistered. */
+export interface CredentialUnsafeGateway {
+  readonly pid: number;
+  readonly version: string | null;
+}
+
+/**
+ * Whether a registered gateway version predates the hardened credential client. Source builds
+ * report the workspace version (0.x) and run current code, so only 1.x releases are compared.
+ */
+export function isCredentialUnsafeGatewayVersion(version: string): boolean {
+  const normalized = version.replace(/^v/u, "");
+  return (
+    RELEASE_VERSION.test(normalized) &&
+    compareSemver(normalized, "1.0.0") >= 0 &&
+    compareSemver(normalized, FIRST_HARDENED_CREDENTIAL_CLIENT_VERSION) < 0
+  );
+}
+
+/**
+ * Selects the gateways that must restart before this device shares new credentials with them:
+ * registered gateways older than the hardened client, plus every unregistered one (their release
+ * predates the registry, so it predates the hardening too). Sorted by PID.
+ */
+export function selectCredentialUnsafeGateways(
+  registered: readonly GatewayRegistration[],
+  unregisteredPids: readonly number[],
+): CredentialUnsafeGateway[] {
+  return [
+    ...registered
+      .filter((gateway) => isCredentialUnsafeGatewayVersion(gateway.version))
+      .map((gateway) => ({ pid: gateway.pid, version: gateway.version.replace(/^v/u, "") })),
+    ...unregisteredPids.map((pid) => ({ pid, version: null })),
+  ].sort((left, right) => left.pid - right.pid);
+}
+
+/** Lists live `resin mcp` gateways of this Resin home whose credential client predates #294. */
+export async function listCredentialUnsafeGateways(options: {
+  readonly resinHome: string;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly procRoot?: string;
+}): Promise<CredentialUnsafeGateway[]> {
+  const registered = await listRunningGateways(options);
+  const unregisteredPids = await listUnregisteredGatewayPids({
+    resinHome: options.resinHome,
+    registeredPids: registered.map((gateway) => gateway.pid),
+    procRoot: options.procRoot,
+  });
+  return selectCredentialUnsafeGateways(registered, unregisteredPids);
+}
+
+/** The user-facing explanation and remedy for credential-unsafe gateways, or null when none. */
+export function formatCredentialUnsafeGateways(
+  gateways: readonly CredentialUnsafeGateway[],
+): string | null {
+  if (gateways.length === 0) return null;
+  const list = gateways
+    .map(
+      (gateway) =>
+        `${gateway.pid} (${gateway.version ? `v${gateway.version}` : "unknown version"})`,
+    )
+    .join(", ");
+  return `${gateways.length} running MCP gateway process(es) use a Resin credential client older than v${FIRST_HARDENED_CREDENTIAL_CLIENT_VERSION}: PID ${list}. Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them).`;
+}
