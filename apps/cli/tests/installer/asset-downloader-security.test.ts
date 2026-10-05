@@ -951,9 +951,8 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
     expect(result.sha256).toBe(expectedSha256);
     expect(fs.existsSync(result.path)).toBe(true);
 
-    // Verify temp file does not linger
-    const tempPath = path.join(downloadDir, `${asset.filename}.download.tmp`);
-    expect(fs.existsSync(tempPath)).toBe(false);
+    // Verify no temp file lingers
+    expect(fs.readdirSync(downloadDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 
     // Verify file content matches byte for byte
     const readBack = fs.readFileSync(result.path);
@@ -963,6 +962,31 @@ describe("asset-downloader-security: RESIN-INSTALL-003 & RESIN-INSTALL-006 remed
       const stat = fs.statSync(result.path);
       expect(stat.mode & 0o777).toBe(0o644);
     }
+  });
+
+  it("downloadAndVerifyAsset lets concurrent downloads of one asset each publish whole", async () => {
+    const downloadDir = path.join(resinHome, "downloads");
+    const fileContent = Buffer.alloc(4 * 1024 * 1024, 7);
+    const asset = {
+      name: "resin-concurrent-asset",
+      filename: "resin-concurrent-asset.tar.gz",
+      sha256: sha256Hex(fileContent),
+      size: fileContent.length,
+      os: "linux" as const,
+      arch: "x64" as const,
+    };
+
+    // With one shared temp name, one writer's rename moved the file away from under the others
+    // (ENOENT) or published a file another writer was still truncating.
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        downloadAndVerifyAsset({ asset, downloadDir, sourceBuffer: fileContent }),
+      ),
+    );
+
+    expect(results.every((result) => result.verified)).toBe(true);
+    expect(fs.readFileSync(path.join(downloadDir, asset.filename)).equals(fileContent)).toBe(true);
+    expect(fs.readdirSync(downloadDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
   it("downloadAndVerifyAsset fails closed on sha256 digest mismatch and cleans up temporary file", async () => {

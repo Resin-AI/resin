@@ -144,6 +144,37 @@ describe("doctor & repair commands", () => {
     expect(lockItem?.fixable).toBe(true);
   });
 
+  it("points signed-out devices at `resin login` and lists gateways that block pairing", async () => {
+    const listCredentialUnsafeGateways = vi.fn(async () => [{ pid: 4242, version: "1.0.106" }]);
+    const items = await runDiagnostics({
+      home: homeDir,
+      fsBridge: createMockFsBridge(),
+      serviceManager: createMockServiceManager(),
+      listCredentialUnsafeGateways,
+    });
+
+    expect(items.find((item) => item.id === "cloud_auth")).toMatchObject({
+      status: "warn",
+      remediation: "Run `resin login` to connect to Resin Cloud.",
+    });
+    expect(listCredentialUnsafeGateways).toHaveBeenCalledWith(
+      resolvePaths({ home: homeDir }).homeDir,
+    );
+    expect(items.find((item) => item.id === "credential_unsafe_gateways")).toMatchObject({
+      status: "warn",
+      message: expect.stringContaining("PID 4242 (v1.0.106)"),
+      remediation: expect.stringContaining("`resin login` will not pair"),
+    });
+
+    const clean = await runDiagnostics({
+      home: homeDir,
+      fsBridge: createMockFsBridge(),
+      serviceManager: createMockServiceManager(),
+      listCredentialUnsafeGateways: async () => [],
+    });
+    expect(clean.some((item) => item.id === "credential_unsafe_gateways")).toBe(false);
+  });
+
   it("diagnoses responsive IPC socket through local socket without requiring auth token", async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-home-"));
     const paths = resolvePaths({ home: tempHome });

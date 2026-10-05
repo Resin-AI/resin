@@ -135,6 +135,7 @@ async function main(argv: string[] = process.argv.slice(2)): Promise<number | un
     harnessId: args.harnessId,
     maxStartupAttempts: args.socketPath ? 1 : 0,
     startupTimeoutMs: args.socketPath ? 500 : 0,
+    clientVersion: VERSION,
   });
 
   const shutdown = async () => {

@@ -52,6 +52,8 @@ export interface McpStdioShimOptions {
   resinHome?: string;
   tokenFilePath?: string;
   credentialStore?: CloudCredentialStore;
+  /** The running release, reported on token rotation by the credential store this shim creates. */
+  clientVersion?: string;
   /**
    * The protocol connections this host can dial by the name a recording carries, resolved from the
    * harness's own MCP configuration. A recorded callable reached over a connection is re-made over
@@ -445,6 +447,7 @@ export class McpStdioShim {
         home: this.options.home,
         resinHome: this.options.resinHome,
         tokenFilePath: this.options.tokenFilePath,
+        clientVersion: this.options.clientVersion,
         ...(this.options.recordedWorkflowConnections === undefined
           ? {}
           : { recordedWorkflowConnections: this.options.recordedWorkflowConnections }),

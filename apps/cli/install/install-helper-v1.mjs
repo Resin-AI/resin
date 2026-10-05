@@ -16721,7 +16721,10 @@ async function downloadAndVerifyAsset(options) {
   await fsPromises.chmod(downloadDir, 493).catch(() => {
   });
   const destinationPath = path38.join(downloadDir, asset.filename);
-  const tempPath = path38.join(downloadDir, `${asset.filename}.download.tmp`);
+  const tempPath = path38.join(
+    downloadDir,
+    `${asset.filename}.${process8.pid}.${crypto4.randomUUID()}.download.tmp`
+  );
   let fileBuffer;
   if (options.sourceBuffer) {
     fileBuffer = options.sourceBuffer;
@@ -16765,9 +16768,14 @@ async function downloadAndVerifyAsset(options) {
       `Cryptographic digest mismatch for asset ${asset.filename}: expected ${asset.sha256}, calculated ${actualDigest}. Download rejected.`
     );
   }
-  await fsPromises.writeFile(tempPath, fileBuffer);
-  await fsPromises.chmod(tempPath, 420);
-  await fsPromises.rename(tempPath, destinationPath);
+  try {
+    await fsPromises.writeFile(tempPath, fileBuffer, { flag: "wx" });
+    await fsPromises.chmod(tempPath, 420);
+    await fsPromises.rename(tempPath, destinationPath);
+  } finally {
+    await fsPromises.rm(tempPath, { force: true }).catch(() => {
+    });
+  }
   log(`Asset ${asset.filename} downloaded and verified successfully (${fileBuffer.length} bytes).`);
   return {
     path: destinationPath,

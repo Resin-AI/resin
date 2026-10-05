@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   REAL_RESIN_ROOTS,
   realResinRootFor,
+  stripResinDirectoryOverrides,
   takeRealHomeViolations,
   withIsolatedHome,
 } from "./real-home-guard.js";
@@ -31,6 +32,19 @@ describe("real-home guard", () => {
     expect(realResinRootFor(`${realResin}-sibling/state.db`)).toBeUndefined();
     expect(realResinRootFor(path.join(os.tmpdir(), ".resin", "state.db"))).toBeUndefined();
     expect(realResinRootFor(":memory:")).toBeUndefined();
+  });
+
+  it("drops inherited Resin layout directory overrides, keeping unrelated RESIN_*_DIR settings", () => {
+    const env: NodeJS.ProcessEnv = {
+      RESIN_DATA_DIR: "/home/dev/.resin/data",
+      RESIN_STATE_DIR: "/home/dev/.resin/state",
+      RESIN_RELEASE_DIR: "/tmp/release",
+      PATH: "/bin",
+    };
+    expect(stripResinDirectoryOverrides(env)).toEqual(["RESIN_DATA_DIR", "RESIN_STATE_DIR"]);
+    expect(env).toEqual({ RESIN_RELEASE_DIR: "/tmp/release", PATH: "/bin" });
+    // This worker already started without them, so default paths follow the isolated HOME.
+    expect(stripResinDirectoryOverrides({ ...process.env })).toEqual([]);
   });
 
   it("rejects fs writes under the real ~/.resin, including named imports and promises", async () => {

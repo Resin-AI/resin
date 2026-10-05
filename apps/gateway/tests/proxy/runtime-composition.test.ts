@@ -101,6 +101,34 @@ describe("Production Runtime Composition & Credential Security", () => {
     await expect(runtime.sync()).resolves.toBeNull();
   });
 
+  it("reports the gateway's release on token refresh from the credential store it creates", async () => {
+    const claims = makeValidClaims({ userId: "usr_version" });
+    const refreshBodies: Record<string, unknown>[] = [];
+    const runtime = await createProductionProxyRuntime({
+      tokenFilePath: tokenFile,
+      clientVersion: "1.0.124",
+      registry: new ToolRegistry(),
+      fetchFn: (async (url: string | URL | Request, init?: RequestInit) => {
+        if (url.toString().includes("/v1/auth/token/refresh")) {
+          refreshBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        }
+        return new Response(JSON.stringify({ message: "unavailable" }), { status: 503 });
+      }) as typeof fetch,
+    });
+    expect(runtime.status).toBe("missing");
+    await runtime.credentialStore.persist({
+      cloudUrl: "https://cloud.resin.io",
+      accessToken: makeJwt(claims),
+      refreshToken: "rf_version",
+      deviceId: claims.deviceId,
+      workspaceId: claims.workspaceId,
+    });
+
+    await runtime.credentialStore.getRequestIdentity({ forceRefresh: true }).catch(() => null);
+
+    expect(refreshBodies.map((body) => body.clientVersion)).toEqual(["1.0.124"]);
+  });
+
   it("constructs full runtime with stored-origin URL and tenant headers on valid credentials", async () => {
     const claims = makeValidClaims();
     const token = makeJwt(claims);

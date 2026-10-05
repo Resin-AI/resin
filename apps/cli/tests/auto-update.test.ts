@@ -943,17 +943,73 @@ describe("MCP gateway version registry", () => {
     }
   });
 
+  it("prunes a stale registration whose PID was reused by a later process", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "resin-gateway-reuse-"));
+    const resinHome = path.join(root, ".resin");
+    const procRoot = path.join(root, "proc");
+    try {
+      const bootSeconds = 1_800_000_000;
+      const registeredAtMs = (bootSeconds + 600) * 1000;
+      // A SIGKILLed pre-v1.0.122 gateway left 301.json; PID 301 now belongs to an unrelated
+      // process started an hour later. PID 302 is the gateway that registered.
+      registerRunningGateway({
+        resinHome,
+        version: "1.0.106",
+        pid: 301,
+        now: () => registeredAtMs,
+      });
+      registerRunningGateway({
+        resinHome,
+        version: "1.0.106",
+        pid: 302,
+        now: () => registeredAtMs,
+      });
+      await fs.mkdir(procRoot, { recursive: true });
+      await fs.writeFile(path.join(procRoot, "stat"), `cpu  1 2 3\nbtime ${bootSeconds}\n`);
+      const startTicks: Record<string, number> = { "301": 4_200 * 100, "302": 599 * 100 };
+      for (const [pid, ticks] of Object.entries(startTicks)) {
+        await fs.mkdir(path.join(procRoot, pid), { recursive: true });
+        // Fields after the command name start at `state` (field 3); `starttime` is field 22.
+        const fields = Array.from({ length: 50 }, (_, index) =>
+          index === 0 ? "S" : index === 19 ? String(ticks) : "0",
+        );
+        await fs.writeFile(
+          path.join(procRoot, pid, "stat"),
+          `${pid} (node (worker) x) ${fields.join(" ")}\n`,
+        );
+      }
+
+      await expect(
+        listCredentialUnsafeGateways({ resinHome, procRoot, isAlive: () => true }),
+      ).resolves.toEqual([{ pid: 302, version: "1.0.106" }]);
+      await expect(fs.readdir(resolveGatewayRegistryDir(resinHome))).resolves.toEqual(["302.json"]);
+
+      // The real /proc (where present) keeps a registration written by the live process.
+      const ownHome = path.join(root, "own");
+      registerRunningGateway({ resinHome: ownHome, version: "1.0.106" });
+      await expect(listRunningGateways({ resinHome: ownHome })).resolves.toMatchObject([
+        { pid: process.pid },
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("registers the running `resin mcp` version and releases it when the gateway fails", async () => {
     const unregister = vi.fn();
     const registerGateway = vi.fn(() => unregister);
     const home = path.join(os.tmpdir(), "resin-gateway-user");
+    let shimClientVersion: string | undefined;
 
     const exitCode = await mcpCommand([], {
       stderr: { write: () => true },
       home,
       env: {},
       registerGateway,
-      shimFactory: () => ({ start: async () => ({ mode: "failed" }), stop: async () => {} }),
+      shimFactory: (options) => {
+        shimClientVersion = options.clientVersion;
+        return { start: async () => ({ mode: "failed" }), stop: async () => {} };
+      },
     });
 
     expect(exitCode).toBe(1);
@@ -962,6 +1018,11 @@ describe("MCP gateway version registry", () => {
       version: expect.stringMatching(/^\d+\.\d+\.\d+/),
     });
     expect(unregister).toHaveBeenCalled();
+    // The gateway's own credential store reports the same release on token rotation.
+    expect(shimClientVersion).toMatch(/^\d+\.\d+\.\d+/);
+    expect(registerGateway).toHaveBeenCalledWith(
+      expect.objectContaining({ version: shimClientVersion }),
+    );
   });
 
   it("registers gateways under a custom RESIN_HOME, where status reports them", async () => {
