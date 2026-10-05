@@ -96,7 +96,8 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
         calls += 1;
       }
     }
-    expect(calls).toBe(13);
+    // The main session's `wait` only joined its subagent: harness bookkeeping, not a call.
+    expect(calls).toBe(12);
   });
 
   it("records the built-in and MCP tools a headless session ran", async () => {
@@ -110,8 +111,9 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
       "write",
       "shout",
       "task",
-      "wait",
     ]);
+    // The `wait` that only joined the subagent's background job is harness bookkeeping.
+    expect(events.some((event) => JSON.stringify(event).includes('"toolName":"wait"'))).toBe(false);
     // The MCP call went through OMP's device surface; it is recorded as the tool it reached.
     const shout = calls.find((call) => call.toolName === "shout");
     expect(shout?.connection).toBe("fixture-echo");

@@ -1255,6 +1255,7 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
 
     it.each([
       ["a foreground run that finished", { wallTimeMs: 82 }, false, "omp-bash-completed"],
+      // An async launch acknowledgement is held for its job's completion: no result, no marker.
       ["an async run", { async: { state: "running", jobId: "j1" } }, false, undefined],
       [
         "an auto-backgrounded run",
@@ -1281,8 +1282,8 @@ describe("OMP JSONL Session Decoder & Normalization", () => {
               ...(details === undefined ? {} : { details }),
             },
           }),
-        ) as IntermediateToolResultEvent;
-        expect(result.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe(marker);
+        ) as IntermediateToolResultEvent | null;
+        expect(result?.metadata?.[RESIN_LOCAL_SOURCE_INTERFACE_KEY]).toBe(marker);
       },
     );
 
