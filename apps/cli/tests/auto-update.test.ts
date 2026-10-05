@@ -41,6 +41,8 @@ import {
 } from "../src/updates/engine.js";
 import {
   createActivatedReleaseNotice,
+  isCredentialUnsafeGatewayVersion,
+  listCredentialUnsafeGateways,
   listRunningGateways,
   registerRunningGateway,
   resolveGatewayRegistryDir,
@@ -830,13 +832,45 @@ describe("MCP gateway version registry", () => {
   });
 
   it("tells the user which harness gateways need a restart", () => {
-    expect(formatStaleMcpGateways({ count: 0, versions: [], unknownVersionCount: 0 })).toBeNull();
-    expect(formatStaleMcpGateways({ count: 2, versions: ["1.0.0"], unknownVersionCount: 0 })).toBe(
-      "2 MCP gateway process(es) still run an older Resin (v1.0.0); restart the harness to load the updated version.",
+    expect(
+      formatStaleMcpGateways({
+        count: 0,
+        versions: [],
+        unknownVersionCount: 0,
+        credentialUnsafe: [],
+      }),
+    ).toBeNull();
+    expect(
+      formatStaleMcpGateways({
+        count: 2,
+        versions: ["1.0.122"],
+        unknownVersionCount: 0,
+        credentialUnsafe: [],
+      }),
+    ).toBe(
+      "2 MCP gateway process(es) still run an older Resin (v1.0.122); restart the harness to load the updated version.",
     );
-    expect(formatStaleMcpGateways({ count: 1, versions: [], unknownVersionCount: 1 })).toBe(
-      "1 MCP gateway process(es) still run an older Resin (unknown version); restart the harness to load the updated version.",
+    expect(
+      formatStaleMcpGateways({
+        count: 1,
+        versions: [],
+        unknownVersionCount: 1,
+        credentialUnsafe: [{ pid: 77, version: null }],
+      }),
+    ).toBe(
+      "1 MCP gateway process(es) still run an older Resin (unknown version); restart the harness to load the updated version. 1 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 77 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
     );
+  });
+
+  it("classifies only 1.x releases before v1.0.122 as credential-unsafe", () => {
+    expect(isCredentialUnsafeGatewayVersion("1.0.106")).toBe(true);
+    expect(isCredentialUnsafeGatewayVersion("v1.0.121")).toBe(true);
+    expect(isCredentialUnsafeGatewayVersion("1.0.122-rc.1")).toBe(true);
+    expect(isCredentialUnsafeGatewayVersion("1.0.122")).toBe(false);
+    expect(isCredentialUnsafeGatewayVersion("1.1.0")).toBe(false);
+    // Source builds report the workspace version and run current code.
+    expect(isCredentialUnsafeGatewayVersion("0.1.0")).toBe(false);
+    expect(isCredentialUnsafeGatewayVersion("garbage")).toBe(false);
   });
 
   it("counts live `resin mcp` processes of this home that never registered", async () => {
@@ -868,9 +902,17 @@ describe("MCP gateway version registry", () => {
       await fs.mkdir(path.join(procRoot, "self"));
 
       const stale = await readStaleMcpGateways(resinHome, { procRoot, isAlive: () => true });
-      expect(stale).toEqual({ count: 2, versions: ["1.0.0"], unknownVersionCount: 1 });
+      expect(stale).toEqual({
+        count: 2,
+        versions: ["1.0.0"],
+        unknownVersionCount: 1,
+        credentialUnsafe: [
+          { pid: 102, version: "1.0.0" },
+          { pid: 201, version: null },
+        ],
+      });
       expect(formatStaleMcpGateways(stale)).toBe(
-        "2 MCP gateway process(es) still run an older Resin (v1.0.0, unknown version); restart the harness to load the updated version.",
+        "2 MCP gateway process(es) still run an older Resin (v1.0.0, unknown version); restart the harness to load the updated version. 2 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 102 (v1.0.0), 201 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
       );
       // Without /proc (macOS, Windows) only registered gateways are reported.
       await expect(
@@ -878,7 +920,24 @@ describe("MCP gateway version registry", () => {
           procRoot: path.join(root, "missing"),
           isAlive: () => true,
         }),
-      ).resolves.toEqual({ count: 1, versions: ["1.0.0"], unknownVersionCount: 0 });
+      ).resolves.toEqual({
+        count: 1,
+        versions: ["1.0.0"],
+        unknownVersionCount: 0,
+        credentialUnsafe: [{ pid: 102, version: "1.0.0" }],
+      });
+      // Login detects them without an active install; hardened gateways are not listed.
+      registerRunningGateway({ resinHome, version: "1.0.122", pid: 103 });
+      await fs.rm(path.join(resinHome, "current"));
+      await expect(
+        listCredentialUnsafeGateways({ resinHome, procRoot, isAlive: () => true }),
+      ).resolves.toEqual([
+        { pid: 102, version: "1.0.0" },
+        { pid: 201, version: null },
+      ]);
+      await expect(
+        readStaleMcpGateways(resinHome, { procRoot, isAlive: () => true }),
+      ).resolves.toMatchObject({ count: 0, credentialUnsafe: [{ pid: 102 }, { pid: 201 }] });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -940,6 +999,7 @@ describe("MCP gateway version registry", () => {
         count: 1,
         versions: ["1.0.0"],
         unknownVersionCount: 0,
+        credentialUnsafe: [{ pid: process.pid, version: "1.0.0" }],
       });
     } finally {
       await fs.rm(root, { recursive: true, force: true });

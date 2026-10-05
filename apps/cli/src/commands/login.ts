@@ -23,6 +23,11 @@ import {
   type DaemonReadinessVerifier,
   verifyDaemonReadiness,
 } from "../service/verification.js";
+import {
+  type CredentialUnsafeGateway,
+  formatCredentialUnsafeGateways,
+  listCredentialUnsafeGateways,
+} from "../updates/gateway-registry.js";
 
 export { validateCloudUrl, isReusableCredentialRecord } from "../service/auth-bootstrap.js";
 
@@ -123,6 +128,8 @@ export interface LoginCommandFlags {
   noBrowser?: boolean;
   json?: boolean;
   force?: boolean;
+  /** Pair even while gateways with the pre-hardening credential client run. */
+  allowOldGateways?: boolean;
   help?: boolean;
 }
 
@@ -144,6 +151,8 @@ export interface LoginCommandOptions {
   fsBridge?: ConfigFsBridge;
   serviceManager?: UserServiceManager;
   readinessVerifier?: DaemonReadinessVerifier;
+  /** Test seam: lists live gateways whose credential client predates resin#294. */
+  listCredentialUnsafeGateways?: (resinHome: string) => Promise<CredentialUnsafeGateway[]>;
 }
 
 export interface PerformPairingOptions {
@@ -165,6 +174,8 @@ export interface PerformPairingOptions {
   fsBridge?: ConfigFsBridge;
   serviceManager?: UserServiceManager;
   readinessVerifier?: DaemonReadinessVerifier;
+  /** Test seam: lists live gateways whose credential client predates resin#294. */
+  listCredentialUnsafeGateways?: (resinHome: string) => Promise<CredentialUnsafeGateway[]>;
   timeoutMs?: number;
   abortSignal?: AbortSignal;
   stdout?: { write(chunk: string): boolean | undefined };
@@ -206,6 +217,29 @@ function failedDaemonRefresh(
   message: string,
 ): DaemonRefreshResult {
   return { status: "failed", stage, message };
+}
+
+/**
+ * Describes the live gateways that would share a newly paired credential with the pre-#294 client
+ * (30 s lock takeover, refresh on 403), the multi-process refresh race that revokes a device's
+ * sign-in. Null when none run or credentials go to a file those gateways never read.
+ */
+async function describeCredentialUnsafeGateways(options: {
+  resinHome: string;
+  tokenFilePath: string;
+  daemonTokenFilePath: string;
+  list?: (resinHome: string) => Promise<CredentialUnsafeGateway[]>;
+}): Promise<string | null> {
+  if (path.resolve(options.tokenFilePath) !== path.resolve(options.daemonTokenFilePath)) {
+    return null;
+  }
+  const list = options.list ?? ((resinHome: string) => listCredentialUnsafeGateways({ resinHome }));
+  try {
+    return formatCredentialUnsafeGateways(await list(options.resinHome));
+  } catch {
+    // Detection reads only local registrations and /proc; failing to read them must not block.
+    return null;
+  }
 }
 
 const EXTERNAL_DAEMON_REFRESH_MESSAGE =
@@ -407,6 +441,18 @@ export async function performPairing(
     );
   }
 
+  const unsafeGateways = await describeCredentialUnsafeGateways({
+    resinHome,
+    tokenFilePath,
+    daemonTokenFilePath,
+    list: options.listCredentialUnsafeGateways,
+  });
+  if (unsafeGateways) {
+    throw new Error(
+      `Not pairing while older Resin MCP gateways run. ${unsafeGateways} Then run \`resin login\`, or rerun init with --local-only to finish installing without pairing.`,
+    );
+  }
+
   const openBrowserFn = options.openBrowser ?? defaultOpenBrowser;
 
   const result = await authClient.bootstrap({
@@ -557,6 +603,8 @@ export function parseLoginFlags(args: string[]): LoginCommandFlags {
       flags.noBrowser = true;
     } else if (arg === "--force") {
       flags.force = true;
+    } else if (arg === "--allow-old-gateways") {
+      flags.allowOldGateways = true;
     } else if (arg === "--cloud-url") {
       flags.cloudUrl = requireOptionValue(args, i, "--cloud-url");
       i++;
@@ -644,6 +692,9 @@ export function printLoginHelp(): void {
     "(mode 0600) plus an ancillary vault. They are distinct from the local IPC",
     "token and never appear in harness config or project metadata.",
     "Valid cached credentials are reused unless --force.",
+    "A new pairing is refused while `resin mcp` gateways older than v1.0.122 run:",
+    "their credential client can race the daemon's token refresh and get this",
+    "device's sign-in revoked. Restart the harness sessions that own them first.",
     "After authentication, resin login automatically restarts only an installed",
     "active daemon service and verifies the new Cloud identity. Inactive or absent",
     "services are not started or installed. Externally managed daemons (including",
@@ -661,6 +712,8 @@ export function printLoginHelp(): void {
     "  --home <dir>              Base user home directory (for testing)",
     "  --resin-home <dir>        Explicit resin home directory override",
     "  --token-file <path>       Explicit token storage path override",
+    "  --allow-old-gateways      Pair even while MCP gateways older than v1.0.122 run",
+    "                            (they can race token refresh and revoke the sign-in)",
     "  --no-browser              Do not open a browser; print the URL and code",
     "  --json                    Output JSON instead of human-readable text",
     "  --force                   Force a new device flow even if valid credentials exist",
@@ -830,9 +883,17 @@ export async function loginCommand(
   };
 
   try {
+    const unsafeGateways = await describeCredentialUnsafeGateways({
+      resinHome,
+      tokenFilePath,
+      daemonTokenFilePath,
+      list: options.listCredentialUnsafeGateways,
+    });
     if (!flags.force) {
       const priorSnapshot = await authClient.snapshotCredentials();
       if (isReusableCredentialRecord(priorSnapshot, cloudUrl)) {
+        // Reuse writes nothing new, but those gateways already share the saved sign-in.
+        if (unsafeGateways) process.stderr.write(`\nWarning: ${unsafeGateways}\n`);
         const claims = priorSnapshot.claims;
         const accountId = claims.accountId;
         const workspaceId = claims.workspaceId;
@@ -882,6 +943,15 @@ export async function loginCommand(
         }
         return 0;
       }
+    }
+
+    if (unsafeGateways) {
+      if (!flags.allowOldGateways) {
+        throw new Error(
+          `Not pairing while older Resin MCP gateways run. ${unsafeGateways} Then run \`resin login\` again, or pass --allow-old-gateways to pair anyway.`,
+        );
+      }
+      process.stderr.write(`\nWarning: pairing anyway (--allow-old-gateways). ${unsafeGateways}\n`);
     }
 
     const result = await authClient.bootstrap({
