@@ -432,6 +432,13 @@ export class CloudObservationClient {
         afterRefresh: true,
       });
     }
+    // Only an unauthenticated (401) answer can be cured by a new access token. A credential-level
+    // 403 (revoked device, foreign device scope) is an authorization decision: rotating the
+    // shared refresh token cannot change it, so degrade without touching credentials.
+    if (status === 403) {
+      this.authRecovery.setDegraded(category, rejectedIdentity);
+      throw this.authRecovery.createError(category, { status });
+    }
 
     const refreshedIdentity = await this.authRecovery.recover(category, rejectedIdentity, () =>
       this.identityProvider({ forceRefresh: true }),

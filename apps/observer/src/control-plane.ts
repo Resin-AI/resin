@@ -123,7 +123,10 @@ export class ControlPlaneClient {
         ...init.headers,
       },
     });
-    if (!forceRefresh && (response.status === 401 || response.status === 403)) {
+    // Only an unauthenticated (401) answer can be cured by a new access token. A 403 is an
+    // authorization decision about this identity (e.g. a deviceId from before a re-login):
+    // rotating the refresh token cannot change it, so it surfaces to the caller untouched.
+    if (!forceRefresh && response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       return this.request(route, init, true);
     }

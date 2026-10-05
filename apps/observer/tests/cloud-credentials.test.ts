@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -101,6 +102,74 @@ async function persistExpiredCredential(
   });
 }
 
+/**
+ * Resolves once the store under test has read `lockPath` `count` times: each read is one
+ * evaluation of a held lock, so two reads prove it declined a takeover and kept waiting.
+ */
+function lockReads(lockPath: string, count: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const readFile = fs.readFile;
+  let reads = 0;
+  vi.spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof readFile>) => {
+    const result = await readFile(...args);
+    if (String(args[0]) === lockPath) {
+      reads += 1;
+      if (reads >= count) resolve();
+    }
+    return result;
+  }) as typeof readFile);
+  return promise;
+}
+
+/** The pid of a process that has already exited, so a liveness probe reports it dead. */
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  if (typeof child.pid !== "number") throw new Error("could not spawn a short-lived process");
+  return child.pid;
+}
+
+/** Plants a credential lock held by another process, with its heartbeat (mtime) set explicitly. */
+async function writeForeignLock(
+  lockPath: string,
+  lock: { pid: number; hostname: string; acquiredAgoMs: number; heartbeatAgoMs: number },
+): Promise<void> {
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  await fs.writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: lock.pid,
+      hostname: lock.hostname,
+      acquiredAt: new Date(Date.now() - lock.acquiredAgoMs).toISOString(),
+      owner: "foreign-holder",
+    }),
+    "utf8",
+  );
+  const heartbeat = new Date(Date.now() - lock.heartbeatAgoMs);
+  await fs.utimes(lockPath, heartbeat, heartbeat);
+}
+
+/** Writes device-token.json the way another process's committed rotation leaves it. */
+async function writeCredentialFile(
+  tokenFilePath: string,
+  claims: AuthClaims,
+  accessToken: string,
+  refreshToken: string,
+): Promise<void> {
+  await fs.writeFile(
+    tokenFilePath,
+    JSON.stringify({
+      cloudUrl: "https://cloud.resin.dev",
+      accessToken,
+      refreshToken,
+      claims,
+      deviceId: claims.deviceId,
+      workspaceId: claims.workspaceId,
+      storedAt: new Date().toISOString(),
+    }),
+    "utf8",
+  );
+}
+
 function createMockContext(homeDir: string, stateDir: string): ModuleContext {
   const config: DaemonConfig = {
     version: "0.1.0",
@@ -143,6 +212,7 @@ describe("CloudCredentialStore", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   });
 
@@ -679,41 +749,336 @@ describe("CloudCredentialStore", () => {
     await expect(fs.stat(tokenFilePath)).rejects.toThrow();
   });
 
-  it("takes over an abandoned credential lock after its bounded stale age", async () => {
-    const rotatedClaims = makeValidClaims({
-      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  describe("credential lock takeover", () => {
+    const ROTATED_REFRESH = "rotated-refresh-token";
+
+    function rotationFixture() {
+      const rotatedClaims = makeValidClaims({
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const rotatedAccessToken = makeJwt(rotatedClaims);
+      const server = createSingleUseRotationServer({
+        rotationState: { activeRefreshToken: "original-refresh-token" },
+        rotatedRefreshToken: ROTATED_REFRESH,
+        rotatedAccessToken,
+        rotatedClaims,
+      });
+      // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        fetchImpl: server.fetchImpl as typeof fetch,
+      });
+      return { server, store, rotatedClaims, rotatedAccessToken };
+    }
+
+    it.each([
+      { holder: "a live holder on this host", hostname: os.hostname(), pid: process.pid },
+      { holder: "a holder on another host", hostname: "another-host.invalid", pid: deadPid() },
+    ])(
+      "waits for $holder whose heartbeat is fresh even after the stale age",
+      async ({ hostname, pid }) => {
+        const { server, store, rotatedClaims, rotatedAccessToken } = rotationFixture();
+        await persistExpiredCredential(store, "original-refresh-token");
+        await writeForeignLock(`${tokenFilePath}.lock`, {
+          pid,
+          hostname,
+          acquiredAgoMs: 40_000,
+          heartbeatAgoMs: 0,
+        });
+
+        const declinedTakeover = lockReads(`${tokenFilePath}.lock`, 2);
+        const refresh = store.getRequestIdentity({ forceRefresh: true });
+        await declinedTakeover;
+
+        // The holder is mid-rotation: taking its lock would replay the token it is spending.
+        expect(server.receivedRefreshTokens).toEqual([]);
+        expect(await fs.readFile(`${tokenFilePath}.lock`, "utf8")).toContain("foreign-holder");
+
+        // The holder commits its rotation and releases; the waiter adopts it without refreshing.
+        await writeCredentialFile(
+          tokenFilePath,
+          rotatedClaims,
+          rotatedAccessToken,
+          ROTATED_REFRESH,
+        );
+        await fs.rm(`${tokenFilePath}.lock`);
+
+        const identity = await refresh;
+        expect(identity?.accessToken).toBe(rotatedAccessToken);
+        expect(server.receivedRefreshTokens).toEqual([]);
+      },
+    );
+
+    it.each([
+      {
+        holder: "a dead holder on this host",
+        lock: () => ({
+          pid: deadPid(),
+          hostname: os.hostname(),
+          acquiredAgoMs: 0,
+          heartbeatAgoMs: 0,
+        }),
+      },
+      {
+        holder: "a live holder whose heartbeat stopped",
+        lock: () => ({
+          pid: process.pid,
+          hostname: os.hostname(),
+          acquiredAgoMs: 31_000,
+          heartbeatAgoMs: 31_000,
+        }),
+      },
+      {
+        holder: "a holder past the hard hold cap despite heartbeating",
+        lock: () => ({
+          pid: process.pid,
+          hostname: os.hostname(),
+          acquiredAgoMs: 300_000,
+          heartbeatAgoMs: 0,
+        }),
+      },
+    ])("takes over the lock of $holder", async ({ lock }) => {
+      const { server, store, rotatedAccessToken } = rotationFixture();
+      await persistExpiredCredential(store, "original-refresh-token");
+      await writeForeignLock(`${tokenFilePath}.lock`, lock());
+
+      const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+      expect(identity?.accessToken).toBe(rotatedAccessToken);
+      expect(server.receivedRefreshTokens).toEqual(["original-refresh-token"]);
+      await expect(fs.stat(`${tokenFilePath}.lock`)).rejects.toThrow();
     });
+
+    it("heartbeats its own lock while a refresh is in flight", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+      try {
+        const lockPath = `${tokenFilePath}.lock`;
+        const rotatedClaims = makeValidClaims();
+        let heartbeatAgeMs = Number.NaN;
+        const server = createSingleUseRotationServer({
+          rotationState: { activeRefreshToken: "original-refresh-token" },
+          rotatedRefreshToken: ROTATED_REFRESH,
+          rotatedAccessToken: makeJwt(rotatedClaims),
+          rotatedClaims,
+          beforeRespond: async () => {
+            const stale = new Date(Date.now() - 20_000);
+            await fs.utimes(lockPath, stale, stale);
+            const heartbeat = lockReads(lockPath, 1);
+            vi.advanceTimersByTime(5_000);
+            await heartbeat;
+            // The heartbeat touches the lock right after confirming it still owns it.
+            await vi.waitFor(async () => {
+              heartbeatAgeMs = Date.now() - (await fs.stat(lockPath)).mtimeMs;
+              expect(heartbeatAgeMs).toBeLessThan(5_000);
+            });
+          },
+        });
+        // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
+        const store = new CloudCredentialStore({
+          tokenFilePath,
+          fetchImpl: server.fetchImpl as typeof fetch,
+        });
+        await persistExpiredCredential(store, "original-refresh-token");
+
+        await store.getRequestIdentity({ forceRefresh: true });
+
+        expect(heartbeatAgeMs).toBeLessThan(5_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("refreshes with the on-disk token when a sibling rotated to an already expired access token", async () => {
+    const rotatedClaims = makeValidClaims();
     const rotatedAccessToken = makeJwt(rotatedClaims);
-    const rotationState = { activeRefreshToken: "original-refresh-token" };
+    const rotationState = { activeRefreshToken: "sibling-refresh-token" };
     const server = createSingleUseRotationServer({
       rotationState,
-      rotatedRefreshToken: "rotated-refresh-token",
+      rotatedRefreshToken: "next-refresh-token",
       rotatedAccessToken,
       rotatedClaims,
     });
-
     // SAFETY: Mock fetch implementing the single-use rotation contract for this test.
     const store = new CloudCredentialStore({
       tokenFilePath,
       fetchImpl: server.fetchImpl as typeof fetch,
     });
     await persistExpiredCredential(store, "original-refresh-token");
+    // A sibling holds the lock while this process reads its (soon stale) credential.
+    await writeForeignLock(`${tokenFilePath}.lock`, {
+      pid: process.pid,
+      hostname: os.hostname(),
+      acquiredAgoMs: 0,
+      heartbeatAgoMs: 0,
+    });
 
-    // A holder that died without releasing: the lock is older than its bounded stale age.
-    await fs.writeFile(
-      `${tokenFilePath}.lock`,
-      JSON.stringify({
-        pid: process.pid,
-        acquiredAt: new Date(Date.now() - 300_000).toISOString(),
-        owner: "abandoned-holder",
-      }),
-      "utf8",
+    const waitingForLock = lockReads(`${tokenFilePath}.lock`, 1);
+    const refresh = store.getRequestIdentity({ forceRefresh: true });
+    await waitingForLock;
+    // The sibling rotated, but the access token it committed has already expired.
+    const siblingClaims = makeValidClaims({
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await writeCredentialFile(
+      tokenFilePath,
+      siblingClaims,
+      makeJwt(siblingClaims),
+      "sibling-refresh-token",
     );
+    await fs.rm(`${tokenFilePath}.lock`);
 
-    const identity = await store.getRequestIdentity({ forceRefresh: true });
+    const identity = await refresh;
 
+    expect(server.receivedRefreshTokens).toEqual(["sibling-refresh-token"]);
+    expect(server.reuseDetections).toBe(0);
     expect(identity?.accessToken).toBe(rotatedAccessToken);
-    await expect(fs.stat(`${tokenFilePath}.lock`)).rejects.toThrow();
+    const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+      refreshToken?: string;
+    };
+    expect(onDisk.refreshToken).toBe("next-refresh-token");
+  });
+
+  it("never refreshes credentials that were removed while it waited for the lock", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 500 }));
+    // SAFETY: Mock fetch implementing fetch interface for testing.
+    const store = new CloudCredentialStore({ tokenFilePath, fetchImpl: fetchImpl as typeof fetch });
+    await persistExpiredCredential(store, "original-refresh-token");
+    await writeForeignLock(`${tokenFilePath}.lock`, {
+      pid: process.pid,
+      hostname: os.hostname(),
+      acquiredAgoMs: 0,
+      heartbeatAgoMs: 0,
+    });
+
+    const waitingForLock = lockReads(`${tokenFilePath}.lock`, 1);
+    const refresh = store.getRequestIdentity({ forceRefresh: true });
+    await waitingForLock;
+    // `resin logout` purged the credential while this refresh waited.
+    await fs.rm(tokenFilePath);
+    await fs.rm(`${tokenFilePath}.lock`);
+
+    expect(await refresh).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(fs.stat(tokenFilePath)).rejects.toThrow();
+  });
+
+  describe("already-rotated grace response", () => {
+    const ALREADY_ROTATED = {
+      error: "invalid_grant",
+      error_description: "Refresh token was already rotated",
+    };
+
+    it("re-reads the credential and retries once with the current on-disk token", async () => {
+      const rotatedClaims = makeValidClaims();
+      const rotatedAccessToken = makeJwt(rotatedClaims);
+      const received: string[] = [];
+      const fetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
+        const { refreshToken } = JSON.parse(String(init?.body)) as { refreshToken: string };
+        received.push(refreshToken);
+        if (refreshToken === "original-refresh-token") {
+          // A sibling that took over rotated this token and committed its successor (whose
+          // access token is already due for refresh) while this request was in flight.
+          const siblingClaims = makeValidClaims({
+            expiresAt: new Date(Date.now() - 1_000).toISOString(),
+          });
+          await writeCredentialFile(
+            tokenFilePath,
+            siblingClaims,
+            makeJwt(siblingClaims),
+            "sibling-refresh-token",
+          );
+          return new Response(JSON.stringify(ALREADY_ROTATED), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            accessToken: rotatedAccessToken,
+            tokenType: "Bearer",
+            expiresIn: 3600,
+            refreshToken: "next-refresh-token",
+            claims: rotatedClaims,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      };
+      // SAFETY: Mock fetch implementing fetch interface for testing.
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      await persistExpiredCredential(store, "original-refresh-token");
+
+      const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+      expect(received).toEqual(["original-refresh-token", "sibling-refresh-token"]);
+      expect(identity?.accessToken).toBe(rotatedAccessToken);
+      expect(store.getLastRefreshFailure()).toBeNull();
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+        refreshToken?: string;
+      };
+      expect(onDisk.refreshToken).toBe("next-refresh-token");
+    });
+
+    it("keeps device-token.json when no newer token is on disk", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify(ALREADY_ROTATED), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
+      // SAFETY: Mock fetch implementing fetch interface for testing.
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      const claims = makeValidClaims();
+      await store.persist({
+        cloudUrl: "https://cloud.resin.dev",
+        accessToken: makeJwt(claims),
+        refreshToken: "original-refresh-token",
+        claims,
+        deviceId: claims.deviceId,
+        workspaceId: claims.workspaceId,
+      });
+
+      const identity = await store.getRequestIdentity({ forceRefresh: true });
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // The still-valid access token keeps serving; the credential is not purged.
+      expect(identity?.accessToken).toBe(makeJwt(claims));
+      expect(store.getLastRefreshFailure()).toBe("unavailable");
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+        refreshToken?: string;
+      };
+      expect(onDisk.refreshToken).toBe("original-refresh-token");
+    });
+
+    it("still purges on a terminal invalid_grant", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "invalid_grant",
+              error_description: "Refresh token reuse detected; token family revoked",
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          ),
+      );
+      // SAFETY: Mock fetch implementing fetch interface for testing.
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      await persistExpiredCredential(store, "original-refresh-token");
+
+      expect(await store.getRequestIdentity({ forceRefresh: true })).toBeNull();
+      expect(store.getLastRefreshFailure()).toBe("revoked");
+      await expect(fs.stat(tokenFilePath)).rejects.toThrow();
+    });
   });
 });
 

@@ -440,24 +440,16 @@ describe("cloud authentication recovery", () => {
     expect(client.getAuthRecoverySnapshot().status).toBe("AUTHENTICATED");
   });
 
-  // SAFETY: Type assertion in test fixture/mock verified by test context.
-  it("treats a 403 response as an auth failure and performs one refresh", async () => {
+  it("degrades on a credential-level 403 without forcing a credential refresh", async () => {
     const initialIdentity = makeIdentity("access-forbidden");
-    const refreshedIdentity = makeIdentity("access-after-forbidden");
     let requestCalls = 0;
-    const identityProvider = vi.fn(async (options?: { forceRefresh?: boolean }) =>
-      options?.forceRefresh ? refreshedIdentity : initialIdentity,
+    const identityProvider = vi.fn(
+      async (_options?: { forceRefresh?: boolean }) => initialIdentity,
     );
     const fetchMock = vi.fn(async () => {
       requestCalls += 1;
-      if (requestCalls === 1) {
-        return new Response(JSON.stringify({ code: "device_revoked" }), {
-          status: 403,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ received: 1, accepted: 1, rejected: 0 }), {
-        status: 200,
+      return new Response(JSON.stringify({ code: "device_revoked" }), {
+        status: 403,
         headers: { "Content-Type": "application/json" },
       });
     });
@@ -467,11 +459,13 @@ describe("cloud authentication recovery", () => {
       fetchImpl: fetchMock as typeof fetch,
     });
 
-    const response = await client.sendTrajectoryObservationBatch([makeObservation()]);
+    await expect(client.sendTrajectoryObservationBatch([makeObservation()])).rejects.toThrow(
+      AuthRecoveryError,
+    );
 
-    expect(response.accepted).toBe(1);
-    expect(identityProvider).toHaveBeenCalledWith({ forceRefresh: true });
-    expect(requestCalls).toBe(2);
+    expect(identityProvider).not.toHaveBeenCalledWith({ forceRefresh: true });
+    expect(requestCalls).toBe(1);
+    expect(client.getAuthRecoverySnapshot().status).toBe("DEGRADED_OFFLINE");
   });
 
   it("recovers from a protocol token-expiry error without exposing it", async () => {
