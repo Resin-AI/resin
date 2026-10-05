@@ -66,6 +66,7 @@ export * from "./harness-version-stats.js";
 
 // Trajectory Capture Daemon Module & Attribution
 export * from "./trajectory-capture-module.js";
+export * from "./sign-out-boundary.js";
 
 // Local Opportunity Detection Engine & Continuous Session Tracker
 export {

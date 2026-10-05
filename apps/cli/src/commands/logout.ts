@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
-import { CAPTURE_WATERMARK_FILE_NAME, resolvePaths } from "@resin/observer";
+import {
+  CAPTURE_WATERMARK_FILE_NAME,
+  IpcClient,
+  resolvePaths,
+  writeSignOutBoundary,
+} from "@resin/observer";
 import { DeviceAuthClient } from "../service/auth-bootstrap.js";
 
 export interface LogoutCommandFlags {
@@ -20,6 +25,8 @@ export interface LogoutResult {
   purgedLocalCredentials: boolean;
   purgedTokenFile: boolean;
   workspaceId?: string;
+  /** A running daemon applied the logout's privacy boundary over IPC. */
+  daemonBoundaryApplied: boolean;
 }
 
 export function parseLogoutFlags(args: string[]): LogoutCommandFlags {
@@ -52,6 +59,9 @@ Revokes and purges local device authentication credentials from the secure
 vault and token store. Leaves all local tools, database records, and harness
 configurations intact.
 
+Logout is a privacy boundary: nothing observed while you are signed out, or
+still waiting to upload, is ever uploaded, including after a later \`resin login\`.
+
 Options:
   --all            Revoke and purge all cached device tokens and sessions.
   -f, --force      Bypass confirmation and proceed immediately.
@@ -65,6 +75,21 @@ Options:
 export interface LogoutCommandOptions {
   fsBridge?: ConfigFsBridge;
   customFetch?: typeof fetch;
+  /** Asks the daemon on `socketPath` to apply the logout boundary; resolves whether it did. */
+  notifyDaemon?: (socketPath: string) => Promise<boolean>;
+}
+
+/** `resin logout` on a running daemon; false when no daemon is reachable or it refuses. */
+async function requestDaemonSignOutBoundary(socketPath: string): Promise<boolean> {
+  const client = new IpcClient({ socketPath, timeoutMs: 3_000 });
+  try {
+    await client.connect();
+    return (await client.applySignOutBoundary()).applied;
+  } catch {
+    return false;
+  } finally {
+    await client.close().catch(() => undefined);
+  }
 }
 
 export async function logoutCommand(
@@ -103,14 +128,15 @@ export async function logoutCommand(
       revoked = await authClient.revokeToken(creds);
     }
     const purgeResult = await authClient.purgeCredentials();
-    // A deliberate logout is a boundary: without the capture watermark the next signed-in daemon
-    // start observes from then on instead of catching up the signed-out window.
-    fs.rmSync(
-      path.join(
-        resolvePaths({ home: customHome, resinHome: canonicalResinHome }).stateDir,
-        CAPTURE_WATERMARK_FILE_NAME,
-      ),
-      { force: true },
+    // A deliberate logout is a hard privacy boundary in every daemon mode. The durable marker
+    // (written after the purge, so only a later login can satisfy it) makes any daemon that
+    // verifies consent again move its cutoff past the signed-out window; without the capture
+    // watermark no start catches the window up; and a running daemon drops what it deferred now.
+    const daemonPaths = resolvePaths({ home: customHome, resinHome: canonicalResinHome });
+    writeSignOutBoundary(daemonPaths.stateDir);
+    fs.rmSync(path.join(daemonPaths.stateDir, CAPTURE_WATERMARK_FILE_NAME), { force: true });
+    const daemonBoundaryApplied = await (options.notifyDaemon ?? requestDaemonSignOutBoundary)(
+      daemonPaths.socketPath,
     );
 
     const result: LogoutResult = {
@@ -119,6 +145,7 @@ export async function logoutCommand(
       purgedLocalCredentials: purgeResult.purgedSecrets,
       purgedTokenFile: purgeResult.purgedFile,
       workspaceId: creds?.workspaceId,
+      daemonBoundaryApplied,
     };
 
     if (flags.json) {

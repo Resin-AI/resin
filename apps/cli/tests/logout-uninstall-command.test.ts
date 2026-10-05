@@ -4,6 +4,7 @@ import { join } from "node:path";
 import path from "node:path";
 import process from "node:process";
 import { buildOmpCatalogInstructionsBlock } from "@resin/adapter-omp";
+import { SIGN_OUT_BOUNDARY_FILE_NAME, readSignOutBoundary, resolvePaths } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
 import { logoutCommand, parseLogoutFlags } from "../src/commands/logout.js";
 import {
@@ -96,6 +97,11 @@ describe("logout command", () => {
     };
 
     const mockFetch = vi.fn().mockResolvedValue(Response.json({ success: true }));
+    const home = fs.mkdtempSync(join(tmpdir(), "resin-logout-revoke-"));
+    const tokenPath = join(home, ".resin", "state", "device-token.json");
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    fs.writeFileSync(tokenPath, JSON.stringify(mockTokenData), { mode: 0o600 });
+    const notifyDaemon = vi.fn(async () => true);
 
     const stdoutChunks: string[] = [];
     const originalStdout = process.stdout.write;
@@ -105,16 +111,60 @@ describe("logout command", () => {
     });
 
     try {
-      const exitCode = await logoutCommand(["--json", "--home", homeDir], {
+      const exitCode = await logoutCommand(["--json", "--home", home], {
         // SAFETY: Mock fetch matching fetch interface for testing.
         customFetch: mockFetch as typeof fetch,
+        notifyDaemon,
       });
 
       expect(exitCode).toBe(0);
       const parsed = JSON.parse(stdoutChunks.join(""));
       expect(parsed.success).toBe(true);
+      expect(parsed.daemonBoundaryApplied).toBe(true);
+      expect(fs.existsSync(tokenPath)).toBe(false);
+      // The running daemon is told on its own socket, after the credentials are gone.
+      expect(notifyDaemon).toHaveBeenCalledWith(
+        resolvePaths({ home, resinHome: join(home, ".resin") }).socketPath,
+      );
     } finally {
       process.stdout.write = originalStdout;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("records a durable sign-out boundary and succeeds while no daemon is running", async () => {
+    const home = fs.mkdtempSync(join(tmpdir(), "resin-logout-boundary-"));
+    // Path overrides would point the real IPC request (and the marker) outside this home.
+    for (const name of ["RESIN_HOME", "RESIN_STATE_DIR", "RESIN_SOCKET_PATH"]) {
+      vi.stubEnv(name, undefined);
+    }
+    const stdoutChunks: string[] = [];
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockImplementation((chunk: string | Uint8Array) => {
+      stdoutChunks.push(String(chunk));
+      return true;
+    });
+    try {
+      // No daemon listens in this home: the real IPC request fails and logout still succeeds.
+      expect(await logoutCommand(["--json", "--home", home])).toBe(0);
+      expect(JSON.parse(stdoutChunks.join(""))).toMatchObject({
+        success: true,
+        daemonBoundaryApplied: false,
+      });
+      const markerPath = join(home, ".resin", "state", SIGN_OUT_BOUNDARY_FILE_NAME);
+      const marker = readSignOutBoundary(markerPath);
+      expect(marker).not.toBeNull();
+      if (process.platform !== "win32") {
+        expect(fs.statSync(markerPath).mode & 0o777).toBe(0o600);
+      }
+
+      // Every logout writes a fresh marker, so a daemon can tell a newer one from the last.
+      expect(await logoutCommand(["--json", "--home", home])).toBe(0);
+      expect(readSignOutBoundary(markerPath)).not.toBe(marker);
+    } finally {
+      vi.unstubAllEnvs();
+      process.stdout.write = originalStdout;
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 
@@ -128,7 +178,9 @@ describe("logout command", () => {
     const originalStdout = process.stdout.write;
     process.stdout.write = vi.fn().mockReturnValue(true);
     try {
-      expect(await logoutCommand(["--json", "--home", home])).toBe(0);
+      expect(
+        await logoutCommand(["--json", "--home", home], { notifyDaemon: async () => false }),
+      ).toBe(0);
       expect(fs.existsSync(watermarkPath)).toBe(false);
       expect(fs.existsSync(checkpointPath)).toBe(true);
     } finally {

@@ -12,7 +12,8 @@ export type IpcMethod =
   | "getModuleStatus"
   | "reloadConfig"
   | "getDiagnostics"
-  | "gracefulShutdown";
+  | "gracefulShutdown"
+  | "applySignOutBoundary";
 
 export type IpcMethodParams =
   | PingParams
@@ -66,6 +67,14 @@ export interface GracefulShutdownParams {
 export interface GracefulShutdownResult {
   accepted: boolean;
   message: string;
+}
+
+/** Reply to `applySignOutBoundary`, sent by `resin logout` to a running daemon. */
+export interface ApplySignOutBoundaryResult {
+  /** The privacy cutoff moved to the logout and nothing observed before it will be uploaded. */
+  applied: boolean;
+  /** The moved cutoff is in the privacy checkpoint, so it also holds after a restart. */
+  persisted: boolean;
 }
 
 export const IPC_ERROR_CODES = {

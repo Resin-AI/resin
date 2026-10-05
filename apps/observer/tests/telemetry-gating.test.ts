@@ -26,11 +26,19 @@ import type {
 } from "../src/lifecycle.js";
 import type { NormalizationPipeline } from "../src/normalization/pipeline.js";
 import { resolvePaths } from "../src/paths.js";
+import {
+  SIGN_OUT_BOUNDARY_FILE_NAME,
+  readSignOutBoundary,
+  writeSignOutBoundary,
+} from "../src/sign-out-boundary.js";
 import type { ObserverCoordinator } from "../src/tailing/coordinator.js";
+import { SourceCursorManager } from "../src/tailing/cursor-manager.js";
+import { TranscriptTailer } from "../src/tailing/tailer.js";
 import {
   type RemoteTelemetryConsentSnapshot,
   TrajectoryCaptureRuntimeModule,
 } from "../src/trajectory-capture-module.js";
+import { FakeSessionEventSource } from "./fake-harness.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -1513,6 +1521,276 @@ describe("observer telemetry gating", () => {
     } finally {
       await fixture.cleanup();
     }
+  });
+});
+
+/**
+ * One running daemon that never restarts (foreground or externally supervised, as with
+ * `RESIN_NO_SERVICE=1`): a real tailer with durable `auth-pending/`, the module's real capture
+ * coordinator, and the daemon's IPC handler on an in-memory transport for `resin logout`.
+ */
+async function createSignedInDaemon() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-sign-out-boundary-"));
+  temporaryDirectories.push(home);
+  const stateDir = path.join(home, "state");
+  const pendingDirectory = path.join(stateDir, "auth-pending");
+  const signOutBoundaryPath = path.join(stateDir, SIGN_OUT_BOUNDARY_FILE_NAME);
+  const privacyCheckpointPath = path.join(stateDir, "telemetry-privacy-checkpoint.json");
+  const verifiedConsent: RemoteTelemetryConsentSnapshot = {
+    metadataTelemetryEnabled: true,
+    updatedAt: new Date(1_000).toISOString(),
+  };
+  const cloud = {
+    nowMs: 1_000,
+    consent: verifiedConsent as RemoteTelemetryConsentSnapshot | null,
+    workspaceId: "ws_a",
+  };
+  const doubles = createUploadingCaptureDoubles();
+  const tailer = new TranscriptTailer({
+    cursorManager: new SourceCursorManager(),
+    pendingStorageDirectory: pendingDirectory,
+    defaultBatchSize: 1,
+  });
+  const module = new TrajectoryCaptureRuntimeModule({
+    observerCoordinator: mockObserverCoordinator({
+      registerAdapter: vi.fn(),
+      onRecords: (handler) => tailer.onRecords(handler),
+      getTailer: () => tailer,
+    }),
+    normalizationPipeline: doubles.pipeline,
+    observationClient: doubles.observationClient,
+    adapters: [],
+    decoders: [],
+    telemetryEnabled: true,
+    remoteTelemetryConsent: verifiedConsent,
+    refreshRemoteTelemetryConsent: async () => cloud.consent,
+    getVerifiedWorkspaceId: () => cloud.workspaceId,
+    privateValueOwnerWorkspaceId: "ws_a",
+    signOutBoundaryPath,
+    privacyCheckpointPath,
+    captureWatermarkPath: path.join(stateDir, "capture-watermark.json"),
+    now: () => cloud.nowMs,
+    logger: createLogger(),
+  });
+  const supervisor = new RecoveryAwareDaemonSupervisor({
+    config: DaemonConfigSchema.parse({}),
+    paths: resolvePaths({ home }),
+    logger: createLogger(),
+    enableSignalHandlers: false,
+  });
+  const server = new IpcServer({
+    supervisor,
+    socketPath: "",
+    applySignOutBoundary: () => ({ applied: true, persisted: module.applySignOutBoundary() }),
+  });
+  await server.start();
+  const { serverTransport, clientTransport } = createInMemoryIpcPair();
+  server.attachTransport(serverTransport);
+  const client = new IpcClient({ transport: clientTransport });
+
+  const sessionA = mockHarnessSession({ sessionId: "signed-out-session", status: "active" });
+  const sourceA = new FakeSessionEventSource(sessionA.sessionId);
+  await tailer.attachSession(sessionA, sourceA, { maxBatchSize: 1 });
+  // The tailer drops records with identical content as duplicates.
+  const distinctRecord = (sessionId: string, timestampMs: number, sequence: number) => ({
+    ...createTimestampedRecord(sessionId, timestampMs, sequence),
+    rawPayload: { text: `record ${sequence}` },
+  });
+
+  return {
+    stateDir,
+    signOutBoundaryPath,
+    privacyCheckpointPath,
+    cloud,
+    verifiedConsent,
+    client,
+    pendingFiles: () => (fs.existsSync(pendingDirectory) ? fs.readdirSync(pendingDirectory) : []),
+    /** Every record the capture coordinator let through to normalization and upload. */
+    captured: () =>
+      doubles.processBatch.mock.calls.flatMap(([records]) =>
+        records.map((record) => record.recordId),
+      ),
+    uploads: doubles.sendObservationBatch,
+    /** Appends a record and waits until the signed-out daemon holds it durably for later. */
+    async deferWhileSignedOut(timestampMs: number, sequence: number) {
+      const pending = () => tailer.getSessionStatus(sessionA.sessionId)?.durablePendingCount ?? 0;
+      const before = pending();
+      sourceA.appendRecords([distinctRecord(sessionA.sessionId, timestampMs, sequence)]);
+      await vi.waitFor(() => expect(pending()).toBe(before + 1));
+    },
+    /**
+     * After `resin login`: the daemon's consent poll verifies consent again and resumes the
+     * deferred session, then a fresh session is captured. Resolves once both happened.
+     */
+    async captureFreshSessionAfterLogin(timestampMs: number, sequence: number) {
+      // Resumed batches are acknowledged (and their auth-pending copy removed) once flushed.
+      await vi.waitFor(
+        async () => {
+          await module.getCaptureCoordinator().waitForIdle();
+          expect(this.pendingFiles()).toEqual([]);
+        },
+        { timeout: 15_000 },
+      );
+      const sessionB = mockHarnessSession({ sessionId: "signed-in-session", status: "active" });
+      const sourceB = new FakeSessionEventSource(sessionB.sessionId, [
+        distinctRecord(sessionB.sessionId, timestampMs, sequence),
+      ]);
+      await tailer.attachSession(sessionB, sourceB, { maxBatchSize: 1 });
+      await vi.waitFor(() => expect(this.captured()).toContain(`record_${sequence}`));
+      await module.getCaptureCoordinator().waitForIdle();
+    },
+    async cleanup() {
+      await client.close().catch(() => undefined);
+      await server.stop().catch(() => undefined);
+      await tailer.close();
+    },
+  };
+}
+
+describe("resin logout privacy boundary in a daemon that does not restart", () => {
+  it("never uploads the signed-out window after re-login once logout reached the daemon", async () => {
+    const daemon = await createSignedInDaemon();
+    try {
+      // Credentials are gone: deliveries are deferred durably, nothing is uploaded.
+      daemon.cloud.consent = null;
+      daemon.cloud.nowMs = 2_000;
+      await daemon.deferWhileSignedOut(1_500, 1);
+      expect(daemon.pendingFiles()).toHaveLength(1);
+
+      // `resin logout`: the durable marker, then the IPC request a running daemon answers.
+      writeSignOutBoundary(daemon.stateDir);
+      await expect(daemon.client.applySignOutBoundary()).resolves.toEqual({
+        applied: true,
+        persisted: true,
+      });
+      // The deferred batch is dropped now, and the moved cutoff survives a restart.
+      await vi.waitFor(() => expect(daemon.pendingFiles()).toEqual([]));
+      expect(JSON.parse(fs.readFileSync(daemon.privacyCheckpointPath, "utf8"))).toMatchObject({
+        cutoffMs: 2_000,
+        remoteConsentCutoffMs: 2_000,
+      });
+
+      // Still signed out: new activity is deferred like any other.
+      daemon.cloud.nowMs = 3_000;
+      await daemon.deferWhileSignedOut(2_500, 2);
+      expect(daemon.pendingFiles()).toHaveLength(1);
+
+      // `resin login` to the same workspace without a restart.
+      daemon.cloud.consent = daemon.verifiedConsent;
+      daemon.cloud.nowMs = 4_000;
+      await daemon.captureFreshSessionAfterLogin(4_500, 3);
+
+      expect(daemon.captured()).toEqual(["record_3"]);
+      expect(readSignOutBoundary(daemon.signOutBoundaryPath)).toBeNull();
+    } finally {
+      await daemon.cleanup();
+    }
+  });
+
+  it("never uploads the signed-out window after re-login when the daemon missed the logout IPC", async () => {
+    const daemon = await createSignedInDaemon();
+    try {
+      daemon.cloud.consent = null;
+      daemon.cloud.nowMs = 2_000;
+      await daemon.deferWhileSignedOut(1_500, 1);
+      // Logout while the daemon is unreachable: only the durable marker is written.
+      writeSignOutBoundary(daemon.stateDir);
+      daemon.cloud.nowMs = 3_000;
+      await daemon.deferWhileSignedOut(2_500, 2);
+
+      daemon.cloud.consent = daemon.verifiedConsent;
+      daemon.cloud.nowMs = 4_000;
+      await daemon.captureFreshSessionAfterLogin(4_500, 3);
+
+      expect(daemon.captured()).toEqual(["record_3"]);
+      expect(readSignOutBoundary(daemon.signOutBoundaryPath)).toBeNull();
+      expect(JSON.parse(fs.readFileSync(daemon.privacyCheckpointPath, "utf8"))).toMatchObject({
+        remoteConsentCutoffMs: 4_000,
+      });
+    } finally {
+      await daemon.cleanup();
+    }
+  });
+
+  it("uploads deliveries deferred by credential loss after re-login to the same workspace", async () => {
+    const daemon = await createSignedInDaemon();
+    try {
+      // A refresh failure or expiry is not a logout: consent is not withdrawn.
+      daemon.cloud.consent = null;
+      daemon.cloud.nowMs = 2_000;
+      await daemon.deferWhileSignedOut(1_500, 1);
+      daemon.cloud.nowMs = 3_000;
+      await daemon.deferWhileSignedOut(2_500, 2);
+
+      daemon.cloud.consent = daemon.verifiedConsent;
+      daemon.cloud.nowMs = 4_000;
+      await daemon.captureFreshSessionAfterLogin(4_500, 3);
+
+      expect([...daemon.captured()].sort()).toEqual(["record_1", "record_2", "record_3"]);
+      expect(daemon.uploads).toHaveBeenCalled();
+    } finally {
+      await daemon.cleanup();
+    }
+  });
+
+  it("drops deliveries deferred for one workspace when re-login verifies another", async () => {
+    const daemon = await createSignedInDaemon();
+    try {
+      daemon.cloud.consent = null;
+      daemon.cloud.nowMs = 2_000;
+      await daemon.deferWhileSignedOut(1_500, 1);
+      daemon.cloud.nowMs = 3_000;
+      await daemon.deferWhileSignedOut(2_500, 2);
+
+      daemon.cloud.consent = daemon.verifiedConsent;
+      daemon.cloud.workspaceId = "ws_b";
+      daemon.cloud.nowMs = 4_000;
+      await daemon.captureFreshSessionAfterLogin(4_500, 3);
+
+      expect(daemon.captured()).toEqual(["record_3"]);
+    } finally {
+      await daemon.cleanup();
+    }
+  });
+
+  it("starts after a logout from the verification time and consumes the marker only after login", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-sign-out-start-"));
+    temporaryDirectories.push(home);
+    writeSignOutBoundary(home);
+    const signOutBoundaryPath = path.join(home, SIGN_OUT_BOUNDARY_FILE_NAME);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    const marker = readSignOutBoundary(signOutBoundaryPath);
+    const start = (signOutBoundaryAtConsentRead: string | null, nowMs: number) =>
+      new TrajectoryCaptureRuntimeModule({
+        observerCoordinator: createCaptureDoubles().observer,
+        captureCoordinator: createCaptureDoubles().capture,
+        adapters: [],
+        decoders: [],
+        telemetryEnabled: true,
+        remoteTelemetryConsent: {
+          metadataTelemetryEnabled: true,
+          updatedAt: new Date(1_000).toISOString(),
+        },
+        signOutBoundaryPath,
+        signOutBoundaryAtConsentRead,
+        privacyCheckpointPath,
+        now: () => nowMs,
+      });
+
+    // The marker appeared while the start was reading consent: applied, kept for later.
+    start(null, 5_000);
+    expect(readSignOutBoundary(signOutBoundaryPath)).toBe(marker);
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      remoteConsentCutoffMs: 5_000,
+    });
+
+    // Consent was verified after the logout (a login): applied and consumed.
+    start(marker, 6_000);
+    expect(readSignOutBoundary(signOutBoundaryPath)).toBeNull();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      cutoffMs: 6_000,
+      remoteConsentCutoffMs: 6_000,
+    });
   });
 });
 function mockObserverCoordinator(obj: Partial<ObserverCoordinator>): ObserverCoordinator {
