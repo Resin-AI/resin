@@ -1086,7 +1086,8 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
    * reported it. A job only a job-joining report stated `completed` exited 0, and is marked as a
    * completed bash run like a foreground one; a completion read from a notice that states no status
    * is not. A job no held call launched (one already joined, or launched before this decoder saw
-   * the session) is ignored.
+   * the session) is ignored. The record's own events take its first `firstStep` steps, so each
+   * joined result takes the next step of the record and none collides with another.
    */
   private joinBackgroundJobs(
     completions: readonly OmpJobCompletion[],
@@ -1094,17 +1095,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     timestamp: string,
     causalRef: CausalRefInput,
     metadata: OmpTranscriptPayload,
+    firstStep: number,
   ): IntermediateToolResultEvent[] {
     const { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
-    return completions.flatMap((completion) => {
+    const joined: IntermediateToolResultEvent[] = [];
+    for (const completion of completions) {
       const launch = this.backgroundJobs.getAndClear(sessionId, completion.jobId);
-      if (launch === undefined) return [];
+      if (launch === undefined) continue;
       const exitedZero = completion.statusStated && !completion.failed;
-      const result: IntermediateToolResultEvent = {
+      joined.push({
         sessionId,
         timestamp,
         schemaVersion: "1.0.0",
-        causalRef,
+        causalRef: { ...causalRef, stepIndex: firstStep + joined.length },
         metadata: exitedZero
           ? { ...unproven, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
           : { ...unproven },
@@ -1116,9 +1119,9 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         isError: completion.failed,
         error: completion.failed ? completion.output : undefined,
         executionDurationMs: completion.durationMs ?? 0,
-      };
-      return [result];
-    });
+      });
+    }
+    return joined;
   }
 
   /**
@@ -1892,6 +1895,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         timestamp,
         causalRef,
         metadata,
+        1,
       );
       if (joined.length > 0) return [fallback, ...joined];
     }
@@ -2465,13 +2469,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
 
     // Any record listing background jobs may report one finished (a `wait`, or a `hub` snapshot
     // or cancellation): the call that launched it gets its result here.
-    const joined = this.joinBackgroundJobs(
-      ompJobReportCompletions(details),
-      sessionId,
-      timestamp,
-      causalRef,
-      metadata,
-    );
+    const completions = ompJobReportCompletions(details);
     const joinCall =
       this.heldJobJoinCalls.getAndClear(sessionId, callId) ??
       (lateCall !== undefined &&
@@ -2484,6 +2482,14 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     // too. The jobs it joined are recorded as their launching calls' results.
     if (joinCall !== undefined && isOmpJobReportOnly(details, isError) && !providerUsage) {
       this.harnessInternalReads.set(sessionId, rawCallId ?? callId, true);
+      const joined = this.joinBackgroundJobs(
+        completions,
+        sessionId,
+        timestamp,
+        causalRef,
+        metadata,
+        0,
+      );
       return joined.length > 0 ? joined : null;
     }
     // A background launch's acknowledgement is not its result: the job's completion is (see
@@ -2495,11 +2501,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       this.backgroundJobs.set(sessionId, launchedJobId, { callId, toolName });
     }
     const call = lateCall ?? joinCall;
-    const events: IntermediateSessionEvent[] = [
+    const own: IntermediateSessionEvent[] = [
       ...(call === undefined ? [] : [call]),
       ...(launchedJobId === undefined ? [evt] : []),
-      ...joined,
     ];
+    const joined = this.joinBackgroundJobs(
+      completions,
+      sessionId,
+      timestamp,
+      causalRef,
+      metadata,
+      own.filter((event) => event.causalRef?.causalSequence === causalRef.causalSequence).length,
+    );
+    const events = [...own, ...joined];
     if (events.length === 0) return null;
     return events.length === 1 && events[0] === evt ? evt : events;
   }

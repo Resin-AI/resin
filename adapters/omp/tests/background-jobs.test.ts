@@ -217,6 +217,16 @@ describe("OMP background jobs", () => {
       ["call-a", "built a", false],
       ["call-b", "b broke\n\nCommand exited with code 2", true],
     ]);
+    // The notice and each joined result take their own step of the notice's record.
+    expect(
+      several
+        .filter((event) => event.causalRef.causalSequence === 7)
+        .map((event) => [event.type, event.causalRef.stepIndex]),
+    ).toEqual([
+      ["unknown_passthrough", undefined],
+      ["tool_result", 1],
+      ["tool_result", 2],
+    ]);
   });
 
   it("joins each job once, whichever record reports it first", () => {
