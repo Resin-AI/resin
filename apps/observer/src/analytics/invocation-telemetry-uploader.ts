@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { InvocationRecord } from "@resin/contracts";
 import type { AuditRepository } from "@resin/db";
 import { ProtocolError } from "@resin/protocol";
 import { ResourceForbiddenError } from "../auth-recovery.js";
 import type { CloudObservationClient } from "../cloud-runtime.js";
 import type { Logger } from "../lifecycle.js";
+import { ensurePrivateDirectorySync } from "../private-fs.js";
+import { readSignOutBoundary, signOutBoundaryTimeMs } from "../sign-out-boundary.js";
 
 // Resin Cloud's telemetry schema guard rejects the whole batch with HTTP 400 when an
 // invocation's error type exceeds 64 characters, its message exceeds 128, or it carries a stack.
@@ -45,6 +49,49 @@ function isPermanentRejection(error: unknown): boolean {
 const REFUSAL_BACKOFF_BASE_MS = 15 * 60_000;
 const REFUSAL_BACKOFF_MAX_MS = 24 * 60 * 60_000;
 
+/** The uploader's identity boundary record, in the daemon state directory. */
+export const INVOCATION_UPLOAD_IDENTITY_FILE_NAME = "invocation-upload-identity.json";
+
+/** The paired cloud identity invocation telemetry is uploaded to. */
+export interface InvocationUploadIdentity {
+  /** The cloud workspace the device credentials belong to. */
+  readonly workspaceId: string;
+  /** When those credentials were saved: a login, or a later token rotation. */
+  readonly storedAt: string;
+}
+
+/**
+ * Which identity pending invocation rows belong to, kept across daemon restarts. Every pending
+ * row was recorded under `workspaceId` (the identity of the last upload) unless a logout
+ * intervened (`signedOutAtMs`); `appliedSignOutMarker` keeps one logout from applying twice.
+ */
+interface InvocationUploadIdentityState {
+  workspaceId: string | null;
+  signedOutAtMs: number | null;
+  appliedSignOutMarker: string | null;
+}
+
+function readIdentityState(filePath: string | undefined): InvocationUploadIdentityState {
+  const empty = { workspaceId: null, signedOutAtMs: null, appliedSignOutMarker: null };
+  if (!filePath) return empty;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (parsed === null || typeof parsed !== "object") return empty;
+    const record = parsed as Record<string, unknown>;
+    return {
+      workspaceId: typeof record.workspaceId === "string" ? record.workspaceId : null,
+      signedOutAtMs: typeof record.signedOutAtMs === "number" ? record.signedOutAtMs : null,
+      appliedSignOutMarker:
+        typeof record.appliedSignOutMarker === "string" ? record.appliedSignOutMarker : null,
+    };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return empty;
+    // A damaged record cannot say which identity the backlog belongs to: treat it as a logout,
+    // so nothing pending is sent to whoever is signed in next.
+    return { ...empty, signedOutAtMs: 0 };
+  }
+}
+
 /**
  * Options for configuring InvocationTelemetryUploader.
  */
@@ -56,6 +103,20 @@ export interface InvocationTelemetryUploaderOptions {
   readonly logger?: Logger;
   /** Clock for backoff decisions; defaults to `Date.now`. */
   readonly now?: () => number;
+  /**
+   * The identity uploads go to (read from the credentials the cloud client sends with), or null
+   * while signed out. With it, the uploader keeps pending rows from crossing an identity
+   * boundary: rows recorded before a `resin logout`, while signed out, or under another cloud
+   * workspace are retired, never uploaded.
+   */
+  readonly currentIdentity?: () => Promise<InvocationUploadIdentity | null>;
+  /** Where the identity boundary is kept across restarts; in memory only when unset. */
+  readonly identityStatePath?: string;
+  /**
+   * The `resin logout` marker. Read before each upload too, so a logout whose signal this
+   * daemon missed still applies once the uploader runs again.
+   */
+  readonly signOutBoundaryPath?: string;
 }
 
 /**
@@ -69,6 +130,12 @@ export class InvocationTelemetryUploader {
   private readonly batchSize: number;
   private readonly logger?: Logger;
   private readonly now: () => number;
+  private readonly currentIdentity?: () => Promise<InvocationUploadIdentity | null>;
+  private readonly identityStatePath?: string;
+  private readonly signOutBoundaryPath?: string;
+  private identityState: InvocationUploadIdentityState;
+  /** Whether `identityState` is on disk as it is in memory. */
+  private identityStatePersisted = false;
   /** Workspaces the cloud refused, and when each may be tried again. */
   private readonly refusals = new Map<string, { retryAtMs: number }>();
   /** Consecutive refusals per workspace; drives the backoff delay. */
@@ -85,6 +152,99 @@ export class InvocationTelemetryUploader {
     this.batchSize = options.batchSize ?? 200;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
+    this.currentIdentity = options.currentIdentity;
+    this.identityStatePath = options.identityStatePath;
+    this.signOutBoundaryPath = options.signOutBoundaryPath;
+    this.identityState = readIdentityState(options.identityStatePath);
+  }
+
+  /**
+   * Applies a `resin logout` (`marker` is the sign-out marker's contents): pending rows recorded
+   * before it are retired now, and rows recorded until the next login are retired once that
+   * login's credentials are in use. Credential loss without a logout keeps the backlog for the
+   * same workspace. Applying one marker twice (a daemon restart before the login) is a no-op.
+   * Returns whether the boundary is persisted.
+   */
+  applySignOutBoundary(marker: string): boolean {
+    if (marker === this.identityState.appliedSignOutMarker) {
+      return this.identityStatePersisted || this.persistIdentityState();
+    }
+    const signedOutAtMs = signOutBoundaryTimeMs(marker);
+    this.retirePendingBefore(signedOutAtMs, "logout");
+    this.identityState = {
+      ...this.identityState,
+      signedOutAtMs: Math.max(this.identityState.signedOutAtMs ?? 0, signedOutAtMs),
+      appliedSignOutMarker: marker,
+    };
+    return this.persistIdentityState();
+  }
+
+  /**
+   * Retires the rows a boundary separates from `identity` and records it as the backlog's owner.
+   * Returns false while the credentials in use predate a pending logout: nothing may be sent.
+   */
+  private crossIdentityBoundary(identity: InvocationUploadIdentity): boolean {
+    const { workspaceId, signedOutAtMs } = this.identityState;
+    const storedAtMs = Date.parse(identity.storedAt);
+    if (signedOutAtMs !== null && !(storedAtMs > signedOutAtMs)) {
+      return false;
+    }
+    const workspaceChanged = workspaceId !== null && workspaceId !== identity.workspaceId;
+    if (signedOutAtMs !== null || workspaceChanged) {
+      // Everything recorded before these credentials were saved belongs to the earlier identity
+      // or to the signed-out window; without a save time, everything pending does.
+      this.retirePendingBefore(
+        Number.isFinite(storedAtMs) ? storedAtMs : this.now() + 1,
+        workspaceChanged ? "workspace change" : "logout",
+      );
+    }
+    if (signedOutAtMs !== null || workspaceId !== identity.workspaceId) {
+      this.identityState = {
+        ...this.identityState,
+        workspaceId: identity.workspaceId,
+        signedOutAtMs: null,
+      };
+      this.persistIdentityState();
+    }
+    return true;
+  }
+
+  private retirePendingBefore(ms: number, reason: string): void {
+    if (!(ms > 0)) return;
+    const retired = this.auditRepository.retirePendingInvocationUploads(
+      new Date(ms).toISOString(),
+      new Date(this.now()).toISOString(),
+    );
+    if (retired > 0) {
+      this.logger?.info("Invocation telemetry withheld across an identity boundary", {
+        reason,
+        retired,
+      });
+    }
+  }
+
+  private persistIdentityState(): boolean {
+    const filePath = this.identityStatePath;
+    this.identityStatePersisted = false;
+    if (!filePath) return false;
+    const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      ensurePrivateDirectorySync(path.dirname(filePath));
+      fs.writeFileSync(
+        temporaryPath,
+        `${JSON.stringify({ version: 1, ...this.identityState })}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+      fs.renameSync(temporaryPath, filePath);
+      this.identityStatePersisted = true;
+      return true;
+    } catch (error) {
+      fs.rmSync(temporaryPath, { force: true });
+      this.logger?.warn("Could not persist the invocation telemetry identity boundary", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
   }
 
   /**
@@ -139,6 +299,16 @@ export class InvocationTelemetryUploader {
     this.isFlushing = true;
 
     try {
+      const marker = this.signOutBoundaryPath
+        ? readSignOutBoundary(this.signOutBoundaryPath)
+        : null;
+      if (marker !== null) this.applySignOutBoundary(marker);
+      if (this.currentIdentity) {
+        const identity = await this.currentIdentity();
+        if (identity === null || !this.crossIdentityBoundary(identity)) {
+          return { uploaded: 0 };
+        }
+      }
       const nowMs = this.now();
       for (const [workspaceId, refusal] of this.refusals) {
         if (refusal.retryAtMs <= nowMs) this.refusals.delete(workspaceId);

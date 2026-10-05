@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import fs, { writeFileSync } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,7 +9,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   REAL_RESIN_ROOTS,
   realResinRootFor,
-  stripResinDirectoryOverrides,
+  resinRootsFor,
+  socketConnectPath,
+  stripResinLayoutOverrides,
   takeRealHomeViolations,
   withIsolatedHome,
 } from "./real-home-guard.js";
@@ -34,18 +38,96 @@ describe("real-home guard", () => {
     expect(realResinRootFor(":memory:")).toBeUndefined();
   });
 
-  it("drops inherited Resin layout directory overrides, keeping unrelated RESIN_*_DIR settings", () => {
+  it("drops inherited Resin layout overrides, keeping unrelated RESIN_*_DIR settings", () => {
     const env: NodeJS.ProcessEnv = {
       RESIN_DATA_DIR: "/home/dev/.resin/data",
       RESIN_STATE_DIR: "/home/dev/.resin/state",
+      RESIN_SOCKET_PATH: "/run/dev/resin.sock",
+      RESIN_CONFIG_FILE: "/etc/dev/resin.json",
+      RESIN_LOCK_FILE: "/run/dev/resin.lock",
+      RESIN_PID_FILE: "/run/dev/resin.pid",
       RESIN_RELEASE_DIR: "/tmp/release",
       PATH: "/bin",
     };
-    expect(stripResinDirectoryOverrides(env)).toEqual(["RESIN_DATA_DIR", "RESIN_STATE_DIR"]);
+    expect(stripResinLayoutOverrides(env).sort()).toEqual([
+      "RESIN_CONFIG_FILE",
+      "RESIN_DATA_DIR",
+      "RESIN_LOCK_FILE",
+      "RESIN_PID_FILE",
+      "RESIN_SOCKET_PATH",
+      "RESIN_STATE_DIR",
+    ]);
     expect(env).toEqual({ RESIN_RELEASE_DIR: "/tmp/release", PATH: "/bin" });
     // This worker already started without them, so default paths follow the isolated HOME.
-    expect(stripResinDirectoryOverrides({ ...process.env })).toEqual([]);
+    expect(stripResinLayoutOverrides({ ...process.env })).toEqual([]);
   });
+
+  it("protects the files named by inherited socket, config, lock and pid overrides", () => {
+    const roots = resinRootsFor(
+      {
+        RESIN_SOCKET_PATH: "/run/dev/resin.sock",
+        RESIN_CONFIG_FILE: "/etc/dev/resin.json",
+        RESIN_LOCK_FILE: "/run/dev/resin.lock",
+        RESIN_PID_FILE: "/run/dev/resin.pid",
+        RESIN_RELEASE_DIR: "/tmp/release",
+      },
+      "/home/dev",
+    );
+    for (const file of [
+      "/home/dev/.resin",
+      "/run/dev/resin.sock",
+      "/etc/dev/resin.json",
+      "/run/dev/resin.lock",
+      "/run/dev/resin.pid",
+    ]) {
+      expect(roots).toContain(path.resolve(file));
+    }
+    expect(roots).not.toContain(path.resolve("/tmp/release"));
+    // Only the named files, not their (possibly shared) parent directories.
+    expect(roots).not.toContain(path.resolve("/run/dev"));
+  });
+
+  it("reads the dialled IPC path from every Socket#connect argument shape", () => {
+    expect(socketConnectPath(["/x/daemon.sock"])).toBe("/x/daemon.sock");
+    expect(socketConnectPath([{ path: "/x/daemon.sock" }])).toBe("/x/daemon.sock");
+    expect(socketConnectPath([[{ path: "/x/daemon.sock" }, null]])).toBe("/x/daemon.sock");
+    expect(socketConnectPath([8080, "127.0.0.1"])).toBeUndefined();
+    expect(socketConnectPath(["8080"])).toBeUndefined();
+    expect(socketConnectPath([{ port: 8080, host: "127.0.0.1" }])).toBeUndefined();
+  });
+
+  it("refuses socket connects under the real ~/.resin with an ordinary error event", async () => {
+    // Under the missing probe directory, so even an unguarded connect could reach no daemon.
+    const socketPath = path.join(missing, "daemon.sock");
+    const [error] = await once(net.connect(socketPath), "error");
+    expect((error as Error).message).toMatch(/real user Resin home: connect/);
+    const [viaOptions] = await once(net.createConnection({ path: socketPath }), "error");
+    expect((viaOptions as Error).message).toMatch(/real user Resin home: connect/);
+    expect(takeRealHomeViolations()).toHaveLength(2);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "allows connects to a socket outside the real home",
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-guard-sock-"));
+      const socketPath = path.join(dir, "s.sock");
+      const server = net.createServer((socket) => socket.end("ok"));
+      server.listen(socketPath);
+      await once(server, "listening");
+      try {
+        const client = net.connect(socketPath);
+        client.setEncoding("utf8");
+        const [reply] = await once(client, "data");
+        expect(reply).toBe("ok");
+        client.destroy();
+        expect(takeRealHomeViolations()).toEqual([]);
+      } finally {
+        server.close();
+        await once(server, "close");
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("rejects fs writes under the real ~/.resin, including named imports and promises", async () => {
     const target = path.join(missing, "state.db");

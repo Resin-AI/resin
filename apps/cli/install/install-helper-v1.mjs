@@ -17894,6 +17894,7 @@ function getActiveVersion(resinHome) {
   }
   return null;
 }
+var STALE_DOWNLOAD_TEMP_MS = 60 * 60 * 1e3;
 
 // apps/cli/src/installer/channel-verifier.ts
 import crypto5 from "node:crypto";

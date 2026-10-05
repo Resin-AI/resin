@@ -6,6 +6,10 @@ import process from "node:process";
 import type { ConfigFsBridge } from "@resin/harness-contracts";
 import { type DaemonSupervisor, IpcServer } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
+import {
+  STALE_DOWNLOAD_TEMP_MS,
+  pruneDownloadedReleaseAssets,
+} from "../../src/installer/asset-downloader.js";
 import type { ResolvedProductionRelease } from "../../src/installer/release-client.js";
 import { detectPlatform, resolvePlatformPaths } from "../../src/platform/index.js";
 import { runUpdateWorker } from "../../src/updates/auto-update.js";
@@ -2509,6 +2513,51 @@ describe("UpdateEngine old release pruning", () => {
         "resin-v1.1.0-linux-x64.tar.gz",
         "resin-v1.1.0-linux-x64.tar.gz.download.tmp",
       ]);
+    } finally {
+      await fs.rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes crash-left partial downloads only once old and their writer is gone", async () => {
+    const { homeDir, resinHome } = await createVersionsHome(["v1.0.0"]);
+    const downloadsDir = path.join(resinHome, "downloads");
+    const now = Date.parse("2026-10-05T12:00:00.000Z");
+    const DEAD = 4_000_001;
+    const LIVE = 4_000_002;
+    const temp = (asset: string, pid: number) =>
+      `${asset}.${pid}.${crypto.randomUUID()}.download.tmp`;
+    const staleDead = temp("resin-v1.0.0-linux-x64.tar.gz", DEAD);
+    const staleDeadDeno = temp("deno-aarch64-unknown-linux-gnu.zip", DEAD);
+    const staleLive = temp("resin-v1.0.0-linux-x64.tar.gz", LIVE);
+    const freshDead = temp("resin-v1.0.0-linux-x64.tar.gz", DEAD);
+    const foreign = temp("notes.txt", DEAD);
+    try {
+      await fs.mkdir(downloadsDir);
+      const ages: Record<string, number> = {
+        [staleDead]: STALE_DOWNLOAD_TEMP_MS,
+        [staleDeadDeno]: STALE_DOWNLOAD_TEMP_MS * 3,
+        [staleLive]: STALE_DOWNLOAD_TEMP_MS * 3,
+        [freshDead]: STALE_DOWNLOAD_TEMP_MS - 60_000,
+        [foreign]: STALE_DOWNLOAD_TEMP_MS * 3,
+        "resin-v1.0.0-linux-x64.tar.gz": STALE_DOWNLOAD_TEMP_MS * 3,
+      };
+      for (const [file, age] of Object.entries(ages)) {
+        const filePath = path.join(downloadsDir, file);
+        await fs.writeFile(filePath, "x");
+        await fs.utimes(filePath, (now - age) / 1000, (now - age) / 1000);
+      }
+
+      const result = await pruneDownloadedReleaseAssets({
+        resinHome,
+        retainVersions: ["1.0.0"],
+        now,
+        isProcessAlive: (pid) => pid === LIVE,
+      });
+
+      expect(result.removed.sort()).toEqual([staleDead, staleDeadDeno].sort());
+      expect((await fs.readdir(downloadsDir)).sort()).toEqual(
+        [freshDead, foreign, staleLive, "resin-v1.0.0-linux-x64.tar.gz"].sort(),
+      );
     } finally {
       await fs.rm(homeDir, { recursive: true, force: true });
     }

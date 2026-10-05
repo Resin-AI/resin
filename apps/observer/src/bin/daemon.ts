@@ -9,6 +9,7 @@ import { createLocalStateStore } from "@resin/db";
 import type { ActionableNotification } from "@resin/protocol";
 import { z } from "zod";
 import { CLOUD_UPLOAD_STATUS_FILE_NAME } from "../analytics/cloud-upload-status.js";
+import { INVOCATION_UPLOAD_IDENTITY_FILE_NAME } from "../analytics/invocation-telemetry-uploader.js";
 import {
   AUTH_PENDING_DIRECTORY_NAME,
   AuthPendingRetentionModule,
@@ -1187,9 +1188,12 @@ async function runForeground(options: {
     clientVersion: VERSION,
   });
   const deviceCredentials = await credentialStore.load();
+  const signOutBoundaryPath = path.join(paths.stateDir, SIGN_OUT_BOUNDARY_FILE_NAME);
   const cloudRuntimeModule = new CloudRuntimeModule({
     credentialStore,
     auditRepository: stateStore.audit,
+    invocationUploadIdentityPath: path.join(paths.stateDir, INVOCATION_UPLOAD_IDENTITY_FILE_NAME),
+    signOutBoundaryPath,
     logger,
   });
   supervisor.registerModule(cloudRuntimeModule);
@@ -1198,8 +1202,11 @@ async function runForeground(options: {
     Boolean(configRecoveryWarning),
   );
   // Read before consent: an unchanged marker after a verified read means a login followed it.
-  const signOutBoundaryPath = path.join(paths.stateDir, SIGN_OUT_BOUNDARY_FILE_NAME);
   const signOutBoundaryAtConsentRead = readSignOutBoundary(signOutBoundaryPath);
+  // A logout this daemon did not see (it was not running) still bounds invocation telemetry.
+  if (signOutBoundaryAtConsentRead !== null) {
+    cloudRuntimeModule.applySignOutBoundary(signOutBoundaryAtConsentRead);
+  }
   let verifiedWorkspaceId: string | null = null;
   const consentOptions: CloudTelemetryConsentOptions = {
     credentialStore,
@@ -1343,10 +1350,16 @@ async function runForeground(options: {
     socketPath: paths.socketPath,
     logger,
     reloadConfig,
-    applySignOutBoundary: () => ({
-      applied: true,
-      persisted: trajectoryCaptureModule.applySignOutBoundary(),
-    }),
+    applySignOutBoundary: () => {
+      // `resin logout` writes the marker before it signals; should it be gone already, the
+      // signal itself is the logout.
+      const marker =
+        readSignOutBoundary(signOutBoundaryPath) ??
+        JSON.stringify({ signedOutAt: new Date().toISOString() });
+      const invocationsPersisted = cloudRuntimeModule.applySignOutBoundary(marker);
+      const capturePersisted = trajectoryCaptureModule.applySignOutBoundary();
+      return { applied: true, persisted: capturePersisted && invocationsPersisted };
+    },
   });
   logger.info(`Starting Resin daemon in foreground (PID: ${process.pid})`);
 

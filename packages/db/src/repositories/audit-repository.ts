@@ -236,6 +236,17 @@ export class AuditRepository {
     );
   }
 
+  /**
+   * Retires every pending invocation that started before `startedBefore` without uploading it
+   * (a privacy boundary: a logout, or a different cloud workspace). Returns how many it retired.
+   */
+  retirePendingInvocationUploads(startedBefore: string, retiredAt: string): number {
+    return this.conn.run(
+      "UPDATE invocation_records SET uploaded_at = ? WHERE uploaded_at IS NULL AND started_at < ?;",
+      [retiredAt, startedBefore],
+    ).changes;
+  }
+
   saveDeadLetter(deadLetter: DeadLetterRecord): void {
     this.conn.run(
       `INSERT INTO dead_letters (

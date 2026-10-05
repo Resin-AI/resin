@@ -13,6 +13,7 @@ import { formatDoctorForTerminal } from "../src/commands/doctor.js";
 import {
   CLI_NOTIFICATION_COOLDOWN_MS,
   CLI_NOTIFICATION_IDS,
+  DOCTOR_OWNED_NOTIFICATION_IDS,
   type StatusNotificationSnapshot,
   consumeCliActionableNotifications,
   deriveDoctorActionableNotifications,
@@ -204,6 +205,44 @@ describe("CLI actionable notifications", () => {
     expect(serialized.toLowerCase()).not.toContain("transcript");
     expect(active[0]?.remediationCommand).toBe("resin login");
     expect(JSON.parse(serialized)).toEqual(active);
+  });
+
+  it("reports stale harness gateways as a restart, not a fixable cloud sync problem", async () => {
+    const gateway = {
+      category: "gateway" as const,
+      status: "warn" as const,
+      remediation:
+        "Restart the listed harness sessions; `resin login` will not pair while they run.",
+    };
+    const { active, managedIds } = deriveDoctorActionableNotifications([gateway], NOW);
+
+    expect(managedIds).toEqual([CLI_NOTIFICATION_IDS.staleGatewaySessions]);
+    expect(active).toEqual([
+      expect.objectContaining({
+        id: CLI_NOTIFICATION_IDS.staleGatewaySessions,
+        severity: "warning",
+        source: "harness",
+        title: "Restart old harness sessions before signing in",
+        remediationCommand: "resin doctor",
+      }),
+    ]);
+    expect(JSON.stringify(active)).not.toMatch(/Cloud sync|--fix/);
+
+    // Doctor alone observes it, so doctor resolves the persisted entry once the sessions are gone.
+    const home = await createTempHome();
+    const options = { home, managedIds: DOCTOR_OWNED_NOTIFICATION_IDS };
+    const shown = await consumeCliActionableNotifications(active, { ...options, now: NOW });
+    expect(shown.map((notification) => notification.id)).toEqual([
+      CLI_NOTIFICATION_IDS.staleGatewaySessions,
+    ]);
+    const stateDir = resolvePaths({ home }).stateDir;
+    expect(
+      (await readNotificationInbox({ stateDir })).notifications.map(
+        (entry) => entry.notification.id,
+      ),
+    ).toEqual([CLI_NOTIFICATION_IDS.staleGatewaySessions]);
+    await consumeCliActionableNotifications([], { ...options, now: NOW + 1 });
+    expect((await readNotificationInbox({ stateDir })).notifications).toEqual([]);
   });
 
   it("places due notifications on the doctor terminal surface", () => {

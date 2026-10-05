@@ -37,6 +37,7 @@ import {
   isStaleSupervisorUnitContent,
 } from "../service/manager.js";
 import {
+  DOCTOR_OWNED_NOTIFICATION_IDS,
   type NotificationConsumer,
   consumeCliActionableNotifications,
   deriveDoctorActionableNotifications,
@@ -1324,8 +1325,9 @@ export async function doctorCommand(
     const notificationSet = deriveDoctorActionableNotifications(items, now);
     const notifications = await consumeCliActionableNotifications(notificationSet.active, {
       home: customHome,
-      // The observer owns resolution of these shared IDs; doctor only contributes evidence.
-      managedIds: [],
+      // The observer owns resolution of its shared IDs; doctor only contributes evidence for
+      // them, and resolves the ones only it observes.
+      managedIds: DOCTOR_OWNED_NOTIFICATION_IDS,
       now,
       consume: options.notificationConsumer,
     });

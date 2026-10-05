@@ -815,6 +815,10 @@ export interface CloudRuntimeModuleOptions {
   fetchImpl?: typeof fetch;
   auditRepository?: AuditRepository;
   telemetryUploader?: InvocationTelemetryUploader;
+  /** Where the invocation uploader keeps its identity boundary (see InvocationTelemetryUploader). */
+  invocationUploadIdentityPath?: string;
+  /** The `resin logout` marker the invocation uploader also checks before each upload. */
+  signOutBoundaryPath?: string;
   logger?: Logger;
 }
 
@@ -851,6 +855,16 @@ export class CloudRuntimeModule implements DaemonModule {
       this.telemetryUploader = new InvocationTelemetryUploader({
         auditRepository: options.auditRepository,
         cloudClient: this.observationClient,
+        // The credentials the client sends with, read fresh: the module's last load can lag a
+        // logout or a login to another workspace.
+        currentIdentity: async () => {
+          const { credentials } = await this.credentialStore.load();
+          return credentials
+            ? { workspaceId: credentials.workspaceId, storedAt: credentials.storedAt }
+            : null;
+        },
+        identityStatePath: options.invocationUploadIdentityPath,
+        signOutBoundaryPath: options.signOutBoundaryPath,
         logger: {
           debug: (msg, meta) => this.logger?.debug(msg, meta),
           info: (msg, meta) => this.logger?.info(msg, meta),
@@ -879,6 +893,14 @@ export class CloudRuntimeModule implements DaemonModule {
 
   getTelemetryUploader(): InvocationTelemetryUploader | undefined {
     return this.telemetryUploader;
+  }
+
+  /**
+   * Applies a `resin logout` to invocation telemetry (`marker` is the sign-out marker's
+   * contents). Returns whether the boundary is persisted.
+   */
+  applySignOutBoundary(marker: string): boolean {
+    return this.telemetryUploader?.applySignOutBoundary(marker) ?? false;
   }
 
   getState(): ModuleLifecycleState {

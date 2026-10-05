@@ -57,6 +57,24 @@ export function readSignOutBoundary(filePath: string): string | null {
 }
 
 /**
+ * When the logout recorded in `marker` (as {@link readSignOutBoundary} returned it) happened, or 0
+ * when the marker is unreadable: an unknown logout time still bounds everything before a login.
+ */
+export function signOutBoundaryTimeMs(marker: string): number {
+  try {
+    const parsed: unknown = JSON.parse(marker);
+    if (parsed !== null && typeof parsed === "object" && "signedOutAt" in parsed) {
+      const ms =
+        typeof parsed.signedOutAt === "string" ? Date.parse(parsed.signedOutAt) : Number.NaN;
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    // A placeholder or corrupt marker has no time.
+  }
+  return 0;
+}
+
+/**
  * Removes the marker if it still holds `expected`; a marker rewritten by a newer logout stays.
  * Returns whether the boundary is gone.
  */

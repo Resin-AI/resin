@@ -28,7 +28,16 @@ export const CLI_NOTIFICATION_IDS = {
   daemon: "daemon.background-failed",
   harness: "harness.integration-failed",
   network: "network.sync-degraded",
+  staleGatewaySessions: "harness.stale-gateway-sessions",
 } as const;
+
+/**
+ * Notifications only doctor can observe, so doctor resolves them: the observer manages its own
+ * shared IDs and never reports old harness gateways.
+ */
+export const DOCTOR_OWNED_NOTIFICATION_IDS: readonly CliNotificationId[] = [
+  CLI_NOTIFICATION_IDS.staleGatewaySessions,
+];
 
 export type CliNotificationId = (typeof CLI_NOTIFICATION_IDS)[keyof typeof CLI_NOTIFICATION_IDS];
 
@@ -232,6 +241,15 @@ const NOTIFICATION_DEFINITIONS = {
     title: "Cloud sync is degraded",
     remediationCommand: "resin doctor --fix",
   },
+  // Old harness sessions still hold credential-unsafe gateways. Nothing `--fix` can do: the user
+  // restarts the sessions `resin doctor` lists.
+  staleGatewaySessions: {
+    id: CLI_NOTIFICATION_IDS.staleGatewaySessions,
+    severity: "warning",
+    source: "harness",
+    title: "Restart old harness sessions before signing in",
+    remediationCommand: "resin doctor",
+  },
 } as const;
 
 const DAEMON_DOCTOR_CATEGORIES = {
@@ -288,7 +306,7 @@ export function deriveDoctorActionableNotifications(
   let authActionRequired = false;
   let daemonActionRequired = false;
   let harnessActionRequired = false;
-  let networkActionRequired = false;
+  let staleGatewayActionRequired = false;
 
   for (const diagnostic of diagnostics) {
     if (diagnostic.category === "auth") managedIds.add(CLI_NOTIFICATION_IDS.auth);
@@ -296,7 +314,9 @@ export function deriveDoctorActionableNotifications(
       managedIds.add(CLI_NOTIFICATION_IDS.daemon);
     }
     if (diagnostic.category === "harness") managedIds.add(CLI_NOTIFICATION_IDS.harness);
-    if (diagnostic.category === "gateway") managedIds.add(CLI_NOTIFICATION_IDS.network);
+    if (diagnostic.category === "gateway") {
+      managedIds.add(CLI_NOTIFICATION_IDS.staleGatewaySessions);
+    }
 
     const actionable =
       diagnostic.status !== "pass" && diagnostic.fixed !== true && Boolean(diagnostic.remediation);
@@ -305,14 +325,14 @@ export function deriveDoctorActionableNotifications(
     if (diagnostic.category === "auth") authActionRequired = true;
     if (diagnostic.category in DAEMON_DOCTOR_CATEGORIES) daemonActionRequired = true;
     if (diagnostic.category === "harness") harnessActionRequired = true;
-    if (diagnostic.category === "gateway") networkActionRequired = true;
+    if (diagnostic.category === "gateway") staleGatewayActionRequired = true;
   }
 
   const active: ActionableNotification[] = [];
   if (daemonActionRequired) active.push(createNotification("daemon", now));
   if (authActionRequired) active.push(createNotification("auth", now));
   if (harnessActionRequired) active.push(createNotification("harness", now));
-  if (networkActionRequired) active.push(createNotification("network", now));
+  if (staleGatewayActionRequired) active.push(createNotification("staleGatewaySessions", now));
 
   return { active, managedIds: [...managedIds] };
 }
