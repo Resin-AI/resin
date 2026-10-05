@@ -227,6 +227,21 @@ describe("WorkflowValidationClient", () => {
     expect(identityProvider.mock.calls[1]?.[0]).toEqual({ forceRefresh: true });
   });
 
+  it("surfaces a 403 as forbidden without forcing a credential refresh", async () => {
+    const identityProvider = vi.fn(async () => IDENTITY);
+    let served = 0;
+    const { fetchImpl } = recordingFetch(() => {
+      served += 1;
+      return jsonResponse({ error: "forbidden" }, 403);
+    });
+    const client = new WorkflowValidationClient({ identityProvider, fetchImpl });
+
+    await expect(client.listPending(DEVICE_ID)).rejects.toMatchObject({ status: 403 });
+
+    expect(served).toBe(1);
+    expect(identityProvider.mock.calls).toEqual([[undefined]]);
+  });
+
   it("reports a delivery failure as an error rather than an outcome", async () => {
     const { fetchImpl } = recordingFetch(() => jsonResponse({ error: "busy" }, 503));
     const client = clientOver(fetchImpl);

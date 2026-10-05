@@ -65,6 +65,7 @@ export interface ControlCommandOptions {
 export type ControlCommandErrorCode =
   | "INVALID_ARGUMENTS"
   | "AUTHENTICATION_REQUIRED"
+  | "FORBIDDEN"
   | "CLOUD_UNREACHABLE"
   | "CLOUD_REQUEST_FAILED"
   | "INVALID_CLOUD_RESPONSE"
@@ -306,9 +307,10 @@ function cloudFailure(response: Response, body: JsonValue | null): ControlComman
       ? record.message.slice(0, 256)
       : `Cloud request failed with HTTP ${response.status}`;
   if (response.status === 409) return new ControlCommandError("CONFLICT", message, 409);
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     return new ControlCommandError("AUTHENTICATION_REQUIRED", message, response.status);
   }
+  if (response.status === 403) return new ControlCommandError("FORBIDDEN", message, 403);
   return new ControlCommandError(
     "CLOUD_REQUEST_FAILED",
     serverCode ? `${serverCode}: ${message}` : message,
@@ -347,7 +349,9 @@ async function cloudRequest(
   } catch {
     throw new ControlCommandError("CLOUD_UNREACHABLE", "Cloud control plane is unreachable");
   }
-  if (!forceRefresh && (response.status === 401 || response.status === 403)) {
+  // Only an unauthenticated (401) answer can be cured by a new access token. A 403 is an
+  // authorization decision about this identity: rotating the refresh token cannot change it.
+  if (!forceRefresh && response.status === 401) {
     await response.body?.cancel().catch(() => undefined);
     return cloudRequest(identityProvider, fetchImpl, route, init, true);
   }

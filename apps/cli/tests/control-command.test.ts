@@ -1,5 +1,5 @@
 import type { CloudRequestIdentity } from "@resin/observer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { controlCommand, parseControlFlags } from "../src/commands/control.js";
 
 const identity: CloudRequestIdentity = {
@@ -151,4 +151,30 @@ describe("resin control", () => {
       error: { code: "INVALID_ARGUMENTS" },
     });
   });
+
+  it.each([
+    { status: 403, forcedRefreshes: 0, calls: 1 },
+    { status: 401, forcedRefreshes: 1, calls: 2 },
+  ])(
+    "forces a credential refresh only after a 401 (HTTP $status)",
+    async ({ status, forcedRefreshes, calls }) => {
+      const getRequestIdentity = vi.fn(async (_options?: { forceRefresh?: boolean }) => identity);
+      const fetchImpl = vi.fn(
+        async () => new Response(JSON.stringify({ error: "denied" }), { status }),
+      );
+      const stdout = outputBuffer();
+      const exitCode = await controlCommand(["get", "--device", "device-1", "--json"], {
+        customFetch: fetchImpl,
+        credentialStore: { getRequestIdentity },
+        output: stdout.stream,
+        errorOutput: outputBuffer().stream,
+      });
+
+      expect(exitCode).not.toBe(0);
+      expect(fetchImpl).toHaveBeenCalledTimes(calls);
+      expect(
+        getRequestIdentity.mock.calls.filter(([options]) => options?.forceRefresh === true),
+      ).toHaveLength(forcedRefreshes);
+    },
+  );
 });

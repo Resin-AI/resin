@@ -15445,6 +15445,10 @@ var StoredCloudCredentialsSchema = external_exports.object({
   workspaceId: external_exports.string().min(1, "workspaceId cannot be empty"),
   storedAt: external_exports.string().min(1, "storedAt cannot be empty")
 });
+var RefreshErrorBodySchema = external_exports.object({
+  error: external_exports.string(),
+  error_description: external_exports.string().optional()
+});
 
 // apps/observer/dist/ipc/client.js
 import crypto2 from "node:crypto";

@@ -1031,3 +1031,42 @@ describe("control-plane capability wire compatibility", () => {
     });
   });
 });
+
+describe("control-plane credential refresh", () => {
+  const identity = {
+    cloudUrl: "https://cloud.resin.test",
+    accessToken: "test-token",
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    deviceId: "device-1",
+    installationId: "installation-1",
+    userId: "user-1",
+  };
+
+  it("surfaces 403 as forbidden without forcing a credential refresh", async () => {
+    const identityProvider = vi.fn(async (_options?: { forceRefresh?: boolean }) => identity);
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 403 }));
+    const client = new ControlPlaneClient({ identityProvider, fetchImpl });
+
+    await expect(client.getEffectiveState("device-1")).rejects.toMatchObject({ status: 403 });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(identityProvider.mock.calls).toEqual([[undefined]]);
+  });
+
+  it("forces one credential refresh after a 401", async () => {
+    const identityProvider = vi.fn(async (_options?: { forceRefresh?: boolean }) => identity);
+    const fetchImpl = vi
+      .fn<() => Promise<Response>>()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    const client = new ControlPlaneClient({ identityProvider, fetchImpl });
+
+    await expect(client.getEffectiveState("device-1", '"w:1:d:0"')).resolves.toMatchObject({
+      notModified: true,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(identityProvider.mock.calls).toEqual([[undefined], [{ forceRefresh: true }]]);
+  });
+});

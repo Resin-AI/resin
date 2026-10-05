@@ -224,7 +224,9 @@ export class WorkflowValidationClient implements WorkflowValidationTransport {
         ...init.headers,
       },
     });
-    if (!forceRefresh && (response.status === 401 || response.status === 403)) {
+    // Only an unauthenticated (401) answer can be cured by a new access token; a 403 is an
+    // authorization decision that rotating the refresh token cannot change.
+    if (!forceRefresh && response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       return await this.request(route, init, true);
     }
