@@ -51,6 +51,8 @@ import {
   redactLocalWorkflowProgramSource,
   retainLocalWorkflowPayload,
 } from "../normalization/local-workflow-payload.js";
+import { redactProgramSourceInPlace } from "../normalization/program-source-redaction.js";
+import type { RedactedStringResult } from "../normalization/redaction.js";
 import { isClosedCodexSource } from "./computation/codex-source-dependencies.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
@@ -1957,9 +1959,11 @@ export class WorkflowCallRecorder {
     if (language === undefined) return;
     const scrubbed = redactLocalWorkflowProgramSource(event, original);
     if (scrubbed === undefined) return;
+    const view = programSourceView(event, language, original, scrubbed);
+    if (view === undefined) return;
 
     try {
-      const sourceTokens = tokenizeProgram(language, scrubbed.redactedText);
+      const sourceTokens = tokenizeProgram(language, view);
       let replacements: Map<number, string> | undefined;
       for (const [index, token] of sourceTokens.entries()) {
         if (token.kind !== "string" || typeof token.value !== "string") continue;
@@ -1974,8 +1978,8 @@ export class WorkflowCallRecorder {
       }
       const redacted =
         replacements === undefined
-          ? scrubbed.redactedText
-          : applyProgramTokenValues(scrubbed.redactedText, sourceTokens, replacements, language);
+          ? view
+          : applyProgramTokenValues(view, sourceTokens, replacements, language);
       // Only a POSIX shell program's words are rewritten relative to its working directory.
       const source =
         language === "shell"
@@ -2225,6 +2229,37 @@ function publicShellProfile(argument: string, value: unknown): boolean {
     typeof value === "string" &&
     Object.hasOwn(PUBLIC_CODEX_SHELL_PROFILES, value)
   );
+}
+
+/**
+ * The redacted text a program is projected as. The engine's whole-text redaction is used when it
+ * keeps the program's token structure. When it does not (a placeholder turned a bare word into a
+ * glob, or an entropy match took in a `;`), each redacted value is replaced inside its own token
+ * instead, so the rest of the program stays readable; that view is published only if the engine
+ * finds nothing left in it to redact. Undefined keeps the program private.
+ */
+function programSourceView(
+  event: NormalizedSessionEvent,
+  language: ProgramLanguage,
+  original: string,
+  scrubbed: RedactedStringResult,
+): string | undefined {
+  try {
+    analyzeProgramSourceProjection(language, original, scrubbed.redactedText);
+    return scrubbed.redactedText;
+  } catch (error) {
+    if (
+      !(error instanceof ProgramTokenizationError) &&
+      !(error instanceof ProgramSourceProjectionError)
+    ) {
+      throw error;
+    }
+  }
+  if (scrubbed.spans === undefined) return undefined;
+  const inPlace = redactProgramSourceInPlace(language, original, scrubbed.spans);
+  if (inPlace === undefined) return undefined;
+  const rescanned = redactLocalWorkflowProgramSource(event, inPlace);
+  return rescanned === undefined || rescanned.changed ? undefined : inPlace;
 }
 
 /**
