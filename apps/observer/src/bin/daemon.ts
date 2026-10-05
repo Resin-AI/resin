@@ -9,6 +9,10 @@ import { createLocalStateStore } from "@resin/db";
 import type { ActionableNotification } from "@resin/protocol";
 import { z } from "zod";
 import { CLOUD_UPLOAD_STATUS_FILE_NAME } from "../analytics/cloud-upload-status.js";
+import {
+  AUTH_PENDING_DIRECTORY_NAME,
+  AuthPendingRetentionModule,
+} from "../auth-pending-retention-module.js";
 import { CloudCredentialStore } from "../cloud-credentials.js";
 import { CloudRuntimeModule } from "../cloud-runtime.js";
 import {
@@ -46,7 +50,12 @@ import {
   reconcileObservedNotifications,
 } from "../notifications.js";
 import { OpportunityTrackingModule } from "../opportunity-module.js";
-import { type DaemonPaths, ensureDaemonDirectories, resolvePaths } from "../paths.js";
+import {
+  type DaemonPaths,
+  ensureDaemonDirectories,
+  getDaemonPaths,
+  resolvePaths,
+} from "../paths.js";
 import {
   PrivateValueRetentionModule,
   daemonPrivateValueReferenceRoots,
@@ -62,6 +71,7 @@ import {
 } from "../supervisor.js";
 import { SourceCursorManager } from "../tailing/cursor-manager.js";
 import {
+  CAPTURE_WATERMARK_FILE_NAME,
   type RemoteTelemetryConsentSnapshot,
   TrajectoryCaptureRuntimeModule,
 } from "../trajectory-capture-module.js";
@@ -88,7 +98,8 @@ export interface CloudTelemetryConsentOptions {
 
 /**
  * Reads authoritative account telemetry consent. Missing credentials, invalid responses, auth
- * failures, and network failures are all unknown and therefore fail closed at the caller.
+ * failures, and network failures are all unknown (null): the caller suspends capture without
+ * uploading anything, but unlike an opt-out records no withdrawal.
  */
 export async function readCloudTelemetryConsent(
   options: CloudTelemetryConsentOptions,
@@ -588,10 +599,24 @@ export class TelemetryCaptureController {
     this.onCaptureRegistered = options.onCaptureRegistered;
     this.deviceEnabled = resolveDeviceTelemetryEnabled(options.deviceEnabled, this.failClosed);
     const shouldCapture = this.getStatus().effectiveEnabled;
-    if (shouldCapture && !this.captureModule.setTelemetryEnabled(true)) {
-      this.failClosed = true;
+    if (shouldCapture) {
+      if (!this.captureModule.setTelemetryEnabled(true)) {
+        this.failClosed = true;
+      }
     } else {
-      this.captureModule.setTelemetryEnabled(shouldCapture);
+      this.closeCaptureGate();
+    }
+  }
+
+  /**
+   * Closes capture at startup. Consent that cannot be verified (signed out, auth or network
+   * failure) only suspends it; a device or account opt-out withdraws it.
+   */
+  private closeCaptureGate(): void {
+    if (this.deviceEnabled && !this.failClosed && this.cloudConsentEnabled === null) {
+      this.captureModule.suspendUntilConsentVerified();
+    } else {
+      this.captureModule.setTelemetryEnabled(false);
     }
   }
 
@@ -646,12 +671,12 @@ export class TelemetryCaptureController {
 
   prepareForStartup(): void {
     const shouldCapture = this.getStatus().effectiveEnabled;
-    if (shouldCapture && !this.captureModule.setTelemetryEnabled(true)) {
-      this.failClosed = true;
+    if (!shouldCapture) {
+      this.closeCaptureGate();
       return;
     }
-    this.captureModule.setTelemetryEnabled(shouldCapture);
-    if (!shouldCapture) {
+    if (!this.captureModule.setTelemetryEnabled(true)) {
+      this.failClosed = true;
       return;
     }
     const existingModule = this.supervisor.getModule(this.captureModule.id);
@@ -1156,6 +1181,13 @@ async function runForeground(options: {
       logger,
     }),
   );
+  supervisor.registerModule(
+    new AuthPendingRetentionModule({
+      // The directory the transcript tailer defers into (it resolves the default daemon paths).
+      directory: path.join(getDaemonPaths().stateDir, AUTH_PENDING_DIRECTORY_NAME),
+      logger,
+    }),
+  );
   const credentialStore = new CloudCredentialStore({
     home: paths.homeDir,
     tokenFilePath: path.join(paths.stateDir, "device-token.json"),
@@ -1185,11 +1217,12 @@ async function runForeground(options: {
     logger,
     privateValueOwnerWorkspaceId: deviceCredentials.credentials?.workspaceId,
     telemetryEnabled: deviceTelemetryEnabled && cloudConsent?.metadataTelemetryEnabled === true,
+    telemetryConsentUnknown: deviceTelemetryEnabled && cloudConsent === null,
     remoteTelemetryConsent: cloudConsent,
     refreshRemoteTelemetryConsent: refreshCloudConsent,
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
     uploadStatusPath: path.join(paths.stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME),
-    captureWatermarkPath: path.join(paths.stateDir, "capture-watermark.json"),
+    captureWatermarkPath: path.join(paths.stateDir, CAPTURE_WATERMARK_FILE_NAME),
     captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
   const opportunityTrackingConfig = config.opportunityTracking;
@@ -1263,12 +1296,13 @@ async function runForeground(options: {
     logger,
   });
 
+  // The control-plane module owns the device's one cloud sync loop; providers' modules follow it.
+  let deviceSync: DeviceSyncSignal | undefined;
   if (deviceCredentials.credentials) {
     const controlPlaneClient = new ControlPlaneClient({
       identityProvider: (identityOptions) => credentialStore.getRequestIdentity(identityOptions),
     });
-    // The control-plane module owns the device's one cloud sync loop; providers' modules follow it.
-    const deviceSync = new DeviceSyncSignal();
+    deviceSync = new DeviceSyncSignal();
     supervisor.registerModule(
       new ControlPlaneRuntimeModule({
         client: controlPlaneClient,
@@ -1285,16 +1319,17 @@ async function runForeground(options: {
         }),
       }),
     );
-    for (const provide of registeredDaemonModuleProviders()) {
-      const module = provide({
-        paths,
-        logger,
-        credentialStore,
-        credentials: deviceCredentials.credentials,
-        deviceSync,
-      });
-      if (module) supervisor.registerModule(module);
-    }
+  }
+  // Signed out, cloud-dependent providers contribute nothing; local-only maintenance still runs.
+  for (const provide of registeredDaemonModuleProviders()) {
+    const module = provide({
+      paths,
+      logger,
+      credentialStore,
+      credentials: deviceCredentials.credentials ?? null,
+      deviceSync,
+    });
+    if (module) supervisor.registerModule(module);
   }
 
   const ipcServer = new IpcServer({

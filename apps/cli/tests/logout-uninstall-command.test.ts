@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import path from "node:path";
@@ -114,6 +115,25 @@ describe("logout command", () => {
       expect(parsed.success).toBe(true);
     } finally {
       process.stdout.write = originalStdout;
+    }
+  });
+
+  it("removes the capture watermark so the signed-out window is never caught up", async () => {
+    const home = fs.mkdtempSync(join(tmpdir(), "resin-logout-watermark-"));
+    const watermarkPath = join(home, ".resin", "state", "capture-watermark.json");
+    const checkpointPath = join(home, ".resin", "state", "telemetry-privacy-checkpoint.json");
+    fs.mkdirSync(path.dirname(watermarkPath), { recursive: true });
+    fs.writeFileSync(watermarkPath, '{"version":1,"lastRunningAtMs":1,"ownerWorkspaceId":null}\n');
+    fs.writeFileSync(checkpointPath, "{}\n");
+    const originalStdout = process.stdout.write;
+    process.stdout.write = vi.fn().mockReturnValue(true);
+    try {
+      expect(await logoutCommand(["--json", "--home", home])).toBe(0);
+      expect(fs.existsSync(watermarkPath)).toBe(false);
+      expect(fs.existsSync(checkpointPath)).toBe(true);
+    } finally {
+      process.stdout.write = originalStdout;
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });

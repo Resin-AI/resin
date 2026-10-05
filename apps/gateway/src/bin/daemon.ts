@@ -10,14 +10,12 @@ import "@resin/db/node-warning-filter";
 import { fileURLToPath } from "node:url";
 import { registerDaemonModuleProvider } from "@resin/observer";
 import { runDaemonCli } from "@resin/observer/daemon";
+import { GATEWAY_DAEMON_MODULE_PROVIDERS } from "../daemon-module-providers.js";
 import { resolveDaemonReleaseVersion } from "../daemon-release-version.js";
-import { createDeviceSyncRelayDaemonModule } from "../proxy/device-sync-daemon-module.js";
-import { createStoredToolGcDaemonModule } from "../proxy/stored-tool-gc-daemon-module.js";
-import { createWorkflowValidationDaemonModule } from "../proxy/validation-daemon-module.js";
 
-registerDaemonModuleProvider((context) => createWorkflowValidationDaemonModule(context));
-registerDaemonModuleProvider((context) => createDeviceSyncRelayDaemonModule(context));
-registerDaemonModuleProvider((context) => createStoredToolGcDaemonModule(context));
+for (const provider of GATEWAY_DAEMON_MODULE_PROVIDERS) {
+  registerDaemonModuleProvider(provider);
+}
 
 const entryFile = fileURLToPath(import.meta.url);
 await runDaemonCli({ entryFile, version: resolveDaemonReleaseVersion(entryFile) });

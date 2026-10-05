@@ -3,12 +3,16 @@ import type { DeviceSyncSignal } from "./device-sync-signal.js";
 import type { DaemonModule, Logger } from "./lifecycle.js";
 import type { DaemonPaths } from "./paths.js";
 
-/** What a module provider may build its module from: the daemon's own paths and device identity. */
+/**
+ * What a module provider may build its module from: the daemon's own paths and device identity.
+ * `credentials` is null while the device is signed out; providers of cloud-dependent modules
+ * return `undefined` then, local-only modules register regardless.
+ */
 export interface DaemonModuleProviderContext {
   readonly paths: DaemonPaths;
   readonly logger: Logger;
   readonly credentialStore: CloudCredentialStore;
-  readonly credentials: StoredCloudCredentials;
+  readonly credentials: StoredCloudCredentials | null;
   /**
    * The daemon's consolidated device sync, when the cloud offers it. Modules that would poll the
    * cloud for their own state subscribe and refetch only when their change token moves.
@@ -21,8 +25,8 @@ export interface DaemonModuleProviderContext {
  *
  * `@resin/gateway` depends on `@resin/observer`, so the daemon cannot import gateway services
  * directly. The packaged daemon entry (`@resin/gateway`'s `bin/daemon`) registers its providers
- * here before it loads the daemon, and the daemon registers each provider's module once the device
- * is enrolled. A provider that returns `undefined` contributes nothing.
+ * here before it loads the daemon, and the daemon registers each provider's module at startup,
+ * signed in or not. A provider that returns `undefined` contributes nothing.
  */
 export type DaemonModuleProvider = (
   context: DaemonModuleProviderContext,

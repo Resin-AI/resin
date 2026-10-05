@@ -15,7 +15,7 @@ import {
 } from "@resin/contracts";
 import {
   CloudCredentialStore,
-  type DaemonModuleProviderContext,
+  type DaemonModule,
   DeviceSyncSignal,
   type DeviceSyncSnapshot,
   InMemoryPrivateValueStore,
@@ -23,10 +23,14 @@ import {
   resolvePaths,
 } from "@resin/observer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GATEWAY_DAEMON_MODULE_PROVIDERS } from "../../src/daemon-module-providers.js";
 import { createDeviceSyncRelayDaemonModule } from "../../src/proxy/device-sync-daemon-module.js";
 import { DeviceSyncStore } from "../../src/proxy/device-sync-store.js";
 import { SharedDeviceSync } from "../../src/proxy/shared-sync.js";
-import { createWorkflowValidationDaemonModule } from "../../src/proxy/validation-daemon-module.js";
+import {
+  type EnrolledDaemonModuleProviderContext,
+  createWorkflowValidationDaemonModule,
+} from "../../src/proxy/validation-daemon-module.js";
 import {
   FileWorkflowValidationPassLease,
   WORKFLOW_VALIDATION_LEASE_FILE_NAME,
@@ -122,7 +126,7 @@ function fakeCloud(ask: WorkflowValidationRequest, listGate?: Promise<void>) {
 
 describe("the daemon's validation module", () => {
   let tempDir: string;
-  let context: DaemonModuleProviderContext;
+  let context: EnrolledDaemonModuleProviderContext;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-daemon-validation-"));
@@ -490,6 +494,31 @@ describe("the daemon's validation module", () => {
 
   it("adds no relay to a daemon without a device sync loop", () => {
     expect(createDeviceSyncRelayDaemonModule(context)).toBeUndefined();
+  });
+
+  it("registers only local-only gateway modules for a signed-out daemon", () => {
+    const modules = GATEWAY_DAEMON_MODULE_PROVIDERS.map((provide) =>
+      provide({ ...context, credentials: null }),
+    ).filter((module): module is DaemonModule => module !== undefined);
+    expect(modules.map((module) => module.id)).toEqual(["stored-tool-gc"]);
+    // The daemon always registers cloud-runtime; nothing here may need an unregistered module.
+    for (const module of modules) {
+      for (const dependency of module.dependencies ?? []) {
+        expect(["cloud-runtime"]).toContain(dependency);
+      }
+    }
+  });
+
+  it("registers every gateway module for a signed-in daemon with a device sync loop", () => {
+    const deviceSync = new DeviceSyncSignal();
+    const modules = GATEWAY_DAEMON_MODULE_PROVIDERS.map((provide) =>
+      provide({ ...context, deviceSync }),
+    ).filter((module): module is DaemonModule => module !== undefined);
+    expect(modules.map((module) => module.id)).toEqual([
+      "workflow-validation",
+      "device-sync-relay",
+      "stored-tool-gc",
+    ]);
   });
 });
 

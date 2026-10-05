@@ -13,6 +13,7 @@ import {
   CaptureWatermarkSchema,
   MAX_DOWNTIME_CATCH_UP_MS,
   TrajectoryCaptureRuntimeModule,
+  type TrajectoryCaptureRuntimeModuleOptions,
   resolveDowntimeCatchUpFrom,
 } from "../src/trajectory-capture-module.js";
 
@@ -77,7 +78,12 @@ afterEach(() => {
 const watermarkPath = () => path.join(fixture.stateDir, "capture-watermark.json");
 
 /** One daemon run: a module wired like the daemon's, with its sink's session ids. */
-function createRun(options: { maxDowntimeCatchUpMs?: number } = {}) {
+function createRun(
+  options: Pick<
+    TrajectoryCaptureRuntimeModuleOptions,
+    "maxDowntimeCatchUpMs" | "telemetryEnabled" | "telemetryConsentUnknown"
+  > = {},
+) {
   const module = new TrajectoryCaptureRuntimeModule({
     adapters: [
       new CodexHarnessAdapter({
@@ -235,6 +241,42 @@ describe("TrajectoryCaptureRuntimeModule downtime catch-up", () => {
     expect(fs.existsSync(watermarkPath())).toBe(false);
 
     writeFinishedSession("sess_while_disabled", T0 + 3 * MINUTE);
+    const captured = await capturedOnStart(T0 + 10 * MINUTE);
+    expect([...captured]).toEqual([]);
+  });
+
+  it("catches up a signed-out window once consent is verifiable again", async () => {
+    await runAndStop(T0, T0 + MINUTE);
+    const checkpointPath = path.join(fixture.stateDir, "telemetry-privacy-checkpoint.json");
+    const checkpoint = fs.readFileSync(checkpointPath, "utf8");
+    const watermark = fs.readFileSync(watermarkPath(), "utf8");
+
+    // A signed-out restart: consent is unknown, so capture is suspended, not withdrawn.
+    vi.setSystemTime(T0 + 2 * MINUTE);
+    const signedOut = createRun({ telemetryEnabled: false, telemetryConsentUnknown: true });
+    signedOut.module.suspendUntilConsentVerified();
+    await signedOut.module.start(signedOut.context);
+    expect(signedOut.module.getState()).toBe("stopped");
+    expect(fs.readFileSync(checkpointPath, "utf8")).toBe(checkpoint);
+    expect(fs.readFileSync(watermarkPath(), "utf8")).toBe(watermark);
+
+    writeFinishedSession("sess_while_signed_out", T0 + 5 * MINUTE);
+    const captured = await capturedOnStart(T0 + 30 * MINUTE);
+    expect([...captured]).toEqual(["sess_while_signed_out"]);
+  });
+
+  it("does not recreate a watermark removed underneath a running capture (resin logout)", async () => {
+    vi.setSystemTime(T0);
+    const run = createRun();
+    await run.module.start(run.context);
+    await run.module.getObserverCoordinator().pollOnce();
+    await vi.waitFor(() => expect(fs.existsSync(watermarkPath())).toBe(true));
+    fs.rmSync(watermarkPath());
+    vi.setSystemTime(T0 + MINUTE);
+    await run.module.stop(run.context);
+    expect(fs.existsSync(watermarkPath())).toBe(false);
+
+    writeFinishedSession("sess_after_logout", T0 + 2 * MINUTE);
     const captured = await capturedOnStart(T0 + 10 * MINUTE);
     expect([...captured]).toEqual([]);
   });

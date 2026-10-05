@@ -612,6 +612,11 @@ export class TrajectoryCaptureCoordinator {
     return introspects;
   }
 
+  /**
+   * Whether these records may leave the device. An `AuthRecoveryError` (consent cannot be
+   * verified right now) propagates so the delivery is deferred durably instead of dropped; any
+   * other authorization failure denies.
+   */
   private async isTelemetryAuthorized(
     generation = this.telemetryGeneration,
     recordTimestampMs: readonly number[] = [],
@@ -625,7 +630,10 @@ export class TrajectoryCaptureCoordinator {
     try {
       const authorized = (await this.authorizeTelemetryEmissionFn(recordTimestampMs)) === true;
       return authorized && this.isTelemetryAllowed(generation);
-    } catch {
+    } catch (err) {
+      if (err instanceof AuthRecoveryError) {
+        throw err;
+      }
       return false;
     }
   }
@@ -1478,7 +1486,29 @@ export class TrajectoryCaptureCoordinator {
       return;
     }
 
-    if (!(await this.isTelemetryAuthorized(telemetryGeneration, telemetryRecordTimestampMs))) {
+    let authorized: boolean;
+    try {
+      authorized = await this.isTelemetryAuthorized(
+        telemetryGeneration,
+        telemetryRecordTimestampMs,
+      );
+    } catch (err) {
+      // Consent cannot be verified yet. Without a window the buffer is just the delivery being
+      // handled, which the tailer defers durably; otherwise keep the buffered deliveries (their
+      // acks still pending) and retry on backoff until consent decides them.
+      if (!(err instanceof AuthRecoveryError) || this.coalesceDwellMs === 0) {
+        throw err;
+      }
+      this.genericCoalescingBuffers.set(sessionId, buffer);
+      this.scheduleGenericFlush(
+        sessionId,
+        buffer,
+        "retry",
+        Math.min(60_000, this.getSessionBackoff(sessionId).nextDelay()),
+      );
+      return;
+    }
+    if (!authorized) {
       this.metadataEventProjector.clear(sessionId);
       this.genericSessionTails.delete(sessionId);
       this.activeGenericSessions.delete(sessionId);

@@ -92,7 +92,9 @@ Cancelled, denied, expired, or failed pairing leaves the previous credential sna
 | Ancillary vault | `~/.resin/vault/` (`cloud_device_access_token`, `cloud_device_refresh_token`, `cloud_device_origin`) | Optional duplicate of the same cloud secrets via `SecretManager` |
 | Local IPC token | Daemon state `auth.token` | Unix-socket/local client auth only |
 
-`resin logout` attempts remote revocation, then deletes the owner-only file and optional vault keys. Harness MCP config, project files, and the four locked local meta-tools remain.
+`resin logout` attempts remote revocation, then deletes the owner-only file and optional vault keys. It also deletes the capture watermark, so activity while you are signed out is never captured after a later `resin login`. Harness MCP config, project files, and the four locked local meta-tools remain.
+
+If the daemon cannot verify your account's telemetry consent (credentials lost, auth or network failure) it pauses capture and uploads nothing; the daemon log says capture is paused until Resin Cloud consent can be verified, and `resin status` shows `account unknown` under Privacy & Telemetry. Batches already read stay in owner-only `~/.resin/state/auth-pending/` until consent is verifiable again (a batch from a session that never comes back is deleted after 14 days); after `resin login` the daemon catches up at most the last 24 hours, never behind your latest consent change.
 
 Access and refresh tokens must not appear in logs, harness configuration, `.resin/project.json`, `.resin/resin.lock`, `resin status`, or `resin doctor --json`.
 
