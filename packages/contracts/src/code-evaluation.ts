@@ -13,6 +13,12 @@
  * - A **code runner**'s code flag (`python -c`, `bash -lc`, `node -e`, `perl -ne`, …) makes the next
  *   word code. That word is unbindable, and so is every assignment in the program, which the code
  *   can read.
+ *
+ * This decides the words of the recorded text itself. Where the code a command runs is a known
+ * program written as one literal quoted word — a python or node `-c`/`-e` string, a POSIX shell's
+ * `-c` string, an `ssh` command's single remote command word — `embeddedPrograms` (in
+ * `program-tokens.ts`) reads that program with its own grammar, and a value is bound to one of its
+ * tokens only by rendering it as data for that program first and then for the quoted word.
  */
 
 /** A command's name without its directory, a PowerShell module qualifier, case or extension. */
