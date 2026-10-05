@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { CodexRecordDecoder, decodeCodexTranscript } from "@resin/adapter-codex";
 import { OmpRecordDecoder } from "@resin/adapter-omp";
 import type { NormalizedSessionEvent } from "@resin/contracts";
@@ -581,5 +582,112 @@ text("sa\x66e-credential", token);`;
     expect(rendered).toBe(
       `curl -H 'Authorization: Bearer ${secret}' https://x/y --out data/b.json`,
     );
+  });
+});
+
+/** Deterministic stand-ins, assembled at runtime so no literal credential shape sits in the source. */
+const hexOf = (seed: string) => createHash("sha256").update(seed).digest("hex").slice(0, 40);
+const keyOf = (seed: string) =>
+  `${["sk", "proj"].join("-")}-${createHash("sha512")
+    .update(seed)
+    .digest("base64")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 40)}`;
+
+/** Records one OMP `bash` call through the real normalization engine and recorder. */
+async function recordOmpBash(sessionId: string, command: string) {
+  const store = new InMemoryPrivateValueStore();
+  const pipeline = new NormalizationPipeline({
+    privateValueStore: store,
+    redactionConfig: { sensitiveEnvVars: [] },
+  });
+  pipeline.registerDecoder(new OmpRecordDecoder());
+  const timestamp = "2026-09-23T12:00:00.000Z";
+  const results = await pipeline.processRecord(
+    {
+      recordId: `rec_${sessionId}`,
+      sessionId,
+      harnessId: "omp",
+      sequenceNumber: 1,
+      recordType: "transcript_line",
+      timestamp,
+      rawPayload: JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: `${sessionId}-call`, name: "bash", arguments: { command } },
+          ],
+        },
+      }),
+      cursor: { offset: 1, line: 1, sequence: 1, timestamp },
+      metadata: {},
+    },
+    { sessionId, harnessId: "omp", workspaceId: WORKSPACE },
+  );
+  const recorder = new WorkflowCallRecorder({ privateValues: store });
+  const observed = results.flatMap((result) =>
+    result.status === "success" && !result.isDuplicate
+      ? [recorder.observe(result.event, { workspaceId: WORKSPACE })]
+      : [],
+  );
+  const { carrier } = callAndCarrier(observed, `${sessionId}-call`);
+  const published = JSON.stringify(observed.map((entry) => projectEventToMetadataOnly(entry)));
+  return { carrier, store, published };
+}
+
+function projectedShell(carrier: WorkflowCallCarrier) {
+  const origin = carrier.origins.command;
+  if (origin?.type !== "program" || typeof origin.source.value !== "string") {
+    throw new Error("expected a projected shell program");
+  }
+  return { origin, view: origin.source.value };
+}
+
+describe("in-place redaction of projected commands", () => {
+  it("keeps a command readable except its API key, and binds tokens against the original", async () => {
+    const key = keyOf("deploy");
+    const command = `deploy-tool --api-key ${key} --region eu-west-1 --out data/a.json`;
+    const { carrier, store, published } = await recordOmpBash("in-place-api-key", command);
+    const { origin, view } = projectedShell(carrier);
+    expect(view).not.toContain(key);
+    expect(view).toMatch(
+      /^deploy-tool --api-key \\\[REDACTED_[A-Z_]+:[0-9a-f]+\\\] --region eu-west-1 --out data\/a\.json$/,
+    );
+    const tokens = tokenizeProgram("shell", command);
+    const keyIndex = tokens.findIndex((token) => token.raw === key);
+    expect(origin.protectedTokens).toEqual([keyIndex]);
+    expect(published).not.toContain(key);
+    expect(published).toContain("--region eu-west-1");
+
+    const outIndex = tokens.findIndex((token) => token.raw === "data/a.json");
+    const rendered = applyProgramTokenValues(
+      resolvePrivateReference(store, origin.sourceReference as string) as string,
+      tokens,
+      new Map([[outIndex, "data/b.json"]]),
+      "shell",
+    );
+    expect(rendered).toBe(`deploy-tool --api-key ${key} --region eu-west-1 --out data/b.json`);
+  });
+
+  it("publishes commit SHAs, run IDs and PR numbers like other literals", async () => {
+    const sha = hexOf("release-commit");
+    const command = `gh workflow run release.yml --ref main -f commit_sha=${sha} -f ci_run_id=37248001702 && gh pr merge 302 --squash --match-head-commit ${sha}`;
+    const { carrier, published } = await recordOmpBash("in-place-identifiers", command);
+    const { origin, view } = projectedShell(carrier);
+    expect(view).toBe(command);
+    expect(origin.protectedTokens).toEqual([]);
+    expect(published).toContain(sha);
+  });
+
+  it("redacts a hex token in an Authorization header while the commit beside it stays", async () => {
+    const token = hexOf("personal-access-token");
+    const sha = hexOf("checked-commit");
+    const command = `gh api -H "Authorization: token ${token}" repos/acme/app/commits/${sha}/check-runs`;
+    const { carrier, published } = await recordOmpBash("in-place-header-token", command);
+    const { view } = projectedShell(carrier);
+    expect(view).not.toContain(token);
+    expect(view).toContain(`repos/acme/app/commits/${sha}/check-runs`);
+    expect(published).not.toContain(token);
   });
 });

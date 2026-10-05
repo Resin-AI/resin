@@ -120,7 +120,7 @@ Tools requiring authentication tokens receive them exclusively as mediated envir
 All logs, error messages, and telemetry streams pass through a continuous redaction filter detecting:
 - AWS, GitHub, OpenAI, Anthropic, and generic API keys.
 - JWT tokens and bearer credentials.
-- High-entropy base64 and hex strings. An ordinary relative file path (slashes plus `.`, `-` or `_`, short names between them, and no `@`, `:`, `=` or `+`) is not treated as one; named key patterns still apply to it.
+- High-entropy base64 and hex strings. An ordinary relative file path (slashes plus `.`, `-` or `_`, short names between them, and no `@`, `:`, `=` or `+`) is not treated as one; named key patterns still apply to it. Commit SHAs used as git or GitHub revisions (`git show <sha>`, `HEAD:<path>`, `commit_sha=<sha>`, `--match-head-commit <sha>`), CI run IDs and pull-request numbers are identifiers, not secrets, and are kept; a token in an `Authorization` header is redacted even when it is hex.
 - Passwords and SSH private keys.
 
 ---
@@ -131,7 +131,7 @@ AI coding harnesses generate rich session transcripts. Resin guarantees:
 
 - Session files in `~/.claude/projects/`, `~/.codex/sessions/`, or `~/.omp/` are parsed **locally** by the observer daemon.
 - Raw text is distilled into **Normalized Session Events** (e.g. `tool_discovery`, `tool_call`, `durationMs`, `exitCode`).
-- If cloud synchronization is enabled for candidate evolution, sanitized evidence may include engine-redacted JavaScript, TypeScript, and Python program views with non-secret code and literals. Their original source stays in the local private store; redaction-sensitive token positions cannot be parameterized, and execution never falls back to the public view. Raw prompts and tool outputs are not uploaded.
+- If cloud synchronization is enabled for candidate evolution, sanitized evidence may include engine-redacted JavaScript, TypeScript, and Python program views with non-secret code and literals. Their original source stays in the local private store; redaction-sensitive token positions cannot be parameterized, and execution never falls back to the public view. A secret in a program or command is replaced where it stands, so the rest of the command stays readable; if that cannot be done without changing how the command parses, the whole command stays private. Raw prompts and tool outputs are not uploaded.
 
 When the cloud is unreachable or after logout, the local MCP gateway continues to serve `search_tools`, `get_tool_schema`, `invoke_tool`, and `manage_tools`.
 

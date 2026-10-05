@@ -146,6 +146,7 @@ A learned tool runs the commands Codex ran, with some recorded values turned int
 
 - a whole command word (`./release test alpha` → `{project}`), or part of one (`out/emea-2025-03/summary.csv` → `out/{region}-{month}/summary.csv`);
 - a literal inside a Python or Node program the command runs (a heredoc body or a `-c`/`-e` string); such inputs are named after the record field or variable the literal is compared with or assigned to (`x['merchant']=='…'` → `{merchant}`), and record field names themselves are never inputs;
+- a word of a shell program the command hands to another shell as one quoted string: `bash -c '…'`, `sh -c '…'`, `docker exec <container> sh -c '…'`, or the remote command of `ssh [options] <host> '…'` (`ssh host 'docker logs --since 2026-10-05T07:30:00Z web-1'` → `--since {since} {container}`). The value is quoted for the inner shell and then for the outer string, so it stays one word of data in both; a value that starts with `-` where the recording's did not is refused. Because the remote login shell of an `ssh` host is not known, a value there may hold only letters, digits, spaces and `_ . / : = + , ~ -`; anything else is never confirmed;
 - a value an earlier command printed, such as a generated deployment id, which later commands then read from that command's output on every run;
 - a value on a line a Codex `apply_patch` edit added; the edit runs as a patch step confined to the working directory.
 

@@ -277,13 +277,19 @@ export class WindowsIdentityScrubber {
       }));
   }
 
-  scrub(text: string, placeholder: PlaceholderFactory): WindowsIdentityResult {
+  /** `alias` hears each home spelling replaced by `$HOME`, as `placeholder` hears each placeholder. */
+  scrub(
+    text: string,
+    placeholder: PlaceholderFactory,
+    alias?: (replacement: string, original: string) => void,
+  ): WindowsIdentityResult {
     const patterns = new Set<string>();
     let current = text;
 
     if (this.literalHomes) {
-      current = replaceOutsidePlaceholders(current, this.literalHomes, () => {
+      current = replaceOutsidePlaceholders(current, this.literalHomes, (match) => {
         patterns.add("path_alias:$HOME");
+        alias?.("$HOME", match[0]);
         return "$HOME";
       });
     }
@@ -294,6 +300,7 @@ export class WindowsIdentityScrubber {
       if (SHARED_PROFILES.has(name) || /^[%$~]/.test(name)) return undefined;
       if (this.currentHomeKeys.has(userHomeKey(groups))) {
         patterns.add("path_alias:$HOME");
+        alias?.("$HOME", match[0]);
         return "$HOME";
       }
       patterns.add("windows_user_home");
