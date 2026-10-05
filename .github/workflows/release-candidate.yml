@@ -31,8 +31,50 @@ env:
   DO_NOT_TRACK: "1"
 
 jobs:
+  # Fails fast, before any runner-minutes go to qualification, when release_tag is already a
+  # published (non-draft) GitHub release: two operators racing the same release would
+  # otherwise build a second candidate that release.yml can only reject. A draft release
+  # with this tag is allowed, since release.yml creates the draft before publishing and a
+  # retried promotion reuses it.
+  release-tag-guard:
+    name: Refuse an already-published release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+      # The job never checks out source, so gh cannot infer the repository from a git remote.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Refuse a release tag that is already published
+        id: release_tag_guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag format: $RELEASE_TAG"
+            exit 1
+          fi
+          err_file="$(mktemp)"
+          if release_json="$(gh release view "$RELEASE_TAG" --json isDraft,publishedAt,url 2>"$err_file")"; then
+            if [ "$(jq -r '.isDraft' <<<"$release_json")" != "true" ]; then
+              echo "::error::GitHub release ${RELEASE_TAG} is already published ($(jq -r '.publishedAt' <<<"$release_json"), $(jq -r '.url' <<<"$release_json")). Refusing a duplicate release; dispatch the next unpublished tag."
+              exit 1
+            fi
+            echo "Draft GitHub release ${RELEASE_TAG} exists and is unpublished; continuing."
+          elif grep -qx 'release not found' "$err_file"; then
+            echo "No GitHub release ${RELEASE_TAG} exists; continuing."
+          else
+            cat "$err_file" >&2
+            echo "::error::Could not determine whether GitHub release ${RELEASE_TAG} is published"
+            exit 1
+          fi
+
   platform-qualification:
     name: ${{ matrix.check_name }}
+    needs: release-tag-guard
     strategy:
       fail-fast: true
       matrix:
@@ -137,6 +179,7 @@ jobs:
   # uploaded here.
   windows-qualification:
     name: ${{ matrix.check_name }}
+    needs: release-tag-guard
     strategy:
       fail-fast: true
       matrix:
@@ -413,6 +456,7 @@ jobs:
   # windows-11-arm). The signing job needs both lanes on both architectures.
   windows-suites:
     name: ${{ matrix.check_name }}
+    needs: release-tag-guard
     strategy:
       fail-fast: true
       matrix:
@@ -532,6 +576,7 @@ jobs:
   # suite so the slowest stays off the Windows critical path.
   release-tests:
     name: ${{ matrix.check_name }}
+    needs: release-tag-guard
     strategy:
       fail-fast: false
       matrix:
@@ -608,6 +653,7 @@ jobs:
 
   system-qualification:
     name: Clean Checkout Public Core System Gate
+    needs: release-tag-guard
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
