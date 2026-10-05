@@ -58,16 +58,17 @@ const MAX_PATH_RUN_LENGTH = 12;
  * `-`, `_` and never `\`; URL-safe base64 has no `/`; a random key has long runs between separators;
  * URL userinfo, `key=value` pairs and base64 padding carry `@`, `:`, `=` or `+`. A leading drive
  * (`C:`), `\\?\` long-path prefix or home reference (`$env:USERPROFILE`, `${env:X}`, `%X%`) is a
- * path's own colon. Named-secret rules still scan every value.
+ * path's own colon. Named-secret rules still scan every value. `requireNameMark` false drops the
+ * `.`/`-`/`_` requirement, for a candidate already known not to be base64.
  */
-function isPathShaped(candidate: string): boolean {
+function isPathShaped(candidate: string, requireNameMark = true): boolean {
   const path = candidate.replace(
     /^(?:\$env:[A-Za-z_]\w*|\$\{env:[A-Za-z_]\w*\}|%[A-Za-z_]\w*%|(?:(?:\\\\|\\){2}[?.](?:\\\\|\\))?[A-Za-z]:)(?=[\\/])/i,
     "",
   );
   return (
     /[/\\]/.test(path) &&
-    /[._-]/.test(path) &&
+    (!requireNameMark || /[._-]/.test(path)) &&
     !/[@:=+]/.test(path) &&
     path.split(/[/\\._-]/).every((run) => run.length <= MAX_PATH_RUN_LENGTH)
   );
@@ -408,9 +409,25 @@ const GIT_OBJECT_CONTEXT =
 const CHECKSUM_TOOL_CONTEXT =
   /\b(?:sha(?:1|224|256|384|512)sum|shasum|md5sum|md5|b2sum|b3sum|cksum|openssl\s+dgst|certutil\s+-hashfile)\b/;
 
-/** Labels that name the following hex value a digest or revision. */
+/**
+ * Labels that name the following hex value a digest or revision. A label may end a longer name
+ * (`commit_sha=`, `HEAD_SHA=`, `--match-head-commit`): only a letter or digit right before it
+ * makes it part of another word.
+ */
 const HASH_LABEL_CONTEXT =
-  /(?:\b(?:sha(?:1|224|256|384|512)?|md5|blake2b?|blake3|digest|checksum|hash|integrity|commit|revision|rev|oid|object|tree|parent|etag|Merge)\b["']?\s*[:=@-]?\s*["']?|@sha256:|\bsha256:)$/i;
+  /(?:(?<![A-Za-z0-9])(?:sha(?:1|224|256|384|512)?|md5|blake2b?|blake3|digest|checksum|hash|integrity|commit|revision|rev|oid|object|tree|parent|etag|Merge)\b["']?\s*[:=@-]?\s*["']?|@sha256:|\bsha256:)$/i;
+/** The same labels ending a camelCase name (`headSha`, `headRefOid`), as JSON keys spell them. */
+const CAMEL_HASH_LABEL_CONTEXT =
+  /[a-z0-9](?:Sha|Commit|Oid|Rev|Revision|Digest|Hash|Checksum)["']?\s*[:=]\s*["']?$/;
+
+/** A git revision: an object name or a ref (`HEAD`, `origin/main`, `v1.2.0`) with `~n`/`^n` steps. */
+const GIT_REVISION = String.raw`(?:[0-9a-f]{7,40}|[0-9A-F]{7,40}|[A-Za-z][\w.-]*(?:/[\w.-]+)*)(?:[~^][0-9]*)*`;
+/** A file at a revision (`<rev>:<path>`, the path holding a `.` or `/`) or a range (`<rev>..<rev>`). */
+const GIT_REVISION_ARGUMENT = new RegExp(
+  String.raw`^(?:${GIT_REVISION}:(?=[\w./-]*[./])[\w./-]+|${GIT_REVISION}\.{2,3}${GIT_REVISION})$`,
+);
+/** Longest candidate tested as a revision argument, bounding the regex's backtracking. */
+const MAX_GIT_REVISION_ARGUMENT_LENGTH = 256;
 
 /** Lengths of the common hex digests (md5, sha1, sha224, sha256, sha384, sha512). */
 const DIGEST_HEX_LENGTHS = new Set([32, 40, 56, 64, 96, 128]);
@@ -430,7 +447,7 @@ function lineAround(text: string, start: number, end: number): { before: string;
 function isHashContext(text: string, start: number, end: number): boolean {
   const { before, line } = lineAround(text, start, end);
   if (SECRET_CONTEXT.test(before.slice(-32))) return false;
-  if (HASH_LABEL_CONTEXT.test(before)) return true;
+  if (HASH_LABEL_CONTEXT.test(before) || CAMEL_HASH_LABEL_CONTEXT.test(before)) return true;
   if (GIT_OBJECT_CONTEXT.test(line) || CHECKSUM_TOOL_CONTEXT.test(line)) return true;
   const length = end - start;
   // `<digest>  <file>` / `<digest> *<file>` rows of sha256sum output or SHA256SUMS files.
@@ -443,6 +460,27 @@ function isHashContext(text: string, start: number, end: number): boolean {
   }
   // git log --oneline / raw output rows led by an abbreviated or full object name.
   return length === 40 && /^\s*$/.test(before) && /^\s+\S/.test(text.slice(end, end + 2));
+}
+
+/**
+ * Whether a high-entropy token is a git revision argument (`HEAD:src/a.ts`, `846069b0:notes.json`,
+ * `v1.2.0..origin/main`) on a git command line: an object name and a path or range, not a key.
+ * A secret label right before it wins.
+ */
+function isGitRevisionArgument(
+  text: string,
+  candidate: string,
+  start: number,
+  end: number,
+): boolean {
+  if (
+    candidate.length > MAX_GIT_REVISION_ARGUMENT_LENGTH ||
+    !GIT_REVISION_ARGUMENT.test(candidate)
+  ) {
+    return false;
+  }
+  const { before, line } = lineAround(text, start, end);
+  return GIT_OBJECT_CONTEXT.test(line) && !SECRET_CONTEXT.test(before.slice(-32));
 }
 
 /**
@@ -652,15 +690,27 @@ export class ContentScanner {
           }
           return;
         }
-        if (covered(start, end) || isPathShaped(candidate)) {
+        if (
+          covered(start, end) ||
+          isPathShaped(candidate) ||
+          isGitRevisionArgument(text, candidate, start, end)
+        ) {
           return;
         }
         // `alpine@sha256:<digest>`: once the exempt digest is set aside, too little is left to be a key.
-        const digestChars = digests
-          .filter((digest) => digest.start >= start && digest.end <= end)
-          .reduce((sum, digest) => sum + digest.end - digest.start, 0);
+        const inside = digests.filter((digest) => digest.start >= start && digest.end <= end);
+        const digestChars = inside.reduce((sum, digest) => sum + digest.end - digest.start, 0);
         if (digestChars > 0 && candidate.length - digestChars < 20) {
           return;
+        }
+        // `repos/acme/app/commits/<sha>`: with the exempt digest set aside, a path. Random base64
+        // never holds a 32+ character run of hex, so no `.`, `-` or `_` is needed to tell them apart.
+        if (inside.length > 0) {
+          let rest = candidate;
+          for (const digest of [...inside].sort((a, b) => b.start - a.start)) {
+            rest = `${rest.slice(0, digest.start - start)}0${rest.slice(digest.end - start)}`;
+          }
+          if (isPathShaped(rest, false)) return;
         }
 
         // Must have character diversity (mixed case or letters + digits or special symbols)

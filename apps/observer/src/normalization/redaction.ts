@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { RedactionMeta, RedactionStrategy } from "@resin/contracts";
 import { z } from "zod";
+import { type RedactionSpan, locateReplacements } from "./redaction-spans.js";
 import { ContentScanner } from "./scanner.js";
 import { WindowsIdentityScrubber, environmentValue, isWindowsPath } from "./windows-identity.js";
 
@@ -13,11 +14,15 @@ export interface JsonObject {
 }
 export type JsonValue = JsonPrimitive | JsonArray | JsonObject;
 
+export type { RedactionSpan } from "./redaction-spans.js";
+
 export interface RedactedStringResult {
   redactedText: string;
   changed: boolean;
   patterns: string[];
   fingerprints: string[];
+  /** Program sources only: each replacement's span in the input, when all could be located. */
+  spans?: RedactionSpan[];
 }
 
 /**
@@ -274,6 +279,15 @@ export class RedactionEngine {
    * Redacts a single string according to privacy transforms.
    */
   redactString(text: string, fieldPath = ""): RedactedStringResult {
+    return this.redactText(text, fieldPath);
+  }
+
+  /** `record` hears every replacement text with the text it replaced, at whatever step it ran. */
+  private redactText(
+    text: string,
+    fieldPath: string,
+    record?: (replacement: string, original: string) => void,
+  ): RedactedStringResult {
     if (!text) {
       return { redactedText: text, changed: false, patterns: [], fingerprints: [] };
     }
@@ -293,6 +307,7 @@ export class RedactionEngine {
         current = current.split(pattern).join(replacement);
         changed = true;
         patterns.push(`path_alias:${replacement}`);
+        record?.(replacement, pattern);
       }
     }
 
@@ -304,6 +319,7 @@ export class RedactionEngine {
         patterns.push(`env_var:${name}`);
         fingerprints.push(placeholder);
         this.config.onRedact?.(placeholder, secret);
+        record?.(placeholder, secret);
       }
     }
 
@@ -316,18 +332,24 @@ export class RedactionEngine {
         patterns.push("custom_secret");
         fingerprints.push(fingerprint);
         this.config.onRedact?.(placeholder, secret);
+        record?.(placeholder, secret);
       }
     }
 
     // 3b. Windows identity: home directories in every spelling, OneDrive organizations, and the
     // session's user, domain and machine names. After the secret values, which may contain them.
-    const identity = this.windowsIdentity.scrub(current, (type, original) => {
-      const fingerprint = computeFingerprint(this.fingerprintKey, original);
-      const placeholder = `[REDACTED_${type}:${fingerprint}]`;
-      fingerprints.push(fingerprint);
-      this.config.onRedact?.(placeholder, original);
-      return placeholder;
-    });
+    const identity = this.windowsIdentity.scrub(
+      current,
+      (type, original) => {
+        const fingerprint = computeFingerprint(this.fingerprintKey, original);
+        const placeholder = `[REDACTED_${type}:${fingerprint}]`;
+        fingerprints.push(fingerprint);
+        this.config.onRedact?.(placeholder, original);
+        record?.(placeholder, original);
+        return placeholder;
+      },
+      record,
+    );
     if (identity.text !== current) {
       current = identity.text;
       changed = true;
@@ -347,6 +369,7 @@ export class RedactionEngine {
           changed = true;
           patterns.push(m.patternId);
           this.config.onRedact?.(placeholder, m.match);
+          record?.(placeholder, m.match);
           fingerprints.push(fp);
         }
       }
@@ -375,6 +398,8 @@ export class RedactionEngine {
   /**
    * Produces a source view eligible for projection, never an executable replacement for the
    * locally retained original. Disabled scanning or truncation cannot authorize source sharing.
+   * The result carries where each replacement sits in `source` (`spans`), when every replacement
+   * can be located exactly, so a projection can redact each value in place.
    */
   redactProgramSource(source: string): RedactedStringResult | undefined {
     if (
@@ -385,10 +410,16 @@ export class RedactionEngine {
     ) {
       return undefined;
     }
-    const result = this.redactString(source, "program");
-    return result.patterns.some((pattern) => pattern.startsWith("truncation:"))
-      ? undefined
-      : result;
+    const replaced = new Map<string, Set<string>>();
+    const result = this.redactText(source, "program", (replacement, original) => {
+      if (original.length === 0) return;
+      const originals = replaced.get(replacement) ?? new Set<string>();
+      originals.add(original);
+      replaced.set(replacement, originals);
+    });
+    if (result.patterns.some((pattern) => pattern.startsWith("truncation:"))) return undefined;
+    const spans = result.changed ? locateReplacements(source, result.redactedText, replaced) : [];
+    return spans === undefined ? result : { ...result, spans };
   }
 
   /**
