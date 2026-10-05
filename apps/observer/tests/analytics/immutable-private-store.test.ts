@@ -226,4 +226,31 @@ describe("immutable private reference persistence", () => {
     store.flush();
     expect(new FilePrivateValueStore(root).get("[REDACTED_SECRET:b]")).toBe("fresh");
   });
+
+  it("resolves a redacted entry's placeholders after the legacy alias cache evicted them", () => {
+    const root = directory();
+    const origin = { workspaceId: "ws-legacy" };
+    const key = `private:v2:demonstration:${"e".repeat(64)}`;
+    const store = new FilePrivateValueStore(root);
+    // Redaction mints the alias, then the recorder stores the redacted demonstration value.
+    store.set("[REDACTED_SECRET:kept]", "sk-live-original");
+    store.set(key, { header: "Bearer [REDACTED_SECRET:kept]" }, origin, "redacted");
+    store.flush();
+
+    // A later heavy session mints 4096 new aliases; the FIFO cache drops the old one.
+    const flood: Record<string, unknown> = {};
+    for (let i = 0; i < 4096; i++)
+      flood[`[REDACTED_SECRET:flood-${i}]`] = { value: `flood-${i}`, at: Date.now() };
+    writeFileSync(path.join(root, "private-values", "private-values.json"), JSON.stringify(flood));
+
+    const reopened = new FilePrivateValueStore(root);
+    expect(reopened.get("[REDACTED_SECRET:kept]")).toBeUndefined();
+    expect(resolvePrivateReference(reopened, key)).toEqual({ header: "Bearer sk-live-original" });
+    // A placeholder the entry never captured still resolves through the cache, or fails closed.
+    const uncaptured = `private:v2:demonstration:${"f".repeat(64)}`;
+    reopened.set(uncaptured, "[REDACTED_SECRET:missing]", origin, "redacted");
+    expect(() => resolvePrivateReference(reopened, uncaptured)).toThrow(
+      "needs '[REDACTED_SECRET:missing]'",
+    );
+  });
 });

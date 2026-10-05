@@ -5,7 +5,7 @@ describe("programCommands", () => {
   it.each([
     // Shapes of recorded programs from real learned tools.
     [
-      `sleep 30; for i in $(seq 1 60); do out=$(gh pr checks 334 --repo Resin-AI/resin-cloud 2>&1); s=$(echo "$out" | awk -F'\\t' '{print $2}' | sort | uniq -c | tr '\\n' ' '); case "$s" in *pending*) sleep 30;; *) break;; esac; done; echo "$out" | awk -F'\\t' '{print $1" | "$2}'`,
+      `sleep 30; for i in $(seq 1 60); do out=$(gh pr checks 334 --repo example-org/example-repo 2>&1); s=$(echo "$out" | awk -F'\\t' '{print $2}' | sort | uniq -c | tr '\\n' ' '); case "$s" in *pending*) sleep 30;; *) break;; esac; done; echo "$out" | awk -F'\\t' '{print $1" | "$2}'`,
       ["gh pr checks"],
     ],
     [

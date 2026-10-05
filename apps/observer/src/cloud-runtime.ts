@@ -226,6 +226,8 @@ export interface SendTelemetryBatchInput {
 }
 
 export interface CloudObservationClientOptions {
+  /** The release version a credential store this client creates reports on token rotation. */
+  clientVersion?: string;
   credentialStore?: CloudCredentialStore;
   identityProvider?: (options?: { forceRefresh?: boolean }) => Promise<CloudRequestIdentity | null>;
   authRecoveryController?: AuthRecoveryController;
@@ -250,7 +252,9 @@ export class CloudObservationClient {
   constructor(options: CloudObservationClientOptions = {}) {
     const credentialStore =
       options.credentialStore ??
-      (options.identityProvider ? undefined : new CloudCredentialStore());
+      (options.identityProvider
+        ? undefined
+        : new CloudCredentialStore({ clientVersion: options.clientVersion }));
     this.credentialStore = options.identityProvider ? undefined : credentialStore;
     if (options.identityProvider) {
       this.identityProvider = options.identityProvider;
@@ -271,6 +275,7 @@ export class CloudObservationClient {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.jobClient = new CloudJobClient({
       credentialStore,
+      clientVersion: options.clientVersion,
       identityProvider: this.identityProvider,
       fetchImpl: this.fetchImpl,
       baseUrl: options.baseUrl,
@@ -804,6 +809,8 @@ export class CloudObservationClient {
 
 export interface CloudRuntimeModuleOptions {
   credentialStore?: CloudCredentialStore;
+  /** The release version a credential store this module creates reports on token rotation. */
+  clientVersion?: string;
   authRecoveryController?: AuthRecoveryController;
   fetchImpl?: typeof fetch;
   auditRepository?: AuditRepository;
@@ -830,7 +837,8 @@ export class CloudRuntimeModule implements DaemonModule {
   private lastLoadResult: CloudCredentialLoadResult = { status: "missing" };
 
   constructor(options: CloudRuntimeModuleOptions = {}) {
-    this.credentialStore = options.credentialStore ?? new CloudCredentialStore();
+    this.credentialStore =
+      options.credentialStore ?? new CloudCredentialStore({ clientVersion: options.clientVersion });
     this.observationClient = new CloudObservationClient({
       credentialStore: this.credentialStore,
       authRecoveryController: options.authRecoveryController,

@@ -83,6 +83,8 @@ export interface ProductionProxyRuntimeOptions {
   home?: string;
   resinHome?: string;
   tokenFilePath?: string;
+  /** The running release, reported on token rotation by the credential store this creates. */
+  clientVersion?: string;
   secretManager?: SecretManager;
   fetchFn?: typeof fetch;
   circuitBreaker?: CloudCircuitBreaker;
@@ -341,6 +343,7 @@ export async function createProductionProxyRuntime(
       tokenFilePath: options.tokenFilePath,
       secretManager: options.secretManager,
       fetchImpl: options.fetchFn,
+      clientVersion: options.clientVersion,
     });
 
   let loadResult: CloudCredentialLoadResult;

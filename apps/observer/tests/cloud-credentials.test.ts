@@ -849,6 +849,57 @@ describe("CloudCredentialStore", () => {
       await expect(fs.stat(`${tokenFilePath}.lock`)).rejects.toThrow();
     });
 
+    it("leaves a lock another waiter took over after this one judged it stale", async () => {
+      const { server, store, rotatedClaims, rotatedAccessToken } = rotationFixture();
+      await persistExpiredCredential(store, "original-refresh-token");
+      const lockPath = `${tokenFilePath}.lock`;
+      await writeForeignLock(lockPath, {
+        pid: deadPid(),
+        hostname: os.hostname(),
+        acquiredAgoMs: 0,
+        heartbeatAgoMs: 0,
+      });
+      // Right after this store reads the stale lock's heartbeat, a competing waiter removes it
+      // and acquires a fresh lock of its own (it is mid-rotation from here on).
+      const stat = fs.stat;
+      let swapped = false;
+      vi.spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof stat>) => {
+        const result = await stat(...args);
+        if (!swapped && String(args[0]) === lockPath) {
+          swapped = true;
+          await fs.rm(lockPath);
+          await fs.writeFile(
+            lockPath,
+            JSON.stringify({
+              pid: process.pid,
+              hostname: os.hostname(),
+              acquiredAt: new Date().toISOString(),
+              owner: "competing-holder",
+            }),
+          );
+        }
+        return result;
+      }) as typeof stat);
+
+      const declinedTakeover = lockReads(lockPath, 2);
+      const refresh = store.getRequestIdentity({ forceRefresh: true });
+      await declinedTakeover;
+
+      // Deleting the competitor's lock would let this store replay the token it is spending.
+      expect(swapped).toBe(true);
+      expect(await fs.readFile(lockPath, "utf8")).toContain("competing-holder");
+      expect(server.receivedRefreshTokens).toEqual([]);
+
+      await writeCredentialFile(tokenFilePath, rotatedClaims, rotatedAccessToken, ROTATED_REFRESH);
+      await fs.rm(lockPath);
+      const identity = await refresh;
+      expect(identity?.accessToken).toBe(rotatedAccessToken);
+      expect(server.receivedRefreshTokens).toEqual([]);
+      expect(
+        (await fs.readdir(path.dirname(lockPath))).filter((name) => name.includes(".takeover-")),
+      ).toEqual([]);
+    });
+
     it("heartbeats its own lock while a refresh is in flight", async () => {
       vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       try {

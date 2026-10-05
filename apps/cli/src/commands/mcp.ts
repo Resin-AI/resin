@@ -223,6 +223,7 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     stdout: (options.stdout ?? process.stdout) as NodeJS.WritableStream,
     stderr: (options.stderr ?? process.stderr) as NodeJS.WritableStream,
     home: options.home,
+    clientVersion: CLI_VERSION,
     recordedWorkflowConnections: harnessMcpConnections(servedHarness, parsedArgs.cwd),
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
     ...(resinHome === undefined

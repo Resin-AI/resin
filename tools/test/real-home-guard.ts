@@ -11,7 +11,10 @@
  *   database open under a protected root throws, and fails the running test in `afterEach` even
  *   when the code under test swallowed the error;
  * - gives children started with an explicit `env` that names neither `HOME` nor `RESIN_HOME` the
- *   worker's `HOME`, so they do not fall back to the password-database home.
+ *   worker's `HOME`, so they do not fall back to the password-database home;
+ * - protects and then removes inherited directory overrides of the Resin home layout
+ *   (`RESIN_DATA_DIR`, `RESIN_STATE_DIR`, ...), which would otherwise point default paths at the
+ *   developer's installation whatever `HOME` says.
  */
 import childProcess from "node:child_process";
 import fs from "node:fs";
@@ -39,11 +42,31 @@ function protectedRoots(): string[] {
   add(path.join(os.userInfo().homedir, ".resin"));
   // A RESIN_HOME inherited from the developer's shell is their installation too.
   add(process.env.RESIN_HOME);
+  for (const name of RESIN_DIRECTORY_OVERRIDES) add(process.env[name]);
   return [...roots];
 }
 
+/** Per-directory overrides of the Resin home layout that default paths honour. */
+const RESIN_DIRECTORY_OVERRIDES = [
+  "RESIN_CONFIG_DIR",
+  "RESIN_DATA_DIR",
+  "RESIN_STATE_DIR",
+  "RESIN_LOG_DIR",
+  "RESIN_STORAGE_DIR",
+] as const;
+
 /** The real user's Resin roots this worker refuses to write. */
 export const REAL_RESIN_ROOTS: readonly string[] = protectedRoots();
+
+/** Removes the Resin layout directory overrides from `env`, returning the names it removed. */
+export function stripResinDirectoryOverrides(env: NodeJS.ProcessEnv): string[] {
+  const names = RESIN_DIRECTORY_OVERRIDES.filter((name) => Object.hasOwn(env, name));
+  for (const name of names) delete env[name];
+  return names;
+}
+
+// Default paths then derive from the isolated HOME; a test that wants an override sets its own.
+stripResinDirectoryOverrides(process.env);
 
 const violations: string[] = [];
 

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectPrivateValueReferences,
   sweepPrivateValues,
@@ -248,5 +248,22 @@ describe("recorded value index", () => {
     // Running or describing the recorded step reads the value back, which marks it again.
     expect(new FilePrivateValueStore(dataDir).get(key)).toBe("feature/old-branch");
     expect(new FilePrivateValueStore(dataDir).holdsValue("feature/old-branch", OWNER)).toBe(true);
+  });
+
+  it("refreshes a marker from a long-lived store that keeps reading its value", () => {
+    const { dataDir } = home();
+    const key = reference("long-lived");
+    const store = new FilePrivateValueStore(dataDir);
+    store.set(key, "deploy/main", OWNER, "literal");
+    const [marker] = markers(dataDir);
+    age(marker as string, 2);
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 2 * DAY });
+    try {
+      // The same process reads the value back two days on; its marker must not keep aging.
+      expect(store.get(key)).toBe("deploy/main");
+      expect(fs.statSync(marker as string).mtimeMs).toBeGreaterThan(Date.now() - DAY);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

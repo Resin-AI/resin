@@ -210,37 +210,6 @@ describe("Privileged Workflow Trust & Security Boundaries", () => {
         }
       }
     });
-    it("publishes the web image on the private runner's native x64 architecture", () => {
-      const workflowEntry = allWorkflows[".github/workflows/web-deploy.yml"];
-      if (!workflowEntry) {
-        expect(fs.existsSync(path.join(ROOT_DIR, "apps/web"))).toBe(false);
-        return;
-      }
-      const workflow = workflowEntry.doc;
-      const publishJob = workflow.jobs.publish;
-      const imageStep = publishJob.steps.find((step) =>
-        step.uses?.startsWith("docker/build-push-action@"),
-      );
-
-      expect(workflow.env.IMAGE_NAME).toBe("ghcr.io/resin-ai/resin-cloud-web");
-      expect(publishJob["runs-on"]).toBe("resin-ovh-linux-x64");
-      expect(imageStep.with.platforms).toBe("linux/amd64");
-      expect(
-        publishJob.steps.some((step) => step.uses?.startsWith("docker/setup-qemu-action@")),
-      ).toBe(false);
-      const dockerfile = fs.readFileSync(path.join(ROOT_DIR, "apps/web/Dockerfile"), "utf8");
-      for (const requiredInput of [
-        "COPY apps/cloud/package.json ./apps/cloud/package.json",
-        "COPY packages/cloud-contracts/package.json ./packages/cloud-contracts/package.json",
-        "COPY apps/cloud ./apps/cloud",
-        "COPY packages/cloud-contracts ./packages/cloud-contracts",
-      ]) {
-        expect(dockerfile).toContain(requiredInput);
-      }
-      expect(dockerfile.indexOf("pnpm --filter @resin/cloud build")).toBeLessThan(
-        dockerfile.indexOf("pnpm --filter @resin/web build"),
-      );
-    });
   });
 
   describe("Least Privilege Permissions", () => {

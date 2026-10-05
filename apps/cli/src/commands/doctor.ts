@@ -59,6 +59,11 @@ import {
   type UpdateStatusSnapshot,
   readUpdateStatusSnapshot,
 } from "../updates/engine.js";
+import {
+  type CredentialUnsafeGateway,
+  formatCredentialUnsafeGateways,
+  listCredentialUnsafeGateways,
+} from "../updates/gateway-registry.js";
 import type { UpdatePolicy } from "../updates/policy.js";
 import {
   formatAutomaticUpdateNotice,
@@ -328,6 +333,8 @@ export async function runDiagnostics(options: {
   harnessHealthCoordinator?: HarnessHealthRunner;
   serviceManager?: UserServiceManager;
   forceHarnessHealthCheck?: boolean;
+  /** Test seam: lists live gateways whose credential client predates resin#294. */
+  listCredentialUnsafeGateways?: (resinHome: string) => Promise<CredentialUnsafeGateway[]>;
 }): Promise<DoctorDiagnosticItem[]> {
   const customHome = options.home
     ? path.resolve(options.home)
@@ -620,8 +627,33 @@ export async function runDiagnostics(options: {
       name: "Cloud Authentication Credentials",
       category: "auth",
       status: "warn",
-      message:
-        "No cloud credentials found (running in local offline mode). Run `resin init` to connect to Resin Cloud.",
+      message: "No cloud credentials found (running in local offline mode).",
+      remediation: "Run `resin login` to connect to Resin Cloud.",
+      fixable: false,
+    });
+  }
+
+  // MCP gateways that `resin login` refuses to pair alongside (they can race the token refresh).
+  let credentialUnsafeGateways: string | null = null;
+  try {
+    const listUnsafe =
+      options.listCredentialUnsafeGateways ??
+      ((resinHome: string) => listCredentialUnsafeGateways({ resinHome }));
+    credentialUnsafeGateways = formatCredentialUnsafeGateways(
+      await listUnsafe(daemonPaths.homeDir),
+    );
+  } catch {
+    // Detection reads only local registrations and /proc; a failure is not a diagnosis.
+  }
+  if (credentialUnsafeGateways) {
+    items.push({
+      id: "credential_unsafe_gateways",
+      name: "MCP Gateway Credential Clients",
+      category: "gateway",
+      status: "warn",
+      message: credentialUnsafeGateways,
+      remediation:
+        "Restart the listed harness sessions; `resin login` will not pair while they run.",
       fixable: false,
     });
   }

@@ -106,10 +106,61 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Lists live gateways, pruning registrations whose process has exited. */
+/** Linux exposes process start times in USER_HZ ticks, fixed at 100 for the userspace ABI. */
+const PROC_CLOCK_TICKS_PER_SECOND = 100;
+
+/**
+ * Slack between a process's start time and its registration's `startedAt`: boot time is
+ * whole seconds and the wall clock may step, so only a clearly later start proves PID reuse.
+ */
+const PID_REUSE_TOLERANCE_MS = 5_000;
+
+/**
+ * The process's start time in epoch ms from `/proc`, or null where it cannot be read (no
+ * `/proc`, the process exited, or an unexpected format).
+ */
+async function readProcessStartTimeMs(procRoot: string, pid: number): Promise<number | null> {
+  try {
+    const bootLine = (await fs.readFile(path.join(procRoot, "stat"), "utf8"))
+      .split("\n")
+      .find((line) => line.startsWith("btime "));
+    const bootTimeSeconds = Number(bootLine?.slice("btime ".length).trim());
+    const stat = await fs.readFile(path.join(procRoot, String(pid), "stat"), "utf8");
+    // Fields after the parenthesized command name start at field 3 (state); starttime is 22.
+    const startTicks = Number(
+      stat
+        .slice(stat.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/u)[19],
+    );
+    if (!Number.isFinite(bootTimeSeconds) || !Number.isFinite(startTicks) || bootTimeSeconds <= 0) {
+      return null;
+    }
+    return bootTimeSeconds * 1000 + (startTicks * 1000) / PROC_CLOCK_TICKS_PER_SECOND;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the live process holding a registration's PID started after the gateway registered,
+ * i.e. the gateway died without unregistering (SIGKILL, OOM) and the PID was reused.
+ */
+async function isReusedPid(registration: GatewayRegistration, procRoot: string): Promise<boolean> {
+  const registeredAtMs = Date.parse(registration.startedAt);
+  if (!Number.isFinite(registeredAtMs)) return false;
+  const startedAtMs = await readProcessStartTimeMs(procRoot, registration.pid);
+  return startedAtMs !== null && startedAtMs > registeredAtMs + PID_REUSE_TOLERANCE_MS;
+}
+
+/**
+ * Lists live gateways, pruning registrations whose process has exited or whose PID now belongs
+ * to a process started after the registration (checked through `/proc` where available).
+ */
 export async function listRunningGateways(options: {
   readonly resinHome: string;
   readonly isAlive?: (pid: number) => boolean;
+  readonly procRoot?: string;
 }): Promise<GatewayRegistration[]> {
   const directory = resolveGatewayRegistryDir(options.resinHome);
   let names: string[];
@@ -119,6 +170,7 @@ export async function listRunningGateways(options: {
     return [];
   }
   const isAlive = options.isAlive ?? isProcessAlive;
+  const procRoot = options.procRoot ?? "/proc";
   const live: GatewayRegistration[] = [];
   for (const name of names.slice(0, MAX_REGISTRATIONS)) {
     const filePath = path.join(directory, name);
@@ -126,7 +178,11 @@ export async function listRunningGateways(options: {
       const parsed = GatewayRegistrationSchema.safeParse(
         JSON.parse(await fs.readFile(filePath, "utf8")),
       );
-      if (parsed.success && isAlive(parsed.data.pid)) {
+      if (
+        parsed.success &&
+        isAlive(parsed.data.pid) &&
+        !(await isReusedPid(parsed.data, procRoot))
+      ) {
         live.push(parsed.data);
         continue;
       }

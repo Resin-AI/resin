@@ -1688,7 +1688,11 @@ export async function readStaleMcpGateways(
 ): Promise<DaemonStatusSummary["update"]["staleMcpGateways"]> {
   const none = { count: 0, versions: [], unknownVersionCount: 0, credentialUnsafe: [] };
   try {
-    const registered = await listRunningGateways({ resinHome, isAlive: options.isAlive });
+    const registered = await listRunningGateways({
+      resinHome,
+      isAlive: options.isAlive,
+      procRoot: options.procRoot,
+    });
     const unregisteredPids = await listUnregisteredGatewayPids({
       resinHome,
       registeredPids: registered.map((gateway) => gateway.pid),

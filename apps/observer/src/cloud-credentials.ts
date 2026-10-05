@@ -464,7 +464,7 @@ export class CloudCredentialStore {
     } catch {
       return false;
     }
-    const stats = await fs.stat(lockPath).catch(() => null);
+    const stats = await fs.stat(lockPath, { bigint: true }).catch(() => null);
     if (!stats) {
       return false;
     }
@@ -488,7 +488,7 @@ export class CloudCredentialStore {
     }
 
     const now = Date.now();
-    const heartbeatAgeMs = now - stats.mtimeMs;
+    const heartbeatAgeMs = now - Number(stats.mtimeMs);
     const holdAgeMs = Number.isFinite(acquiredAtMs) ? now - acquiredAtMs : heartbeatAgeMs;
     // A pid only identifies a process on the host that wrote it. Locks from releases before the
     // heartbeat carry no hostname; they were written by a client on this machine.
@@ -502,8 +502,31 @@ export class CloudCredentialStore {
       return false;
     }
 
-    await fs.rm(lockPath, { force: true }).catch(() => undefined);
-    return true;
+    // Another waiter may have taken the same stale lock over since it was judged, and its
+    // replacement must survive: claim whatever is at the path under a private name, and delete
+    // it only if it is still the judged lock (same file and payload); otherwise put it back.
+    const claimed = `${lockPath}.takeover-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.rename(lockPath, claimed);
+    } catch {
+      // Gone already: released or taken over; the caller retries acquiring it.
+      return true;
+    }
+    const [claimedStats, claimedRaw] = await Promise.all([
+      fs.stat(claimed, { bigint: true }).catch(() => null),
+      fs.readFile(claimed, "utf8").catch(() => null),
+    ]);
+    const isJudgedLock =
+      claimedStats !== null &&
+      claimedStats.ino === stats.ino &&
+      claimedStats.dev === stats.dev &&
+      claimedRaw === raw;
+    if (!isJudgedLock) {
+      // A hard link restores it atomically unless yet another holder has the path by now.
+      await fs.link(claimed, lockPath).catch(() => undefined);
+    }
+    await fs.rm(claimed, { force: true }).catch(() => undefined);
+    return isJudgedLock;
   }
 
   /**

@@ -23,6 +23,11 @@ export interface PrivateValueStore {
   origin?(key: string): PrivateValueOrigin | undefined;
   representation?(key: string): PrivateValueRepresentation | undefined;
   /**
+   * The redaction-placeholder originals a redacted V2 entry captured when it was recorded, so it
+   * resolves for as long as the entry itself is retained, whatever the legacy alias cache evicted.
+   */
+  placeholderOriginals?(key: string): Readonly<Record<string, unknown>> | undefined;
+  /**
    * Device-local HMAC key that tags redaction placeholders. Stable for this store so one secret
    * keeps one placeholder across sessions; never uploaded.
    */
@@ -94,10 +99,14 @@ export function resolvePrivateReference(store: PrivateValueStore, reference: str
   if (stored === undefined)
     throw new Error(`private reference '${reference}' is not in the local value store`);
   if (store.representation?.(reference) === "literal") return stored;
+  const captured = store.placeholderOriginals?.(reference);
   const substitute = (value: unknown): unknown => {
     if (typeof value === "string") {
       return value.replace(PLACEHOLDER_PATTERN, (placeholder) => {
-        const original = store.get(placeholder);
+        const original =
+          captured !== undefined && Object.hasOwn(captured, placeholder)
+            ? captured[placeholder]
+            : store.get(placeholder);
         if (original === undefined) {
           throw new Error(
             `private reference '${reference}' needs '${placeholder}', which is not in the local value store`,
@@ -166,6 +175,12 @@ interface PrivateEntry {
 }
 interface ImmutableEntry extends PrivateEntry {
   key: string;
+  /**
+   * A redacted entry's placeholder originals, copied from the legacy alias cache when it was
+   * written. That cache keeps only the newest MAX_ENTRIES aliases, while an entry lives as long as
+   * something names it (see private-value-retention), so the entry carries what it needs.
+   */
+  placeholders?: Record<string, unknown>;
 }
 
 function isSameEntry(current: PrivateEntry, next: PrivateEntry): boolean {
@@ -223,8 +238,12 @@ export class FilePrivateValueStore implements PrivateValueStore {
   private readonly legacy: LegacyFileState;
   private readonly immutableEntries = new Map<string, ImmutableEntry>();
   private readonly indexDir: string;
-  /** Value digests this process already indexed (or refreshed), so each is touched once. */
-  private readonly indexedDigests = new Set<string>();
+  /**
+   * When this process last indexed (or refreshed) each value digest, so a marker is touched at
+   * most once per IMMUTABLE_REFRESH_AFTER_MS and a long-lived process keeps markers of values it
+   * still records from aging out.
+   */
+  private readonly indexedDigests = new Map<string, number>();
   private deviceRedactionKey: Buffer | undefined;
 
   constructor(dataDir: string) {
@@ -323,7 +342,8 @@ export class FilePrivateValueStore implements PrivateValueStore {
       !isPlainObject(value) ||
       value.key !== key ||
       !Object.hasOwn(value, "value") ||
-      (value.representation !== "literal" && value.representation !== "redacted")
+      (value.representation !== "literal" && value.representation !== "redacted") ||
+      (value.placeholders !== undefined && !isPlainObject(value.placeholders))
     ) {
       throw new Error(`Invalid local private reference '${key}'`);
     }
@@ -362,7 +382,7 @@ export class FilePrivateValueStore implements PrivateValueStore {
     return false;
   }
 
-  private writeImmutable(key: string, entry: PrivateEntry): void {
+  private writeImmutable(key: string, entry: Omit<ImmutableEntry, "key">): void {
     const current = this.readImmutable(key);
     if (current !== undefined) {
       assertSameEntry(current, entry, key);
@@ -554,7 +574,8 @@ export class FilePrivateValueStore implements PrivateValueStore {
         entry.value,
         entry.origin?.workspaceId,
       );
-      if (this.indexedDigests.has(digest)) return;
+      const indexedAt = this.indexedDigests.get(digest);
+      if (indexedAt !== undefined && Date.now() - indexedAt < IMMUTABLE_REFRESH_AFTER_MS) return;
       const marker = privateValueEntryPath(this.indexDir, digest);
       ensurePrivateDirectorySync(path.dirname(marker));
       try {
@@ -566,9 +587,10 @@ export class FilePrivateValueStore implements PrivateValueStore {
           fs.utimesSync(marker, now, now);
         }
       }
-      this.indexedDigests.add(digest);
+      this.indexedDigests.delete(digest);
+      this.indexedDigests.set(digest, Date.now());
       if (this.indexedDigests.size > MAX_ENTRIES) {
-        const oldest = this.indexedDigests.values().next().value;
+        const oldest = this.indexedDigests.keys().next().value;
         if (oldest !== undefined) this.indexedDigests.delete(oldest);
       }
     } catch {
@@ -588,6 +610,33 @@ export class FilePrivateValueStore implements PrivateValueStore {
       : this.load().get(key)?.representation;
   }
 
+  placeholderOriginals(key: string): Readonly<Record<string, unknown>> | undefined {
+    if (!key.startsWith("private:v2:")) return undefined;
+    const placeholders = this.readImmutable(key)?.placeholders;
+    return placeholders === undefined ? undefined : structuredClone(placeholders);
+  }
+
+  /**
+   * The legacy aliases a redacted value's placeholders resolve through right now; placeholders
+   * whose alias is unknown are left to resolve through the cache later, as before.
+   */
+  private capturePlaceholderOriginals(value: unknown): Record<string, unknown> | undefined {
+    const placeholders = JSON.stringify(value).match(PLACEHOLDER_PATTERN);
+    if (placeholders === null) return undefined;
+    let aliases: Map<string, PrivateEntry>;
+    try {
+      aliases = this.load();
+    } catch {
+      return undefined;
+    }
+    const originals: Record<string, unknown> = {};
+    for (const placeholder of placeholders) {
+      const alias = aliases.get(placeholder);
+      if (alias !== undefined) originals[placeholder] = alias.value;
+    }
+    return Object.keys(originals).length > 0 ? originals : undefined;
+  }
+
   set(
     key: string,
     value: unknown,
@@ -596,7 +645,9 @@ export class FilePrivateValueStore implements PrivateValueStore {
   ): void {
     const entry = snapshot(value, origin, representation);
     if (key.startsWith("private:v2:")) {
-      this.writeImmutable(key, entry);
+      const placeholders =
+        representation === "redacted" ? this.capturePlaceholderOriginals(entry.value) : undefined;
+      this.writeImmutable(key, placeholders ? { ...entry, placeholders } : entry);
       this.indexRecordedValue(key, entry);
       return;
     }

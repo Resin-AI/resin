@@ -705,7 +705,12 @@ export async function downloadAndVerifyAsset(
   await fsPromises.chmod(downloadDir, 0o755).catch(() => {});
 
   const destinationPath = path.join(downloadDir, asset.filename);
-  const tempPath = path.join(downloadDir, `${asset.filename}.download.tmp`);
+  // Unique per writer: concurrent downloads of one asset (an installer beside the update engine)
+  // must not write into, or rename away, each other's partial file.
+  const tempPath = path.join(
+    downloadDir,
+    `${asset.filename}.${process.pid}.${crypto.randomUUID()}.download.tmp`,
+  );
 
   let fileBuffer: Buffer;
 
@@ -761,9 +766,13 @@ export async function downloadAndVerifyAsset(
   }
 
   // Atomic write to destination via temp file
-  await fsPromises.writeFile(tempPath, fileBuffer);
-  await fsPromises.chmod(tempPath, 0o644);
-  await fsPromises.rename(tempPath, destinationPath);
+  try {
+    await fsPromises.writeFile(tempPath, fileBuffer, { flag: "wx" });
+    await fsPromises.chmod(tempPath, 0o644);
+    await fsPromises.rename(tempPath, destinationPath);
+  } finally {
+    await fsPromises.rm(tempPath, { force: true }).catch(() => {});
+  }
 
   log(`Asset ${asset.filename} downloaded and verified successfully (${fileBuffer.length} bytes).`);
 

@@ -190,6 +190,8 @@ async function readBodyWithLimit(
  */
 export interface CloudJobClientOptions {
   credentialStore?: CloudCredentialStore;
+  /** The release version a credential store this client creates reports on token rotation. */
+  clientVersion?: string;
   identityProvider?: (options?: { forceRefresh?: boolean }) => Promise<CloudRequestIdentity | null>;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
@@ -221,7 +223,8 @@ export class CloudJobClient {
   private readonly defaultDownloadOptions: ArtifactDownloadOptions;
 
   constructor(options: CloudJobClientOptions = {}) {
-    this.credentialStore = options.credentialStore ?? new CloudCredentialStore();
+    this.credentialStore =
+      options.credentialStore ?? new CloudCredentialStore({ clientVersion: options.clientVersion });
     this.identityProvider =
       options.identityProvider ??
       (async (opts) => {
