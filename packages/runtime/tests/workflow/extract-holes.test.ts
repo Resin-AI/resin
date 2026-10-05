@@ -86,6 +86,32 @@ describe("extract holes", () => {
     if (failed?.status === "failed") expect(failed.error).not.toContain("secret-output");
   });
 
+  it("feeds a printed value into the value part of an inline option, keeping its name", async () => {
+    const base = recorded();
+    const command = "./deployctl wait --id=dep-9e983a";
+    const plan = applyConfirmedWorkflowBinding(
+      {
+        ...base,
+        steps: [
+          base.steps[0]!,
+          {
+            ...base.steps[1]!,
+            callable: {
+              ...base.steps[1]!.callable,
+              program: { kind: "shell", source: command, argument: "cmd" },
+            },
+            arguments: [{ name: "cmd", source: { kind: "literal", value: command } }],
+          },
+        ],
+      },
+      { ...candidate, path: ["tokens", 2, "span", 5, 15] },
+    );
+    expect(plan).toBeDefined();
+    const { execution, received } = await run(plan!, "created deployment dep-1a2b3c\n");
+    expect(execution.status).toBe("completed");
+    expect(received[1]).toBe("./deployctl wait --id=dep-1a2b3c");
+  });
+
   it("refuses to promote a locator the plan does not declare or a producer that is not earlier", () => {
     expect(
       applyConfirmedWorkflowBinding({ ...recorded(), privateReferences: [] }, candidate),

@@ -99,8 +99,8 @@ export interface DerivedExtract {
   path: WorkflowValuePath;
   producerStepId: string;
   locator: ExtractLocator;
-  /** Structural only: token count and position. */
-  evidence: { tokens: number; token: number };
+  /** Structural only: token count and position, and the value's span inside an inline option. */
+  evidence: { tokens: number; token: number; span?: [number, number] };
 }
 
 export interface NativeDerivation {
@@ -601,16 +601,34 @@ export function deriveNativeCalls(
           if (resultFull()) break;
           if (!token.bindable || typeof token.value !== "string" || bound.has(tokenIndex)) continue;
           if (requestWords.has(token.value)) continue;
-          const found = printedBy(token.value, index, calls, mentionStrings);
+          let found = printedBy(token.value, index, calls, mentionStrings);
+          let span: { start: number; end: number } | undefined;
+          // An inline option or field value (`-f commit_sha=<sha>`, `--run=<id>`) is read from the
+          // output where the value alone was printed: the token keeps its name, the value is the
+          // span after `=`.
+          if (found === undefined) {
+            const name = INLINE_VALUE_NAME.exec(token.value)?.[0];
+            const value = name === undefined ? undefined : token.value.slice(name.length);
+            if (value !== undefined && value.length > 0 && !requestWords.has(value)) {
+              found = printedBy(value, index, calls, mentionStrings);
+              span = { start: name!.length, end: token.value.length };
+            }
+          }
           if (found === undefined) continue;
           resultUsed[family] += 1;
           extracts.push({
             stepId: call.stepId,
             argument: call.program.argument,
-            path: ["tokens", tokenIndex],
+            path:
+              span === undefined
+                ? ["tokens", tokenIndex]
+                : ["tokens", tokenIndex, "span", span.start, span.end],
             producerStepId: calls[found.producer]!.stepId,
             locator: found.locator,
-            evidence: { tokens: tokens.length, token: tokenIndex },
+            evidence:
+              span === undefined
+                ? { tokens: tokens.length, token: tokenIndex }
+                : { tokens: tokens.length, token: tokenIndex, span: [span.start, span.end] },
           });
         }
       }
@@ -861,7 +879,9 @@ export function deriveNativeCalls(
         if (
           [...candidates, ...extracts].some(
             (candidate) =>
-              candidate.stepId === call.stepId && JSON.stringify(candidate.path) === pathKey,
+              candidate.stepId === call.stepId &&
+              (JSON.stringify(candidate.path) === pathKey ||
+                JSON.stringify(spanTokenOf(candidate.path)) === pathKey),
           )
         ) {
           continue;
@@ -931,6 +951,14 @@ export function deriveNativeCalls(
       JSON.stringify([candidate.stepId, candidate.argument, candidate.path]),
     ),
   );
+  // A token whose inline value is read from an earlier output keeps its name as recorded text: an
+  // input over the whole token, or over a part of it, would overlap that hole.
+  const spanExtractTokens = new Set(
+    extracts.flatMap((extract) => {
+      const token = spanTokenOf(extract.path);
+      return token === undefined ? [] : [JSON.stringify([extract.stepId, extract.argument, token])];
+    }),
+  );
   // Inputs fill what result evidence left of each family's budget, in recording order.
   const used: Record<CandidateFamily, number> = { ...resultUsed };
   for (const candidate of inputCandidates) {
@@ -938,21 +966,145 @@ export function deriveNativeCalls(
     if (used[family] >= MAX_CANDIDATES_PER_FAMILY) continue;
     if (resultPositions.has(JSON.stringify([candidate.stepId, candidate.argument, candidate.path])))
       continue;
+    const token = candidate.path[0] === "tokens" ? candidate.path.slice(0, 2) : undefined;
+    if (
+      token !== undefined &&
+      candidate.path[2] !== "embedded" &&
+      spanExtractTokens.has(JSON.stringify([candidate.stepId, candidate.argument, token]))
+    )
+      continue;
     used[family] += 1;
     candidates.push(candidate);
   }
   return { calls: derived, candidates, extracts, inputNames: programInputs };
 }
 
+/** The top-level token a span path (`["tokens", 4, "span", 11, 51]`) lies in; undefined otherwise. */
+function spanTokenOf(path: WorkflowValuePath): WorkflowValuePath | undefined {
+  return path[0] === "tokens" && path[2] === "span" ? path.slice(0, 2) : undefined;
+}
+
 /**
  * Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash, or
  * a prefixed hex id whose random part happens to be letters only (`dep-abcdef`, about 1 in 360).
+ * A flag (`--exit-status`) or a name made only of letters (`acme/widgets`, `fix/login-page`) is
+ * chosen, not minted, however long: an earlier output that shows one is echoing it.
  */
 function looksMinted(value: string): boolean {
-  if (/\s/.test(value)) return false;
-  if (value.length >= 12) return true;
+  if (/\s/.test(value) || value.startsWith("-")) return false;
   if (/[-_.:][0-9a-f]{6,}$|^[0-9a-f]{6,}[-_.:]/i.test(value)) return true;
-  return value.length >= 4 && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
+  if (!/[0-9]/.test(value)) return false;
+  if (value.length >= 12) return true;
+  return value.length >= 4 && /[A-Za-z]/.test(value);
+}
+
+/** The name part of an inline option or field value: `commit_sha=`, `--run-id=`, `-f=`. */
+const INLINE_VALUE_NAME = /^-{0,2}[A-Za-z_][\w.-]*=/;
+
+/**
+ * An integer shorter than this many digits (a pull request, issue or port number) coincides with
+ * counts and options printed in prose, so it is read only from a structured position in the output.
+ */
+const MIN_UNSTRUCTURED_INTEGER_DIGITS = 6;
+
+/** Occurrences of a value one producer's output is searched at, so a large output cannot stall. */
+const MAX_PRINTED_OCCURRENCES = 16;
+
+/** Characters a locator may start at inside a word: they open a path segment, field or parameter. */
+const LOCATOR_OPENERS = "/?&=:#@\"'([{,;";
+
+/** The longest locator text tried that names the value's position (`/pull/`, `"merge":"`). */
+const MAX_NAMED_LOCATOR_LENGTH = 64;
+
+type PrintedStructure = "path-segment" | "field" | "reference" | "table-cell";
+
+/**
+ * The structured position a value occupies in printed output, if any: a URL path segment after a
+ * named segment (`/pull/107`), a `key=value` or JSON/YAML field value (`head=…`, `"merge": "…"`,
+ * `id: 42`), a `#123` reference, or a cell of a tab-separated table row.
+ */
+function printedStructure(
+  output: string,
+  start: number,
+  length: number,
+): PrintedStructure | undefined {
+  const end = start + length;
+  const before = output.slice(Math.max(0, start - MAX_NAMED_LOCATOR_LENGTH), start);
+  const next = output[end];
+  const closedBy = (characters: string) =>
+    next === undefined || /\s/.test(next) || characters.includes(next);
+  if (/\/[A-Za-z][\w.-]*\/$/.test(before) && closedBy("/?#\"'),;]>")) return "path-segment";
+  if (/(?:^|[^\w-])[A-Za-z_][\w.-]*=$/.test(before) && closedBy("&;,\"')]}")) return "field";
+  if (
+    (/"[A-Za-z_][\w.-]*"\s*:\s*"?$/.test(before) || /(?:^|\s)[A-Za-z_][\w-]*:\s+$/.test(before)) &&
+    closedBy(",}]\"'")
+  )
+    return "field";
+  if (/(?:^|[^\w&])#$/.test(before) && closedBy(".,;:)]}\"'")) return "reference";
+  const lineStart = output.lastIndexOf("\n", start - 1) + 1;
+  const lineBreak = output.indexOf("\n", end);
+  const lineEnd = lineBreak < 0 ? output.length : lineBreak;
+  if (
+    output.slice(lineStart, lineEnd).includes("\t") &&
+    (start === lineStart || output[start - 1] === "\t") &&
+    (end === lineEnd || output[end] === "\t" || output[end] === "\r")
+  )
+    return "table-cell";
+  return undefined;
+}
+
+/**
+ * The text before the value at `position` that finds exactly it in `output`, or undefined.
+ *
+ * The shortest text naming the value's position is tried first: from a word start or a character
+ * that opens a segment or field (`/runs/`, `"merge":"`, `?code=`), holding a letter. It names the
+ * field without repeating the run's other values, so a URL's owner and repository — often a caller
+ * input — never become part of where the value is read. Then the last one, two and three whole
+ * words, and the whole line. A number's locator must name it; only a table cell, whose row is the
+ * structure, may be read at the start of its line.
+ */
+function locatePrinted(
+  output: string,
+  position: number,
+  value: string,
+  charset: string[],
+  numeric: boolean,
+  structure: PrintedStructure | undefined,
+): ExtractLocator | undefined {
+  const lineStart = output.lastIndexOf("\n", position - 1) + 1;
+  const prefix = output.slice(lineStart, position);
+  const named: string[] = [];
+  for (
+    let at = Math.max(0, prefix.length - MAX_NAMED_LOCATOR_LENGTH);
+    at < prefix.length;
+    at += 1
+  ) {
+    const opens = at === 0 || /\s/.test(prefix[at - 1]!) || LOCATOR_OPENERS.includes(prefix[at]!);
+    if (!opens || /\s/.test(prefix[at]!)) continue;
+    const suffix = prefix.slice(at);
+    if (/[A-Za-z]/.test(suffix)) named.push(suffix);
+  }
+  named.sort((left, right) => left.length - right.length);
+  const attempts = [...named];
+  const words = [...prefix.matchAll(/\S+\s*/g)];
+  for (const count of [1, 2, 3]) {
+    const word = words[words.length - count];
+    if (word !== undefined) attempts.push(prefix.slice(word.index));
+  }
+  attempts.push(lineStart > 0 ? output.slice(lineStart - 1, position) : prefix);
+  if (position === 0) attempts.push("");
+  for (const attempt of new Set(attempts)) {
+    if (attempt.length === 0 && position !== 0) continue;
+    if (
+      numeric &&
+      !/[A-Za-z]/.test(attempt) &&
+      !(structure === "table-cell" && (attempt === "" || attempt === "\n"))
+    )
+      continue;
+    const locator = { before: attempt, charset };
+    if (extractPrintedValue(output, locator) === value) return locator;
+  }
+  return undefined;
 }
 
 /** The string leaves of a value, in the order and within the bounds `scalarLeaves` reads them. */
@@ -965,10 +1117,13 @@ function stringLeaves(value: WorkflowJsonValue | undefined): string[] {
 /**
  * The earlier call that printed `value` and the locator that finds it in that call's output.
  *
- * The producer is the latest earlier call whose text result holds the value as a whole run of its
- * characters, provided no call up to and including it was given the value: a value a call was
- * given is echoed, not minted. The locator is the shortest text before the value, on its own line,
- * that finds exactly this value in the producer's output.
+ * A value counts where it stands as a whole run of its characters: `473` inside `…-46-473Z` or
+ * `pr473.log` is part of another value, neither printed nor given. The producer is the latest
+ * earlier call whose text result prints the value, provided no call up to and including it was
+ * given the value: a value a call was given is echoed, not minted. A short integer is read only
+ * where the output gives it a structured position (`/pull/107`, `"number": 107`, `pr=107`, `#107`,
+ * a table cell). The locator is the shortest text before the value, on its own line, that finds
+ * exactly this value in the producer's output (see `locatePrinted`).
  */
 function printedBy(
   value: string,
@@ -986,10 +1141,21 @@ function printedBy(
     const entry = char === undefined ? undefined : extractCharsetOf(char)?.[0];
     return entry !== undefined && charset.includes(entry);
   };
+  const wholeFrom = (text: string, from: number): number => {
+    let position = text.indexOf(value, from);
+    while (
+      position >= 0 &&
+      (inCharset(text[position - 1]) || inCharset(text[position + value.length]))
+    ) {
+      position = text.indexOf(value, position + 1);
+    }
+    return position;
+  };
+  const structuredOnly = /^\d+$/.test(value) && value.length < MIN_UNSTRUCTURED_INTEGER_DIGITS;
   let firstMention = before;
   for (let index = 0; index < before; index += 1) {
     const strings = (mentionStrings[index] ??= stringLeaves(calls[index]!.arguments));
-    if (strings.some((leaf) => leaf.includes(value))) {
+    if (strings.some((leaf) => wholeFrom(leaf, 0) >= 0)) {
       firstMention = index;
       break;
     }
@@ -997,32 +1163,17 @@ function printedBy(
   for (let producer = Math.min(before, firstMention) - 1; producer >= 0; producer -= 1) {
     const output = calls[producer]!.result;
     if (typeof output !== "string") continue;
-    let position = output.indexOf(value);
-    while (
-      position >= 0 &&
-      (inCharset(output[position - 1]) || inCharset(output[position + value.length]))
+    let seen = 0;
+    for (
+      let position = wholeFrom(output, 0);
+      position >= 0 && seen < MAX_PRINTED_OCCURRENCES;
+      position = wholeFrom(output, position + 1), seen += 1
     ) {
-      position = output.indexOf(value, position + 1);
+      const structure = printedStructure(output, position, value.length);
+      if (structuredOnly && structure === undefined) continue;
+      const locator = locatePrinted(output, position, value, charset, numeric, structure);
+      if (locator !== undefined) return { producer, locator };
     }
-    if (position < 0) continue;
-    const lineStart = output.lastIndexOf("\n", position - 1) + 1;
-    const prefix = output.slice(lineStart, position);
-    const attempts: string[] = [];
-    // The last one, two and three whole words before the value, with their separators.
-    const words = [...prefix.matchAll(/\S+\s*/g)];
-    for (const count of [1, 2, 3]) {
-      const word = words[words.length - count];
-      if (word !== undefined) attempts.push(prefix.slice(word.index));
-    }
-    attempts.push(lineStart > 0 ? output.slice(lineStart - 1, position) : prefix);
-    if (position === 0) attempts.push("");
-    for (const attempt of attempts) {
-      if (attempt.length === 0 && position !== 0) continue;
-      if (numeric && !/[A-Za-z]/.test(attempt)) continue;
-      const locator = { before: attempt, charset };
-      if (extractPrintedValue(output, locator) === value) return { producer, locator };
-    }
-    return undefined;
   }
   return undefined;
 }
