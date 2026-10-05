@@ -492,6 +492,14 @@ export class BoundedRecordQueue extends EventEmitter {
       this.pendingFileIdentity = `${stat.dev}:${stat.ino}`;
       fs.chmodSync(pendingPath, 0o600);
       restrictPrivateFileSync(pendingPath);
+      // An attached session owns its file again: restart its age so the auth-pending retention
+      // sweep (which expires orphans by mtime) never removes it while it is being delivered.
+      try {
+        const restoredAt = new Date();
+        fs.utimesSync(pendingPath, restoredAt, restoredAt);
+      } catch {
+        // Best effort: a missed touch only lets the sweep expire it by its original age.
+      }
       if (restored.length > 0) {
         this.queue = restored;
         this.durablePendingActive = true;

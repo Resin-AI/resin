@@ -11,6 +11,7 @@ import {
   type SourceCursor,
 } from "@resin/harness-contracts";
 import { z } from "zod";
+import { AUTH_PENDING_DIRECTORY_NAME } from "../auth-pending-retention-module.js";
 import { AuthRecoveryError } from "../auth-recovery.js";
 import { getDaemonPaths } from "../paths.js";
 import { SourceCursorManager } from "./cursor-manager.js";
@@ -167,7 +168,7 @@ export class TranscriptTailer extends EventEmitter {
     this.defaultDeviceId = options.deviceId ?? "local-observer";
     this.pendingStorageDirectory =
       options.pendingStorageDirectory === undefined
-        ? path.join(getDaemonPaths().stateDir, "auth-pending")
+        ? path.join(getDaemonPaths().stateDir, AUTH_PENDING_DIRECTORY_NAME)
         : options.pendingStorageDirectory;
     this.maxPendingBytes = Math.max(1, options.maxPendingBytes ?? 32 * 1024 * 1024);
     this.defaultMaxInFlightBatches = Math.max(1, options.defaultMaxInFlightBatches ?? 1);

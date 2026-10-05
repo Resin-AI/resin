@@ -4,6 +4,7 @@ import path from "node:path";
 import type { HarnessSession, RawHarnessRecord } from "@resin/harness-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TrajectoryCaptureCoordinator } from "../src/analytics/capture-coordinator.js";
+import { AuthRecoveryError } from "../src/auth-recovery.js";
 import {
   RecoveryAwareDaemonSupervisor,
   TelemetryCaptureController,
@@ -1195,6 +1196,212 @@ describe("observer telemetry gating", () => {
       remoteConsentCutoffMs: 3_000,
       remoteHistoryAvailable: true,
     });
+  });
+
+  it("defers deliveries while consent cannot be verified and uploads them once it can", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-consent-unknown-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    const verifiedConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    let remoteConsent: RemoteTelemetryConsentSnapshot | null = verifiedConsent;
+    const logger = createLogger();
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      telemetryEnabled: true,
+      remoteTelemetryConsent: verifiedConsent,
+      refreshRemoteTelemetryConsent: async () => remoteConsent,
+      privacyCheckpointPath,
+      now: () => 1_000,
+      logger,
+    });
+    const session = mockHarnessSession({
+      sessionId: "consent-unknown-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+    const checkpoint = fs.readFileSync(privacyCheckpointPath, "utf8");
+
+    // Signed out: the refresh yields unknown consent.
+    remoteConsent = null;
+    const ack = vi.fn(async () => undefined);
+    const deferred = await module
+      .getCaptureCoordinator()
+      .handleRecords(session, [createTimestampedRecord(session.sessionId, 2_500, 1)], ack)
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    const second = await module
+      .getCaptureCoordinator()
+      .handleRecords(session, [createTimestampedRecord(session.sessionId, 2_600, 2)], ack)
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(deferred).toBeInstanceOf(AuthRecoveryError);
+    expect(second).toBeInstanceOf(AuthRecoveryError);
+    expect(ack).not.toHaveBeenCalled();
+    expect(doubles.sendObservationBatch).not.toHaveBeenCalled();
+    expect(fs.readFileSync(privacyCheckpointPath, "utf8")).toBe(checkpoint);
+    const pausedLogs = vi
+      .mocked(logger.info)
+      .mock.calls.filter(([message]) => String(message).includes("paused until Resin Cloud"));
+    expect(pausedLogs).toHaveLength(1);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const recovered = vi.fn();
+      (deferred as AuthRecoveryError).onRecovered(recovered);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(recovered).not.toHaveBeenCalled();
+      remoteConsent = verifiedConsent;
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(recovered).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const redeliveredAck = vi.fn(async () => undefined);
+    await module
+      .getCaptureCoordinator()
+      .handleRecords(
+        session,
+        [createTimestampedRecord(session.sessionId, 2_500, 1)],
+        redeliveredAck,
+      );
+    await module.getCaptureCoordinator().waitForIdle();
+    expect(doubles.sendObservationBatch).toHaveBeenCalledOnce();
+    expect(redeliveredAck).toHaveBeenCalledOnce();
+  });
+
+  it("drops a deferred delivery when the verified consent is an opt-out", async () => {
+    const verifiedConsent: RemoteTelemetryConsentSnapshot = {
+      metadataTelemetryEnabled: true,
+      updatedAt: new Date(1_000).toISOString(),
+    };
+    let remoteConsent: RemoteTelemetryConsentSnapshot | null = null;
+    const doubles = createUploadingCaptureDoubles();
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: createCaptureDoubles().observer,
+      normalizationPipeline: doubles.pipeline,
+      observationClient: doubles.observationClient,
+      adapters: [],
+      decoders: [],
+      telemetryEnabled: true,
+      remoteTelemetryConsent: verifiedConsent,
+      refreshRemoteTelemetryConsent: async () => remoteConsent,
+      now: () => 1_000,
+    });
+    const session = mockHarnessSession({
+      sessionId: "consent-withdrawn-session",
+      workspaceId: "workspace",
+      harnessId: "omp",
+      status: "active",
+    });
+    await expect(
+      module.getCaptureCoordinator().handleRecords(
+        session,
+        [createTimestampedRecord(session.sessionId, 2_500, 1)],
+        vi.fn(async () => undefined),
+      ),
+    ).rejects.toBeInstanceOf(AuthRecoveryError);
+
+    remoteConsent = { metadataTelemetryEnabled: false, updatedAt: new Date(2_000).toISOString() };
+    const ack = vi.fn(async () => undefined);
+    await module
+      .getCaptureCoordinator()
+      .handleRecords(session, [createTimestampedRecord(session.sessionId, 2_500, 1)], ack);
+    expect(ack).toHaveBeenCalledOnce();
+    expect(doubles.processBatch).not.toHaveBeenCalled();
+    expect(doubles.sendObservationBatch).not.toHaveBeenCalled();
+  });
+
+  it("suspends capture without recording a withdrawal when cloud consent is unknown at startup", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-startup-unknown-"));
+    temporaryDirectories.push(home);
+    const privacyCheckpointPath = path.join(home, "telemetry-privacy-checkpoint.json");
+    const captureWatermarkPath = path.join(home, "capture-watermark.json");
+    const checkpoint = `${JSON.stringify({
+      version: 2,
+      cutoffMs: 500,
+      telemetryEnabled: true,
+      remoteConsent: { metadataTelemetryEnabled: true, updatedAt: new Date(500).toISOString() },
+      remoteConsentCutoffMs: 500,
+      remoteHistoryAvailable: true,
+    })}\n`;
+    const watermark = `${JSON.stringify({ version: 1, lastRunningAtMs: 900, ownerWorkspaceId: null })}\n`;
+    fs.writeFileSync(privacyCheckpointPath, checkpoint);
+    fs.writeFileSync(captureWatermarkPath, watermark);
+    const logger = createLogger();
+    const supervisor = new RecoveryAwareDaemonSupervisor({
+      config: DaemonConfigSchema.parse({}),
+      paths: resolvePaths({ home }),
+      logger,
+      enableSignalHandlers: false,
+    });
+    const doubles = createCaptureDoubles();
+    // Wired as the daemon wires a signed-out start.
+    const module = new TrajectoryCaptureRuntimeModule({
+      observerCoordinator: doubles.observer,
+      captureCoordinator: doubles.capture,
+      adapters: [],
+      decoders: [],
+      telemetryEnabled: false,
+      telemetryConsentUnknown: true,
+      remoteTelemetryConsent: null,
+      refreshRemoteTelemetryConsent: async () => null,
+      privacyCheckpointPath,
+      captureWatermarkPath,
+      now: () => 1_000,
+      logger,
+    });
+    const controller = new TelemetryCaptureController({
+      supervisor,
+      captureModule: module,
+      logger,
+      deviceEnabled: true,
+      getCloudConsentEnabled: () => null,
+    });
+    controller.prepareForStartup();
+
+    expect(supervisor.getModule("trajectory-capture")).toBeUndefined();
+    expect(controller.getStatus()).toMatchObject({
+      deviceEnabled: true,
+      cloudConsentEnabled: null,
+      effectiveEnabled: false,
+      captureActive: false,
+      failClosed: false,
+    });
+    expect(fs.readFileSync(privacyCheckpointPath, "utf8")).toBe(checkpoint);
+    expect(fs.readFileSync(captureWatermarkPath, "utf8")).toBe(watermark);
+    const pausedLogs = vi
+      .mocked(logger.info)
+      .mock.calls.filter(([message]) => String(message).includes("paused until Resin Cloud"));
+    expect(pausedLogs).toHaveLength(1);
+
+    // An account opt-out, by contrast, is a withdrawal.
+    const optedOut = new TelemetryCaptureController({
+      supervisor,
+      captureModule: module,
+      logger,
+      deviceEnabled: true,
+      getCloudConsentEnabled: () => false,
+    });
+    optedOut.prepareForStartup();
+    expect(JSON.parse(fs.readFileSync(privacyCheckpointPath, "utf8"))).toMatchObject({
+      telemetryEnabled: false,
+    });
+    expect(fs.existsSync(captureWatermarkPath)).toBe(false);
   });
 
   it("enables and disables capture over tokenless local reload while local MCP stays ready", async () => {

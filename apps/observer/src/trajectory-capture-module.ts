@@ -22,6 +22,7 @@ import {
 } from "./analytics/index.js";
 import { FilePrivateValueStore } from "./analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "./analytics/workflow-call-recorder.js";
+import { AuthRecoveryError } from "./auth-recovery.js";
 import { CloudObservationClient, type CloudRuntimeModule } from "./cloud-runtime.js";
 import { HARNESS_DEFINITIONS } from "./harness-registry.js";
 import {
@@ -92,6 +93,13 @@ export const MAX_DOWNTIME_CATCH_UP_MS = 24 * 60 * 60 * 1000;
 
 /** How often a running capture refreshes its watermark, bounding what a crash can lose. */
 export const CAPTURE_WATERMARK_HEARTBEAT_MS = 60_000;
+
+/** The capture watermark's file name in the daemon state directory. */
+export const CAPTURE_WATERMARK_FILE_NAME = "capture-watermark.json";
+
+/** Backoff bounds for re-checking consent while deliveries wait for it to become verifiable. */
+const CONSENT_RECOVERY_INITIAL_DELAY_MS = 1_000;
+const CONSENT_RECOVERY_MAX_DELAY_MS = 60_000;
 
 /**
  * Owner-only record of the last instant capture was running with consent. `ownerWorkspaceId`
@@ -259,7 +267,16 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
   remoteTelemetryConsent?: RemoteTelemetryConsentSnapshot | null;
 
   /**
+   * Cloud consent could not be verified at construction (signed out, auth or network failure).
+   * Capture stays off without recording a withdrawal: the persisted checkpoint and the capture
+   * watermark are kept, so the next start with verified consent catches up the downtime.
+   */
+  telemetryConsentUnknown?: boolean;
+
+  /**
    * Refreshes authoritative account consent before processing and before every cloud request.
+   * `null`/`undefined` (or a throw) means consent is currently unknown: deliveries are deferred
+   * with an `AuthRecoveryError` until it can be verified again, never dropped.
    */
   refreshRemoteTelemetryConsent?: () => Promise<RemoteTelemetryConsentSnapshot | null | undefined>;
 
@@ -358,6 +375,15 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
   private remoteConsentAuthorizationQueue: Promise<void> = Promise.resolve();
   private privacyCheckpointHealthy: boolean;
   private skipBackfillOnNextStart = false;
+  /**
+   * Cloud consent cannot currently be verified (signed out, auth or network failure). Capture is
+   * suspended — not withdrawn — and the watermark is left where verified capture last ran.
+   */
+  private consentUnverified = false;
+  /** Deferred deliveries waiting for consent to become verifiable again. */
+  private readonly consentRecoveryListeners = new Set<() => void>();
+  private consentRecoveryTimer?: NodeJS.Timeout;
+  private consentRecoveryDelayMs = CONSENT_RECOVERY_INITIAL_DELAY_MS;
   private logger?: Logger;
   private readonly captureUserSessionsOnly: boolean;
   private readonly decodeStats?: HarnessVersionStatsRecorder;
@@ -382,6 +408,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     this.now = options.now ?? Date.now;
     const requestedTelemetryEnabled =
       options.telemetryEnabled === undefined ? true : options.telemetryEnabled === true;
+    const consentUnknown = options.telemetryConsentUnknown === true && !requestedTelemetryEnabled;
     const persistedCheckpoint = this.readPersistedPrivacyCheckpoint();
     this.remoteConsentCutoffMs =
       persistedCheckpoint?.version === 2 ? persistedCheckpoint.remoteConsentCutoffMs : 0;
@@ -418,8 +445,16 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     if (catchUpFromMs !== undefined && this.privacyCutoffMs < this.now()) {
       this.pendingCatchUpFromMs = this.privacyCutoffMs;
     }
-    this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(requestedTelemetryEnabled);
-    this.telemetryEnabled = requestedTelemetryEnabled && this.privacyCheckpointHealthy;
+    if (consentUnknown) {
+      // Unknown consent is not a withdrawal: the persisted boundary and the watermark stay as
+      // they are, so the next start with verified consent catches up this downtime.
+      this.privacyCheckpointHealthy = true;
+      this.telemetryEnabled = false;
+      this.markConsentUnverified();
+    } else {
+      this.privacyCheckpointHealthy = this.persistPrivacyCheckpoint(requestedTelemetryEnabled);
+      this.telemetryEnabled = requestedTelemetryEnabled && this.privacyCheckpointHealthy;
+    }
     if (!this.telemetryEnabled) {
       this.pendingCatchUpFromMs = undefined;
     }
@@ -679,9 +714,17 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
   }
 
-  /** Records that capture is running now. Best effort: a missed write only shortens catch-up. */
-  private writeCaptureWatermark(): void {
+  /**
+   * Records that capture is running now. Best effort: a missed write only shortens catch-up.
+   * Only the start of a capture run creates the file; later refreshes (heartbeat, clean stop)
+   * update an existing one, so a watermark removed underneath a running daemon (`resin logout`)
+   * stays removed and the signed-out window is never caught up.
+   */
+  private writeCaptureWatermark(options: { create: boolean }): void {
     if (!this.captureWatermarkPath) {
+      return;
+    }
+    if (!options.create && !fs.existsSync(this.captureWatermarkPath)) {
       return;
     }
     const temporaryPath = `${this.captureWatermarkPath}.${process.pid}.tmp`;
@@ -721,10 +764,11 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
 
   private startWatermarkHeartbeat(): void {
     this.stopWatermarkHeartbeat();
-    this.writeCaptureWatermark();
+    this.writeCaptureWatermark({ create: true });
     this.watermarkHeartbeat = setInterval(() => {
-      if (this.telemetryEnabled && this.state === "ready") {
-        this.writeCaptureWatermark();
+      // While consent is unverifiable the watermark stays where verified capture last ran.
+      if (this.telemetryEnabled && this.state === "ready" && !this.consentUnverified) {
+        this.writeCaptureWatermark({ create: false });
       }
     }, CAPTURE_WATERMARK_HEARTBEAT_MS);
     this.watermarkHeartbeat.unref();
@@ -839,8 +883,15 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       snapshot = null;
     }
     if (!snapshot) {
-      return false;
+      // Unknown is not withdrawn: the delivery is deferred durably until consent is verifiable.
+      this.markConsentUnverified();
+      throw new AuthRecoveryError("REFRESH_UNAVAILABLE", {
+        message:
+          "Resin Cloud telemetry consent cannot be verified; observations remain queued locally until it can (run `resin login` if this device is signed out).",
+        subscribeToRecovery: (listener) => this.onConsentVerifiable(listener),
+      });
     }
+    this.markConsentVerified();
 
     const reconciliation = this.reconcileRemoteTelemetryConsent(snapshot);
     if (reconciliation.cutoffAdvanced) {
@@ -868,6 +919,78 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     return recordTimestampMs.every(
       (timestampMs) => Number.isFinite(timestampMs) && timestampMs > this.remoteConsentCutoffMs,
     );
+  }
+
+  /** Logs (once) and records that capture is suspended until consent can be verified. */
+  private markConsentUnverified(): void {
+    if (this.consentUnverified) {
+      return;
+    }
+    this.consentUnverified = true;
+    this.consentRecoveryDelayMs = CONSENT_RECOVERY_INITIAL_DELAY_MS;
+    this.logger?.info(
+      "Trajectory capture is paused until Resin Cloud consent can be verified; run `resin login` if this device is signed out",
+    );
+  }
+
+  /** Consent is verifiable again: deferred deliveries resume and are re-authorized normally. */
+  private markConsentVerified(): void {
+    if (this.consentUnverified) {
+      this.consentUnverified = false;
+      this.logger?.info(
+        "Resin Cloud consent is verifiable again; paused trajectory capture resumes",
+      );
+    }
+    this.clearConsentRecoveryTimer();
+    const listeners = [...this.consentRecoveryListeners];
+    this.consentRecoveryListeners.clear();
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+
+  private onConsentVerifiable(listener: () => void): () => void {
+    this.consentRecoveryListeners.add(listener);
+    this.scheduleConsentRecoveryPoll();
+    return () => {
+      this.consentRecoveryListeners.delete(listener);
+      if (this.consentRecoveryListeners.size === 0) {
+        this.clearConsentRecoveryTimer();
+      }
+    };
+  }
+
+  /** Re-checks consent on a capped backoff while any deferred delivery waits for it. */
+  private scheduleConsentRecoveryPoll(): void {
+    if (this.consentRecoveryTimer || this.consentRecoveryListeners.size === 0) {
+      return;
+    }
+    const delayMs = this.consentRecoveryDelayMs;
+    this.consentRecoveryDelayMs = Math.min(CONSENT_RECOVERY_MAX_DELAY_MS, delayMs * 2);
+    this.consentRecoveryTimer = setTimeout(() => {
+      void this.pollConsentRecovery();
+    }, delayMs);
+    this.consentRecoveryTimer.unref();
+  }
+
+  private async pollConsentRecovery(): Promise<void> {
+    let snapshot: RemoteTelemetryConsentSnapshot | null = null;
+    try {
+      snapshot = (await this.refreshRemoteTelemetryConsentFn?.()) ?? null;
+    } catch {
+      snapshot = null;
+    }
+    this.consentRecoveryTimer = undefined;
+    if (snapshot) {
+      this.markConsentVerified();
+    } else {
+      this.scheduleConsentRecoveryPoll();
+    }
+  }
+
+  private clearConsentRecoveryTimer(): void {
+    clearTimeout(this.consentRecoveryTimer);
+    this.consentRecoveryTimer = undefined;
   }
 
   private async authorizeTelemetryRecords(recordTimestampMs: readonly number[]): Promise<boolean> {
@@ -908,6 +1031,24 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
 
   getState(): ModuleLifecycleState {
     return this.state;
+  }
+
+  /**
+   * Closes the capture gate because cloud consent cannot be verified right now (signed out, auth
+   * or network failure). Unlike a withdrawal this records no privacy boundary: the persisted
+   * checkpoint, its cutoff and the capture watermark stay, so the next start with verified
+   * consent catches up the downtime (bounded by `MAX_DOWNTIME_CATCH_UP_MS` and the consent floor).
+   */
+  suspendUntilConsentVerified(): void {
+    this.telemetryEnabled = false;
+    this.captureCoordinator.setTelemetryEnabled(false);
+    if (this.unsubscribeRecords) {
+      this.unsubscribeRecords();
+      this.unsubscribeRecords = undefined;
+    }
+    this.pendingCatchUpFromMs = undefined;
+    this.stopWatermarkHeartbeat();
+    this.markConsentUnverified();
   }
 
   /**
@@ -958,6 +1099,7 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     }
 
     this.telemetryEnabled = true;
+    this.consentUnverified = false;
     this.captureCoordinator.setTelemetryEnabled(true);
     return true;
   }
@@ -1096,6 +1238,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
     const wasCapturing = this.state === "ready" && this.telemetryEnabled;
     this.state = "stopping";
     this.stopWatermarkHeartbeat();
+    this.consentRecoveryListeners.clear();
+    this.clearConsentRecoveryTimer();
 
     try {
       if (this.unsubscribeRecords) {
@@ -1110,9 +1254,10 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
       }
       await this.initialScan;
       await this.observerCoordinator.stop();
-      // Clean shutdown: the next start catches up whatever finishes from here on.
-      if (wasCapturing && this.telemetryEnabled) {
-        this.writeCaptureWatermark();
+      // Clean shutdown: the next start catches up whatever finishes from here on. While consent
+      // is unverifiable the watermark stays where verified capture last ran.
+      if (wasCapturing && this.telemetryEnabled && !this.consentUnverified) {
+        this.writeCaptureWatermark({ create: false });
       }
       if (this.ownsObserverCoordinator) {
         this.observerCoordinatorNeedsRebuild = true;

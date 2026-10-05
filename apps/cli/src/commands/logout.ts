@@ -1,7 +1,9 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { type ConfigFsBridge, defaultFsBridge } from "@resin/harness-contracts";
+import { CAPTURE_WATERMARK_FILE_NAME, resolvePaths } from "@resin/observer";
 import { DeviceAuthClient } from "../service/auth-bootstrap.js";
 
 export interface LogoutCommandFlags {
@@ -101,6 +103,15 @@ export async function logoutCommand(
       revoked = await authClient.revokeToken(creds);
     }
     const purgeResult = await authClient.purgeCredentials();
+    // A deliberate logout is a boundary: without the capture watermark the next signed-in daemon
+    // start observes from then on instead of catching up the signed-out window.
+    fs.rmSync(
+      path.join(
+        resolvePaths({ home: customHome, resinHome: canonicalResinHome }).stateDir,
+        CAPTURE_WATERMARK_FILE_NAME,
+      ),
+      { force: true },
+    );
 
     const result: LogoutResult = {
       success: true,

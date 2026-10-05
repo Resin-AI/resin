@@ -8,6 +8,7 @@ import {
   type ModuleContext,
   type ModuleHealth,
   type ModuleLifecycleState,
+  type StoredCloudCredentials,
   createLocalCallIdentity,
 } from "@resin/observer";
 import {
@@ -160,12 +161,17 @@ export class WorkflowValidationDaemonModule implements DaemonModule {
   }
 }
 
+/** A provider context for a signed-in device: validation leases and asks need its identity. */
+export type EnrolledDaemonModuleProviderContext = DaemonModuleProviderContext & {
+  readonly credentials: StoredCloudCredentials;
+};
+
 /**
  * The daemon's module for an enrolled device. `overrides` exist for tests and the local smoke;
  * the packaged daemon passes none.
  */
 export function createWorkflowValidationDaemonModule(
-  context: DaemonModuleProviderContext,
+  context: EnrolledDaemonModuleProviderContext,
   overrides: Partial<Omit<WorkflowValidationWorkerOptions, "identity">> = {},
   moduleOptions: { retryDelayMs?: number } = {},
 ): WorkflowValidationDaemonModule {
