@@ -34,7 +34,7 @@
  * `PYTHON_MUTATING_METHODS` are treated as writes.
  *
  * Nothing here executes or resolves anything: identity questions (is `defaultdict` really
- * `collections.defaultdict`? is `hogql` an observed helper?) are answered by the host parser, which
+ * `collections.defaultdict`? is `fetch_rows` an observed helper?) are answered by the host parser, which
  * owns the scope and import model.
  */
 
