@@ -175,6 +175,58 @@ describe("doctor & repair commands", () => {
     expect(clean.some((item) => item.id === "credential_unsafe_gateways")).toBe(false);
   });
 
+  it.each([
+    ["passes while a saved refresh token renews an expired access token", "saved-refresh", "pass"],
+    ["asks for `resin login` when an expired sign-in has no refresh token", undefined, "warn"],
+  ])("%s", async (_label, refreshToken, expectedStatus) => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-auth-"));
+    try {
+      const tokenFilePath = path.join(tempHome, ".resin", "state", "device-token.json");
+      await fs.mkdir(path.dirname(tokenFilePath), { recursive: true });
+      await fs.writeFile(
+        tokenFilePath,
+        JSON.stringify({
+          accessToken: "expired-access-token",
+          ...(refreshToken ? { refreshToken } : {}),
+          cloudUrl: "https://api.resin.sh",
+          deviceId: "dev_doctor_01",
+          workspaceId: "ws_doctor_01",
+          storedAt: new Date().toISOString(),
+          claims: {
+            accountId: "acc_doctor_01",
+            workspaceId: "ws_doctor_01",
+            deviceId: "dev_doctor_01",
+            installationId: "inst_doctor_01",
+            userId: "usr_doctor_01",
+            subject: "usr_doctor_01",
+            scopes: ["device:connect"],
+            rawUploadConsent: false,
+            issuedAt: new Date(Date.now() - 7_200_000).toISOString(),
+            expiresAt: new Date(Date.now() - 3_600_000).toISOString(),
+            tokenType: "access",
+          },
+        }),
+        { mode: 0o600 },
+      );
+      const items = await runDiagnostics({
+        home: tempHome,
+        fsBridge: createMockFsBridge(),
+        serviceManager: createMockServiceManager(),
+        listCredentialUnsafeGateways: async () => [],
+      });
+      const cloudAuth = items.find((item) => item.id === "cloud_auth");
+      expect(cloudAuth?.status).toBe(expectedStatus);
+      if (expectedStatus === "pass") {
+        expect(cloudAuth?.message).toContain("renews automatically");
+        expect(cloudAuth?.remediation).toBeUndefined();
+      } else {
+        expect(cloudAuth?.remediation).toBe("Run `resin login` to sign this device in again.");
+      }
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it("diagnoses responsive IPC socket through local socket without requiring auth token", async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-doctor-home-"));
     const paths = resolvePaths({ home: tempHome });

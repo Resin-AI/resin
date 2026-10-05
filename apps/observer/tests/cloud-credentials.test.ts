@@ -553,6 +553,75 @@ describe("CloudCredentialStore", () => {
     expect(loadAfter.status).toBe("valid");
   });
 
+  describe("refresh answer classification", () => {
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    const html = (status: number) =>
+      new Response("<html><body>Bad gateway</body></html>", {
+        status,
+        headers: { "Content-Type": "text/html" },
+      });
+
+    async function refreshWith(answer: () => Response) {
+      const fetchImpl = vi.fn(async () => answer());
+      const store = new CloudCredentialStore({
+        tokenFilePath,
+        // SAFETY: Mock fetch implementing fetch interface for testing.
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      const claims = makeValidClaims({
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      });
+      await store.persist({
+        cloudUrl: "https://cloud.resin.dev",
+        accessToken: makeJwt(claims),
+        refreshToken: "family-refresh-token",
+        claims,
+        deviceId: claims.deviceId,
+        workspaceId: claims.workspaceId,
+      });
+      const identity = await store.getRequestIdentity({ forceRefresh: true });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      return { store, identity, accessToken: makeJwt(claims) };
+    }
+
+    it.each([
+      ["503", () => json(503, { error: "temporarily_unavailable" })],
+      ["502 HTML", () => html(502)],
+      ["429", () => json(429, { error: "slow_down" })],
+      ["404", () => json(404, { error: "not_found" })],
+      ["403 non-JSON", () => html(403)],
+      ["401 non-JSON", () => html(401)],
+      ["400 invalid_request", () => json(400, { error: "invalid_request" })],
+      ["403 access_denied", () => json(403, { error: "access_denied" })],
+    ])("keeps the credential on a non-definitive %s answer", async (_label, answer) => {
+      const { store, identity, accessToken } = await refreshWith(answer);
+
+      expect(identity?.accessToken).toBe(accessToken);
+      expect(store.getLastRefreshFailure()).toBe("unavailable");
+      const onDisk = JSON.parse(await fs.readFile(tokenFilePath, "utf8")) as {
+        refreshToken?: string;
+      };
+      expect(onDisk.refreshToken).toBe("family-refresh-token");
+    });
+
+    it.each([
+      [400, { error: "invalid_grant", error_description: "Token family has been revoked" }],
+      [400, { error: "expired_token" }],
+      [401, { error: "expired_token" }],
+      [403, { error: "revoked_device" }],
+    ])("purges the credential on a definitive %i %j refusal", async (status, body) => {
+      const { store, identity } = await refreshWith(() => json(status, body));
+
+      expect(identity).toBeNull();
+      expect(store.getLastRefreshFailure()).toBe("revoked");
+      await expect(fs.stat(tokenFilePath)).rejects.toThrow();
+    });
+  });
+
   it("supports snapshot and restore for installer rollback", async () => {
     const store = new CloudCredentialStore({ tokenFilePath });
     const claims = makeValidClaims();

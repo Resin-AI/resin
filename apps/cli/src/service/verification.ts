@@ -705,24 +705,34 @@ export class VerificationSuite {
       };
     }
 
-    const expired = areClaimsExpired(creds.claims);
-    if (expired) {
+    const details: VerificationDetails = {
+      workspaceId: creds.workspaceId,
+      deviceId: creds.deviceId,
+      expiresAt: creds.claims.expiresAt,
+      scopes: creds.claims.scopes,
+    };
+
+    if (areClaimsExpired(creds.claims)) {
+      if (creds.refreshToken) {
+        // The 1-hour access token lapses whenever nothing refreshed it; the saved refresh token
+        // renews it on the next Cloud request, so this is not a sign-out.
+        return {
+          status: "pass",
+          message: `Device signed in for workspace ${creds.workspaceId}; its access token expired at ${creds.claims.expiresAt} and renews automatically while the Resin daemon runs.`,
+          details,
+        };
+      }
       return {
         status: "warn",
-        message: `Device access token is expired (expired at: ${creds.claims.expiresAt})`,
-        remediation: "Run `resin init` or re-authenticate device.",
+        message: `Device access token is expired (expired at: ${creds.claims.expiresAt}) and no refresh token is saved`,
+        remediation: "Run `resin login` to sign this device in again.",
       };
     }
 
     return {
       status: "pass",
       message: `Device authenticated for workspace ${creds.workspaceId} (scopes: ${creds.claims.scopes.join(", ")})`,
-      details: {
-        workspaceId: creds.workspaceId,
-        deviceId: creds.deviceId,
-        expiresAt: creds.claims.expiresAt,
-        scopes: creds.claims.scopes,
-      },
+      details,
     };
   }
 }

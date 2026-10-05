@@ -98,10 +98,29 @@ export function isReusableCredentialRecord(
   creds: StoredCloudCredentials | null | undefined,
   expectedCloudUrl?: string,
 ): creds is StoredCloudCredentials {
+  return hasReusableCredentialBinding(creds, expectedCloudUrl) && !areClaimsExpired(creds.claims);
+}
+
+/**
+ * Checks if a stored credential record would be reusable except that its access token expired,
+ * and it still holds a refresh token that can renew it without pairing a new device.
+ */
+export function isRefreshableCredentialRecord(
+  creds: StoredCloudCredentials | null | undefined,
+  expectedCloudUrl?: string,
+): creds is StoredCloudCredentials {
+  return hasReusableCredentialBinding(creds, expectedCloudUrl) && Boolean(creds.refreshToken);
+}
+
+/**
+ * Every reuse requirement except access-token expiry: non-empty account/workspace/device/subject
+ * claims, every ordinary pairing scope without privacy:delete, and the expected cloud origin.
+ */
+function hasReusableCredentialBinding(
+  creds: StoredCloudCredentials | null | undefined,
+  expectedCloudUrl?: string,
+): creds is StoredCloudCredentials {
   if (!creds || !creds.accessToken || !creds.claims) {
-    return false;
-  }
-  if (areClaimsExpired(creds.claims)) {
     return false;
   }
   const accountId = creds.claims.accountId?.trim();
@@ -237,6 +256,7 @@ export class DeviceAuthClient {
         home: options.home,
         resinHome: options.resinHome,
         clientVersion: CLI_VERSION,
+        fetchImpl: this.fetchImpl,
       });
     }
   }
@@ -657,6 +677,21 @@ export class DeviceAuthClient {
 
   async snapshotCredentials(): Promise<StoredCloudCredentials | null> {
     return this.store.snapshot();
+  }
+
+  /**
+   * Renews the stored credential through the store's cross-process locked refresh, keeping this
+   * device's token family instead of pairing a new device.
+   * - "refreshed": a credential with a live access token is on disk.
+   * - "signed_out": the cloud refused the refresh definitively and the credential is gone.
+   * - "unavailable": the refresh failed transiently; the saved credential is kept for a retry.
+   */
+  async refreshStoredCredentials(): Promise<"refreshed" | "signed_out" | "unavailable"> {
+    if (await this.store.getRequestIdentity()) {
+      return "refreshed";
+    }
+    const { status } = await this.store.load();
+    return status === "missing" || status === "invalid" ? "signed_out" : "unavailable";
   }
 
   async restoreCredentials(snapshot: StoredCloudCredentials | null): Promise<void> {

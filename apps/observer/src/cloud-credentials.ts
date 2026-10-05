@@ -193,6 +193,16 @@ const RefreshErrorBodySchema = z.object({
 });
 
 /**
+ * OAuth refresh refusals that end the token family, so the stored credential is deleted. Every
+ * other non-OK refresh answer is treated as transient and the credential is kept.
+ */
+const DEFINITIVE_REFRESH_REFUSALS: Readonly<Record<string, true>> = {
+  invalid_grant: true,
+  expired_token: true,
+  revoked_device: true,
+};
+
+/**
  * Raised when the cross-process credential lock cannot be acquired within its bounded wait.
  */
 class CredentialLockUnavailableError extends Error {
@@ -842,27 +852,20 @@ export class CloudCredentialStore {
     }
 
     if (!response.ok) {
+      const refusal =
+        response.status === 400 || response.status === 401 || response.status === 403
+          ? RefreshErrorBodySchema.safeParse(await response.json().catch(() => null))
+          : null;
+      const refusalError = refusal?.success ? refusal.data : null;
+
       if (
-        response.status >= 500 ||
-        response.status === 408 ||
-        response.status === 425 ||
-        response.status === 429
+        refusalError?.error === "invalid_grant" &&
+        refusalError.error_description === ALREADY_ROTATED_DESCRIPTION
       ) {
-        return this.adoptOrRetainOnTransientFailure(credentials);
+        return this.recoverAlreadyRotated(credentials, retryAlreadyRotated);
       }
 
-      if (response.status === 400) {
-        const refusal = RefreshErrorBodySchema.safeParse(await response.json().catch(() => null));
-        if (
-          refusal.success &&
-          refusal.data.error === "invalid_grant" &&
-          refusal.data.error_description === ALREADY_ROTATED_DESCRIPTION
-        ) {
-          return this.recoverAlreadyRotated(credentials, retryAlreadyRotated);
-        }
-      }
-
-      if (response.status === 400 || response.status === 401 || response.status === 403) {
+      if (refusalError && DEFINITIVE_REFRESH_REFUSALS[refusalError.error] === true) {
         // Only the credential that was actually rejected is genuinely revoked; a newer one on
         // disk belongs to another client and must survive this refusal.
         const adopted = await this.adoptNewerCredentials(credentials);
@@ -878,9 +881,14 @@ export class CloudCredentialStore {
         return null;
       }
 
-      this.lastRefreshFailure = "invalid";
-      reportEvent("credential_refresh_failed", { reason: "invalid", http_status: response.status });
-      return null;
+      // Anything else (5xx, throttling, a plan without Cloud access, a proxy's non-OAuth error
+      // page, a malformed request answer) leaves the token family intact: keep the credential
+      // and retry later rather than signing the user out.
+      reportEvent("credential_refresh_failed", {
+        reason: refusalError?.error === "access_denied" ? "access_denied" : "transient",
+        http_status: response.status,
+      });
+      return this.adoptOrRetainOnTransientFailure(credentials);
     }
 
     let responseJson: unknown;

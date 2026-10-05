@@ -9,6 +9,7 @@ import {
   DEFAULT_DEVICE_AUTH_SCOPES,
   DeviceAuthClient,
   type StoredDeviceCredentials,
+  isRefreshableCredentialRecord,
   isReusableCredentialRecord,
 } from "../src/service/auth-bootstrap.js";
 
@@ -136,6 +137,44 @@ describe("DeviceAuthClient & Auth Bootstrap", () => {
       },
     };
     expect(isReusableCredentialRecord(overPrivilegedFamily, "https://api.resin.sh")).toBe(false);
+  });
+  it("treats an expired access token with a refresh token as refreshable, not reusable", () => {
+    const issuedAt = new Date(Date.now() - 7_200_000).toISOString();
+    const expired: StoredDeviceCredentials = {
+      cloudUrl: "https://api.resin.sh",
+      accessToken: "atk_expired_family",
+      refreshToken: "rtk_live_family",
+      claims: {
+        accountId: "acc_expired_family",
+        deviceId: "dev_expired_family",
+        installationId: "inst_expired_family",
+        workspaceId: "ws_expired_family",
+        scopes: [...DEFAULT_DEVICE_AUTH_SCOPES],
+        rawUploadConsent: false,
+        issuedAt,
+        expiresAt: new Date(Date.now() - 3_600_000).toISOString(),
+        tokenType: "access",
+        subject: "usr_expired_family",
+      },
+      deviceId: "dev_expired_family",
+      workspaceId: "ws_expired_family",
+      storedAt: issuedAt,
+    };
+
+    expect(isReusableCredentialRecord(expired, "https://api.resin.sh")).toBe(false);
+    expect(isRefreshableCredentialRecord(expired, "https://api.resin.sh")).toBe(true);
+    expect(
+      isRefreshableCredentialRecord(
+        { ...expired, refreshToken: undefined },
+        "https://api.resin.sh",
+      ),
+    ).toBe(false);
+    expect(isRefreshableCredentialRecord(expired, "https://cloud.other.example")).toBe(false);
+    const legacyFamily = {
+      ...expired,
+      claims: { ...expired.claims, scopes: DEFAULT_DEVICE_AUTH_SCOPES.slice(1) },
+    };
+    expect(isRefreshableCredentialRecord(legacyFamily, "https://api.resin.sh")).toBe(false);
   });
   it("uses a one-time privacy:delete authorization without persisting it", async () => {
     vi.useFakeTimers();

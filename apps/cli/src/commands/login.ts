@@ -9,6 +9,8 @@ import { isWslEnvironment } from "../platform/platform.js";
 import {
   DEFAULT_CLOUD_URL,
   DeviceAuthClient,
+  type StoredCloudCredentials,
+  isRefreshableCredentialRecord,
   isReusableCredentialRecord,
   validateCloudUrl,
 } from "../service/auth-bootstrap.js";
@@ -378,6 +380,35 @@ async function refreshDaemonAfterCredentials(options: {
     message: "The Resin daemon was restarted and verified with the saved Cloud credentials.",
   };
 }
+
+const SAVED_SIGN_IN_UNAVAILABLE_MESSAGE =
+  "The saved Resin sign-in has an expired access token and Resin Cloud could not renew it right now. The saved sign-in was kept; check your connection and retry, or run `resin login --force` to pair this device again.";
+
+/**
+ * Reads the saved credential and reports whether it can be reused as-is. An otherwise reusable
+ * credential whose access token expired is renewed through its existing refresh family first,
+ * so login never abandons a live sign-in for a new device pairing. `snapshot` is the credential
+ * on disk after any renewal. Throws, keeping the credential, when the renewal failed
+ * transiently; a definitive refusal leaves nothing to reuse and pairing proceeds.
+ */
+async function resolveSavedCredentials(
+  authClient: DeviceAuthClient,
+  cloudUrl: string,
+): Promise<{ snapshot: StoredCloudCredentials | null; reusable: boolean }> {
+  const snapshot = await authClient.snapshotCredentials();
+  if (isReusableCredentialRecord(snapshot, cloudUrl)) {
+    return { snapshot, reusable: true };
+  }
+  if (!isRefreshableCredentialRecord(snapshot, cloudUrl)) {
+    return { snapshot, reusable: false };
+  }
+  if ((await authClient.refreshStoredCredentials()) === "unavailable") {
+    throw new Error(SAVED_SIGN_IN_UNAVAILABLE_MESSAGE);
+  }
+  const refreshed = await authClient.snapshotCredentials();
+  return { snapshot: refreshed, reusable: isReusableCredentialRecord(refreshed, cloudUrl) };
+}
+
 /**
  * 1. Checks and reuses valid pre-provisioned credentials if not forcing fresh auth.
  * 2. In non-interactive mode without reusable credentials, fails truthfully.
@@ -406,9 +437,11 @@ export async function performPairing(
     tokenFilePath,
   });
 
-  const priorSnapshot = await authClient.snapshotCredentials();
+  const { snapshot: priorSnapshot, reusable } = options.force
+    ? { snapshot: await authClient.snapshotCredentials(), reusable: false }
+    : await resolveSavedCredentials(authClient, cloudUrl);
 
-  if (!options.force && isReusableCredentialRecord(priorSnapshot, cloudUrl)) {
+  if (reusable && priorSnapshot) {
     const claims = priorSnapshot.claims;
     // Requested IDs are pairing hints, never authority for the authenticated identity.
     const accountId = claims.accountId;
@@ -691,7 +724,8 @@ export function printLoginHelp(): void {
     "Credentials are written owner-only to the effective Resin home state path",
     "(mode 0600) plus an ancillary vault. They are distinct from the local IPC",
     "token and never appear in harness config or project metadata.",
-    "Valid cached credentials are reused unless --force.",
+    "Valid cached credentials are reused unless --force; an expired access token is",
+    "renewed with the saved refresh token instead of pairing the device again.",
     "A new pairing is refused while `resin mcp` gateways older than v1.0.122 run:",
     "their credential client can race the daemon's token refresh and get this",
     "device's sign-in revoked. Restart the harness sessions that own them first.",
@@ -890,9 +924,13 @@ export async function loginCommand(
       list: options.listCredentialUnsafeGateways,
     });
     if (!flags.force) {
-      const priorSnapshot = await authClient.snapshotCredentials();
-      if (isReusableCredentialRecord(priorSnapshot, cloudUrl)) {
-        // Reuse writes nothing new, but those gateways already share the saved sign-in.
+      const { snapshot: priorSnapshot, reusable } = await resolveSavedCredentials(
+        authClient,
+        cloudUrl,
+      );
+      if (reusable && priorSnapshot) {
+        // Reuse (or the same rotation the daemon would perform) keeps the existing device
+        // sign-in, which those gateways already share.
         if (unsafeGateways) process.stderr.write(`\nWarning: ${unsafeGateways}\n`);
         const claims = priorSnapshot.claims;
         const accountId = claims.accountId;

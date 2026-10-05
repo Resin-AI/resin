@@ -582,6 +582,16 @@ export async function runDiagnostics(options: {
       message: `Authenticated for workspace ${loadResult.credentials.workspaceId}`,
       fixable: false,
     });
+  } else if (loadResult.status === "expired" && loadResult.credentials?.refreshToken) {
+    // Only the hour-long access token lapsed; the saved sign-in renews it on its next refresh.
+    items.push({
+      id: "cloud_auth",
+      name: "Cloud Authentication Credentials",
+      category: "auth",
+      status: "pass",
+      message: `Signed in for workspace ${loadResult.credentials.workspaceId}; the access token renews automatically while the Resin daemon runs`,
+      fixable: false,
+    });
   } else if (loadResult.status === "expired" && loadResult.credentials) {
     items.push({
       id: "cloud_auth",
@@ -589,7 +599,7 @@ export async function runDiagnostics(options: {
       category: "auth",
       status: "warn",
       message: `Cloud credentials expired for workspace ${loadResult.credentials.workspaceId} (expired at ${loadResult.credentials.claims.expiresAt})`,
-      remediation: "Run `resin login` or `resin init` to refresh your session.",
+      remediation: "Run `resin login` to sign this device in again.",
       fixable: false,
     });
   } else if (loadResult.status === "offline" && loadResult.credentials) {

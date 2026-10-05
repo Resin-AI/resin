@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { IpcClient } from "@resin/observer";
 import { describe, expect, it, vi } from "vitest";
@@ -286,6 +288,66 @@ describe("VerificationSuite", () => {
     expect(checkNames).not.toContain("cloud_auth");
     expect(checkNames).not.toContain("adapter_discovery");
     expect(checkNames).toContain("meta_tools");
+  });
+
+  describe("cloud_auth with an expired access token", () => {
+    async function checkWithSavedCredential(refreshToken: string | undefined) {
+      const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "resin-verify-auth-"));
+      try {
+        const tempResinHome = path.join(tempHome, ".resin");
+        const tokenFilePath = path.join(tempResinHome, "state", "device-token.json");
+        await fs.mkdir(path.dirname(tokenFilePath), { recursive: true });
+        await fs.writeFile(
+          tokenFilePath,
+          JSON.stringify({
+            accessToken: "expired-access-token",
+            ...(refreshToken ? { refreshToken } : {}),
+            cloudUrl: "https://api.resin.sh",
+            deviceId: "dev_verify_01",
+            workspaceId: "ws_verify_01",
+            storedAt: new Date().toISOString(),
+            claims: {
+              accountId: "acc_verify_01",
+              workspaceId: "ws_verify_01",
+              deviceId: "dev_verify_01",
+              installationId: "inst_verify_01",
+              userId: "usr_verify_01",
+              subject: "usr_verify_01",
+              scopes: ["device:connect"],
+              rawUploadConsent: false,
+              issuedAt: new Date(Date.now() - 7_200_000).toISOString(),
+              expiresAt: new Date(Date.now() - 3_600_000).toISOString(),
+              tokenType: "access",
+            },
+          }),
+          { mode: 0o600 },
+        );
+        const suite = new VerificationSuite({
+          homeDir: tempHome,
+          resinHome: tempResinHome,
+          cloudUrl: "https://api.resin.sh",
+          fsBridge: createMockFsBridge(),
+        });
+        return await suite.checkCloudAuth();
+      } finally {
+        await fs.rm(tempHome, { recursive: true, force: true });
+      }
+    }
+
+    it("passes while a saved refresh token renews it", async () => {
+      const result = await checkWithSavedCredential("saved-refresh-family");
+
+      expect(result.status).toBe("pass");
+      expect(result.message).toContain("renews automatically while the Resin daemon runs");
+      expect(result.remediation).toBeUndefined();
+    });
+
+    it("asks for `resin login` only when no refresh token is saved", async () => {
+      const result = await checkWithSavedCredential(undefined);
+
+      expect(result.status).toBe("warn");
+      expect(result.remediation).toBe("Run `resin login` to sign this device in again.");
+    });
   });
 });
 
