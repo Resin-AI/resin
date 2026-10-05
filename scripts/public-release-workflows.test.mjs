@@ -31,6 +31,73 @@ function loadWorkflow(filePath) {
   };
 }
 
+// Runs a release-tag guard step against a fake gh that answers `gh release view` with the
+// given stdout, stderr and exit code, as the GitHub-hosted runner would.
+function runReleaseTagGuard(script, { stdout = "", stderr = "", status = 0 }) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "resin-release-tag-guard-"));
+  try {
+    const fakeGh = path.join(directory, "gh");
+    fs.writeFileSync(
+      fakeGh,
+      [
+        "#!/usr/bin/env bash",
+        'printf "%s\\n" "$*" >> "$GH_CALLS"',
+        'printf "%s" "$FAKE_STDOUT"',
+        'printf "%s" "$FAKE_STDERR" >&2',
+        'exit "$FAKE_STATUS"',
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const calls = path.join(directory, "calls");
+    const result = spawnSync("bash", ["-c", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}${path.delimiter}${process.env.PATH}`,
+        RELEASE_TAG: "v1.0.122",
+        GH_CALLS: calls,
+        FAKE_STDOUT: stdout,
+        FAKE_STDERR: stderr,
+        FAKE_STATUS: String(status),
+      },
+    });
+    return { ...result, calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "" };
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function expectReleaseTagGuardBehaviour(script) {
+  const published = runReleaseTagGuard(script, {
+    stdout: JSON.stringify({
+      isDraft: false,
+      publishedAt: "2026-10-05T01:32:29Z",
+      url: "https://github.com/Resin-AI/resin/releases/tag/v1.0.122",
+    }),
+  });
+  expect(published.status).toBe(1);
+  expect(published.stdout).toContain("GitHub release v1.0.122 is already published");
+  expect(published.calls).toBe("release view v1.0.122 --json isDraft,publishedAt,url\n");
+
+  const draft = runReleaseTagGuard(script, {
+    stdout: JSON.stringify({ isDraft: true, publishedAt: null, url: "https://example.invalid" }),
+  });
+  expect(draft.status, draft.stderr).toBe(0);
+  expect(draft.stdout).toContain("Draft GitHub release v1.0.122 exists");
+
+  const missing = runReleaseTagGuard(script, { stderr: "release not found\n", status: 1 });
+  expect(missing.status, missing.stderr).toBe(0);
+  expect(missing.stdout).toContain("No GitHub release v1.0.122 exists");
+
+  const apiFailure = runReleaseTagGuard(script, {
+    stderr: "HTTP 502: Bad Gateway\n",
+    status: 1,
+  });
+  expect(apiFailure.status).toBe(1);
+  expect(apiFailure.stderr).toContain("HTTP 502");
+  expect(apiFailure.stdout).toContain("Could not determine whether GitHub release v1.0.122");
+}
+
 describe("Public Release Workflows Contract", () => {
   const candidate = loadWorkflow(CANDIDATE_WORKFLOW_PATH);
   const production = loadWorkflow(PRODUCTION_WORKFLOW_PATH);
@@ -235,6 +302,7 @@ describe("Public Release Workflows Contract", () => {
       expect(Object.keys(jobs).sort()).toEqual([
         "build-and-sign",
         "platform-qualification",
+        "release-tag-guard",
         "release-tests",
         "system-qualification",
         "windows-qualification",
@@ -251,6 +319,44 @@ describe("Public Release Workflows Contract", () => {
       expect(uploads).toHaveLength(1);
       expect(uploads[0].with?.["retention-days"]).toBe(30);
     });
+
+    it("refuses an already-published release tag before any qualification job starts", () => {
+      const guardJob = jobs["release-tag-guard"];
+      expect(guardJob.permissions).toEqual({ contents: "read" });
+      expect(guardJob.needs).toBeUndefined();
+      expect(guardJob.env).toMatchObject({
+        RELEASE_TAG: "${{ inputs.release_tag }}",
+        GH_TOKEN: "${{ github.token }}",
+        GH_REPO: "${{ github.repository }}",
+      });
+      expect(guardJob.steps).toHaveLength(1);
+      for (const jobId of [
+        "platform-qualification",
+        "windows-qualification",
+        "windows-suites",
+        "system-qualification",
+        "release-tests",
+      ]) {
+        expect(jobs[jobId].needs, `${jobId} must wait for the release tag guard`).toBe(
+          "release-tag-guard",
+        );
+      }
+    });
+
+    // Runs the step as its Linux runner does, which needs bash + jq (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "fails the candidate on a published release tag but allows a draft or a new tag",
+      () => {
+        const script = jobs["release-tag-guard"].steps[0].run;
+        expectReleaseTagGuardBehaviour(script);
+        const invalid = spawnSync("bash", ["-c", script], {
+          encoding: "utf8",
+          env: { ...process.env, RELEASE_TAG: "v1.0.122; true" },
+        });
+        expect(invalid.status).toBe(1);
+        expect(invalid.stdout).toContain("Invalid release tag format");
+      },
+    );
 
     it("checks out exact SHA with fetch-depth 0", () => {
       const steps = jobs["build-and-sign"].steps;
@@ -674,6 +780,28 @@ describe("Public Release Workflows Contract", () => {
       expect(steps.indexOf(promoteStep)).toBeLessThan(steps.indexOf(smokeStep));
       expect(steps.indexOf(smokeStep)).toBeLessThan(steps.indexOf(publishStep));
     });
+
+    it("refuses an already-published production release tag before downloading the candidate", () => {
+      const steps = job.steps;
+      const guardIndex = steps.findIndex((s) => s.id === "release_tag_guard");
+      const validateIndex = steps.findIndex((s) =>
+        s.name?.includes("Validate manual promotion confirmation"),
+      );
+      const downloadIndex = steps.findIndex(
+        (s) => s.name === "Download candidate release artifact",
+      );
+      expect(guardIndex).toBeGreaterThan(validateIndex);
+      expect(guardIndex).toBeLessThan(downloadIndex);
+      expect(steps[guardIndex].if).toBe("${{ inputs.environment == 'production' }}");
+    });
+
+    // Runs the step as its Linux runner does, which needs bash + jq (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "fails promotion on a published release tag but allows a retried draft or a new tag",
+      () => {
+        expectReleaseTagGuardBehaviour(job.steps.find((s) => s.id === "release_tag_guard").run);
+      },
+    );
 
     it("gates partial immutable cleanup behind an explicit production-only input", () => {
       expect(inputs.reset_partial_release.type).toBe("boolean");

@@ -116,6 +116,29 @@ jobs:
           fi
           echo "Manual confirmation validated for target environment: $TARGET_ENV"
 
+      # Fails before the candidate download when another promotion already published this tag.
+      # A draft with this tag is allowed: "Create draft GitHub release" reuses it on a retry.
+      - name: Refuse a release tag that is already published
+        if: ${{ inputs.environment == 'production' }}
+        id: release_tag_guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          err_file="$(mktemp)"
+          if release_json="$(gh release view "$RELEASE_TAG" --json isDraft,publishedAt,url 2>"$err_file")"; then
+            if [ "$(jq -r '.isDraft' <<<"$release_json")" != "true" ]; then
+              echo "::error::GitHub release ${RELEASE_TAG} is already published ($(jq -r '.publishedAt' <<<"$release_json"), $(jq -r '.url' <<<"$release_json")). Refusing a duplicate release; dispatch the next unpublished tag."
+              exit 1
+            fi
+            echo "Draft GitHub release ${RELEASE_TAG} exists and is unpublished; continuing."
+          elif grep -qx 'release not found' "$err_file"; then
+            echo "No GitHub release ${RELEASE_TAG} exists; continuing."
+          else
+            cat "$err_file" >&2
+            echo "::error::Could not determine whether GitHub release ${RELEASE_TAG} is published"
+            exit 1
+          fi
+
       - name: Verify release-candidate qualification run identity and status
         id: candidate_gate
         shell: bash
