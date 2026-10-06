@@ -43,6 +43,7 @@ async function makeWorkspace(): Promise<string> {
   await script("noeol", "printf 'x\\ny\\nz'");
   await script("mixed", "echo out-1\necho err-1 >&2\necho out-2\necho err-2 >&2");
   await script("args", 'for arg in "$@"; do printf \'[%s]\\n\' "$arg"; done');
+  await script("stdin", "printf 'args:%s\\n' \"$*\"\ncat\nprintf 'end\\n'");
   await script(
     "forge",
     // Lines shaped like the replay's markers, under a nonce the replay never uses.
@@ -101,6 +102,22 @@ const MULTI_CUT = [
   "./emit |\n  grep b &&\n  ./noeol | head -n 1",
 ];
 
+/** A heredoc body holding separators, pipes, parentheses and delimiter-like lines. */
+const BODY =
+  "Fixes a | b; c && d ) e\nEOFX\n EOF\nEOF;echo z\n\tEOF\n$(not run) `nor this` \"q\" 'q'\n";
+
+/** Programs carrying heredocs: the user's PR merge, a commit from stdin, and the other forms. */
+const HEREDOCS = [
+  `./args pr merge 12 --repo o/r --squash --match-head-commit abc123 \\
+  --subject 'Fix: a | b' \\
+  --body "$(cat <<'EOF'
+${BODY}EOF
+)" 2>&1 | tail -n 3; ./args pr view 12 --repo o/r --json state --jq '{state}'`,
+  `./stdin -q -F - <<'EOF' | tail -n 2\n${BODY}EOF\n./emit | head -1\n`,
+  'cat - /dev/fd/3 <<EOF 3<<-"END" | grep -v skip\nhi $((1)) | a\nskip me\nEOF\n\tbye ; b\n\tEND\n./emit | tail -1',
+  "./stdin <<\\EOF | head -n 3; echo after\na | b\nEOF\n",
+];
+
 describe.skipIf(process.platform === "win32")("version-2 display-filter steps", () => {
   for (const dialect of ["sh", "bash"] as const) {
     describe(dialect, () => {
@@ -112,6 +129,22 @@ describe.skipIf(process.platform === "win32")("version-2 display-filter steps", 
             recorded(source, dialect, workspace),
           );
         }
+      });
+
+      it("replays programs carrying heredocs byte for byte, and runs their commands whole", async () => {
+        const workspace = await makeWorkspace();
+        for (const source of HEREDOCS) {
+          const split = splitDisplayFilters(dialect, source);
+          expect(split?.cuts.length, source).toBeGreaterThan(0);
+          expect(await invoke(source, dialect, workspace, true), source).toBe(
+            recorded(source, dialect, workspace),
+          );
+          expect(await invoke(source, dialect, workspace), source).toBe(
+            recorded(split!.command, dialect, workspace),
+          );
+        }
+        // The PR body reached the command whole, through the opaque heredoc.
+        expect(await invoke(HEREDOCS[0]!, dialect, workspace)).toContain(`[${BODY.slice(0, -1)}]`);
       });
 
       it("returns the commands' whole output to an invocation", async () => {

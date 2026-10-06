@@ -24,7 +24,7 @@
  *   `displayFilter.input`, when the caller sets it, runs the whole recorded pipeline instead;
  * - `display-filter-v2`: also `displayFilter.version` 2 (`splitDisplayFilters`), which drops the
  *   trailing display filter of every top-level pipeline of a program the version-2 lexer delimits
- *   (redirections, `$NAME`, `$(...)` and double-quoted expansions in the kept text), runs the rest
+ *   (redirections, heredocs, `$NAME`, `$(...)` and double-quoted expansions in the kept text), runs the rest
  *   verbatim, and replays each cut pipeline's marker-bracketed output through its own filter.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";

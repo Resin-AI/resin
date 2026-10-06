@@ -206,6 +206,47 @@ describe("splitDisplayFilters", () => {
     });
   });
 
+  it("reads heredoc bodies as opaque text, at the top level and inside $(...)", () => {
+    const body =
+      "Fixes a | b; c && d ) e\nEOFX\n EOF\nEOF;echo z\n\tEOF\n$(not run) `nor this` \"q\" 'q'\n";
+    const merge = `gh pr merge 12 --repo o/r --squash --match-head-commit abc123 \\
+  --subject 'Fix: a | b' \\
+  --body "$(cat <<'EOF'
+${body}EOF
+)" 2>&1 | tail -n 3; gh pr view 12 --repo o/r --json state,mergeCommit --jq '{state, merge: .mergeCommit.oid}'`;
+    const kept = merge.slice(0, merge.indexOf(" | tail -n 3"));
+    expect(cutsOf("bash", merge)).toEqual({
+      command: `${kept}; gh pr view 12 --repo o/r --json state,mergeCommit --jq '{state, merge: .mergeCommit.oid}'`,
+      cuts: [[" | tail -n 3", "tail -n 3"]],
+    });
+    expect(cutsOf("dash", merge)?.cuts).toEqual([[" | tail -n 3", "tail -n 3"]]);
+    // A top-level heredoc's body follows the operator's line, after the filter, and stays.
+    const commit = `git add -A && git commit -q -F - <<'EOF' | tail -n 2\n${body}EOF\ngit log --oneline -1 | head -1\n`;
+    expect(cutsOf("sh", commit)).toEqual({
+      command: `git add -A && git commit -q -F - <<'EOF'\n${body}EOF\ngit log --oneline -1`,
+      cuts: [
+        [" | tail -n 2", "tail -n 2"],
+        [" | head -1", "head -1"],
+      ],
+    });
+    // Unquoted, quoted, backslashed and tab-stripped delimiters; several bodies after one line.
+    expect(
+      cutsOf(
+        "bash",
+        'cat <<EOF - <<-"END" | grep -v x\nhi $USER | x\nEOF\n\tbye ; x\n\tEND\nmake | tail -1',
+      ),
+    ).toEqual({
+      command: 'cat <<EOF - <<-"END"\nhi $USER | x\nEOF\n\tbye ; x\n\tEND\nmake',
+      cuts: [
+        [" | grep -v x", "grep -v x"],
+        [" | tail -1", "tail -1"],
+      ],
+    });
+    expect(cutsOf("dash", "cat <<\\EOF | head -2\na | b\nEOF")?.command).toBe(
+      "cat <<\\EOF\na | b\nEOF",
+    );
+  });
+
   it("splits every version-1 program as version 1 did", () => {
     for (const [shell, text] of [
       ["bash", "pnpm vitest run 2>&1 | tail -30"],
@@ -233,9 +274,20 @@ describe("splitDisplayFilters", () => {
 
   it("refuses a program it cannot delimit safely", () => {
     for (const text of [
-      "cat <<EOF | head\nx\nEOF",
-      "cat <<-EOF | head\n\tx\n\tEOF",
-      "cat <<< x | head",
+      // Heredocs whose bodies cannot be read safely.
+      "cat <<EOF | head",
+      "cat <<EOF | head\nx\n",
+      "cat <<EOF | head\nx\nEOF \n",
+      "cat <<EOF |\nbody\nEOF\ngrep x",
+      "cat <<EOF | head\na\\\nEOF\nEOF",
+      "cat <<EOF $(date) | head\nx\nEOF",
+      'x="$(cat <<EOF\na\nEOF)"\nmake | head',
+      'x="$(cat <<EOF\na\nEOF )\nEOF\n)"\nmake | head',
+      "x=$(cat <<EOF)\na\nEOF\nmake | head",
+      "cat <<$X | head\nx\n$X",
+      "cat << | head",
+      "cat <<# | head",
+      "cat <<\\\nEOF | head\nx\nEOF",
       "a `b` | head",
       'a "`b`" | head',
       "a | head; echo ${PIPESTATUS[0]}",
@@ -291,6 +343,12 @@ describe("splitDisplayFilters", () => {
     expect(splitDisplayFilters("bash", "make | tail -5", 1)).toBeUndefined();
     expect(splitDisplayFilters("bash", "make | tail -5", 3)).toBeUndefined();
     expect(splitDisplayFilters("zsh", "make | tail -5", 2)).toBeUndefined();
+    // A here-string is bash's: dash reads `<<<` as a heredoc.
+    expect(splitDisplayFilters("bash", "cat <<< 'a | b' | head -1", 2)?.command).toBe(
+      "cat <<< 'a | b'",
+    );
+    for (const shell of ["sh", "dash", "sh-or-zsh"])
+      expect(splitDisplayFilters(shell, "cat <<< 'a | b' | head -1", 2), shell).toBeUndefined();
     expect(splitDisplayFilters("pwsh", "make | tail -5", 2)).toBeUndefined();
     for (const text of [
       "make",

@@ -370,11 +370,66 @@ interface ListStage {
   redirects: boolean;
 }
 
-/** A lexed list: its top-level pipelines, where lexing ended, and where its last token ended. */
+/**
+ * A lexed list: its pipelines, where lexing ended, where its last token or heredoc body ended, and
+ * the heredoc bodies it holds (from the line after their operator through their delimiter line).
+ */
 interface LexedList {
   pipelines: ListStage[][];
   end: number;
   contentEnd: number;
+  bodies: { start: number; end: number }[];
+}
+
+/** What every level of one program's lexing shares. */
+interface Lexer {
+  /** Whether the shell reads `<<<` as a here-string (bash), not as a heredoc of `<word`. */
+  hereStrings: boolean;
+  /** Heredocs whose operator was read and whose body is not yet, at any level. */
+  pending: number;
+}
+
+/** A heredoc whose operator was read: its delimiter, `<<-`, and whether the delimiter is quoted. */
+interface Heredoc {
+  delimiter: string;
+  strip: boolean;
+  quoted: boolean;
+}
+
+/**
+ * The offset after the bodies of `heredocs`, read in order from `from` (the line after their
+ * operators): each runs through the first line that is its delimiter (leading tabs removed for
+ * `<<-`). The bodies are opaque: nothing in them is lexed, whatever they hold. Undefined when a
+ * delimiter line is missing; when an unquoted body has a line ending in `\`, which would join the
+ * next line to it; or when a body inside `$(...)` has a line that is the delimiter followed by a
+ * `)` (`EOF)`, `EOF )`), which bash ends the body at and dash does not.
+ */
+function readHeredocBodies(
+  text: string,
+  from: number,
+  heredocs: readonly Heredoc[],
+  nested: boolean,
+): number | undefined {
+  let position = from;
+  for (const heredoc of heredocs) {
+    for (;;) {
+      if (position >= text.length) return undefined;
+      const newline = text.indexOf("\n", position);
+      const line = text.slice(position, newline === -1 ? text.length : newline);
+      const compared = heredoc.strip ? line.replace(/^\t+/, "") : line;
+      position = newline === -1 ? text.length : newline + 1;
+      if (compared === heredoc.delimiter) break;
+      if (!heredoc.quoted && line.endsWith("\\")) return undefined;
+      if (
+        nested &&
+        compared.startsWith(heredoc.delimiter) &&
+        /^[ \t]*\)/.test(compared.slice(heredoc.delimiter.length))
+      ) {
+        return undefined;
+      }
+    }
+  }
+  return position;
 }
 
 /**
@@ -387,6 +442,7 @@ function lexDollar(
   index: number,
   depth: number,
   quoted: boolean,
+  lexer: Lexer,
 ): number | undefined {
   const next = text[index + 1];
   if (next === undefined) return index + 1;
@@ -401,8 +457,9 @@ function lexDollar(
   // bash's old arithmetic `$[...]` may hold blanks and `|`.
   if (next === "[") return undefined;
   if (next === "(") {
-    if (text[index + 2] === "(") return undefined;
-    return lexList(text, index + 2, depth + 1)?.end;
+    // Where a heredoc's body would start inside a `$(...)` opened on its operator's line is unclear.
+    if (text[index + 2] === "(" || lexer.pending > 0) return undefined;
+    return lexList(text, index + 2, depth + 1, lexer)?.end;
   }
   if (next === "'" || next === '"') return quoted ? index + 1 : undefined;
   if (NAME_START.test(next)) {
@@ -418,6 +475,7 @@ function lexDoubleQuoted(
   text: string,
   open: number,
   depth: number,
+  lexer: Lexer,
 ): { end: number; value?: string } | undefined {
   let value: string | undefined = "";
   let index = open + 1;
@@ -438,7 +496,7 @@ function lexDoubleQuoted(
       continue;
     }
     if (char === "$") {
-      const after = lexDollar(text, index, depth, true);
+      const after = lexDollar(text, index, depth, true, lexer);
       if (after === undefined) return undefined;
       if (after > index + 1) value = undefined;
       else if (value !== undefined) value += char;
@@ -451,7 +509,7 @@ function lexDoubleQuoted(
 }
 
 /** The unquoted-or-quoted word starting at `start` (not at a blank or operator). */
-function lexWord(text: string, start: number, depth: number): ShellWord | undefined {
+function lexWord(text: string, start: number, depth: number, lexer: Lexer): ShellWord | undefined {
   let value: string | undefined = "";
   let plain = true;
   let index = start;
@@ -476,14 +534,14 @@ function lexWord(text: string, start: number, depth: number): ShellWord | undefi
       if (value !== undefined) value += quoted;
       index = close + 1;
     } else if (char === '"') {
-      const quoted = lexDoubleQuoted(text, index, depth);
+      const quoted = lexDoubleQuoted(text, index, depth, lexer);
       if (quoted === undefined) return undefined;
       const body = text.slice(index + 1, quoted.end - 1);
       if (CONTROL.test(body) || !isLiteralDoubleQuoted(body)) plain = false;
       value = value === undefined || quoted.value === undefined ? undefined : value + quoted.value;
       index = quoted.end;
     } else if (char === "$") {
-      const after = lexDollar(text, index, depth, false);
+      const after = lexDollar(text, index, depth, false, lexer);
       if (after === undefined) return undefined;
       plain = false;
       if (after > index + 1) value = undefined;
@@ -510,9 +568,12 @@ function lexWord(text: string, start: number, depth: number): ShellWord | undefi
  * Lexes the list starting at `from`: at depth 0 the whole program, deeper the body of a `$(...)`
  * ending at its `)`. Undefined for anything the lexer cannot delimit (see `splitDisplayFilters`).
  */
-function lexList(text: string, from: number, depth: number): LexedList | undefined {
+function lexList(text: string, from: number, depth: number, lexer: Lexer): LexedList | undefined {
   if (depth > MAX_SUBSTITUTION_DEPTH) return undefined;
   const pipelines: ListStage[][] = [];
+  /** Heredocs of this list whose bodies start after its next line break. */
+  const heredocs: Heredoc[] = [];
+  const bodies: { start: number; end: number }[] = [];
   let stages: ListStage[] = [];
   let stage: ListStage | undefined;
   /** Offset of the `|` the next stage follows. */
@@ -549,14 +610,14 @@ function lexList(text: string, from: number, depth: number): LexedList | undefin
   for (;;) {
     const char = text[index];
     if (char === undefined || (char === ")" && depth > 0)) {
-      if ((char === undefined) !== (depth === 0)) return undefined;
+      if ((char === undefined) !== (depth === 0) || heredocs.length > 0) return undefined;
       if (stage !== undefined) {
         if (!endStage()) return undefined;
         endPipeline();
       } else if (continues) {
         return undefined;
       }
-      return { pipelines, end: char === undefined ? index : index + 1, contentEnd };
+      return { pipelines, end: char === undefined ? index : index + 1, contentEnd, bodies };
     }
     if (char === " " || char === "\t") {
       index += 1;
@@ -573,6 +634,16 @@ function lexList(text: string, from: number, depth: number): LexedList | undefin
         endPipeline();
       }
       index += 1;
+      // The bodies of the heredocs this line opened follow it.
+      if (heredocs.length > 0) {
+        const after = readHeredocBodies(text, index, heredocs, depth > 0);
+        if (after === undefined) return undefined;
+        bodies.push({ start: index, end: after });
+        lexer.pending -= heredocs.length;
+        heredocs.length = 0;
+        index = after;
+        contentEnd = after;
+      }
       continue;
     }
     if (char === ";") {
@@ -607,8 +678,14 @@ function lexList(text: string, from: number, depth: number): LexedList | undefin
     }
     if (char === "<" || char === ">") {
       const next = text[index + 1];
-      // Never a heredoc or here-string, `<>`, `>|`, or a process substitution.
-      if (target || next === "(" || (char === "<" ? next === "<" || next === ">" : next === "|")) {
+      // Never `<>`, `>|`, or a process substitution; a here-string only where the shell has them.
+      const hereString = char === "<" && next === "<" && text[index + 2] === "<";
+      if (
+        target ||
+        next === "(" ||
+        (char === "<" ? next === ">" : next === "|") ||
+        (hereString && !lexer.hereStrings)
+      ) {
         return undefined;
       }
       const current = begin(index);
@@ -620,9 +697,44 @@ function lexList(text: string, from: number, depth: number): LexedList | undefin
         else if (previous.raw.startsWith("{")) return undefined;
       }
       current.redirects = true;
-      target = true;
       continues = false;
-      index += next === "&" || (char === ">" && next === ">") ? 2 : 1;
+      if (char === "<" && next === "<" && !hereString) {
+        // A heredoc: its delimiter is the next word, quotes removed; no expansion in it.
+        const strip = text[index + 2] === "-";
+        let at = index + (strip ? 3 : 2);
+        while (text[at] === " " || text[at] === "\t") at += 1;
+        const opener = text[at];
+        if (
+          opener === undefined ||
+          WORD_END.includes(opener) ||
+          opener === "#" ||
+          (opener === "\\" && text[at + 1] === "\n")
+        ) {
+          return undefined;
+        }
+        const delimiter = lexWord(text, at, depth, lexer);
+        if (
+          delimiter === undefined ||
+          delimiter.end === at ||
+          delimiter.value === undefined ||
+          delimiter.value.length === 0 ||
+          delimiter.value.includes("\n")
+        ) {
+          return undefined;
+        }
+        heredocs.push({
+          delimiter: delimiter.value,
+          strip,
+          quoted: /['"\\]/.test(delimiter.raw),
+        });
+        lexer.pending += 1;
+        current.end = delimiter.end;
+        contentEnd = delimiter.end;
+        index = delimiter.next;
+        continue;
+      }
+      target = true;
+      index += hereString ? 3 : next === "&" || (char === ">" && next === ">") ? 2 : 1;
       contentEnd = index;
       continue;
     }
@@ -634,7 +746,7 @@ function lexList(text: string, from: number, depth: number): LexedList | undefin
       index = newline === -1 ? text.length : newline;
       continue;
     }
-    const word = lexWord(text, index, depth);
+    const word = lexWord(text, index, depth, lexer);
     if (word === undefined) return undefined;
     const current = begin(index);
     if (target) {
@@ -713,16 +825,23 @@ export interface DisplayFilterSplit {
  * comments are allowed). Words may hold `'...'`, `"..."` (escapes and expansions included), `\`
  * escapes, `$NAME`, `$?` and the other one-character parameters, `${...}` holding only a name and
  * plain operators, and `$(...)` whose body the same lexer delimits; redirections `<`, `>`, `>>`,
- * `<&`, `>&`, with a descriptor number (`2>&1`, `>/dev/null`). It refuses the whole program on
- * anything it cannot delimit safely: a heredoc or here-string, a backtick, an unbalanced quote or
- * parenthesis, a `(`/`)` outside `$(...)` (subshells, process substitution, `$((...))`), `$[...]`, `$'...'`,
- * `<>`, `>|`, `|&`, a lone `&`, `;;`, an empty command, a keyword in command position (`if`, `for`,
- * `while`, `case`, `{`, `!`, `[[`, `function`, ...), and any `PIPESTATUS`/`pipestatus` reference.
- * It also refuses a cut pipeline whose kept stages are not all `isKeepableStage`, or whose
- * `tail` follows its input.
+ * `<&`, `>&`, with a descriptor number (`2>&1`, `>/dev/null`); under bash, here-strings `<<<`.
+ * Heredocs `<<WORD`, `<<'WORD'`, `<<"WORD"`, `<<\WORD` and `<<-WORD`, at the top level and inside
+ * `$(...)` (`--body "$(cat <<'EOF' ... EOF
+)"`), have opaque bodies (see `readHeredocBodies`)
+ * starting after the line break that ends their operator's line; a cut never holds one.
+ *
+ * It refuses the whole program on anything it cannot delimit safely: a heredoc whose body it
+ * cannot read so, or with a `$(...)` opened between its operator and its body; a here-string
+ * outside bash; a backtick; an unbalanced quote or parenthesis; a `(`/`)` outside `$(...)`
+ * (subshells, process substitution, `$((...))`); `$[...]`; `$'...'`; `<>`, `>|`, `|&`, a lone
+ * `&`, `;;`; an empty command; a keyword in command position (`if`, `for`, `while`, `case`, `{`,
+ * `!`, `[[`, `function`, ...); and any `PIPESTATUS`/`pipestatus` reference. It also refuses a cut
+ * pipeline whose kept stages are not all `isKeepableStage`, or whose `tail` follows its input.
  *
  * Cuts are exact slices: `text.slice(start, end)` is the blanks before the first dropped `|`, the
- * dropped stages, and nothing after them; `command` is `text` without them, up to its last token.
+ * dropped stages, and nothing after them; `command` is `text` without them, up to its last token
+ * or heredoc body.
  */
 export function splitDisplayFilters(
   shell: string,
@@ -732,7 +851,7 @@ export function splitDisplayFilters(
   if (version !== 2 || !Object.hasOwn(POSIX_SHELLS, shell) || PIPE_STATUS.test(text)) {
     return undefined;
   }
-  const list = lexList(text, 0, 0);
+  const list = lexList(text, 0, 0, { hereStrings: shell === "bash", pending: 0 });
   if (list === undefined) return undefined;
   const cuts: DisplayFilterCut[] = [];
   for (const stages of list.pipelines) {
@@ -748,7 +867,13 @@ export function splitDisplayFilters(
       filter: text.slice(stages[first]!.pipe! + 1, end).trim(),
     });
   }
-  if (cuts.length === 0) return undefined;
+  // A cut never holds a heredoc body (`cat <<EOF |`, the body, then `grep x`).
+  if (
+    cuts.length === 0 ||
+    list.bodies.some((body) => cuts.some((cut) => body.start < cut.end && body.end > cut.start))
+  ) {
+    return undefined;
+  }
   let command = "";
   let from = 0;
   for (const cut of cuts) {
