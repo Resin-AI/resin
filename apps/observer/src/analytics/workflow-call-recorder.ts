@@ -2338,7 +2338,7 @@ function unprotectedCandidates(
     program !== undefined &&
     recordedProgramLanguage(program) === "shell" &&
     typeof original === "string"
-      ? embeddedPrograms(original)
+      ? embeddedPrograms(original, { prose: true })
       : [];
   const safeEmbedded = new Map<string, boolean>();
   const embeddedIsSafe = (anchor: number, index: number): boolean => {

@@ -938,7 +938,7 @@ export class LocalArtifactExecutor {
         return { text: show(masked), parameters: [] };
       }
       const programs = template.holes.some((hole) => hole.embedded !== undefined)
-        ? embeddedPrograms(recorded)
+        ? embeddedPrograms(recorded, { prose: true })
         : [];
       const bound = template.holes.flatMap((hole) => {
         if (hole.through !== undefined) {

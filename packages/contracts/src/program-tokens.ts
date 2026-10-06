@@ -1122,43 +1122,57 @@ export type EmbeddedCodeLanguage = "python" | "javascript" | "shell";
  * A program embedded in a shell command: a heredoc body an interpreter reads, a heredoc body written
  * to a script file a later command of the same text runs, a `-c`/`-e` code string, or a POSIX shell
  * program another shell runs from one quoted word (see {@link embeddedShellProgram}).
- *
- * Language `text` is heredoc prose rather than a program: the literal body of a quoted-delimiter
- * heredoc a command reads as data (`git commit -F - <<'EOF'`, `gh pr create --body-file - <<'EOF'`,
- * `--body "$(cat <<'EOF' … EOF\n)"`). Its one token is the whole body (see
- * {@link heredocProsePrograms}): kind `string`, `quote: "heredoc"`.
  */
 export interface EmbeddedProgram {
-  /**
-   * Top-level shell token that anchors it: the code string token, the heredoc delimiter token, or
-   * the double-quoted word whose `$(cat <<'EOF' …)` substitution holds a prose heredoc.
-   */
+  /** Top-level shell token that anchors it: the code string token, or the heredoc delimiter token. */
   anchor: number;
-  language: EmbeddedCodeLanguage | "text";
+  language: EmbeddedCodeLanguage;
   /** Half-open span of the embedded source inside the shell text. */
   start: number;
   end: number;
-  /**
-   * How the embedded text sits in the shell source; decides the escaping a rendered value needs.
-   * `substituted-heredoc`: a literal heredoc inside a `$( … )` inside a double-quoted word.
-   */
-  context:
-    | "literal-heredoc"
-    | "expanding-heredoc"
-    | "substituted-heredoc"
-    | "single-quoted"
-    | "double-quoted";
+  /** How the embedded text sits in the shell source; decides the escaping a rendered value needs. */
+  context: "literal-heredoc" | "expanding-heredoc" | "single-quoted" | "double-quoted";
   /**
    * A shell program `ssh` sends to the remote account's login shell, whose grammar the device cannot
    * see: a value is rendered into it only when every common shell reads it as data (see
    * {@link renderEmbeddedProgramTokenValue}).
    */
   remote?: true;
-  /** The delimiter that ends a prose heredoc (`text`), and whether it is `<<-` (tabs stripped). */
-  heredoc?: { delimiter: string; stripTabs: boolean };
   /** tokenizeProgram(language, embeddedSource) with offsets made absolute in the shell text. */
   tokens: ProgramToken[];
 }
+
+/**
+ * Heredoc prose: the literal body of a quoted-delimiter heredoc a command reads as data
+ * (`git commit -F - <<'EOF'`, `gh pr create --body-file - <<'EOF'`, `--body "$(cat <<'EOF' …
+ * EOF\n)"`), read as an embedded "program" of language `text` whose one token is the whole body:
+ * kind `string`, `quote: "heredoc"` (see {@link heredocProsePrograms}). Listed only by
+ * `embeddedPrograms(source, { prose: true })`, after every code program, and addressed like any
+ * embedded token: `["tokens", anchor, "embedded", 0]`.
+ */
+export interface HeredocProseProgram {
+  /**
+   * Top-level shell token that anchors it: the heredoc delimiter token, or the token holding the
+   * double-quoted word whose `$(cat <<'EOF' …)` substitution holds the heredoc.
+   */
+  anchor: number;
+  language: "text";
+  /** Half-open span of the body inside the shell text (no terminator line). */
+  start: number;
+  end: number;
+  /**
+   * `literal-heredoc`: a heredoc a top-level command reads. `substituted-heredoc`: a heredoc inside
+   * a `$( … )` inside a double-quoted word.
+   */
+  context: "literal-heredoc" | "substituted-heredoc";
+  /** The delimiter that ends the heredoc, and whether it is `<<-` (leading tabs stripped). */
+  heredoc: { delimiter: string; stripTabs: boolean };
+  /** The body: exactly one bindable `string` token with `quote: "heredoc"`. */
+  tokens: [ProgramToken];
+}
+
+/** Anything `embeddedPrograms(source, { prose: true })` lists. */
+export type EmbeddedProgramOrProse = EmbeddedProgram | HeredocProseProgram;
 
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const SHELL_COMMAND_SEPARATORS: Record<string, true> = {
@@ -1792,7 +1806,7 @@ function heredocProseProgram(
   anchor: number,
   heredoc: { bodyStart: number; bodyEnd: number; delimiter: string; stripTabs: boolean },
   context: "literal-heredoc" | "substituted-heredoc",
-): EmbeddedProgram | undefined {
+): HeredocProseProgram | undefined {
   const { bodyStart, bodyEnd, delimiter, stripTabs } = heredoc;
   // An empty body has no line a value could replace; a terminated body ends in a line break.
   if (bodyEnd <= bodyStart || source[bodyEnd - 1] !== "\n") return undefined;
@@ -1853,7 +1867,7 @@ function heredocProsePrograms(
   commands: readonly ShellSimpleCommand[],
   commandOf: ReadonlyMap<number, ShellSimpleCommand>,
   data: ReadonlyArray<{ command: ShellSimpleCommand; heredoc: LexedHeredoc }>,
-): EmbeddedProgram[] {
+): HeredocProseProgram[] {
   const { tokens, body, heredocs, opaqueFrom, evaluatesCode } = analyzed;
   if (evaluatesCode) return [];
   const anyCodeReader = commands.some(
@@ -1865,7 +1879,7 @@ function heredocProsePrograms(
     start: tokens[heredoc.operator]!.start,
     end: heredoc.bodyStart,
   }));
-  const programs: EmbeddedProgram[] = [];
+  const programs: HeredocProseProgram[] = [];
   let depth = 0;
   let backtick = false;
   for (let position = 0; position < Math.min(tokens.length, opaqueFrom); position += 1) {
@@ -1936,18 +1950,36 @@ function heredocProsePrograms(
 /**
  * The programs embedded in a shell command: heredoc bodies fed to python or node, heredoc bodies
  * `cat`/`tee` save to a script file a later command of the same text runs, `-c`/`-e` code
- * strings, the POSIX shell program of `sh -c '…'`, `docker exec c sh -c '…'` or `ssh host '…'`
- * (see {@link embeddedShellProgram}), and the prose of quoted heredocs read as data (language
- * `text`, see {@link heredocProsePrograms}). Detection fails closed: a construct whose quoting,
- * expansion or interpreter is not certain yields nothing, and a heredoc whose body cannot be
- * delimited ends the scan (everything after it would be guessed).
+ * strings, and the POSIX shell program of `sh -c '…'`, `docker exec c sh -c '…'` or `ssh host '…'`
+ * (see {@link embeddedShellProgram}). Detection fails closed: a construct whose quoting, expansion
+ * or interpreter is not certain yields nothing, a body saved to a file nothing runs is data and
+ * yields nothing, and a heredoc whose body cannot be delimited ends the scan (everything after it
+ * would be guessed).
+ *
+ * With `{ prose: true }` the list goes on with the heredoc prose of the text (language `text`, see
+ * {@link heredocProsePrograms}), after every code program, so an index into the code programs is
+ * an index into the full list too, and a lookup by anchor finds a code program first. The device
+ * resolves, renders and validates holes against the full list; {@link heredocProseSites} lists
+ * the prose sites alone.
  *
  * Top-level tokens are untouched — the code string of a shell program stays unbindable as a whole
  * (see `code-evaluation.ts`) — and embedded tokens carry absolute offsets into `shellSource`. An
  * embedded shell program's tokens are read by the same POSIX tokenizer, so its own evaluators and
  * code strings bind nothing either; only one level is read.
  */
-export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
+export function embeddedPrograms(shellSource: string): EmbeddedProgram[];
+export function embeddedPrograms(
+  shellSource: string,
+  options: { prose: true },
+): EmbeddedProgramOrProse[];
+export function embeddedPrograms(
+  shellSource: string,
+  options?: { prose?: boolean },
+): EmbeddedProgram[] | EmbeddedProgramOrProse[];
+export function embeddedPrograms(
+  shellSource: string,
+  options?: { prose?: boolean },
+): EmbeddedProgram[] | EmbeddedProgramOrProse[] {
   const analyzed = analyzeShell(shellSource);
   const { tokens, body, heredocs, opaqueFrom } = analyzed;
   const heredocAt = new Map(heredocs.map((heredoc) => [heredoc.operator, heredoc]));
@@ -2048,8 +2080,39 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
     const shell = embeddedShellProgram(shellSource, tokens, each);
     if (shell !== undefined) programs.push(shell);
   }
-  programs.push(...heredocProsePrograms(shellSource, analyzed, commands, commandOf, data));
-  return programs.sort((left, right) => left.start - right.start);
+  programs.sort((left, right) => left.start - right.start);
+  if (options?.prose !== true) return programs;
+  return [...programs, ...heredocProsePrograms(shellSource, analyzed, commands, commandOf, data)];
+}
+
+/** A heredoc prose site a caller may propose a prose input at. */
+export interface HeredocProseSite {
+  /** The top-level token that anchors the prose program. */
+  anchor: number;
+  /** The prose token's index inside its program: always 0. */
+  embedded: 0;
+  /** `["tokens", anchor, "embedded", 0]`. */
+  path: ["tokens", number, "embedded", 0];
+  context: HeredocProseProgram["context"];
+  /** The body token: kind `string`, `quote: "heredoc"`, bindable, `value` the text read. */
+  token: ProgramToken;
+}
+
+/** The heredoc prose of a POSIX shell text (see {@link heredocProsePrograms}), in source order. */
+export function heredocProseSites(shellSource: string): HeredocProseSite[] {
+  return embeddedPrograms(shellSource, { prose: true }).flatMap((program) =>
+    program.language === "text"
+      ? [
+          {
+            anchor: program.anchor,
+            embedded: 0 as const,
+            path: ["tokens", program.anchor, "embedded", 0] as ["tokens", number, "embedded", 0],
+            context: program.context,
+            token: program.tokens[0],
+          },
+        ]
+      : [],
+  );
 }
 
 /**
@@ -2135,19 +2198,18 @@ function bash32SubstitutionKeepsText(text: string): boolean {
  * parentheses, `${`, `$[`, `$'`, `$"`).
  */
 function renderHeredocProse(
-  program: EmbeddedProgram,
+  program: HeredocProseProgram,
   token: ProgramToken,
   value: ProgramTokenValue,
 ): string {
-  const heredoc = program.heredoc;
-  if (heredoc === undefined || token.quote !== "heredoc" || !token.bindable) {
+  if (token.quote !== "heredoc" || !token.bindable) {
     throw new Error("this embedded token is not heredoc prose");
   }
   if (typeof value !== "string") throw new TypeError("a heredoc body takes text");
   if (value === token.value) return token.raw;
   if (value.includes("\0")) throw new Error("a heredoc body cannot contain a NUL");
   if (value.includes("\r")) throw new Error("a heredoc body cannot contain a carriage return");
-  const { delimiter, stripTabs } = heredoc;
+  const { delimiter, stripTabs } = program.heredoc;
   const lines = value.split("\n");
   for (const line of lines) {
     if (stripTabs && line.startsWith("\t")) {
@@ -2195,7 +2257,7 @@ function renderHeredocProse(
  * device cannot see, so its values are limited to {@link REMOTE_VALUE}.
  */
 export function renderEmbeddedProgramTokenValue(
-  program: EmbeddedProgram,
+  program: EmbeddedProgramOrProse,
   token: ProgramToken,
   value: ProgramTokenValue,
 ): string {
@@ -2227,8 +2289,6 @@ export function renderEmbeddedProgramTokenValue(
     case "literal-heredoc":
       if (rendered.includes("\n")) throw new Error("a heredoc value cannot contain a newline");
       return rendered;
-    case "substituted-heredoc":
-      throw new Error("only heredoc prose sits in a substituted heredoc");
   }
 }
 
@@ -2604,9 +2664,9 @@ export function programTokenValueAt(
     address.embedded === undefined
       ? tokenizeProgram(language, source)[address.token]
       : language === "shell"
-        ? embeddedPrograms(source).find((program) => program.anchor === address.token)?.tokens[
-            address.embedded
-          ]
+        ? embeddedPrograms(source, { prose: true }).find(
+            (program) => program.anchor === address.token,
+          )?.tokens[address.embedded]
         : undefined;
   if (!token?.bindable) return undefined;
   if (address.span === undefined) return token.value;
@@ -2709,7 +2769,7 @@ const REDACTION_PLACEHOLDER = /\[REDACTED[A-Z0-9_]*(?::[^\]\s]*)?\]/g;
  * protected token is only ever run from the private original.
  */
 export function embeddedProgramProtectedTokens(
-  program: EmbeddedProgram,
+  program: EmbeddedProgramOrProse,
   sanitizedSource: string,
   shellTokens: readonly ProgramToken[],
   protectedTokens: readonly number[],
@@ -2750,8 +2810,12 @@ export function projectedEmbeddedTokenIsBindable(
   anchor: number,
   embedded: number,
 ): boolean {
-  const sanitized = embeddedPrograms(sanitizedSource).find((each) => each.anchor === anchor);
-  const original = embeddedPrograms(originalSource).find((each) => each.anchor === anchor);
+  const sanitized = embeddedPrograms(sanitizedSource, { prose: true }).find(
+    (each) => each.anchor === anchor,
+  );
+  const original = embeddedPrograms(originalSource, { prose: true }).find(
+    (each) => each.anchor === anchor,
+  );
   if (
     sanitized === undefined ||
     original === undefined ||
@@ -2813,7 +2877,7 @@ export function applyProgramTokenValues(
     );
     const programs = spans.some((span) => span.embedded !== undefined)
       ? language === "shell"
-        ? embeddedPrograms(source)
+        ? embeddedPrograms(source, { prose: true })
         : undefined
       : [];
     if (programs === undefined) throw new Error("only a shell program embeds other programs");
@@ -2878,7 +2942,7 @@ export function applyProgramTokenValues(
   }
   if (embedded !== undefined && embedded.size > 0) {
     if (language !== "shell") throw new Error("only a shell program embeds other programs");
-    const programs = embeddedPrograms(source);
+    const programs = embeddedPrograms(source, { prose: true });
     for (const [anchor, embeddedValues] of embedded) {
       const program = programs.find((each) => each.anchor === anchor);
       if (program === undefined) {
@@ -2997,7 +3061,9 @@ export function bindProgramToken(
         throw new Error("the recorded program token is not safely bindable");
       }
     } else {
-      const program = embeddedPrograms(literal.value).find((each) => each.anchor === token);
+      const program = embeddedPrograms(literal.value, { prose: true }).find(
+        (each) => each.anchor === token,
+      );
       recorded = program?.tokens[embedded];
       if (
         program === undefined ||

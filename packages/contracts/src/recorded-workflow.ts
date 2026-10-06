@@ -694,7 +694,7 @@ export function validateWorkflowProgramProjection(
   );
   if (sanitized === undefined || embeddedHoles.length === 0 || protectedTokens.size === 0) return;
   const shellTokens = tokenizeProgram("shell", sanitized);
-  const programs = embeddedPrograms(sanitized);
+  const programs = embeddedPrograms(sanitized, { prose: true });
   for (const hole of embeddedHoles) {
     const program = programs.find((each) => each.anchor === hole.token);
     if (
