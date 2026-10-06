@@ -603,4 +603,39 @@ describe("Claude Code Transcript Decoder", () => {
       expect(parsed.availability).toBe("unavailable");
     });
   });
+
+  it("reports a message's usage once when Claude splits it across lines", () => {
+    const transcript = fs.readFileSync(
+      path.join(
+        __dirname,
+        "fixtures/recorded/2.1.283/projects/-workspace-project/8ea90a99-82b6-4c6c-b8cb-4fa5f5dee9dd.jsonl",
+      ),
+      "utf8",
+    );
+    const records = transcript
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    const outputByMessage = new Map<string, number>();
+    let assistantLines = 0;
+    for (const record of records) {
+      if (record.type !== "assistant") continue;
+      assistantLines += 1;
+      outputByMessage.set(record.message.id, record.message.usage.output_tokens);
+    }
+    // The fixture really does repeat each message's usage on every content-block line.
+    expect(assistantLines).toBeGreaterThan(outputByMessage.size);
+
+    const decoder = new ClaudeRecordDecoder();
+    const usages = records.flatMap((rawPayload, sequenceNumber) =>
+      decoder
+        .decode({ harnessId: "claude-code", sessionId, sequenceNumber, rawPayload })
+        .flatMap((event) => (event.providerUsage ? [event.providerUsage] : [])),
+    );
+
+    expect(usages).toHaveLength(outputByMessage.size);
+    expect(usages.reduce((sum, usage) => sum + (usage.outputTokens ?? 0), 0)).toBe(
+      [...outputByMessage.values()].reduce((sum, tokens) => sum + tokens, 0),
+    );
+  });
 });

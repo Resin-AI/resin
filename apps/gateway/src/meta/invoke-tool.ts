@@ -378,7 +378,7 @@ export function createInvokeToolHandler(
         const outputDigest = result ? hashCanonicalContent(result) : undefined;
         const invocationId = `inv_${randomUUID().replace(/-/g, "")}`;
 
-        const inputBytes = estimatePayloadBytes(params);
+        const inputBytes = estimatePayloadBytes(targetParams);
         const outputBytes = result !== undefined ? estimatePayloadBytes(result) : undefined;
         let usageEstimate: InvocationUsageEstimate | undefined;
         if (inputBytes !== undefined && outputBytes !== undefined) {

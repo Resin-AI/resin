@@ -331,6 +331,14 @@ export interface PendingClaudeToolCall {
 /** Tool calls awaiting their results, keyed by Claude's `tool_use` id. */
 export type PendingClaudeToolCalls = Map<string, PendingClaudeToolCall>;
 
+/**
+ * Assistant message ids whose provider usage an event already carries. Claude writes one content
+ * block per line, each repeating its message's usage, so only the first carrying event of a message
+ * may report it. Bounded: a message's lines arrive together, so only recent ids can recur.
+ */
+export type AttributedClaudeMessages = Set<string>;
+const MAX_ATTRIBUTED_MESSAGES = 4096;
+
 /** Canonical call id for a Claude `tool_use` id (`toolu_…`), constrained to identifier characters. */
 /**
  * Claude Code names every MCP tool `mcp__<server>__<tool>`, so a call named exactly `Bash` with a
@@ -360,7 +368,8 @@ export function claudeCallId(toolCallId: string): string {
 /**
  * Decodes a single Claude Code JSONL or memory transcript line into canonical intermediate events.
  * `pendingCalls` carries tool calls across lines so a result can name its tool, measure its
- * duration, and report the shell command it completed.
+ * duration, and report the shell command it completed; `attributedMessages` keeps a message split
+ * across lines from reporting its usage more than once.
  */
 export function decodeClaudeTranscriptLine(
   lineOrPayload: string | ClaudeTranscriptPayload,
@@ -368,6 +377,7 @@ export function decodeClaudeTranscriptLine(
   sequenceNumber = 0,
   timestamp = new Date().toISOString(),
   pendingCalls: PendingClaudeToolCalls = new Map(),
+  attributedMessages: AttributedClaudeMessages = new Set(),
 ): IntermediateSessionEvent[] {
   const events = decodeLineEvents(
     lineOrPayload,
@@ -375,6 +385,7 @@ export function decodeClaudeTranscriptLine(
     sequenceNumber,
     timestamp,
     pendingCalls,
+    attributedMessages,
   );
   // Every event of one line shares the line's sequence; its position within the line keeps each
   // one distinct (a tool result and the command it completed would otherwise collide).
@@ -394,6 +405,7 @@ function decodeLineEvents(
   sequenceNumber: number,
   timestamp: string,
   pendingCalls: PendingClaudeToolCalls,
+  attributedMessages: AttributedClaudeMessages,
 ): IntermediateSessionEvent[] {
   const payload = parseRawPayload(lineOrPayload);
   if (!payload) {
@@ -838,7 +850,11 @@ function decodeLineEvents(
     rawType === "assistant_message" ||
     asString(payload.role) === "assistant"
   ) {
-    const providerUsage = extractClaudeProviderUsage(payload);
+    const messageId = asString(asObject(payload.message)?.id);
+    const providerUsage =
+      messageId !== undefined && attributedMessages.has(messageId)
+        ? undefined
+        : extractClaudeProviderUsage(payload);
     const rawContent = asObject(payload.message)?.content ?? payload.content ?? payload.text;
 
     const assistantTurnEvents: IntermediateSessionEvent[] = [];
@@ -940,7 +956,7 @@ function decodeLineEvents(
       }
     }
 
-    // Attach providerUsage to the primary model execution event in this turn
+    // Attach providerUsage to the primary model execution event of the message's first line
     if (providerUsage && assistantTurnEvents.length > 0) {
       let targetEvent: IntermediateSessionEvent | undefined = assistantTurnEvents.find(
         (e): e is IntermediateMessageEvent => e.type === "message" && e.role === "assistant",
@@ -953,6 +969,13 @@ function decodeLineEvents(
       }
       if (targetEvent) {
         targetEvent.providerUsage = providerUsage;
+        if (messageId !== undefined) {
+          attributedMessages.add(messageId);
+          if (attributedMessages.size > MAX_ATTRIBUTED_MESSAGES) {
+            const oldest = attributedMessages.values().next().value;
+            if (oldest !== undefined) attributedMessages.delete(oldest);
+          }
+        }
       }
     }
 
@@ -1184,6 +1207,8 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
   readonly decoderVersion = CLAUDE_ACCOUNTING_VERSION;
   /** Tool calls awaiting results; Claude `tool_use` ids are unique across sessions. */
   private readonly pendingCalls: PendingClaudeToolCalls = new Map();
+  /** Messages whose usage is already reported; Claude message ids are unique across sessions. */
+  private readonly attributedMessages: AttributedClaudeMessages = new Set();
 
   canDecode(record: RawHarnessRecord): boolean {
     if (!record) return false;
@@ -1215,6 +1240,7 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
         sequenceNumber,
         timestamp,
         this.pendingCalls,
+        this.attributedMessages,
       );
     }
     if (
@@ -1230,6 +1256,7 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
         sequenceNumber,
         timestamp,
         this.pendingCalls,
+        this.attributedMessages,
       );
     }
     return [];
