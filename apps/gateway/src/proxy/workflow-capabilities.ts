@@ -21,7 +21,11 @@
  *   without its trailing `tail`/`head`/`grep` display filter (`splitDisplayFilter`, version 1),
  *   returning the command's whole output and exit status; replay confirmation pipes that output
  *   through the dropped stages before comparing it with the recording; a step's boolean
- *   `displayFilter.input`, when the caller sets it, runs the whole recorded pipeline instead.
+ *   `displayFilter.input`, when the caller sets it, runs the whole recorded pipeline instead;
+ * - `display-filter-v2`: also `displayFilter.version` 2 (`splitDisplayFilters`), which drops the
+ *   trailing display filter of every top-level pipeline of a program the version-2 lexer delimits
+ *   (redirections, `$NAME`, `$(...)` and double-quoted expansions in the kept text), runs the rest
+ *   verbatim, and replays each cut pipeline's marker-bracketed output through its own filter.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -33,4 +37,5 @@ export const WORKFLOW_CAPABILITIES = [
   "joint-token-spans-v1",
   "cross-harness-shell-heldout-v1",
   "display-filter-v1",
+  "display-filter-v2",
 ].join(",");
