@@ -17,6 +17,7 @@
 import { parser as javascriptParser } from "@lezer/javascript";
 import { parser as pythonParser } from "@lezer/python";
 import {
+  commandBaseName,
   isCodeFlagWord,
   isCodeRunnerWord,
   isEvaluatorWord,
@@ -152,9 +153,9 @@ function commandRunsCode(tokens: readonly ProgramToken[]): boolean {
  * Applies the shared code-evaluation policy (see `code-evaluation.ts`) to a POSIX program's tokens:
  * a program that runs an evaluator (`eval`, `trap`, `ssh`, `cmd /c`, `pwsh -Command`, `sudo -s`, …)
  * in command position binds nothing; one that runs a code runner's code string binds no assignment,
- * which that code can read.
+ * which that code can read. Returns whether the program does either.
  */
-function applyPosixCodeEvaluation(tokens: ProgramToken[]): void {
+function applyPosixCodeEvaluation(tokens: ProgramToken[]): boolean {
   let evaluates = false;
   let runsCode = false;
   let words: string[] = [];
@@ -183,10 +184,11 @@ function applyPosixCodeEvaluation(tokens: ProgramToken[]): void {
     words.push(typeof token.value === "string" ? token.value : token.raw);
   }
   settle();
-  if (!evaluates && !runsCode) return;
+  if (!evaluates && !runsCode) return false;
   for (const token of tokens) {
     if (evaluates || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(token.raw)) token.bindable = false;
   }
+  return true;
 }
 
 /** A heredoc the shell lexer delimited: its `<<` operator, its delimiter word, and its body. */
@@ -207,6 +209,8 @@ interface LexedHeredoc {
   terminatorEnd?: number;
   /** A `<<-` body with a tab-indented line: what the reader sees is not a span of the shell text. */
   tabbedBody: boolean;
+  /** Opened inside parentheses, a command substitution or backticks: not a top-level command's. */
+  nested: boolean;
 }
 
 interface LexedShell {
@@ -420,6 +424,8 @@ function lexShell(source: string, heredocs: boolean): LexedShell {
           delimiterToken: tokens.length - 1,
           ...delimiter,
           stripTabs,
+          nested:
+            parentheses.length > 0 || commandSubstitutionDepth > 0 || insideBacktickSubstitution,
         });
       }
     }
@@ -441,7 +447,13 @@ function lexShell(source: string, heredocs: boolean): LexedShell {
   };
 }
 
-function analyzeShell(source: string): LexedShell {
+/** A lexed POSIX program after the nesting and code-evaluation policies (see {@link lexShell}). */
+interface AnalyzedShell extends LexedShell {
+  /** The program runs an evaluator or a code runner's code string (see applyPosixCodeEvaluation). */
+  evaluatesCode: boolean;
+}
+
+function analyzeShell(source: string): AnalyzedShell {
   const lexed = lexShell(source, true);
   const { tokens, body } = lexed;
   // Inner words already have their original spans. Admit only arguments of a complete,
@@ -594,8 +606,8 @@ function analyzeShell(source: string): LexedShell {
     tokens[position]!.bindable = false;
     delete tokens[position]!.value;
   }
-  applyPosixCodeEvaluation(tokens);
-  return { ...lexed, tokens, opaqueFrom };
+  const evaluatesCode = applyPosixCodeEvaluation(tokens);
+  return { ...lexed, tokens, opaqueFrom, evaluatesCode };
 }
 
 /** Whether the character at `index` continues a shell word (so a quote was not the whole token). */
@@ -1103,26 +1115,47 @@ function patchTokens(source: string): ProgramToken[] {
   return tokens;
 }
 
+/** A programming language whose program a shell command embeds and this module tokenizes. */
+export type EmbeddedCodeLanguage = "python" | "javascript" | "shell";
+
 /**
  * A program embedded in a shell command: a heredoc body an interpreter reads, a heredoc body written
  * to a script file a later command of the same text runs, a `-c`/`-e` code string, or a POSIX shell
  * program another shell runs from one quoted word (see {@link embeddedShellProgram}).
+ *
+ * Language `text` is heredoc prose rather than a program: the literal body of a quoted-delimiter
+ * heredoc a command reads as data (`git commit -F - <<'EOF'`, `gh pr create --body-file - <<'EOF'`,
+ * `--body "$(cat <<'EOF' … EOF\n)"`). Its one token is the whole body (see
+ * {@link heredocProsePrograms}): kind `string`, `quote: "heredoc"`.
  */
 export interface EmbeddedProgram {
-  /** Top-level shell token that anchors it: the code string token, or the heredoc delimiter token. */
+  /**
+   * Top-level shell token that anchors it: the code string token, the heredoc delimiter token, or
+   * the double-quoted word whose `$(cat <<'EOF' …)` substitution holds a prose heredoc.
+   */
   anchor: number;
-  language: "python" | "javascript" | "shell";
+  language: EmbeddedCodeLanguage | "text";
   /** Half-open span of the embedded source inside the shell text. */
   start: number;
   end: number;
-  /** How the embedded text sits in the shell source; decides the escaping a rendered value needs. */
-  context: "literal-heredoc" | "expanding-heredoc" | "single-quoted" | "double-quoted";
+  /**
+   * How the embedded text sits in the shell source; decides the escaping a rendered value needs.
+   * `substituted-heredoc`: a literal heredoc inside a `$( … )` inside a double-quoted word.
+   */
+  context:
+    | "literal-heredoc"
+    | "expanding-heredoc"
+    | "substituted-heredoc"
+    | "single-quoted"
+    | "double-quoted";
   /**
    * A shell program `ssh` sends to the remote account's login shell, whose grammar the device cannot
    * see: a value is rendered into it only when every common shell reads it as data (see
    * {@link renderEmbeddedProgramTokenValue}).
    */
   remote?: true;
+  /** The delimiter that ends a prose heredoc (`text`), and whether it is `<<-` (tabs stripped). */
+  heredoc?: { delimiter: string; stripTabs: boolean };
   /** tokenizeProgram(language, embeddedSource) with offsets made absolute in the shell text. */
   tokens: ProgramToken[];
 }
@@ -1140,10 +1173,7 @@ const SHELL_COMMAND_SEPARATORS: Record<string, true> = {
 };
 
 /** `inline`: the word runs a `-e` code string, where `bun` is a JavaScript runtime too. */
-function interpreterLanguage(
-  word: ProgramToken,
-  inline = false,
-): EmbeddedProgram["language"] | undefined {
+function interpreterLanguage(word: ProgramToken, inline = false): EmbeddedCodeLanguage | undefined {
   // Only a plain word names a program; quoting or expansion in it is never guessed through.
   if (word.kind !== "word" || word.value === undefined || word.value !== word.raw) return undefined;
   const base = word.raw.slice(word.raw.lastIndexOf("/") + 1);
@@ -1233,7 +1263,7 @@ function scriptRun(
   tokens: readonly ProgramToken[],
   command: ShellSimpleCommand,
   file: string,
-): EmbeddedProgram["language"] | "direct" | undefined {
+): EmbeddedCodeLanguage | "direct" | undefined {
   const words = command.words
     .map((index) => tokens[index]!)
     .filter((word) => !SHELL_ASSIGNMENT.test(word.raw));
@@ -1267,7 +1297,7 @@ function writtenScriptLanguage(
   commands: readonly ShellSimpleCommand[],
   writer: ShellSimpleCommand,
   body: string,
-): EmbeddedProgram["language"] | undefined {
+): EmbeddedCodeLanguage | undefined {
   const file = standardInputFile(tokens, writer);
   if (file === undefined) return undefined;
   let last = writer;
@@ -1322,7 +1352,7 @@ function interpreterReadsStandardInput(
 }
 
 function embeddedTokens(
-  language: EmbeddedProgram["language"],
+  language: EmbeddedCodeLanguage,
   source: string,
   start: number,
   end: number,
@@ -1342,7 +1372,7 @@ function commandInterpreter(
   tokens: readonly ProgramToken[],
   command: ShellSimpleCommand,
   inline = false,
-): { position: number; language: EmbeddedProgram["language"] } | undefined {
+): { position: number; language: EmbeddedCodeLanguage } | undefined {
   const position = command.words.findIndex((index) => !SHELL_ASSIGNMENT.test(tokens[index]!.raw));
   if (position === -1) return undefined;
   const language = interpreterLanguage(tokens[command.words[position]!]!, inline);
@@ -1544,13 +1574,373 @@ function embeddedShellProgram(
 }
 
 /**
+ * Command names that read their standard input (or a file it was saved to) as code, or build and
+ * run command lines from it, beyond the code runners and evaluators of `code-evaluation.ts`; and
+ * `chmod`/`install`, which make a saved file runnable.
+ */
+const STANDARD_INPUT_CODE_READERS: ReadonlySet<string> = new Set([
+  ".",
+  "at",
+  "batch",
+  "bc",
+  "bmake",
+  "bunx",
+  "chmod",
+  "chroot",
+  "crontab",
+  "dc",
+  "docker",
+  "ed",
+  "emacs",
+  "ex",
+  "expect",
+  "gdb",
+  "ghci",
+  "gmake",
+  "iex",
+  "install",
+  "irb",
+  "kubectl",
+  "launchctl",
+  "lldb",
+  "m4",
+  "make",
+  "npm",
+  "npx",
+  "nsenter",
+  "nvim",
+  "pnpm",
+  "pnpx",
+  "podman",
+  "r",
+  "source",
+  "systemd-run",
+  "ts-node",
+  "tsx",
+  "unshare",
+  "vi",
+  "vim",
+  "wish",
+  "xargs",
+  "yarn",
+]);
+/** Commands that store their standard input in shell variables, which any later command can read. */
+const VARIABLE_READERS: ReadonlySet<string> = new Set(["read", "mapfile", "readarray"]);
+/** Commands whose arguments are assignments to shell variables. */
+const DECLARATION_COMMANDS: ReadonlySet<string> = new Set([
+  "declare",
+  "export",
+  "local",
+  "readonly",
+  "typeset",
+]);
+/** A file a shell, interpreter, build tool or hook runs: by extension or by well-known name. */
+const SCRIPT_FILE =
+  /(?:\.(?:sh|bash|zsh|ksh|fish|command|py|pyw|js|mjs|cjs|jsx|ts|mts|cts|tsx|rb|pl|pm|php|lua|r|tcl|ps1|psm1|bat|cmd|vbs|applescript|scpt|awk|sed|sql|mk)|(?:^|\/)(?:makefile|gnumakefile|dockerfile|containerfile|justfile|rakefile|\.?(?:bash|zsh|k?sh)rc|\.?profile|\.bash_profile|\.zprofile|\.zshenv|\.envrc|crontab)|(?:^|\/)\.git\/hooks\/[^/]+|(?:^|\/)\.husky\/[^/]+)$/i;
+/** A redirection that writes a file: `>`, `>>`, `2>`, `1>>`. */
+const WRITE_REDIRECT = /^[0-9]*>{1,2}$/;
+/** Stands for a word whose text an expansion decides. */
+const UNKNOWN_WORD = "\u0000";
+
+/**
+ * The opening of a `"$(cat <<'EOF'` substitution: a double-quoted word whose command substitution
+ * is a `cat` of one quoted-delimiter heredoc (`<<'D'`, `<<"D"`, `<<\D`, `<<-'D'`), then a newline.
+ */
+const SUBSTITUTED_HEREDOC_OPENING =
+  /^"\$\([ \t]*cat[ \t]*<<(-?)[ \t]*(?:'([A-Za-z0-9_.-]+)'|"([A-Za-z0-9_.-]+)"|\\([A-Za-z0-9_.-]+))[ \t]*\n/;
+/** What may follow a substituted heredoc's terminator line: blank lines, then `)"`. */
+const SUBSTITUTED_HEREDOC_CLOSING = /^\n[ \t\n]*\)"/;
+
+/** Each word of a command as text: a literal word's value, or {@link UNKNOWN_WORD}. */
+function commandWordTexts(tokens: readonly ProgramToken[], command: ShellSimpleCommand): string[] {
+  return command.words.map((index) => {
+    const token = tokens[index]!;
+    if (typeof token.value === "string") return token.value;
+    // An assignment whose value expands stays an assignment: never a command name.
+    const assignment = SHELL_ASSIGNMENT.exec(token.raw);
+    return assignment === null ? UNKNOWN_WORD : `${assignment[0]}${UNKNOWN_WORD}`;
+  });
+}
+
+/**
+ * Whether one simple command reads what it is given as data: no command-position word (wrappers
+ * seen through) is an expansion or a {@link STANDARD_INPUT_CODE_READERS} program, no wrapper hands
+ * it to a shell, and no word at all is a code runner or an evaluator (`docker exec -i c bash`).
+ */
+function commandReadsAsData(texts: readonly string[]): boolean {
+  const names = posixCommandWords(texts);
+  if (names.some((name) => name === UNKNOWN_WORD)) return false;
+  if (names.some((name) => STANDARD_INPUT_CODE_READERS.has(commandBaseName(name)))) return false;
+  if (posixWrapperEvaluates(texts)) return false;
+  return !texts.some(
+    (word) => word !== UNKNOWN_WORD && (isCodeRunnerWord(word) || isEvaluatorWord(word, "posix")),
+  );
+}
+
+/** Whether a command and every command its output is piped into read as data. */
+function pipelineReadsAsData(
+  tokens: readonly ProgramToken[],
+  command: ShellSimpleCommand,
+): boolean {
+  for (let each: ShellSimpleCommand | undefined = command; each; each = each.pipeTo) {
+    if (!commandReadsAsData(commandWordTexts(tokens, each))) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether what a pipeline writes to files stays data: every file it writes (`>`/`>>` targets,
+ * `tee` operands) is a plain path that names no script, and no later command of the same text runs
+ * it, hands it to a code reader or makes it runnable.
+ */
+function writtenFilesStayData(
+  tokens: readonly ProgramToken[],
+  commands: readonly ShellSimpleCommand[],
+  command: ShellSimpleCommand,
+): boolean {
+  const files: string[] = [];
+  let last = command;
+  for (let each: ShellSimpleCommand | undefined = command; each; each = each.pipeTo) {
+    last = each;
+    for (const redirect of each.redirects) {
+      if (WRITE_REDIRECT.test(redirect.operator)) {
+        const target = tokens[redirect.target]!.value;
+        if (typeof target !== "string") return false;
+        files.push(target);
+      }
+    }
+    const texts = commandWordTexts(tokens, each);
+    const tee = texts.findIndex((word) => commandBaseName(word) === "tee");
+    if (tee !== -1) {
+      for (const operand of texts.slice(tee + 1)) {
+        if (operand === UNKNOWN_WORD) return false;
+        if (!operand.startsWith("-")) files.push(operand);
+      }
+    }
+  }
+  if (files.some((file) => SCRIPT_FILE.test(file))) return false;
+  for (const later of commands.slice(commands.indexOf(last) + 1)) {
+    const texts = commandWordTexts(tokens, later);
+    const mentioned = files.filter(
+      (file) =>
+        texts.some((word) => sameFile(word, file)) ||
+        later.redirects.some((redirect) => sameFile(tokens[redirect.target]!.value, file)),
+    );
+    if (mentioned.length === 0) continue;
+    const name = texts.find((word) => !SHELL_ASSIGNMENT.test(word));
+    if (!commandReadsAsData(texts) || mentioned.some((file) => sameFile(name, file))) return false;
+  }
+  return true;
+}
+
+/** A `"$( cat <<'EOF' … EOF\n)"` word's parts, read from its opening `"` at `quote`. */
+function substitutedHeredoc(
+  source: string,
+  quote: number,
+):
+  | {
+      bodyStart: number;
+      bodyEnd: number;
+      /** Just past the closing `"`. */
+      end: number;
+      delimiter: string;
+      stripTabs: boolean;
+    }
+  | undefined {
+  const opening = SUBSTITUTED_HEREDOC_OPENING.exec(source.slice(quote));
+  if (opening === null) return undefined;
+  const stripTabs = opening[1] === "-";
+  const delimiter = (opening[2] ?? opening[3] ?? opening[4])!;
+  const bodyStart = quote + opening[0].length;
+  const delimited = delimitHeredoc(source, bodyStart, delimiter, stripTabs);
+  if (delimited.terminatorEnd === undefined) return undefined;
+  const closing = SUBSTITUTED_HEREDOC_CLOSING.exec(source.slice(delimited.terminatorEnd));
+  if (closing === null) return undefined;
+  return {
+    bodyStart,
+    bodyEnd: delimited.bodyEnd,
+    end: delimited.terminatorEnd + closing[0].length,
+    delimiter,
+    stripTabs,
+  };
+}
+
+/**
+ * Inside a command substitution, bash ends a heredoc at a line that starts with its delimiter and
+ * holds a `)` (`EOF)`, `EOF )`, `EOF")`), wherever that `)` is: such a line never stays prose.
+ */
+function endsSubstitutedHeredoc(line: string, delimiter: string): boolean {
+  return line.startsWith(delimiter) && line.includes(")");
+}
+
+/**
+ * dash (0.5.12) drops the first byte of a non-ASCII character that directly follows a heredoc
+ * line's longest prefix shared with the delimiter (`Eé`, `EOFé` under `EOF`): such a line never
+ * reaches the reader intact.
+ */
+function dashDropsByte(line: string, delimiter: string): boolean {
+  let shared = 0;
+  while (shared < line.length && shared < delimiter.length && line[shared] === delimiter[shared]) {
+    shared += 1;
+  }
+  return shared > 0 && line.charCodeAt(shared) > 0x7f;
+}
+
+/** The prose program of one quoted heredoc body: one `string` token, `quote: "heredoc"`. */
+function heredocProseProgram(
+  source: string,
+  anchor: number,
+  heredoc: { bodyStart: number; bodyEnd: number; delimiter: string; stripTabs: boolean },
+  context: "literal-heredoc" | "substituted-heredoc",
+): EmbeddedProgram | undefined {
+  const { bodyStart, bodyEnd, delimiter, stripTabs } = heredoc;
+  // An empty body has no line a value could replace; a terminated body ends in a line break.
+  if (bodyEnd <= bodyStart || source[bodyEnd - 1] !== "\n") return undefined;
+  const raw = source.slice(bodyStart, bodyEnd);
+  const lines = raw.slice(0, -1).split("\n");
+  const read = stripTabs ? lines.map((line) => line.replace(/^\t+/, "")) : lines;
+  if (
+    context === "substituted-heredoc" &&
+    read.some((line) => endsSubstitutedHeredoc(line, delimiter))
+  ) {
+    return undefined;
+  }
+  const value = read.join("\n");
+  // A script's shebang: whatever reads it, the body is a program.
+  if (value.startsWith("#!")) return undefined;
+  return {
+    anchor,
+    language: "text",
+    start: bodyStart,
+    end: bodyEnd,
+    context,
+    heredoc: { delimiter, stripTabs },
+    tokens: [
+      {
+        kind: "string",
+        start: bodyStart,
+        end: bodyEnd,
+        raw,
+        value,
+        bindable: true,
+        quote: "heredoc",
+      },
+    ],
+  };
+}
+
+/**
+ * The prose programs of a POSIX shell text: the literal bodies of quoted-delimiter heredocs that a
+ * command reads as data, each one bindable `string` token with `quote: "heredoc"` whose value is
+ * the text the reader receives without the line break that ends its last line.
+ *
+ * - A heredoc a top-level command reads (`git commit -F - <<'EOF'`, `gh pr create --body-file -
+ *   <<'EOF'`, `cat > notes.md <<'EOF'`), anchored at its delimiter token; context `literal-heredoc`.
+ * - The heredoc of a `"$(cat <<'EOF'\n…\nEOF\n)"` word (optionally after a plain prefix such as
+ *   `--body=`), anchored at the top-level token holding the word; context `substituted-heredoc`.
+ *
+ * Detection fails closed. Nothing in a program that runs an evaluator or a code string is prose;
+ * neither is a heredoc opened inside parentheses or backticks, one whose command — or a command its
+ * output is piped to — could read it as code ({@link commandReadsAsData}), one written to a file
+ * that is a script or that a later command runs ({@link writtenFilesStayData}), a body that starts
+ * with `#!`, nor one stored in a variable (`read`, an assignment) in a program with any code reader.
+ * The top-level lexer reads a `"…"` word up to its next `"`, so after a substituted heredoc whose
+ * body holds a `"` the token boundaries it reports are not the shell's: nothing past one is prose.
+ */
+function heredocProsePrograms(
+  source: string,
+  analyzed: AnalyzedShell,
+  commands: readonly ShellSimpleCommand[],
+  commandOf: ReadonlyMap<number, ShellSimpleCommand>,
+  data: ReadonlyArray<{ command: ShellSimpleCommand; heredoc: LexedHeredoc }>,
+): EmbeddedProgram[] {
+  const { tokens, body, heredocs, opaqueFrom, evaluatesCode } = analyzed;
+  if (evaluatesCode) return [];
+  const anyCodeReader = commands.some(
+    (each) => !commandReadsAsData(commandWordTexts(tokens, each)),
+  );
+  const dataAt = new Map(data.map((each) => [each.heredoc.delimiterToken, each]));
+  /** The rest of each heredoc's opening line, whose line break the lexer took to start the body. */
+  const openingLines = heredocs.map((heredoc) => ({
+    start: tokens[heredoc.operator]!.start,
+    end: heredoc.bodyStart,
+  }));
+  const programs: EmbeddedProgram[] = [];
+  let depth = 0;
+  let backtick = false;
+  for (let position = 0; position < Math.min(tokens.length, opaqueFrom); position += 1) {
+    if (body.has(position)) continue;
+    const token = tokens[position]!;
+    if (token.raw === "(") depth += 1;
+    if (token.raw === ")") depth = Math.max(0, depth - 1);
+    const fed = dataAt.get(position);
+    if (fed !== undefined) {
+      const { command, heredoc } = fed;
+      const opening = source.slice(tokens[heredoc.operator]!.start, heredoc.bodyStart);
+      const reader = posixCommandWords(commandWordTexts(tokens, command)).at(-1);
+      if (
+        heredoc.quoted &&
+        !heredoc.nested &&
+        !opening.includes("$(") &&
+        !opening.includes("`") &&
+        pipelineReadsAsData(tokens, command) &&
+        writtenFilesStayData(tokens, commands, command) &&
+        !(reader !== undefined && VARIABLE_READERS.has(commandBaseName(reader)) && anyCodeReader)
+      ) {
+        const program = heredocProseProgram(
+          source,
+          heredoc.delimiterToken,
+          heredoc,
+          "literal-heredoc",
+        );
+        if (program !== undefined) programs.push(program);
+      }
+      continue;
+    }
+    if (token.kind === "operator") continue;
+    const quoteAt = token.raw.indexOf('"');
+    if (quoteAt !== -1 && !backtick && depth === 0) {
+      const prefix = token.raw.slice(0, quoteAt);
+      const quote = token.start + quoteAt;
+      const construct = /^[A-Za-z0-9_./:=@%+,-]*$/.test(prefix)
+        ? substitutedHeredoc(source, quote)
+        : undefined;
+      if (construct !== undefined) {
+        const ambiguous = openingLines.some((line) => line.start < quote && quote < line.end);
+        const command = commandOf.get(position);
+        const assigns =
+          command !== undefined &&
+          (SHELL_ASSIGNMENT.test(token.raw) ||
+            DECLARATION_COMMANDS.has(
+              commandBaseName(posixCommandWords(commandWordTexts(tokens, command))[0] ?? ""),
+            ));
+        if (
+          !ambiguous &&
+          command !== undefined &&
+          pipelineReadsAsData(tokens, command) &&
+          writtenFilesStayData(tokens, commands, command) &&
+          !(assigns && anyCodeReader)
+        ) {
+          const program = heredocProseProgram(source, position, construct, "substituted-heredoc");
+          if (program !== undefined) programs.push(program);
+        }
+        // The lexer's word ended at a `"` inside the body: what it reads next is not the shell's.
+        if (ambiguous || readShellQuoted(source, quote).end !== construct.end) break;
+      }
+    }
+    if (token.raw.includes("`")) backtick = true;
+  }
+  return programs;
+}
+
+/**
  * The programs embedded in a shell command: heredoc bodies fed to python or node, heredoc bodies
  * `cat`/`tee` save to a script file a later command of the same text runs, `-c`/`-e` code
- * strings, and the POSIX shell program of `sh -c '…'`, `docker exec c sh -c '…'` or `ssh host '…'`
- * (see {@link embeddedShellProgram}). Detection fails closed: a construct whose quoting, expansion
- * or interpreter is not certain yields nothing, a body saved to a file nothing runs is data and
- * yields nothing, and a heredoc whose body cannot be delimited ends the scan (everything after it
- * would be guessed).
+ * strings, the POSIX shell program of `sh -c '…'`, `docker exec c sh -c '…'` or `ssh host '…'`
+ * (see {@link embeddedShellProgram}), and the prose of quoted heredocs read as data (language
+ * `text`, see {@link heredocProsePrograms}). Detection fails closed: a construct whose quoting,
+ * expansion or interpreter is not certain yields nothing, and a heredoc whose body cannot be
+ * delimited ends the scan (everything after it would be guessed).
  *
  * Top-level tokens are untouched — the code string of a shell program stays unbindable as a whole
  * (see `code-evaluation.ts`) — and embedded tokens carry absolute offsets into `shellSource`. An
@@ -1558,9 +1948,12 @@ function embeddedShellProgram(
  * code strings bind nothing either; only one level is read.
  */
 export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
-  const { tokens, body, heredocs, opaqueFrom } = analyzeShell(shellSource);
+  const analyzed = analyzeShell(shellSource);
+  const { tokens, body, heredocs, opaqueFrom } = analyzed;
   const heredocAt = new Map(heredocs.map((heredoc) => [heredoc.operator, heredoc]));
   const commands: ShellSimpleCommand[] = [];
+  /** The simple command each top-level word belongs to. */
+  const commandOf = new Map<number, ShellSimpleCommand>();
   const fed: Array<{ command: ShellSimpleCommand; heredoc: LexedHeredoc }> = [];
   let command: ShellSimpleCommand = { words: [], redirects: [] };
   const closeCommand = (separator?: string): void => {
@@ -1578,6 +1971,7 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
     previousEnd = token.end;
     if (token.kind !== "operator") {
       command.words.push(position);
+      commandOf.set(position, command);
       continue;
     }
     if (SHELL_COMMAND_SEPARATORS[token.raw]) {
@@ -1610,9 +2004,15 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
   }
   closeCommand();
   const programs: EmbeddedProgram[] = [];
+  /** Quoted heredocs no interpreter reads as code: candidates for prose. */
+  const data: Array<{ command: ShellSimpleCommand; heredoc: LexedHeredoc }> = [];
   for (const { command: reader, heredoc } of fed) {
+    if (heredoc.terminatorEnd === undefined) continue;
     // `<<-` removes leading tabs, so the text the interpreter reads is not a span of the shell.
-    if (heredoc.terminatorEnd === undefined || heredoc.tabbedBody) continue;
+    if (heredoc.tabbedBody) {
+      data.push({ command: reader, heredoc });
+      continue;
+    }
     const text = shellSource.slice(heredoc.bodyStart, heredoc.bodyEnd);
     const context = heredoc.quoted
       ? "literal-heredoc"
@@ -1627,7 +2027,10 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
         : interpreterReadsStandardInput(tokens, reader, interpreter.position)
           ? interpreter.language
           : undefined;
-    if (language === undefined) continue;
+    if (language === undefined) {
+      data.push({ command: reader, heredoc });
+      continue;
+    }
     const programTokens = embeddedTokens(language, shellSource, heredoc.bodyStart, heredoc.bodyEnd);
     if (programTokens === undefined) continue;
     programs.push({
@@ -1645,6 +2048,7 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
     const shell = embeddedShellProgram(shellSource, tokens, each);
     if (shell !== undefined) programs.push(shell);
   }
+  programs.push(...heredocProsePrograms(shellSource, analyzed, commands, commandOf, data));
   return programs.sort((left, right) => left.start - right.start);
 }
 
@@ -1656,8 +2060,132 @@ export function embeddedPrograms(shellSource: string): EmbeddedProgram[] {
 const REMOTE_VALUE = /^[A-Za-z0-9 _./:=+,~-]*$/;
 
 /**
+ * Whether bash 3.2 — `/bin/bash` and `/bin/sh` on macOS — finds the end of a `"$( … )"` command
+ * substitution where every later shell does, with `text` (heredoc lines) inside it, and copies the
+ * text unchanged. Before it parses a substitution in a double-quoted word, bash 3.2 scans for its
+ * closing `)` with `parse_matched_pair`, which knows nothing of heredocs: it pairs `'…'`, `"…"`,
+ * `` `…` ``, `(…)` and `$(…)`, honors `\` escapes (and drops `\` + newline), and rewrites `$'…'`
+ * and `$"…"`. The text must leave that scanner where it found it, inside the substitution: a lone
+ * `'` or `)` ends or swallows it, after which the rest of the body is parsed as commands.
+ */
+function bash32SubstitutionKeepsText(text: string): boolean {
+  const frames: Array<"group" | "single" | "double" | "backquote"> = ["group"];
+  let escaped = false;
+  let dollar = false;
+  for (const char of text) {
+    const frame = frames.at(-1)!;
+    // bash marks its own quoting with these bytes: never copied as written.
+    if (char === "\u0001" || char === "\u007f") return false;
+    if (frame === "single") {
+      if (char === "'") frames.pop();
+      dollar = false;
+      continue;
+    }
+    if (escaped) {
+      if (char === "\n") return false;
+      escaped = false;
+      dollar = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      dollar = false;
+      continue;
+    }
+    if (frame === "group") {
+      if (char === ")") {
+        frames.pop();
+        if (frames.length === 0) return false;
+      } else if (char === "(") {
+        frames.push("group");
+      } else if (char === "'" || char === '"') {
+        if (dollar) return false;
+        frames.push(char === "'" ? "single" : "double");
+      } else if (char === "`") {
+        frames.push("backquote");
+      } else if (dollar && (char === "{" || char === "[")) {
+        return false;
+      }
+    } else if (frame === "double") {
+      if (char === '"') frames.pop();
+      else if (char === "`") frames.push("backquote");
+      else if (dollar && char === "(") frames.push("group");
+      else if (dollar && (char === "{" || char === "[")) return false;
+    } else if (char === "`") {
+      frames.pop();
+    }
+    dollar = char === "$";
+  }
+  return !escaped && frames.length === 1;
+}
+
+/**
+ * Renders a value as the body of a prose heredoc (see {@link heredocProsePrograms}): its lines
+ * verbatim, each ending in a line break, so the reader receives exactly the value plus the line
+ * break that ends its last line. The recorded value renders as the recorded body.
+ *
+ * A value is refused, never altered, when a shell would not read it back as the same text: a NUL
+ * or carriage return, a line that is the delimiter, under `<<-` a line starting with a tab
+ * (the shell strips it), and a line starting with part of the delimiter and then a non-ASCII
+ * character ({@link dashDropsByte}). Inside `"$(cat <<'EOF' … )"` a value is further refused when any shell
+ * this program may run in would end the substitution or the heredoc inside it, or change its text:
+ * a line starting with the delimiter that holds a `)` (bash ≥ 4.2 ends the heredoc there), a line
+ * ending in `\` (bash ≤ 4.4 joins it to the next), or text bash 3.2's substitution scanner does not
+ * pass over intact (see {@link bash32SubstitutionKeepsText}: lone quotes, backquotes or
+ * parentheses, `${`, `$[`, `$'`, `$"`).
+ */
+function renderHeredocProse(
+  program: EmbeddedProgram,
+  token: ProgramToken,
+  value: ProgramTokenValue,
+): string {
+  const heredoc = program.heredoc;
+  if (heredoc === undefined || token.quote !== "heredoc" || !token.bindable) {
+    throw new Error("this embedded token is not heredoc prose");
+  }
+  if (typeof value !== "string") throw new TypeError("a heredoc body takes text");
+  if (value === token.value) return token.raw;
+  if (value.includes("\0")) throw new Error("a heredoc body cannot contain a NUL");
+  if (value.includes("\r")) throw new Error("a heredoc body cannot contain a carriage return");
+  const { delimiter, stripTabs } = heredoc;
+  const lines = value.split("\n");
+  for (const line of lines) {
+    if (stripTabs && line.startsWith("\t")) {
+      throw new Error("a `<<-` heredoc line cannot start with a tab: the shell strips it");
+    }
+    if (line === delimiter) {
+      throw new Error(`a heredoc body line cannot be its delimiter '${delimiter}'`);
+    }
+    if (dashDropsByte(line, delimiter)) {
+      throw new Error(
+        `a heredoc body line cannot start with part of its delimiter '${delimiter}' and then a non-ASCII character: dash drops a byte of it`,
+      );
+    }
+    if (program.context === "substituted-heredoc") {
+      if (endsSubstitutedHeredoc(line, delimiter)) {
+        throw new Error(
+          `inside $( … ), a heredoc body line cannot start with its delimiter '${delimiter}' and hold a ')'`,
+        );
+      }
+      if (line.endsWith("\\")) {
+        throw new Error("inside $( … ), a heredoc body line cannot end in a backslash");
+      }
+    }
+  }
+  if (program.context === "substituted-heredoc" && !bash32SubstitutionKeepsText(`${value}\n`)) {
+    throw new Error(
+      "inside $( … ), a heredoc body needs paired quotes, backquotes and parentheses and no ${, $[, $' or $\": bash 3.2 would end the substitution early",
+    );
+  }
+  // `<<-` strips leading tabs, so the recorded indentation can stay.
+  const indent = stripTabs ? /^\t*/.exec(token.raw)![0] : "";
+  return `${lines.map((line) => (line.length === 0 ? line : `${indent}${line}`)).join("\n")}\n`;
+}
+
+/**
  * Renders a bound value for a token of an embedded program, escaped for the shell context the
  * program's text sits in. A heredoc value may not carry a newline: it could end the heredoc early.
+ * Heredoc prose (language `text`) is rendered by {@link renderHeredocProse}.
  *
  * A value in an embedded shell program is rendered twice: as data for the inner shell (quoted as
  * the recorded token was, by {@link renderProgramTokenValue}), then escaped for the quoted word that
@@ -1671,6 +2199,8 @@ export function renderEmbeddedProgramTokenValue(
   token: ProgramToken,
   value: ProgramTokenValue,
 ): string {
+  if (program.language === "text") return renderHeredocProse(program, token, value);
+  if (token.quote === "heredoc") throw new Error("heredoc prose belongs to a text program");
   if (program.language === "shell") {
     const text = typeof value === "string" ? value : String(value);
     if (text.includes("\0")) throw new Error("a shell program value cannot contain a NUL");
@@ -1697,6 +2227,8 @@ export function renderEmbeddedProgramTokenValue(
     case "literal-heredoc":
       if (rendered.includes("\n")) throw new Error("a heredoc value cannot contain a newline");
       return rendered;
+    case "substituted-heredoc":
+      throw new Error("only heredoc prose sits in a substituted heredoc");
   }
 }
 
@@ -1756,6 +2288,9 @@ export function renderProgramTokenValue(
   language: ProgramLanguage = "shell",
 ): string {
   if (!token.bindable) throw new Error("the recorded program token is not safely bindable");
+  if (token.quote === "heredoc") {
+    throw new Error("heredoc prose is rendered only as the body of its heredoc");
+  }
   if (token.kind === "operator" || token.kind === "unsupported") {
     throw new Error("this program token cannot carry a bound value");
   }

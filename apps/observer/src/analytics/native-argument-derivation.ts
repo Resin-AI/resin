@@ -751,9 +751,12 @@ export function deriveNativeCalls(
             let name = programInputs.get(key);
             if (name === undefined) {
               if (offered.size >= MAX_PROGRAM_INPUTS_PER_CALL) continue;
+              // Heredoc prose is named from the command around it (`--body "$(cat <<'EOF'…)"`).
               const base =
-                scriptTokenContextName(text, program.tokens, embeddedIndex) ??
-                programInputBaseName(value, program.tokens, embeddedIndex, program.language);
+                program.language === "text"
+                  ? programInputBaseName(value, tokens, program.anchor, call.program.kind)
+                  : (scriptTokenContextName(text, program.tokens, embeddedIndex) ??
+                    programInputBaseName(value, program.tokens, embeddedIndex, program.language));
               name = base;
               for (let suffix = 2; programInputNames.has(name); suffix += 1) {
                 name = `${base}_${suffix}`;
