@@ -13,6 +13,7 @@ import {
   resolvePrivateReference,
 } from "./private-value-store.js";
 import {
+  WORKFLOW_CALL_DEPENDENCIES_SLOT,
   WORKFLOW_CALL_DIALECT_CONFLICT_SLOT,
   WORKFLOW_CALL_DIALECT_SLOT,
   WORKFLOW_CALL_EXIT_CODE_SLOT,
@@ -23,6 +24,7 @@ import {
   WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   WORKFLOW_CALL_RESULT_SLOTS,
   workflowCallArgumentSlot,
+  workflowCallDependencySlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
 
@@ -223,6 +225,37 @@ export interface LocalCallIdentity {
    * record of it. Throws `LocalSessionDiscoveryUnavailableError` when sessions cannot be listed.
    */
   lookup(callId: string): Promise<LocalRecordedCall | undefined>;
+}
+
+/**
+ * Whether the recorder judged that this argument position of a recorded call carries a value an
+ * earlier call of its execution printed first — judged over everything the execution held, not
+ * only the calls a plan cut from it names. Undefined when the call was recorded before the
+ * recorder kept that judgement (or this device holds no owned record of it).
+ */
+export function recordedDependencyAt(
+  store: PrivateValueStore,
+  workspaceId: string,
+  call: Pick<LocalRecordedCall, "sessionId" | "callId">,
+  argument: string,
+  path: WorkflowValuePath,
+): boolean | undefined {
+  const held = (slot: string): boolean =>
+    PRIVATE_REPRESENTATIONS.some(
+      (representation) =>
+        ownedValue(
+          store,
+          workflowPrivateReference("demonstration", workspaceId, representation, [
+            call.sessionId,
+            call.callId,
+            slot,
+          ]),
+          representation,
+          workspaceId,
+        )?.value === true,
+    );
+  if (!held(WORKFLOW_CALL_DEPENDENCIES_SLOT)) return undefined;
+  return held(workflowCallDependencySlot(argument, path));
 }
 
 /**

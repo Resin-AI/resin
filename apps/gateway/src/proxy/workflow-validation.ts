@@ -46,6 +46,7 @@ import {
   type PrivateValueStore,
   RESIN_INVOKE_TOOL_RUNTIME,
   deriveNativeCalls,
+  recordedDependencyAt,
   resolvePrivateReference,
 } from "@resin/observer";
 import {
@@ -154,6 +155,16 @@ interface LocalDemonstration {
  * is not one run per item, and the check misses those steps rather than guessing which call belongs
  * to which item.
  */
+/**
+ * Whether the recorder judged a recorded call's argument position to carry a value an earlier call
+ * of its execution printed first; undefined for a call recorded before it kept that judgement.
+ */
+type RecordedDependency = (
+  call: LocalRecordedCall,
+  argument: string,
+  path: WorkflowValuePath,
+) => boolean | undefined;
+
 type LocalDemonstrationRuns =
   | { iterations: LocalDemonstration[]; mismatched?: undefined }
   | { iterations?: undefined; mismatched: string[] };
@@ -173,6 +184,7 @@ async function localDemonstration(
   plan: RecordedWorkflow,
   label: DemonstrationLabel,
   localCalls: LocalCallIdentity,
+  recordedDependency: RecordedDependency = () => undefined,
 ): Promise<LocalDemonstrationRuns | undefined> {
   const recordedSteps = plan.steps.filter((step) => step.origin !== "derivation");
   const callIdsByStep = new Map<string, readonly string[]>();
@@ -325,7 +337,7 @@ async function localDemonstration(
       }
       if (sequence !== undefined) previous = call;
     }
-    iterations.push(iterationDemonstration(iteration, planRoots, ownCalls));
+    iterations.push(iterationDemonstration(iteration, planRoots, ownCalls, recordedDependency));
   }
   if (unordered.size > 0) {
     return { mismatched: located.map(({ step }) => step.id).filter((id) => unordered.has(id)) };
@@ -342,6 +354,7 @@ function iterationDemonstration(
   }>,
   planRoots: ReadonlyMap<string, string>,
   ownCalls: ReadonlyMap<string, LocalRecordedCall> = new Map(),
+  recordedDependency: RecordedDependency = () => undefined,
 ): LocalDemonstration {
   // A segment this device cannot re-split exactly as the plan did is not in its recording. A
   // held-out another harness's built-in shell ran is read as the plan's shell step would run it.
@@ -373,7 +386,16 @@ function iterationDemonstration(
     })),
   );
   const hidden = new Map<string, Array<{ argument: string; path: WorkflowValuePath }>>();
+  const callOf = new Map(calls.map(({ step, call, address }) => [step.id, { call, address }]));
   const addHidden = (stepId: string, argument: string, path: WorkflowValuePath): void => {
+    // The plan's calls are only part of what the recording's execution held: a value an earlier
+    // call outside the plan already carried (a script a `write` made, then ran) only looks printed
+    // by the plan's step. The recorder judged every whole call over the whole execution; where it
+    // recorded that judgement, a value it did not find printed first is no hidden dependency.
+    const own = callOf.get(stepId);
+    if (own !== undefined && own.address === null) {
+      if (recordedDependency(own.call, argument, path) === false) return;
+    }
     const list = hidden.get(stepId) ?? [];
     list.push({ argument, path });
     hidden.set(stepId, list);
@@ -860,6 +882,12 @@ export function createRecordingCheckValidator(
       }
       return resolvePrivateReference(privateValues, reference) as WorkflowJsonValue;
     };
+    // The recorder's own judgement of which values an earlier call printed, read only from this
+    // workspace's recording.
+    const recordedDependency: RecordedDependency = (call, argument, path) =>
+      workspaceId === undefined || workspaceId.trim().length === 0
+        ? undefined
+        : recordedDependencyAt(privateValues, workspaceId, call, argument, path);
 
     const label: DemonstrationLabel | undefined =
       plan.heldOut !== undefined
@@ -905,7 +933,7 @@ export function createRecordingCheckValidator(
     const runs = new Map<DemonstrationLabel, LocalDemonstrationRuns>();
     for (const each of ["held-out", "baseline"] as const) {
       if ((each === "held-out" ? plan.heldOut : plan.baseline) === undefined) continue;
-      const found = await localDemonstration(plan, each, options.localCalls);
+      const found = await localDemonstration(plan, each, options.localCalls, recordedDependency);
       if (found !== undefined) runs.set(each, found);
     }
     const selected = runs.get(label);
@@ -1027,7 +1055,8 @@ export function createRecordingCheckValidator(
     ): Promise<Readonly<Record<string, WorkflowJsonValue>> | undefined> => {
       const run =
         baselineRun ??
-        (await localDemonstration(plan, "baseline", options.localCalls))?.iterations?.[0];
+        (await localDemonstration(plan, "baseline", options.localCalls, recordedDependency))
+          ?.iterations?.[0];
       if (run === undefined) return undefined;
       const environment = await demonstrationEnvironment({
         plan: { ...plan, baseline: run.demonstration },
