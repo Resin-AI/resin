@@ -123,6 +123,9 @@ All logs, error messages, and telemetry streams pass through a continuous redact
 - High-entropy base64 and hex strings. An ordinary relative file path (slashes plus `.`, `-` or `_`, short names between them, and no `@`, `:`, `=` or `+`) is not treated as one; named key patterns still apply to it. Commit SHAs used as git or GitHub revisions (`git show <sha>`, `HEAD:<path>`, `commit_sha=<sha>`, `--match-head-commit <sha>`), CI run IDs and pull-request numbers are identifiers, not secrets, and are kept; a token in an `Authorization` header is redacted even when it is hex.
 - Passwords and SSH private keys.
 
+### Working Directories
+The folder a command ran in is never uploaded. Each recorded call carries instead a keyed, equality-only identity of its working directory, and of the enclosing repository when Resin finds a `.git` entry on your disk: an HMAC-SHA256 of the path, truncated to 128 bits, under a key derived from the random device key Resin keeps owner-only (mode 0600) at `<data>/private-values/redaction-key`. That key never leaves your computer, so the cloud can tell whether two calls ran in the same folder but cannot learn or confirm which folder, and identities from different computers are unrelated. See the [privacy inventory](../security/privacy-inventory.md) for the exact fields.
+
 ---
 
 ## 6. Local-Only Raw Transcripts And Offline MCP

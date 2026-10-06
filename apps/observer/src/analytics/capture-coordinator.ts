@@ -41,6 +41,7 @@ import {
   createTrajectoryEmitter,
 } from "./trajectory-emitter.js";
 import { WorkflowCallRecorder } from "./workflow-call-recorder.js";
+import { WorkingDirectoryIdentifier } from "./working-directory-identity.js";
 
 /**
  * Upload batching policy for generic observation sessions. Every constant that decides when a
@@ -325,6 +326,12 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * `harnessVersion`. The resolver must cache; it runs on every batch.
    */
   resolveHarnessVersion?: (harnessId: string) => Promise<string | null>;
+  /**
+   * The directory a session works in (the root of the workspace the harness recorded it in): what a
+   * call that names no working directory, or a relative one, ran in. Only its keyed identity leaves
+   * the device. Must be cheap and synchronous; it runs on every batch.
+   */
+  resolveSessionWorkingDirectory?: (session: HarnessSession) => string | undefined;
 }
 
 interface GenericSessionTail {
@@ -404,6 +411,11 @@ export class TrajectoryCaptureCoordinator {
   private readonly metadataEventProjector = new MetadataEventProjector(() =>
     this.privateValueStore?.redactionKey?.(),
   );
+  /** Keyed, equality-only working-directory identities, under a key derived from the device's. */
+  private readonly workingDirectoryIdentifier = new WorkingDirectoryIdentifier({
+    deviceKey: () => this.privateValueStore?.redactionKey?.(),
+  });
+  private readonly resolveSessionWorkingDirectory?: TrajectoryCaptureCoordinatorOptions["resolveSessionWorkingDirectory"];
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
 
@@ -480,6 +492,7 @@ export class TrajectoryCaptureCoordinator {
       this.uploadStatus = pipelineOrOptions.uploadStatus;
       this.onPipelineResults = pipelineOrOptions.onPipelineResults;
       this.resolveHarnessVersion = pipelineOrOptions.resolveHarnessVersion;
+      this.resolveSessionWorkingDirectory = pipelineOrOptions.resolveSessionWorkingDirectory;
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
       this.computationEvidenceRecorder =
         pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
@@ -758,6 +771,16 @@ export class TrajectoryCaptureCoordinator {
     return version ? { ...base, harnessVersion: version } : base;
   }
 
+  /** The session's own directory, or undefined when the resolver has none or fails. */
+  private sessionWorkingDirectory(session: HarnessSession): string | undefined {
+    try {
+      const directory = this.resolveSessionWorkingDirectory?.(session);
+      return typeof directory === "string" && directory.length > 0 ? directory : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private observePipelineResults(
     session: HarnessSession,
     results: readonly PipelineProcessResult[],
@@ -916,6 +939,7 @@ export class TrajectoryCaptureCoordinator {
             return;
           }
 
+          const sessionDirectory = this.sessionWorkingDirectory(session);
           for (const res of pipelineResults) {
             if (res.status === "dead_letter" || (res.status === "success" && res.isDuplicate)) {
               continue;
@@ -931,6 +955,7 @@ export class TrajectoryCaptureCoordinator {
                     }),
                   ),
                 );
+                this.workingDirectoryIdentifier.annotate(res.event, observed, sessionDirectory);
                 emitter.ingest(observed);
                 ingestedEvents.push(this.metadataEventProjector.project(observed));
               } catch (err) {
@@ -1113,6 +1138,7 @@ export class TrajectoryCaptureCoordinator {
             throw err;
           }
 
+          const sessionDirectory = this.sessionWorkingDirectory(session);
           for (const res of pipelineResults) {
             if (res.status === "dead_letter") {
               continue;
@@ -1138,15 +1164,15 @@ export class TrajectoryCaptureCoordinator {
               if (!res.isDuplicate) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
                 // the identical carrier-bearing event.
-                validEvents.push(
-                  this.computationEvidenceRecorder.observe(
-                    this.toolLinkEvidenceRecorder.observe(
-                      this.workflowCallRecorder.observe(ev, {
-                        workspaceId: session.workspaceId,
-                      }),
-                    ),
+                const observed = this.computationEvidenceRecorder.observe(
+                  this.toolLinkEvidenceRecorder.observe(
+                    this.workflowCallRecorder.observe(ev, {
+                      workspaceId: session.workspaceId,
+                    }),
                   ),
                 );
+                this.workingDirectoryIdentifier.annotate(ev, observed, sessionDirectory);
+                validEvents.push(observed);
               }
             }
           }

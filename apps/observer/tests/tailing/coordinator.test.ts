@@ -68,6 +68,9 @@ describe("ObserverCoordinator Lifecycle and Discovery", () => {
     const diagnostics = coordinator.getDiagnostics();
     expect(diagnostics.adapters).toHaveLength(1);
     expect(diagnostics.workspacesTracked).toContain("ws-coord-1");
+    // The session's own directory, which a call naming no working directory ran in.
+    expect(coordinator.workspaceRootPath("ws-coord-1")).toBe("/tmp/ws-1");
+    expect(coordinator.workspaceRootPath("ws-unknown")).toBeUndefined();
     expect(diagnostics.pollCyclesCompleted).toBe(2);
 
     // Unregister adapter

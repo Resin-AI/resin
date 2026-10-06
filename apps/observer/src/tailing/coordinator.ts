@@ -227,6 +227,14 @@ export class ObserverCoordinator extends EventEmitter {
   }
 
   /**
+   * The root path of a workspace the adapters reported, which is where that workspace's sessions
+   * run unless a call names another directory. Undefined for a workspace no poll has seen.
+   */
+  workspaceRootPath(workspaceId: string): string | undefined {
+    return this.trackedWorkspaces.get(workspaceId)?.rootPath;
+  }
+
+  /**
    * Registers downstream handler to receive raw records from all observed sessions.
    */
   onRecords(handler: TailerRecordHandler): () => void {

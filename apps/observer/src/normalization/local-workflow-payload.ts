@@ -112,6 +112,39 @@ export function localWorkflowEvent<T extends NormalizedSessionEvent>(event: T): 
   return { ...event, [field]: payload[field] } as T;
 }
 
+/** Parameter names a harness uses for a call's own working directory (OMP `cwd`, Codex `workdir`). */
+const CALL_WORKING_DIRECTORY_PARAMETERS = ["cwd", "workdir", "workingDirectory"] as const;
+
+/**
+ * The exact working directory a call named before redaction, read from the retained local payload.
+ * `{ directory: undefined }` means the call named none, so it ran where its session did; undefined
+ * means this process does not hold the call's original (a duplicate, or an event reloaded from
+ * storage) or the value is not a string, so the directory is unknown.
+ */
+export function localCallWorkingDirectory(
+  event: NormalizedSessionEvent,
+): { directory: string | undefined } | undefined {
+  const payload = payloads.get(event);
+  if (payload === undefined) return undefined;
+  if (event.type === "command_exec") {
+    if (!Object.hasOwn(payload, "cwd") || payload.cwd === undefined)
+      return { directory: undefined };
+    return typeof payload.cwd === "string" ? { directory: payload.cwd } : undefined;
+  }
+  if (event.type !== "tool_call" || !Object.hasOwn(payload, "parameters")) return undefined;
+  const parameters = payload.parameters;
+  if (typeof parameters !== "object" || parameters === null || Array.isArray(parameters)) {
+    return undefined;
+  }
+  for (const name of CALL_WORKING_DIRECTORY_PARAMETERS) {
+    if (!Object.hasOwn(parameters, name)) continue;
+    const value: unknown = Reflect.get(parameters, name);
+    if (value === undefined || value === null || value === "") continue;
+    return typeof value === "string" ? { directory: value } : undefined;
+  }
+  return { directory: undefined };
+}
+
 /** Source exposure requires the actual normalization engine, not an event's claimed metadata. */
 export function redactLocalWorkflowProgramSource(
   event: NormalizedSessionEvent,
