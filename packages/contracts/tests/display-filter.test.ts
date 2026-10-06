@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   DISPLAY_FILTER_VERSION,
+  DISPLAY_FILTER_VERSIONS,
   RECORDED_WORKFLOW_SCHEMA_VERSION,
+  renderProgramTokenValue,
   splitDisplayFilter,
+  splitDisplayFilters,
   tokenizeProgram,
   validateRecordedWorkflow,
 } from "../src/index.js";
 
 describe("splitDisplayFilter", () => {
   it("drops the trailing display-filter stages, keeping exact slices of the program", () => {
-    expect(DISPLAY_FILTER_VERSION).toBe(1);
+    expect(DISPLAY_FILTER_VERSION).toBe(2);
     expect(splitDisplayFilter("bash", "pnpm vitest run 2>&1 | tail -30")).toEqual({
       command: "pnpm vitest run 2>&1",
       filter: "tail -30",
@@ -132,6 +135,264 @@ describe("splitDisplayFilter", () => {
   });
 });
 
+/** The cuts of a version-2 split as `[dropped text, filter]` pairs, for readable expectations. */
+const cutsOf = (shell: string, text: string) => {
+  const split = splitDisplayFilters(shell, text, 2);
+  return split === undefined
+    ? undefined
+    : {
+        command: split.command,
+        cuts: split.cuts.map((cut) => [text.slice(cut.start, cut.end), cut.filter]),
+      };
+};
+
+describe("splitDisplayFilters", () => {
+  it("drops the trailing display filter of every top-level pipeline, keeping the rest verbatim", () => {
+    expect(DISPLAY_FILTER_VERSIONS).toEqual([1, 2]);
+    expect(cutsOf("bash", "A 2>&1 | grep -E 'x|y' ; B >/dev/null && echo ok")).toEqual({
+      command: "A 2>&1 ; B >/dev/null && echo ok",
+      cuts: [[" | grep -E 'x|y'", "grep -E 'x|y'"]],
+    });
+    expect(
+      cutsOf("bash", 'A | sort -V | tail -n 4; S=$(git rev-parse origin/main); echo "main=$S"'),
+    ).toEqual({
+      command: 'A | sort -V; S=$(git rev-parse origin/main); echo "main=$S"',
+      cuts: [[" | tail -n 4", "tail -n 4"]],
+    });
+    expect(cutsOf("sh", "build 2>&1 | tail -8; echo build=$?")).toEqual({
+      command: "build 2>&1; echo build=$?",
+      cuts: [[" | tail -8", "tail -8"]],
+    });
+    expect(cutsOf("dash", "A 2>&1 | tail -n 2")).toEqual({
+      command: "A 2>&1",
+      cuts: [[" | tail -n 2", "tail -n 2"]],
+    });
+    expect(cutsOf("bash", "A | tail -n 3 && B")).toEqual({
+      command: "A && B",
+      cuts: [[" | tail -n 3", "tail -n 3"]],
+    });
+    // Several cuts; kept text with redirections, expansions and quotes stays byte for byte.
+    expect(
+      cutsOf(
+        "bash",
+        'pnpm exec vitest run "$F" 2>&1 | grep -E \'Test Files|Tests|FAIL\' ; pnpm exec oxlint ${G:-src} >/dev/null && echo \'oxlint: ok\'\nnpx tsc --noEmit -p "$(pwd)/x" 2>&1 | head -20 || echo "tsc=$?"',
+      ),
+    ).toEqual({
+      command:
+        'pnpm exec vitest run "$F" 2>&1 ; pnpm exec oxlint ${G:-src} >/dev/null && echo \'oxlint: ok\'\nnpx tsc --noEmit -p "$(pwd)/x" 2>&1 || echo "tsc=$?"',
+      cuts: [
+        [" | grep -E 'Test Files|Tests|FAIL'", "grep -E 'Test Files|Tests|FAIL'"],
+        [" | head -20", "head -20"],
+      ],
+    });
+    // Line breaks after `|` and `&&`, line continuations, blank lines and comments delimit as the
+    // shell reads them; trailing blanks and a trailing comment are not part of the command.
+    expect(
+      cutsOf(
+        "bash",
+        "# build\nmake \\\n  all |\n  tail -3 &&\n\n./run x>out | grep -v ok # done\n",
+      ),
+    ).toEqual({
+      command: "# build\nmake \\\n  all &&\n\n./run x>out",
+      cuts: [
+        [" |\n  tail -3", "tail -3"],
+        [" | grep -v ok", "grep -v ok"],
+      ],
+    });
+    // A pipeline that is all filters, or ends in no filter, is left whole.
+    expect(cutsOf("bash", "grep -r x . | head -2; ls | wc -l; make | tail -1")).toEqual({
+      command: "grep -r x . | head -2; ls | wc -l; make",
+      cuts: [[" | tail -1", "tail -1"]],
+    });
+  });
+
+  it("reads heredoc bodies as opaque text, at the top level and inside $(...)", () => {
+    const body =
+      "Fixes a | b; c && d ) e\nEOFX\n EOF\nEOF;echo z\n\tEOF\n$(not run) `nor this` \"q\" 'q'\n";
+    const merge = `gh pr merge 12 --repo o/r --squash --match-head-commit abc123 \\
+  --subject 'Fix: a | b' \\
+  --body "$(cat <<'EOF'
+${body}EOF
+)" 2>&1 | tail -n 3; gh pr view 12 --repo o/r --json state,mergeCommit --jq '{state, merge: .mergeCommit.oid}'`;
+    const kept = merge.slice(0, merge.indexOf(" | tail -n 3"));
+    expect(cutsOf("bash", merge)).toEqual({
+      command: `${kept}; gh pr view 12 --repo o/r --json state,mergeCommit --jq '{state, merge: .mergeCommit.oid}'`,
+      cuts: [[" | tail -n 3", "tail -n 3"]],
+    });
+    expect(cutsOf("dash", merge)?.cuts).toEqual([[" | tail -n 3", "tail -n 3"]]);
+    // A top-level heredoc's body follows the operator's line, after the filter, and stays.
+    const commit = `git add -A && git commit -q -F - <<'EOF' | tail -n 2\n${body}EOF\ngit log --oneline -1 | head -1\n`;
+    expect(cutsOf("sh", commit)).toEqual({
+      command: `git add -A && git commit -q -F - <<'EOF'\n${body}EOF\ngit log --oneline -1`,
+      cuts: [
+        [" | tail -n 2", "tail -n 2"],
+        [" | head -1", "head -1"],
+      ],
+    });
+    // Unquoted, quoted, backslashed and tab-stripped delimiters; several bodies after one line.
+    expect(
+      cutsOf(
+        "bash",
+        'cat <<EOF - <<-"END" | grep -v x\nhi $USER | x\nEOF\n\tbye ; x\n\tEND\nmake | tail -1',
+      ),
+    ).toEqual({
+      command: 'cat <<EOF - <<-"END"\nhi $USER | x\nEOF\n\tbye ; x\n\tEND\nmake',
+      cuts: [
+        [" | grep -v x", "grep -v x"],
+        [" | tail -1", "tail -1"],
+      ],
+    });
+    expect(cutsOf("dash", "cat <<\\EOF | head -2\na | b\nEOF")?.command).toBe(
+      "cat <<\\EOF\na | b\nEOF",
+    );
+  });
+
+  it("splits every version-1 program as version 1 did", () => {
+    for (const [shell, text] of [
+      ["bash", "pnpm vitest run 2>&1 | tail -30"],
+      ["bash", "gh pr checks 12 | grep -E 'fail|pass' | head -5"],
+      ["sh", "git log --oneline  |  egrep fix\t| fgrep -v wip"],
+      ["dash", "cat notes | grep x | sort | head -3"],
+      ["sh-or-zsh", "make test | tail -n 20"],
+      ["bash", "pytest -q | grep -v 'passed' | tail -2"],
+      [
+        "bash",
+        'cd packages/frontend && npx vitest run a.test.tsx 2>&1 | grep -E "×|FAIL" | head -40',
+      ],
+      ["bash", "sleep 5; gh pr checks 12 --watch 2>&1 | tail -4"],
+      ["dash", "./prep\n./run =x 2>&1| grep '✓ ok' \n"],
+      ["bash", "grep -c x notes | sort && make | tail -2"],
+      ["bash", 'make 2>&1 | grep -vE "^\\s+at " | grep -v "^$"'],
+    ] as const) {
+      const v1 = splitDisplayFilter(shell, text, 1)!;
+      const v2 = splitDisplayFilters(shell, text, 2)!;
+      expect(v1, text).toBeDefined();
+      expect(v2.command, text).toBe(v1.command);
+      expect(v2.cuts.map((cut) => cut.filter)).toEqual([v1.filter]);
+    }
+  });
+
+  it("refuses a program it cannot delimit safely", () => {
+    for (const text of [
+      // Heredocs whose bodies cannot be read safely.
+      "cat <<EOF | head",
+      "cat <<EOF | head\nx\n",
+      "cat <<EOF | head\nx\nEOF \n",
+      "cat <<EOF |\nbody\nEOF\ngrep x",
+      "cat <<EOF | head\na\\\nEOF\nEOF",
+      "cat <<EOF $(date) | head\nx\nEOF",
+      'x="$(cat <<EOF\na\nEOF)"\nmake | head',
+      'x="$(cat <<EOF\na\nEOF )\nEOF\n)"\nmake | head',
+      "x=$(cat <<EOF)\na\nEOF\nmake | head",
+      "cat <<$X | head\nx\n$X",
+      "cat << | head",
+      "cat <<# | head",
+      "cat <<\\\nEOF | head\nx\nEOF",
+      "a `b` | head",
+      'a "`b`" | head',
+      "a | head; echo ${PIPESTATUS[0]}",
+      'a | head; echo "${pipestatus[1]}"',
+      "cd x | head",
+      "exit 1 | tail",
+      "X=1 | head",
+      "export X=1 | head",
+      "$CMD x | head",
+      "(cd x && make) | tail",
+      "{ make; } | tail",
+      "make | tail; (cd x)",
+      "tail -f log | grep x",
+      "tail -n 5 -F log | head -2",
+      "a 'unterminated | head",
+      'a "unterminated | head',
+      "a $(b | head",
+      "a $((1 + 2)) | head",
+      "a $[ 1 | 2 ] | head",
+      'a "$[1|2]" | head',
+      "a $'x' | head",
+      "a <(b) | head",
+      "a >(b) | head",
+      "a <> f | head",
+      "a >| f | head",
+      "a |& head",
+      "a & b | head",
+      "a &> f | head",
+      "a ;; b | head",
+      "a | | head",
+      "; a | head",
+      "a && ; b | head",
+      "a | head &&",
+      "a | head |",
+      "a | head >",
+      "if a; then b | head; fi",
+      "for x in a; do b | head; done",
+      "while a | head; do :; done",
+      "! a | head",
+      "[[ a ]] | head",
+      "time a | head",
+      "function f { a; }; a | head",
+      "f() { a; }; a | head",
+      "a $(case x in x) y;; esac) | head",
+      "a $(b # c\n) | head",
+      "a {fd}>f | head",
+      "a ${x:-$y} | head",
+      'a ${x:-"y"} | head',
+      "a \\",
+    ])
+      expect(splitDisplayFilters("bash", text, 2), text).toBeUndefined();
+    // Only version 2, only a POSIX shell, and only a program with a display filter.
+    expect(splitDisplayFilters("bash", "make | tail -5", 1)).toBeUndefined();
+    expect(splitDisplayFilters("bash", "make | tail -5", 3)).toBeUndefined();
+    expect(splitDisplayFilters("zsh", "make | tail -5", 2)).toBeUndefined();
+    // A here-string is bash's: dash reads `<<<` as a heredoc.
+    expect(splitDisplayFilters("bash", "cat <<< 'a | b' | head -1", 2)?.command).toBe(
+      "cat <<< 'a | b'",
+    );
+    for (const shell of ["sh", "dash", "sh-or-zsh"])
+      expect(splitDisplayFilters(shell, "cat <<< 'a | b' | head -1", 2), shell).toBeUndefined();
+    expect(splitDisplayFilters("pwsh", "make | tail -5", 2)).toBeUndefined();
+    for (const text of [
+      "make",
+      "ls | wc -l",
+      "make | grep -c x",
+      'make | grep "$X"',
+      "make | tail 2>&1",
+    ])
+      expect(splitDisplayFilters("bash", text, 2), text).toBeUndefined();
+  });
+
+  it("never cuts inside a bound value its hole quotes", () => {
+    const source = "./args hello there | grep -v zzz; ./emit | tail -n 1";
+    const tokens = tokenizeProgram("shell", source);
+    const recorded = splitDisplayFilters("bash", source, 2)!;
+    for (const value of [
+      "x | head -1",
+      "y; ./emit | tail -1",
+      'it\'s "q" | head',
+      "$(echo x | head) `echo y` ${HOME} $?",
+      "a\n./emit | head -1\n",
+      "b && ./emit | grep a || true &",
+      "'; ./emit | tail -n 1; '",
+      '"; ./emit | tail -n 1; "',
+      "<<EOF\n| head\nEOF",
+    ]) {
+      let rendered = source;
+      for (const raw of ["there", "hello"]) {
+        const token = tokens.find((entry) => entry.raw === raw)!;
+        rendered =
+          rendered.slice(0, token.start) +
+          renderProgramTokenValue(token, value) +
+          rendered.slice(token.end);
+      }
+      const split = splitDisplayFilters("bash", rendered, 2);
+      expect(
+        split?.cuts.map((cut) => cut.filter),
+        value,
+      ).toEqual(recorded.cuts.map((cut) => cut.filter));
+      expect(split!.command.endsWith("; ./emit"), value).toBe(true);
+    }
+  });
+});
+
 const PROGRAM = "gh pr checks 12 | tail -5";
 
 /** A recorded OMP bash step running `source`, whose program argument is its projected template. */
@@ -207,7 +468,8 @@ describe("displayFilter steps", () => {
 
   it("refuses a malformed or unsupported displayFilter", () => {
     for (const displayFilter of [
-      { version: 2 },
+      { version: 3 },
+      { version: 0 },
       { version: "1" },
       { version: 1, extra: true },
       { version: 1.5 },
@@ -251,6 +513,35 @@ describe("displayFilter steps", () => {
     expect(
       validateRecordedWorkflow(plan([step({}, PROGRAM, holeAt(PROGRAM, "-5"))])).errors,
     ).toContain("step checks binds a value inside the display filter it drops");
+  });
+
+  it("accepts version 2, refusing a hole inside any of its cuts", () => {
+    const source =
+      "gh pr checks 12 2>&1 | grep -E 'fail|pass' ; gh pr view 12 >/dev/null && gh pr diff 12 | tail -1";
+    const version2 = (holes: unknown[]) =>
+      validateRecordedWorkflow(plan([step({ displayFilter: { version: 2 } }, source, holes)]));
+    expect(version2([]).errors).toEqual([]);
+    const at = (raw: string, last = false) => {
+      const tokens = tokenizeProgram("shell", source);
+      const token = last
+        ? tokens.findLastIndex((entry) => entry.raw === raw)
+        : tokens.findIndex((entry) => entry.raw === raw);
+      expect(token).toBeGreaterThanOrEqual(0);
+      return [{ token, binding: { type: "input", name: "n" } }];
+    };
+    expect(version2(at("12")).errors).toEqual([]);
+    expect(version2(at("12", true)).errors).toEqual([]);
+    expect(version2(at("'fail|pass'")).errors).toContain(
+      "step checks binds a value inside the display filter it drops",
+    );
+    expect(version2(at("-1")).errors).toContain(
+      "step checks binds a value inside the display filter it drops",
+    );
+    // A program version 2 cannot split is refused under it.
+    expect(
+      validateRecordedWorkflow(plan([step({ displayFilter: { version: 2 } }, "cd x | tail -1")]))
+        .valid,
+    ).toBe(false);
   });
 
   it("lets a hole inside the filter stand when a boolean input switches the filter", () => {

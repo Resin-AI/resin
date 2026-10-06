@@ -65,6 +65,7 @@ import {
 } from "./private-value-store.js";
 import { declaredFlowOfToolCall } from "./tool-links/declared-flow.js";
 import {
+  WORKFLOW_CALL_DEPENDENCIES_SLOT,
   WORKFLOW_CALL_DIALECT_CONFLICT_SLOT,
   WORKFLOW_CALL_DIALECT_SLOT,
   WORKFLOW_CALL_EXIT_CODE_SLOT,
@@ -74,6 +75,7 @@ import {
   WORKFLOW_CALL_RESULT_CONFLICT_SLOT,
   WORKFLOW_CALL_RESULT_REDACTED_SLOT,
   workflowCallArgumentSlot,
+  workflowCallDependencySlot,
   workflowPrivateReference,
 } from "./workflow-private-reference.js";
 
@@ -1803,6 +1805,26 @@ export class WorkflowCallRecorder {
     );
     if (execution !== undefined) execution.inputNames = derivation.inputNames;
     if (index < 0) return { dependsOnCallIds, candidates };
+    // Which of this call's values an earlier call of the execution printed first, judged here over
+    // everything the execution held: a validator checking a plan cut from it sees only the plan's
+    // calls, and would take a value the session already held (a script an earlier call wrote) for
+    // one the plan's earlier step printed. Each position is its own entry, so a later judgement
+    // (an earlier call's result arriving after this call) only adds to it.
+    for (const position of [
+      ...derivation.candidates.filter(
+        (candidate) =>
+          candidate.stepId === ownStepId && candidate.reason === "equal-to-earlier-result",
+      ),
+      ...derivation.extracts.filter((extract) => extract.stepId === ownStepId),
+    ]) {
+      this.localReference(
+        true,
+        sessionId,
+        call.callId,
+        workflowCallDependencySlot(position.argument, position.path),
+      );
+    }
+    this.localReference(true, sessionId, call.callId, WORKFLOW_CALL_DEPENDENCIES_SLOT);
     for (const candidate of derivation.candidates) {
       // Derivation bindings are proposed by the cloud against a compiled plan, never recorded here.
       if (candidate.stepId !== ownStepId || candidate.reason === "derived-from-inputs") continue;
@@ -2338,7 +2360,7 @@ function unprotectedCandidates(
     program !== undefined &&
     recordedProgramLanguage(program) === "shell" &&
     typeof original === "string"
-      ? embeddedPrograms(original)
+      ? embeddedPrograms(original, { prose: true })
       : [];
   const safeEmbedded = new Map<string, boolean>();
   const embeddedIsSafe = (anchor: number, index: number): boolean => {

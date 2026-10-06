@@ -1,8 +1,19 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { NormalizedSessionEvent } from "@resin/contracts";
+import { OmpRecordDecoder } from "@resin/adapter-omp";
+import {
+  type NormalizedSessionEvent,
+  RESIN_WORKING_DIRECTORY_METADATA_KEY,
+  readWorkingDirectoryIdentity,
+} from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
+import { FilePrivateValueStore } from "../../src/analytics/private-value-store.js";
+import { WorkingDirectoryIdentifier } from "../../src/analytics/working-directory-identity.js";
+import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
+import { resolvePaths } from "../../src/paths.js";
 import {
   InvalidSanitizedObservationError,
   ObservationSyncClient,
@@ -323,6 +334,83 @@ describe("Privacy and Data Residency Boundary Enforcement", () => {
 
       // Verify that fetch was never called
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("transmits a call's working directory only as a keyed identity, never its path or the device secret", async () => {
+      const resinHome = fs.mkdtempSync(path.join(os.tmpdir(), "resin-privacy-boundary-"));
+      try {
+        const store = new FilePrivateValueStore(resolvePaths({ resinHome, env: {} }).dataDir);
+        const pipeline = new NormalizationPipeline({ privateValueStore: store });
+        pipeline.registerDecoder(new OmpRecordDecoder());
+        const sessionId = "ses_01j7db4n000000000000000002";
+        const [result] = await pipeline.processRecord(
+          {
+            recordId: "rec_working_directory",
+            sessionId,
+            harnessId: "omp",
+            sequenceNumber: 1,
+            timestamp: "2026-08-28T12:00:00.000Z",
+            recordType: "custom",
+            rawPayload: JSON.stringify({
+              type: "custom",
+              customType: "tool_execution_start",
+              data: {
+                toolCallId: "call_working_directory",
+                toolName: "bash",
+                args: { command: "pnpm test", cwd: "/synthetic/zq-private-checkout" },
+              },
+            }),
+            cursor: { offset: 1, line: 1, sequence: 1, timestamp: "2026-08-28T12:00:00.000Z" },
+            metadata: {},
+          },
+          { sessionId, harnessId: "omp", workspaceId: "ws_01j7db4n000000000000000001" },
+        );
+        if (result?.status !== "success") throw new Error("the synthetic call did not normalize");
+        const identifier = new WorkingDirectoryIdentifier({
+          deviceKey: () => store.redactionKey(),
+        });
+        identifier.annotate(result.event, result.event, "/synthetic/zq-session-root");
+        const projected = projectEventToMetadataOnly(result.event);
+
+        let transmittedBody = "";
+        const mockFetch = vi.fn().mockImplementation(async (_url, options) => {
+          transmittedBody = options.body;
+          return {
+            ok: true,
+            json: async () => ({ accepted: 1, rejected: 0, batchId: "batch_wd" }),
+          };
+        });
+        const client = new ObservationSyncClient({
+          baseUrl: "https://api.resin.cloud",
+          // SAFETY: Mock fetch satisfies fetchFn test contract.
+          fetchFn: mockFetch as typeof fetch,
+          identityProvider: async () => ({ tenantId: "tenant_wd", token: "valid-auth-token" }),
+        });
+        await client.syncObservations([createSanitizedObservationDto(projected)], {
+          batchId: "batch_01j7db4n000000000000000002",
+          workspaceId: "ws_01j7db4n000000000000000001",
+        });
+
+        const sent = JSON.parse(transmittedBody).observations[0];
+        expect(
+          readWorkingDirectoryIdentity(sent.metadata[RESIN_WORKING_DIRECTORY_METADATA_KEY]),
+        ).toEqual(sent.metadata[RESIN_WORKING_DIRECTORY_METADATA_KEY]);
+        expect(sent.metadata[RESIN_WORKING_DIRECTORY_METADATA_KEY].directory).toMatch(
+          /^[0-9a-f]{32}$/,
+        );
+        expect(transmittedBody).not.toContain("/synthetic");
+        expect(transmittedBody).not.toContain("zq-private-checkout");
+        const keyFile = path.join(resinHome, "data", "private-values", "redaction-key");
+        const secret = fs.readFileSync(keyFile);
+        if (process.platform !== "win32") {
+          expect(fs.statSync(keyFile).mode & 0o777).toBe(0o600);
+        }
+        for (const encoding of ["hex", "base64", "base64url"] as const) {
+          expect(transmittedBody).not.toContain(secret.toString(encoding));
+        }
+      } finally {
+        fs.rmSync(resinHome, { recursive: true, force: true });
+      }
     });
   });
 });

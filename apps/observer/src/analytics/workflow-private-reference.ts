@@ -68,6 +68,26 @@ export function workflowCallArgumentSlot(argument: string): string {
   return `argument:${argument}`;
 }
 
+/**
+ * Demonstration slot set (to `true`) once the recorder judged, over the whole execution it recorded
+ * a call in, which of the call's argument positions carry a value an earlier call printed (see
+ * {@link workflowCallDependencySlot}). Absent for a call recorded before the recorder kept that
+ * judgement.
+ */
+export const WORKFLOW_CALL_DEPENDENCIES_SLOT = "dependencies:v1";
+
+/**
+ * Demonstration slot set (to `true`) for one argument position of a call the recorder judged to
+ * carry a value an earlier call of its execution printed: the value first appeared in that output,
+ * not in anything the session held before it.
+ */
+export function workflowCallDependencySlot(
+  argument: string,
+  path: ReadonlyArray<string | number>,
+): string {
+  return `dependency:v1:${JSON.stringify([argument, path])}`;
+}
+
 /** Demonstration slots a recorded call's result may be kept under, with their comparison. */
 export const WORKFLOW_CALL_RESULT_SLOTS: ReadonlyArray<{
   slot: string;

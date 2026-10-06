@@ -51,6 +51,13 @@ export {
 } from "./metadata-projection.js";
 
 export { MetadataEventProjector } from "./metadata-event-projector.js";
+export {
+  type EffectiveDirectory,
+  type WorkingDirectoryIdentifierOptions,
+  WorkingDirectoryIdentifier,
+  effectiveWorkingDirectory,
+  findRepositoryRoot,
+} from "./working-directory-identity.js";
 
 export {
   type InvocationTelemetryUploaderOptions,
@@ -86,4 +93,5 @@ export {
   type LocalRecordedCall,
   LocalSessionDiscoveryUnavailableError,
   createLocalCallIdentity,
+  recordedDependencyAt,
 } from "./local-call-identity.js";
