@@ -93,4 +93,5 @@ export {
   type LocalRecordedCall,
   LocalSessionDiscoveryUnavailableError,
   createLocalCallIdentity,
+  recordedDependencyAt,
 } from "./local-call-identity.js";
