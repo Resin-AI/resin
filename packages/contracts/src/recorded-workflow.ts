@@ -12,9 +12,9 @@
 
 import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
 import {
-  DISPLAY_FILTER_VERSION,
+  DISPLAY_FILTER_VERSIONS,
+  displayFilterDroppedRanges,
   displayFilterShell,
-  splitDisplayFilter,
 } from "./display-filter.js";
 import {
   type ProgramLanguage,
@@ -389,10 +389,12 @@ export type WorkflowStep = {
    */
   segment?: { index: number; count: number; version: number };
   /**
-   * The step runs its program without the trailing display filter (see `splitDisplayFilter`, rules
-   * `version`) its recording piped the output through — `| tail -30`, `| grep fail` — so the caller
-   * gets the command's whole output and real exit status. A recording check replays the step by
-   * passing that output through the dropped stages and comparing the result with the recording.
+   * The step runs its program without the trailing display filters its recording piped output
+   * through — `| tail -30`, `| grep fail` — split under rules `version` (`DISPLAY_FILTER_VERSIONS`):
+   * version 1 drops the last pipeline's (`splitDisplayFilter`), version 2 every top-level
+   * pipeline's (`splitDisplayFilters`). The caller gets the commands' whole output and real exit
+   * statuses. A recording check replays the step by passing each cut pipeline's output through
+   * the stages dropped from it and comparing the result with the recording.
    *
    * `input` names a boolean plan input defaulting to `false` that nothing else reads: a caller who
    * sets it to `true` runs the whole recorded pipeline, filter included. Only with it may the
@@ -1284,7 +1286,7 @@ function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, error
       !isPlainObject(displayFilter) ||
       !hasOnlyKeys(displayFilter, ["version", "input"]) ||
       !Number.isSafeInteger(displayFilter.version) ||
-      displayFilter.version !== DISPLAY_FILTER_VERSION ||
+      !DISPLAY_FILTER_VERSIONS.includes(displayFilter.version as number) ||
       (displayFilter.input !== undefined &&
         (typeof displayFilter.input !== "string" || displayFilter.input.length === 0))
     ) {
@@ -1325,11 +1327,11 @@ function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, error
       step.origin === "derivation" || typeof callable?.name !== "string"
         ? undefined
         : displayFilterShell(callable.name, literals, program as WorkflowRecordedProgram);
-    const split =
+    const dropped =
       shell === undefined || typeof program?.source !== "string"
         ? undefined
-        : splitDisplayFilter(shell, program.source, displayFilter.version as number);
-    if (split === undefined) {
+        : displayFilterDroppedRanges(shell, program.source, displayFilter.version as number);
+    if (dropped === undefined) {
       errors.push(
         `step ${stepId} displayFilter needs a recorded POSIX shell program ending in a display filter`,
       );
@@ -1354,12 +1356,14 @@ function validateWorkflowDisplayFilters(workflow: Record<string, unknown>, error
     // A filter input lets the caller keep the filter, so its holes are the caller's to bind.
     if (switchName !== undefined) continue;
     const tokens = tokenizeProgram("shell", program!.source as string);
-    const dropped = split.command.length;
     const holes = Array.isArray(template.holes) ? template.holes.filter(isPlainObject) : [];
     const inFilter = holes.some((hole) => {
       const last = Number.isSafeInteger(hole.through) ? hole.through : hole.token;
       const token = Number.isSafeInteger(last) ? tokens[last as number] : undefined;
-      return token === undefined || token.end > dropped;
+      return (
+        token === undefined ||
+        dropped.some((range) => token.start < range.end && token.end > range.start)
+      );
     });
     if (inFilter) {
       errors.push(`step ${stepId} binds a value inside the display filter it drops`);

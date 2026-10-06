@@ -18,6 +18,7 @@ import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { parse } from "@babel/parser";
 import {
+  type DisplayFilterCut,
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
   WORKFLOW_PATCH_STEP_RESULT,
@@ -26,11 +27,18 @@ import {
   displayFilterShell,
   programNotLearnableReason,
   splitDisplayFilter,
+  splitDisplayFilters,
   validateWorkflowProgramSourceInterface,
   validateWorkflowPythonState,
 } from "@resin/contracts";
 import { serviceHostExecutablePath } from "@resin/windows-security";
 import { runDerivation } from "./derivation-sandbox.js";
+import {
+  displayFilterChunks,
+  displayFilterNonce,
+  instrumentDisplayFilters,
+  withoutDisplayFilterMarkers,
+} from "./display-filter-replay.js";
 import { harnessLoginIdentity, inheritedHarnessEnvironment } from "./harness-environment.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
@@ -1855,42 +1863,84 @@ export async function runRecordedCall(
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   };
-  // A display-filter step runs its command alone: the caller gets its whole output and exit status.
-  // A caller who switched the filter on through its input runs the recorded pipeline instead.
+  // A display-filter step runs its commands alone: the caller gets their whole output and exit
+  // statuses. A caller who switched the filter on through its input runs the recorded program.
   let filter: string | undefined;
+  let cuts: DisplayFilterCut[] | undefined;
   let command = source;
   if (step.displayFilter !== undefined && request.displayFilter !== "whole") {
+    const { version } = step.displayFilter;
     const shell = displayFilterShell(step.callable.name, request.arguments, program);
-    const split =
-      shell === undefined
-        ? undefined
-        : splitDisplayFilter(shell, source, step.displayFilter.version);
-    if (split === undefined) {
-      throw new Error(
-        `step '${step.id}' cannot run: the program does not end in the display filter this step drops`,
-      );
+    const refused = new Error(
+      `step '${step.id}' cannot run: the program does not end in the display filter this step drops`,
+    );
+    if (shell === undefined) throw refused;
+    if (version === 1) {
+      const split = splitDisplayFilter(shell, source, version);
+      if (split === undefined) throw refused;
+      command = split.command;
+      filter = split.filter;
+    } else {
+      // The resolved program must cut where the recorded one does: bound values (quoted by their
+      // holes) never add or remove a cut, and without a filter input they never change a filter.
+      const split = splitDisplayFilters(shell, source, version);
+      const recorded = splitDisplayFilters(shell, program.source, version);
+      if (
+        split === undefined ||
+        recorded === undefined ||
+        split.cuts.length !== recorded.cuts.length ||
+        (step.displayFilter.input === undefined &&
+          split.cuts.some((cut, index) => cut.filter !== recorded.cuts[index]!.filter))
+      ) {
+        throw refused;
+      }
+      command = split.command;
+      cuts = split.cuts;
     }
-    command = split.command;
-    filter = split.filter;
+  }
+  if (cuts !== undefined && request.displayFilter === "replay") {
+    return await replayDisplayFilters(request, source, cuts, replayOptions);
   }
   const run = await runRecordedProgram({ ...program, source: command }, replayOptions, step.callId);
-  if (run.exitCode !== 0) {
-    // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
-    const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : run.stdout);
-    const detail = tail.length > 0 ? `: ${tail}` : " (no output)";
-    throw new Error(
-      `step '${step.id}' failed: recorded ${program.kind} program exited with code ${run.exitCode}${detail}`,
-    );
-  }
+  if (run.exitCode !== 0) throw programFailed(request, run, run.stdout);
   if (filter === undefined || request.displayFilter !== "replay") return run.value;
   // A replay compared with the recording passes the output through the dropped stages, in the
   // same shell, directory and environment. Their exit status is ignored as the recorded pipeline's
   // was (grep exits 1 printing nothing when nothing matches); a filter killed by a signal fails.
+  return await runDisplayFilter(request, filter, run.stdout, replayOptions);
+}
+
+/** The error of a recorded call whose program exited non-zero; `stdout` without any markers. */
+function programFailed(
+  request: RecordedCallRequest,
+  run: RecordedProgramRun,
+  stdout: string,
+): Error {
+  // A Codex-recorded command's stderr is merged into its stdout, as Codex recorded it.
+  const tail = stderrTail(run.stderr.trim().length > 0 ? run.stderr : stdout);
+  const detail = tail.length > 0 ? `: ${tail}` : " (no output)";
+  return new Error(
+    `step '${request.step.id}' failed: recorded ${request.step.callable.program!.kind} program exited with code ${run.exitCode}${detail}`,
+  );
+}
+
+/**
+ * The output of a display filter `filter` dropped from a recorded call's shell program, given the
+ * `input` it was piped, run in the same shell, directory and environment. Its exit status is
+ * ignored as the recorded pipeline's was; a filter killed by a signal fails.
+ */
+async function runDisplayFilter(
+  request: RecordedCallRequest,
+  filter: string,
+  input: string,
+  options: ProgramRunnerOptions,
+): Promise<WorkflowJsonValue> {
+  const { step } = request;
   const filtered = await runRecordedProgram(
-    { ...program, source: filter },
-    replayOptions,
+    { ...step.callable.program!, source: filter },
+    options,
     step.callId,
-    run.stdout,
+    input,
   );
   if (filtered.signal !== undefined || filtered.exitCode > 128) {
     throw new Error(
@@ -1898,4 +1948,48 @@ export async function runRecordedCall(
     );
   }
   return filtered.value;
+}
+
+/**
+ * A recording check's replay of a version-2 display-filter step (see `display-filter-replay.ts`):
+ * the program `source` runs without its `cuts`, each cut pipeline's stdout bracketed by markers of
+ * a fresh nonce; each bracketed chunk is then piped through the filter cut from that pipeline, and
+ * the result spliced back between the verbatim output around it. The program must exit 0.
+ */
+async function replayDisplayFilters(
+  request: RecordedCallRequest,
+  source: string,
+  cuts: readonly DisplayFilterCut[],
+  options: ProgramRunnerOptions,
+): Promise<WorkflowJsonValue> {
+  const { step } = request;
+  const program = step.callable.program!;
+  const nonce = displayFilterNonce();
+  const run = await runRecordedProgram(
+    { ...program, source: instrumentDisplayFilters(source, cuts, nonce) },
+    options,
+    step.callId,
+  );
+  if (run.exitCode !== 0) {
+    throw programFailed(request, run, withoutDisplayFilterMarkers(run.stdout, nonce));
+  }
+  const chunks = displayFilterChunks(run.stdout, nonce, cuts.length);
+  if (chunks === undefined) {
+    throw new Error(
+      `step '${step.id}' failed: its output did not keep the display-filter markers in order`,
+    );
+  }
+  let output = "";
+  for (const chunk of chunks) {
+    if (chunk.cut === undefined) {
+      output += chunk.text;
+      continue;
+    }
+    const filtered = await runDisplayFilter(request, cuts[chunk.cut]!.filter, chunk.text, options);
+    if (typeof filtered !== "string") {
+      throw new Error(`step '${step.id}' failed: its display filter printed no text`);
+    }
+    output += filtered;
+  }
+  return output;
 }
