@@ -109,3 +109,21 @@ export function isMcpProtocolError(error: JsonRpcErrorCandidate): error is McpPr
   }
   return false;
 }
+
+/** The JSON-RPC error object a caller receives for `error`; `redact` scrubs the message. */
+export function jsonRpcErrorOf(
+  error: JsonRpcErrorCandidate,
+  redact: (message: string) => string = (message) => message,
+): JsonRpcErrorObject {
+  if (isMcpProtocolError(error)) {
+    const errorObj: JsonRpcErrorObject = { code: error.code, message: redact(error.message) };
+    if (error.data !== undefined) {
+      errorObj.data = error.data;
+    }
+    return errorObj;
+  }
+  return {
+    code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
+    message: redact(error instanceof Error ? error.message : String(error)),
+  };
+}

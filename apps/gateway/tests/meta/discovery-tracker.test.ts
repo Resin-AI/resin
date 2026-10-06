@@ -6,6 +6,8 @@ import {
   type ToolManifest,
   ToolParameterSchema,
   ToolRuntimeRequirementSchema,
+  bytesToTokens,
+  estimatePayloadBytes,
 } from "@resin/contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 import { SessionDiscoveryTracker, isDiscoveryTool } from "../../src/meta/discovery-tracker.js";
@@ -14,6 +16,7 @@ import type {
   ToolInvocationRequest,
   ToolInvocationRouter,
 } from "../../src/meta/router-contract.js";
+import { JSON_RPC_ERROR_CODES } from "../../src/protocol/errors.js";
 import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
@@ -312,6 +315,80 @@ describe("Gateway SessionDiscoveryTracker & Usage Estimates", () => {
           (directRecord.usageEstimate?.outputTokens ?? 0) +
           accumulatedDiscovery,
       );
+    });
+
+    it("charges a thrown direct-call failure with usage from the error the caller receives and drains discovery", async () => {
+      const recordedList: InvocationRecord[] = [];
+      const mockRouter: ToolInvocationRouter = {
+        async invoke(): Promise<CallToolResult> {
+          throw new Error("runtime exploded");
+        },
+      };
+      const registry = new ToolRegistry({
+        onInvocationRecorded: async (record) => {
+          recordedList.push(record);
+        },
+        invocationRouter: mockRouter,
+      });
+      await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-discovery" });
+      const router = new RegistryGatewayRouter(registry, mockRouter, undefined, undefined, tracker);
+      const context = makeContext("ws-discovery", "session-direct-fail");
+      tracker.recordDiscoveryOverhead("session-direct-fail", 40);
+
+      await expect(
+        router.callTool(context, "echo_tool", { message: "will throw" }),
+      ).rejects.toThrow("runtime exploded");
+
+      expect(recordedList).toHaveLength(1);
+      const [failed] = recordedList;
+      expect(failed.status).toBe("error");
+      expect(failed.usageEstimate?.discoveryTokens).toBe(40);
+      expect(failed.usageEstimate?.inputTokens).toBe(
+        bytesToTokens(estimatePayloadBytes({ message: "will throw" }) ?? 0),
+      );
+      expect(failed.usageEstimate?.outputTokens).toBe(
+        bytesToTokens(
+          estimatePayloadBytes({
+            code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
+            message: "runtime exploded",
+          }) ?? 0,
+        ),
+      );
+      expect(tracker.getPendingTokens("session-direct-fail")).toBe(0);
+    });
+
+    it("measures the same input tokens for a direct call and an invoke_tool call with the same arguments", async () => {
+      const recordedList: InvocationRecord[] = [];
+      const onInvocationRecorded = async (record: InvocationRecord) => {
+        recordedList.push(record);
+      };
+      const mockRouter: ToolInvocationRouter = {
+        async invoke(): Promise<CallToolResult> {
+          return { content: [{ type: "text", text: "same result" }] };
+        },
+      };
+      const registry = new ToolRegistry({ onInvocationRecorded, invocationRouter: mockRouter });
+      await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-discovery" });
+      const router = new RegistryGatewayRouter(registry, mockRouter, undefined, undefined, tracker);
+      const invoke = createInvokeToolHandler(registry, mockRouter, {
+        onInvocationRecorded,
+        discoveryTracker: tracker,
+      });
+      const context = makeContext("ws-discovery", "session-parity");
+      const args = { message: "identical arguments for both paths" };
+
+      await router.callTool(context, "echo_tool", args);
+      await invoke(context, {
+        name: "echo_tool",
+        toolId: "tool_echo",
+        version: "1.0.0",
+        parameters: args,
+      });
+
+      expect(recordedList).toHaveLength(2);
+      const [direct, viaInvoke] = recordedList;
+      expect(viaInvoke.usageEstimate?.inputTokens).toBe(direct.usageEstimate?.inputTokens);
+      expect(viaInvoke.usageEstimate?.outputTokens).toBe(direct.usageEstimate?.outputTokens);
     });
   });
 });

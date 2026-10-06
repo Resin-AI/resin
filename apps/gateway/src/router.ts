@@ -36,7 +36,12 @@ import {
   SEARCH_TOOLS_MANIFEST,
   SYSTEM_META_TOOL_IDS,
 } from "./meta/system-tools.js";
-import { MCP_ERROR_CODES, McpProtocolError } from "./protocol/errors.js";
+import {
+  type JsonRpcErrorObject,
+  MCP_ERROR_CODES,
+  McpProtocolError,
+  jsonRpcErrorOf,
+} from "./protocol/errors.js";
 import type {
   CallToolResult,
   JsonRpcParamValue,
@@ -394,9 +399,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
     try {
       executed = await this.executeTool(context, tool, name, params, options);
     } catch (error) {
-      // A call the routing layer refused or lost is still a failed invocation of this tool.
+      // A call the routing layer refused or lost is still a failed invocation of this tool,
+      // and the error the caller receives is its output: estimate usage from it like a result.
       if (recorder) {
         this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
+          output: jsonRpcErrorOf(error instanceof Error ? error : String(error)),
           reason: failureReasonOfError(error),
         });
       }
@@ -417,7 +424,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
       }
     } else if (recorder) {
       this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
-        executed,
+        output: executed,
         ...(executed.isError ? { reason: failureReasonOfResult(executed) } : {}),
       });
     }
@@ -430,12 +437,12 @@ export class RegistryGatewayRouter implements GatewayRouter {
     tool: RegistryTool,
     params: JsonRpcParams,
     startedAtMs: number,
-    outcome: { executed?: CallToolResult; reason?: InvocationFailureReason },
+    outcome: { output: CallToolResult | JsonRpcErrorObject; reason?: InvocationFailureReason },
   ): void {
-    const { executed, reason } = outcome;
+    const { output, reason } = outcome;
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
     const inBytes = estimatePayloadBytes(params);
-    const outBytes = executed === undefined ? undefined : estimatePayloadBytes(executed);
+    const outBytes = estimatePayloadBytes(output);
     let usageEstimate: InvocationUsageEstimate | undefined;
     if (inBytes !== undefined && outBytes !== undefined) {
       const inputTokens = bytesToTokens(inBytes);
@@ -459,7 +466,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
       durationMs: Math.max(0, Date.now() - startedAtMs),
       status,
       inputDigest: hashCanonicalContent(params),
-      ...(executed === undefined ? {} : { outputDigest: hashCanonicalContent(executed) }),
+      outputDigest: hashCanonicalContent(output),
       // The reason, never the error text: native calls record no message.
       ...(reason === undefined
         ? {}

@@ -9,6 +9,7 @@ import {
   McpProtocolError,
   createMcpError,
   isMcpProtocolError,
+  jsonRpcErrorOf,
 } from "./protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "./protocol/framing.js";
 import {
@@ -911,24 +912,7 @@ export class LocalMcpGateway {
     err: GatewayErrorInput,
     workspaceRoot?: string,
   ): JsonRpcErrorObject {
-    if (isMcpProtocolError(err)) {
-      const errObj: JsonRpcErrorObject = {
-        code: err.code,
-        message: redactSensitiveText(err.message, workspaceRoot),
-      };
-      if (err.data !== undefined) {
-        errObj.data = err.data;
-      }
-      return errObj;
-    }
-
-    const rawMessage = err instanceof Error ? err.message : String(err);
-    const sanitizedMessage = redactSensitiveText(rawMessage, workspaceRoot);
-
-    return {
-      code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
-      message: sanitizedMessage,
-    };
+    return jsonRpcErrorOf(err, (message) => redactSensitiveText(message, workspaceRoot));
   }
 
   /**
