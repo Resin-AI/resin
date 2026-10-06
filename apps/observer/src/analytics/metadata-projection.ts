@@ -23,6 +23,7 @@ import {
   RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
+  RESIN_WORKING_DIRECTORY_METADATA_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
   commandLineOf,
@@ -33,6 +34,7 @@ import {
   readCodexCommandMetadata,
   readComputationEvidence,
   readToolLinkEvidence,
+  readWorkingDirectoryIdentity,
 } from "@resin/contracts";
 import { projectDeterministicCommandSequenceFromEvent } from "./deterministic-command-sequence.js";
 import {
@@ -933,6 +935,17 @@ export function projectEventToMetadataOnly(
         : undefined;
   if (enrichEvidence && (observedCwd === "." || observedCwd === "./")) {
     metadata.cwd = ".";
+  }
+  // The call's working directory leaves only as keyed, equality-only digests the device computed
+  // (see working-directory-identity.ts). The strict reader admits exactly two bounded hex values, so
+  // no path text can ride along; anything else is dropped.
+  if (event.type === "tool_call" || event.type === "command_exec") {
+    const workingDirectory = readWorkingDirectoryIdentity(
+      event.metadata?.[RESIN_WORKING_DIRECTORY_METADATA_KEY],
+    );
+    if (workingDirectory !== undefined) {
+      metadata[RESIN_WORKING_DIRECTORY_METADATA_KEY] = { ...workingDirectory };
+    }
   }
 
   const existingEstimate = event.metadata?.resinTokenEstimateV1;

@@ -55,6 +55,8 @@ export * from "./codex-command.js";
 export * from "./command-text.js";
 export * from "./harness-introspection.js";
 export * from "./assistant-stop-reason.js";
+// Keyed, equality-only identity of the directory a recorded call ran in
+export * from "./working-directory.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {
   id: string;

@@ -614,6 +614,14 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
         authorizeTelemetryEmission,
         minimumRecordTimestampMs: this.privacyCutoffMs,
         resolveHarnessVersion: this.resolveHarnessVersion,
+        // A session runs in its workspace's root unless a call names another directory; only the
+        // keyed identity of the resulting directory is uploaded.
+        resolveSessionWorkingDirectory: (session) => {
+          const coordinator = this.observerCoordinator;
+          return typeof coordinator.workspaceRootPath === "function"
+            ? coordinator.workspaceRootPath(session.workspaceId)
+            : undefined;
+        },
         uploadStatus: this.uploadStatus,
         onPipelineResults: this.decodeStats
           ? (session, results) => this.decodeStats?.record(session, results)
