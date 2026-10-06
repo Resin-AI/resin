@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  type EmbeddedProgram,
+  type EmbeddedProgramOrProse,
+  type HeredocProseProgram,
   applyProgramTokenValues,
   bindProgramToken,
   embeddedPrograms,
+  heredocProseSites,
   programTokenPath,
   programTokenValueAt,
   renderEmbeddedProgramTokenValue,
@@ -22,17 +24,23 @@ import {
  * untouched, so no plan's token index moves.
  */
 
-function prose(source: string): EmbeddedProgram[] {
-  return embeddedPrograms(source).filter((program) => program.language === "text");
+function prose(source: string): HeredocProseProgram[] {
+  return embeddedPrograms(source, { prose: true }).filter(
+    (program): program is HeredocProseProgram => program.language === "text",
+  );
 }
 
-function only(source: string): EmbeddedProgram {
+function only(source: string): HeredocProseProgram {
   const programs = prose(source);
   expect(programs, source).toHaveLength(1);
   return programs[0]!;
 }
 
-function bind(source: string, value: string, program: EmbeddedProgram = only(source)): string {
+function bind(
+  source: string,
+  value: string,
+  program: EmbeddedProgramOrProse = only(source),
+): string {
   return applyProgramTokenValues(
     source,
     tokenizeProgram("shell", source),
@@ -56,7 +64,7 @@ const NOTES =
 
 describe("heredoc prose", () => {
   it("is one bindable string token marked quote heredoc, at each quoted-delimiter form", () => {
-    const cases: Array<[string, string, string, EmbeddedProgram["context"]]> = [
+    const cases: Array<[string, string, string, HeredocProseProgram["context"]]> = [
       [COMMIT, "'EOF'", 'Fix the parser\n\nIt reads "quotes" (and parens).', "literal-heredoc"],
       [PR_BODY_FILE, '"EOF"', "## Summary\n- reads quotes", "literal-heredoc"],
       [TAG, "\\EOF", "Release 1.2.0", "literal-heredoc"],
@@ -111,6 +119,27 @@ describe("heredoc prose", () => {
     expect(bind(source, "Other body")).toBe(
       'gh pr merge 42 --squash --delete-branch --subject "Fix the parser (#42)" --body "$(cat <<\'EOF\'\nOther body\nEOF\n)" 2>&1 | tail -n 3; gh pr view 42 --json state,mergedAt',
     );
+  });
+
+  it("is listed only on request, after every code program", () => {
+    const source =
+      "cat > notes.md <<'EOF'\nnotes\nEOF\npython3 - <<'PY'\nprint('x')\nPY\ngit commit -F - <<'EOF'\nmsg\nEOF";
+    // The default list is the code programs alone, as it always was.
+    expect(embeddedPrograms(source).map((program) => program.language)).toEqual(["python"]);
+    const full = embeddedPrograms(source, { prose: true });
+    expect(full.map((program) => program.language)).toEqual(["python", "text", "text"]);
+    expect(full[0]).toEqual(embeddedPrograms(source)[0]);
+    expect(embeddedPrograms(PR_SUBSTITUTED)).toEqual([]);
+    const sites = heredocProseSites(source);
+    expect(sites.map((site) => [site.path, site.context, site.token.value])).toEqual([
+      [["tokens", full[1]!.anchor, "embedded", 0], "literal-heredoc", "notes"],
+      [["tokens", full[2]!.anchor, "embedded", 0], "literal-heredoc", "msg"],
+    ]);
+    expect(sites.map((site) => tokenizeProgram("shell", source)[site.anchor]!.raw)).toEqual([
+      "'EOF'",
+      "'EOF'",
+    ]);
+    expect(sites.every((site) => site.embedded === 0 && site.token.quote === "heredoc")).toBe(true);
   });
 
   it("leaves every top-level token where it was", () => {

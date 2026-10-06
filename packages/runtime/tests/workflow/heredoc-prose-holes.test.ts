@@ -8,7 +8,7 @@ import {
   type RecordedWorkflow,
   type WorkflowBindingCandidate,
   type WorkflowJsonValue,
-  embeddedPrograms,
+  heredocProseSites,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import {
@@ -67,13 +67,13 @@ function plan(): RecordedWorkflow {
 
 /** The prose candidate: `["tokens", anchor, "embedded", 0]` of the one `text` program. */
 function candidate(source: string, name: string): WorkflowBindingCandidate {
-  const program = embeddedPrograms(source).find((each) => each.language === "text");
-  if (program === undefined) throw new Error("no heredoc prose");
-  expect(program.tokens[0]).toMatchObject({ kind: "string", quote: "heredoc", bindable: true });
+  const [site] = heredocProseSites(source);
+  if (site === undefined) throw new Error("no heredoc prose");
+  expect(site.token).toMatchObject({ kind: "string", quote: "heredoc", bindable: true });
   return {
     stepId: "ship",
     argument: "command",
-    path: ["tokens", program.anchor, "embedded", 0],
+    path: site.path,
     proposed: { kind: "input", name, type: "string" },
     reason: "native-data-argument",
     missing: "two recordings show this value varies",

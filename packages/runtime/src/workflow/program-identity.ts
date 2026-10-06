@@ -120,7 +120,7 @@ async function identityForProgram(
   const values = new Map<number, string | number | boolean | null>();
   const embedded = new Map<number, Map<number, string | number | boolean | null>>();
   const programs = template.holes.some((hole) => hole.embedded !== undefined)
-    ? embeddedPrograms(source)
+    ? embeddedPrograms(source, { prose: true })
     : [];
   const spans: ProgramTokenSpanValue[] = [];
   const lists: ProgramTokenListValue[] = [];
