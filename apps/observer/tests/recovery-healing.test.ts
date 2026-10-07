@@ -11,9 +11,11 @@ import { squatPipeForTesting } from "@resin/windows-security/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
+  DaemonAlreadyRunningError,
   RecoveryAwareDaemonSupervisor,
   type RecoveryAwareHealthReport,
   awaitBackgroundDaemonStartup,
+  endDaemonCliAfterFailure,
   getRecoverySnapshot,
   handleIpcCommand,
   persistAndSurfaceConfigRecoveryWarning,
@@ -763,5 +765,55 @@ describe("configuration healing", () => {
 
     await expect(startup).resolves.toBe(4321);
     expect(stderr).toHaveBeenCalledWith(warning.message);
+  });
+});
+
+describe("starting a daemon that already runs", () => {
+  function failureFakes() {
+    const captureExceptionImmediate = vi.fn(async () => undefined);
+    const exit = vi.fn<(code: number) => void>();
+    const log = vi.fn<(message: string, error?: unknown) => void>();
+    return {
+      deps: { reporter: { captureExceptionImmediate }, exit, log },
+      captureExceptionImmediate,
+    };
+  }
+
+  it("hears the detached child report a daemon already running, not a startup failure", async () => {
+    // SAFETY: Mock EventEmitter implements ChildProcess event surface for test.
+    const fakeChild = new EventEmitter() as ChildProcess;
+    const startup = awaitBackgroundDaemonStartup(fakeChild, { timeoutMs: 500 });
+
+    fakeChild.emit("message", { type: "already-running", pid: 4321 });
+
+    await expect(startup).rejects.toBeInstanceOf(DaemonAlreadyRunningError);
+    await expect(startup).rejects.toMatchObject({
+      pid: 4321,
+      message: "Resin daemon is already running (PID: 4321)",
+    });
+  });
+
+  it("ends without a crash report when the lock is held by a running daemon", async () => {
+    const { deps, captureExceptionImmediate } = failureFakes();
+
+    await endDaemonCliAfterFailure(new DaemonAlreadyRunningError(4321), deps);
+
+    expect(captureExceptionImmediate).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith("Resin daemon is already running (PID: 4321)");
+    expect(deps.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("still reports any other startup failure as a fatal crash", async () => {
+    const { deps, captureExceptionImmediate } = failureFakes();
+    const failure = new Error("state directory is not writable");
+
+    await endDaemonCliAfterFailure(failure, deps);
+
+    expect(captureExceptionImmediate).toHaveBeenCalledWith(failure, {
+      handled: false,
+      level: "fatal",
+      failureClass: "daemon_startup",
+    });
+    expect(deps.exit).toHaveBeenCalledWith(1);
   });
 });

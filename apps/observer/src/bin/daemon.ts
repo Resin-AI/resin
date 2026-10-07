@@ -36,6 +36,7 @@ import { registeredDaemonModuleProviders } from "../daemon-extensions.js";
 import { createDaemonShutdown } from "../daemon-shutdown.js";
 import { DeviceSyncSignal } from "../device-sync-signal.js";
 import {
+  type ErrorReporterLike,
   bridgeErrorLogs,
   configureErrorReporting,
   getErrorReporter,
@@ -248,8 +249,29 @@ const DaemonStartupMessageSchema = z.discriminatedUnion("type", [
       message: z.string().min(1).max(2_048),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("already-running"),
+      pid: z.number().int().positive().optional(),
+    })
+    .strict(),
 ]);
 type DaemonStartupMessage = z.infer<typeof DaemonStartupMessageSchema>;
+
+/**
+ * Another daemon of this Resin home holds the lock. Asking for a daemon while one runs (a second
+ * `resin-daemon`, several MCP shims starting one at once, a service restart beside a manual
+ * daemon) is an expected outcome, not a crash: it is said plainly and never reported.
+ */
+export class DaemonAlreadyRunningError extends Error {
+  readonly pid?: number;
+
+  constructor(pid?: number) {
+    super(`Resin daemon is already running${pid ? ` (PID: ${pid})` : ""}`);
+    this.name = "DaemonAlreadyRunningError";
+    if (pid !== undefined) this.pid = pid;
+  }
+}
 
 const FAILURE_REMEDIATIONS = {
   AUTHENTICATION: "Run `resin login` to restore cloud access.",
@@ -1111,9 +1133,7 @@ async function runForeground(options: {
 
   const lockResult = await lock.acquire();
   if (lockResult.status === "already_running") {
-    throw new Error(
-      `Resin daemon is already running${lockResult.pid ? ` (PID: ${lockResult.pid})` : ""}`,
-    );
+    throw new DaemonAlreadyRunningError(lockResult.pid);
   }
   if (!configRecoveryWarning) {
     const configWarningStatePath = path.join(
@@ -1425,6 +1445,10 @@ export async function awaitBackgroundDaemonStartup(
       reject(new Error(parsed.data.message));
       return;
     }
+    if (parsed.data.type === "already-running") {
+      reject(new DaemonAlreadyRunningError(parsed.data.pid));
+      return;
+    }
     resolve(parsed.data.pid);
   };
   const onError = (error: Error): void => {
@@ -1490,6 +1514,11 @@ async function runBackground(
       child.kill();
     }
     child.unref();
+    // A daemon already serving this home is what was asked for.
+    if (err instanceof DaemonAlreadyRunningError) {
+      console.log(err.message);
+      return;
+    }
     throw err;
   }
 }
@@ -1572,20 +1601,50 @@ export async function runDaemonCli(options: {
     home: readHomeArgument(process.argv.slice(2)),
   });
   installCrashHandlers(reporter);
-  await main(options.entryFile).catch(async (err) => {
-    await reporter.captureExceptionImmediate(err, {
-      handled: false,
-      level: "fatal",
-      failureClass: "daemon_startup",
-    });
-    const message = sanitizeStartupError(err);
+  await main(options.entryFile).catch((err) =>
+    endDaemonCliAfterFailure(err, {
+      reporter,
+      exit: (code) => process.exit(code),
+      log: (message, error) =>
+        error === undefined ? console.error(message) : console.error(message, error),
+    }),
+  );
+}
+
+/**
+ * Ends the daemon command line after `main` failed. A daemon already running is said plainly and
+ * never reported (the detached parent hears it as such); any other failure is a fatal startup crash,
+ * reported before the process exits non-zero.
+ */
+export async function endDaemonCliAfterFailure(
+  err: unknown,
+  deps: {
+    reporter: Pick<ErrorReporterLike, "captureExceptionImmediate">;
+    exit: (code: number) => void;
+    log: (message: string, error?: unknown) => void;
+  },
+): Promise<void> {
+  if (err instanceof DaemonAlreadyRunningError) {
     sendStartupMessage({
-      type: "startup-error",
-      message: message || "Resin daemon startup failed",
+      type: "already-running",
+      ...(err.pid === undefined ? {} : { pid: err.pid }),
     });
-    console.error("Fatal error in daemon CLI:", err);
-    process.exit(1);
+    deps.log(err.message);
+    deps.exit(1);
+    return;
+  }
+  await deps.reporter.captureExceptionImmediate(err, {
+    handled: false,
+    level: "fatal",
+    failureClass: "daemon_startup",
   });
+  const message = sanitizeStartupError(err);
+  sendStartupMessage({
+    type: "startup-error",
+    message: message || "Resin daemon startup failed",
+  });
+  deps.log("Fatal error in daemon CLI:", err);
+  deps.exit(1);
 }
 
 // Run directly, this module would start a daemon without the packaged entry's modules.

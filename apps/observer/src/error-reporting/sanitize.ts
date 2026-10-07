@@ -170,12 +170,20 @@ export function sanitizeText(
 
 export interface SanitizedStackFrame {
   readonly platform: "node:javascript";
-  readonly function?: string;
+  /** The frame's function, or {@link UNKNOWN_FRAME_FUNCTION} for a frame without one. */
+  readonly function: string;
   readonly filename?: string;
   readonly lineno?: number;
   readonly colno?: number;
   readonly in_app: boolean;
 }
+
+/**
+ * The name of a frame without a function (`at file:line:col`). PostHog's error tracking drops an
+ * exception any of whose frames lacks `function` ("missing field `function`"), so such a frame is
+ * named the way PostHog's own stack parser names it.
+ */
+export const UNKNOWN_FRAME_FUNCTION = "?";
 
 const FRAME_WITH_FUNCTION = /^\s*at\s+(?:async\s+)?(.*?)\s+\((.*)\)\s*$/;
 const FRAME_WITHOUT_FUNCTION = /^\s*at\s+(?:async\s+)?(.*)\s*$/;
@@ -223,7 +231,7 @@ export function parseStackFrames(
     const filename = sanitizeText(location.file, context, 512);
     frames.push({
       platform: "node:javascript",
-      function: functionName ? sanitizeText(functionName, context, 256) : undefined,
+      function: functionName ? sanitizeText(functionName, context, 256) : UNKNOWN_FRAME_FUNCTION,
       filename,
       lineno: location.line,
       colno: location.column,
