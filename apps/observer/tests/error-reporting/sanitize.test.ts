@@ -116,7 +116,7 @@ describe("stack sanitization", () => {
     expect(frames).toEqual([
       {
         platform: "node:javascript",
-        function: undefined,
+        function: "?",
         filename: "/Users/<user>/x.js",
         lineno: 1,
         colno: 1,
@@ -124,7 +124,7 @@ describe("stack sanitization", () => {
       },
       {
         platform: "node:javascript",
-        function: undefined,
+        function: "?",
         filename: "node:internal/process/task_queues",
         lineno: 95,
         colno: 5,
@@ -147,6 +147,14 @@ describe("stack sanitization", () => {
         in_app: true,
       },
     ]);
+  });
+
+  it("names every frame, as PostHog's error tracking requires of each frame it processes", () => {
+    // An exception with a nameless frame (`at file:line:col`) was dropped from error tracking
+    // ("missing field `function`"); PostHog's own stack parser names such a frame `?`.
+    for (const frame of parseStackFrames(stack, context)) {
+      expect(Object.keys(JSON.parse(JSON.stringify(frame)))).toContain("function");
+    }
   });
 
   it("caps frames", () => {
