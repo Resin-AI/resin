@@ -124,6 +124,20 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -134,7 +148,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -233,6 +246,24 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        id: pnpm_store
+        shell: pwsh
+        run: |
+          $store = pnpm store path --silent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "STORE_PATH=$store" -Encoding utf8
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
 
@@ -243,7 +274,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -540,6 +570,24 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        id: pnpm_store
+        shell: pwsh
+        run: |
+          $store = pnpm store path --silent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "STORE_PATH=$store" -Encoding utf8
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
 
@@ -550,7 +598,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -628,6 +675,20 @@ jobs:
         with:
           deno-version: "2.9.5"
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -638,7 +699,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -687,6 +747,20 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -697,7 +771,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

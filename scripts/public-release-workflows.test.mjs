@@ -1903,9 +1903,6 @@ with patch("subprocess.run", side_effect=publish):
 
       const checkAll = scripts["check:all"];
       expect(checkAll).toBeDefined();
-      expect(checkAll).toContain("pnpm run check:privacy-boundary");
-      expect(checkAll).toContain("pnpm run check:hostile-cloud");
-      expect(checkAll).toContain("pnpm run check:runtime-security");
       expect(checkAll).toContain("pnpm run check:adrs");
       expect(checkAll).toContain("pnpm run check:boundaries");
       expect(checkAll).toContain("pnpm run check:secrets");

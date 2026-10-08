@@ -38,17 +38,18 @@ pnpm run check:all
 `pnpm run check:all` executes the complete sequence in order:
 1. `pnpm run check:adrs` — Architecture Decision Record (ADR) format, sequence, and glossary validation
 2. `pnpm run check:boundaries` — Monorepo package boundary and architectural import validation
-3. `pnpm run check:privacy-boundary` — Fail-closed privacy boundary verification and zero-raw-upload enforcement
-4. `pnpm run check:hostile-cloud` — Hostile cloud authority rejection and certificate validation
-5. `pnpm run check:runtime-security` — Runtime IPC, process sandbox, and sensitive path security verification
-6. `pnpm run check:secrets` — Standalone secret scanner checking for unencrypted private keys, tokens, credentials, and canary leaks
-7. `pnpm run lint` — Biome formatting and code style linting
-8. `pnpm run typecheck` — TypeScript strict type checking across all packages and apps
-9. `pnpm run build` — Topological build of all workspace packages and apps
-10. `pnpm run test` — Unit test suite execution via Vitest
-10a. `pnpm run test:sandbox` — Derivation tests against the real Deno + Pyodide sandbox
-11. `pnpm run release:test` — Release packaging, Ed25519 signing and evidence suites, including the binary entry point smoke check (`check:smoke`)
-12. `pnpm run test:e2e` — End-to-end integration test suite
+3. `pnpm run check:secrets` — Standalone secret scanner checking for unencrypted private keys, tokens, credentials, and canary leaks
+4. `pnpm run lint` — Biome formatting and code style linting
+5. `pnpm run typecheck` — TypeScript strict type checking across all packages and apps
+6. `pnpm run build` — Topological build of all workspace packages and apps
+7. `pnpm run test` — Unit test suite execution via Vitest, including the privacy boundary, hostile cloud and runtime security suites
+7a. `pnpm run test:sandbox` — Derivation tests against the real Deno + Pyodide sandbox
+8. `pnpm run release:test` — Release packaging, Ed25519 signing and evidence suites, including the binary entry point smoke check (`check:smoke`)
+9. `pnpm run test:e2e` — End-to-end integration test suite
+
+`check:all` runs the security suites once, through `pnpm run test`. The focused scripts below still run each group on its own.
+
+Turbo includes the root `tsconfig.base.json` in every task hash, so changing it invalidates cached builds and typechecks. The release candidate caches the pnpm content store and Turbo outputs per OS and CPU architecture; it never caches `node_modules`, and installs still run `pnpm install --frozen-lockfile`.
 
 ### Individual Verification Commands
 - **Lint & Format:** `pnpm run lint` / `pnpm run format`
@@ -60,11 +61,19 @@ pnpm run check:all
 - **Smoke Tests:** `pnpm run check:smoke`
 - **Package Boundaries:** `pnpm run check:boundaries`
 - **ADR Check:** `pnpm run check:adrs`
-- **Privacy Boundary Check:** `pnpm run check:privacy-boundary`
-- **Hostile Cloud Check:** `pnpm run check:hostile-cloud`
-- **Runtime Security Check:** `pnpm run check:runtime-security`
+- **Privacy Boundary Check (also in `pnpm run test`):** `pnpm run check:privacy-boundary`
+- **Hostile Cloud Check (also in `pnpm run test`):** `pnpm run check:hostile-cloud`
+- **Runtime Security Check (also in `pnpm run test`):** `pnpm run check:runtime-security`
 - **Release Verification:** `pnpm run release:verify`
 - **Release Test Suite:** `pnpm run release:test`
+
+`pnpm run test:e2e` runs through `vitest.packaged.config.ts`. Its global setup packs the npm bootstrap tarball once per run into a fresh temporary directory and deletes it when the run ends; nothing is cached between runs. Each suite installs into its own temporary directory.
+
+To run one packaged suite on its own, pass the same config:
+
+```bash
+pnpm exec vitest run --config vitest.packaged.config.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts
+```
 
 ### Running the Locally Built CLI
 

@@ -142,7 +142,16 @@ export function runSystemQualification(options = {}) {
   }
   const result = run(
     command,
-    ["exec", "vitest", "run", "--testTimeout=60000", "--hookTimeout=60000", ...suites],
+    [
+      "exec",
+      "vitest",
+      "run",
+      "--config",
+      "vitest.packaged.config.ts",
+      "--testTimeout=60000",
+      "--hookTimeout=60000",
+      ...suites,
+    ],
     {
       cwd: rootDir,
       env,
