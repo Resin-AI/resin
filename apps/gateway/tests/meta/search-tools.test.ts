@@ -1039,35 +1039,19 @@ describe("search_tools over near-duplicate learned tools", () => {
     expect(response.note).toContain("get_tool_schema(name) gives its inputs");
   });
 
-  it("lists a tool measured to cost more after every recommended match, marked", async () => {
+  it("keeps a tool measured to cost more at its rank, leading its group, and marks it", async () => {
     const baseline = await searchLuau({ query, limit: 100 });
-    const baselineNames = baseline.tools.map((tool) => tool.name);
-    expect(baselineNames.length).toBeGreaterThan(1);
-    // The best match and every tool grouped under it, so no recommended member can lead.
     const [best] = baseline.tools;
-    const demotedName = best?.name ?? "";
-    const demoted = [demotedName, ...(best?.similar ?? []).map((tool) => tool.name)];
+    expect(best?.similar?.length).toBeGreaterThan(0);
 
-    const response = await searchLuau({ query, limit: 100 }, [], demoted);
-    const names = response.tools.map((tool) => tool.name);
-    // Still found, but last; the rest keep their order.
-    expect(names.at(-1)).toBe(demotedName);
-    expect(names.slice(0, -1)).toEqual(baselineNames.slice(1));
-    expect(response.tools.at(-1)?.recommended).toBe(false);
-    expect(response.tools.slice(0, -1).every((tool) => !("recommended" in tool))).toBe(true);
-  });
-
-  it("leads a group with its best recommended member when the best match is demoted", async () => {
-    const baseline = await searchLuau({ query, limit: 100 });
-    const [lead] = baseline.tools;
-    const runnerUp = lead?.similar?.[0]?.name;
-    expect(runnerUp).toBeDefined();
-
-    const response = await searchLuau({ query, limit: 100 }, [], [lead?.name ?? ""]);
-    const group = response.tools.find((tool) => tool.name === runnerUp);
-    expect(group).toBeDefined();
-    expect(group).not.toHaveProperty("recommended");
-    expect(group?.similar?.map((tool) => tool.name)).toContain(lead?.name);
+    const response = await searchLuau({ query, limit: 100 }, [], [best?.name ?? ""]);
+    // A search asks for the job explicitly: the best match stays first with its full schema.
+    expect(response.tools.map((tool) => tool.name)).toEqual(
+      baseline.tools.map((tool) => tool.name),
+    );
+    expect(response.tools[0]?.inputSchema).toEqual(best?.inputSchema);
+    expect(response.tools[0]?.recommended).toBe(false);
+    expect(response.tools.slice(1).every((tool) => !("recommended" in tool))).toBe(true);
   });
 
   it("serves every full item's whole input schema, without the sentences each input repeated", async () => {
