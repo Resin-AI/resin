@@ -1612,5 +1612,53 @@ describe("Release Packaging & Verification Suite", () => {
         ).toBe(true);
       }
     });
+
+    it("verifyTarballEntries reports every forbidden entry with configured-list precedence across Unicode and malformed UTF-8", () => {
+      const malformed = Buffer.from([0xff, 0xc3, 0x28, 0xe2, 0x82]);
+      const text = (...parts) =>
+        Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p, "utf8") : p)));
+      const entry = (name, content) => ({ name, content, size: content.length });
+      const dist = (file, content) => entry(`resin/packages/runtime/dist/${file}`, content);
+      const entries = [
+        entry("resin/package.json", Buffer.from('{"name":"resin"}')),
+        entry("resin/LICENSE", Buffer.from("Apache License\nVersion 2.0, January 2004\n")),
+        entry("resin/NOTICE", Buffer.from("Resin\nCopyright 2026\n")),
+        dist(
+          "a.js",
+          text(
+            "// héllo \u{10400} ",
+            malformed,
+            "new LambdaRunner(); import '@resin/cloud-contracts';",
+            malformed,
+          ),
+        ),
+        dist("b.js", text(malformed, "export const q = SqsQueue; // ünïcödé")),
+        dist("c.js", text("日本語 ", malformed, " DynamoTable ", malformed)),
+        dist(
+          "near.js",
+          text(
+            "lambdarunner LAMBDARUNNER Lambda Runner sqsqueue Dynamo_Table cloudservice @resin/clou ",
+            malformed,
+            " Ωμέγα",
+          ),
+        ),
+        dist("clean.js", text("export const ok = 'ünïcödé \u{10400}';", malformed)),
+      ];
+      const violations = verifyTarballEntries(entries, "test.tar.gz", { boundary });
+      const expected = [
+        ["a.js", "@resin/cloud"],
+        ["b.js", "SqsQueue"],
+        ["c.js", "DynamoTable"],
+      ];
+      expect(violations).toHaveLength(expected.length);
+      expected.forEach(([file, identifier], i) => {
+        expect(violations[i]).toMatchObject({
+          rule: "PROPRIETARY_CLOUD_IDENTIFIER",
+          file: "test.tar.gz",
+        });
+        expect(violations[i].message).toContain(`'resin/packages/runtime/dist/${file}'`);
+        expect(violations[i].message).toContain(`identifier '${identifier}'`);
+      });
+    });
   });
 });

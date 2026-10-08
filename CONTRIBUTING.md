@@ -163,3 +163,4 @@ Resin enforces a strict architectural boundary separating the open-source local 
    - Release assets, tarballs, and SBOMs must be generated deterministically through `scripts/package-release.mjs`.
    - Signatures are verified cryptographically via Ed25519 in `scripts/verify-release.mjs`.
    - Verification is purely offline and self-contained without exposing private cloud topology or internal endpoints.
+   - Tarball content scanning checks every text/code entry; a literal identifier prefilter skips clean entries, and matches still report the first identifier in the configured list per entry.

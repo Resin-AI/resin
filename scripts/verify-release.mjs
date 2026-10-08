@@ -93,6 +93,18 @@ export const PROPRIETARY_CLOUD_IDENTIFIERS = Object.freeze([
   "LambdaRunner",
 ]);
 
+const PROPRIETARY_CLOUD_IDENTIFIER_PATTERN = new RegExp(
+  PROPRIETARY_CLOUD_IDENTIFIERS.map((identifier) =>
+    identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  ).join("|"),
+);
+// ASCII needles match the same bytes without UTF-8 decoding; preserve decoding for Unicode needles.
+const PROPRIETARY_CLOUD_IDENTIFIER_ENCODING = PROPRIETARY_CLOUD_IDENTIFIERS.every(
+  (identifier) => Buffer.byteLength(identifier, "utf8") === identifier.length,
+)
+  ? "latin1"
+  : "utf8";
+
 export const ALLOWED_RELEASE_BINARIES = Object.freeze([
   "resin/bin/resin",
   "resin/bin/resin.cmd",
@@ -471,15 +483,17 @@ export function verifyTarballEntries(entries, filename = "tarball", options = {}
     }
 
     if (entry.content && entry.content.length > 0 && isTextOrCodeFile(normalized)) {
-      const contentStr = entry.content.toString("utf8");
-      for (const identifier of PROPRIETARY_CLOUD_IDENTIFIERS) {
-        if (contentStr.includes(identifier)) {
-          violations.push({
-            rule: "PROPRIETARY_CLOUD_IDENTIFIER",
-            file: filename,
-            message: `Platform release tarball ${filename} entry '${normalized}' contains proprietary cloud identifier '${identifier}'.`,
-          });
-          break;
+      const contentStr = entry.content.toString(PROPRIETARY_CLOUD_IDENTIFIER_ENCODING);
+      if (PROPRIETARY_CLOUD_IDENTIFIER_PATTERN.test(contentStr)) {
+        for (const identifier of PROPRIETARY_CLOUD_IDENTIFIERS) {
+          if (contentStr.includes(identifier)) {
+            violations.push({
+              rule: "PROPRIETARY_CLOUD_IDENTIFIER",
+              file: filename,
+              message: `Platform release tarball ${filename} entry '${normalized}' contains proprietary cloud identifier '${identifier}'.`,
+            });
+            break;
+          }
         }
       }
     }
