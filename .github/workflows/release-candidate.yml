@@ -133,8 +133,6 @@ jobs:
         with:
           path: ${{ env.STORE_PATH }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
 
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
@@ -270,8 +268,6 @@ jobs:
         with:
           path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
 
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
@@ -594,8 +590,6 @@ jobs:
         with:
           path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
 
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
@@ -690,8 +684,6 @@ jobs:
         with:
           path: ${{ env.STORE_PATH }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
 
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
@@ -762,8 +754,6 @@ jobs:
         with:
           path: ${{ env.STORE_PATH }}
           key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
 
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
