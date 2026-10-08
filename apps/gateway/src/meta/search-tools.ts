@@ -48,7 +48,8 @@ export interface SearchToolsResultItem {
   replaces?: string;
   /**
    * Present only as `false`: repeated measurements showed this tool costing more than doing the
-   * job directly, so it is listed after every recommended match. It still invokes by name.
+   * job directly, so Resin no longer names it unprompted. A search is an explicit request, so the
+   * tool keeps its rank here and still invokes by name.
    */
   recommended?: false;
   /** Lower-ranked matches running the same set of commands as this tool, listed compactly. */
@@ -982,10 +983,9 @@ export function createSearchToolsHandler(
         })
       : filtered.map((candidate) => ({ candidate }));
 
-    // Recommended tools first, so a group's lead is its best recommended member; then by score
-    // descending, then name ascending
+    // By score descending, then name ascending. Measured cost does not reorder a search: it is an
+    // explicit request, and pushing the best match down only adds a schema lookup.
     scoredTools.sort(({ candidate: a, score: aScore = 0 }, { candidate: b, score: bScore = 0 }) => {
-      if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
       if (query) {
         if (bScore !== aScore) {
           return bScore - aScore;
