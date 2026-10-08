@@ -51,6 +51,9 @@ export interface SearchToolsResponse {
   note?: string;
 }
 
+/** How many tools a search returns when the caller names no `limit`. */
+export const DEFAULT_SEARCH_LIMIT = 5;
+
 /**
  * What an agent is told when its query matches no learned tool. An empty result alone read as "this
  * workspace cannot do that": an agent asked for a PostHog error report searched `posthog`, found
@@ -643,7 +646,9 @@ export function createSearchToolsHandler(
       : [];
     const requestedScope = params.scope;
     const requestedStatus = params.status ?? "active";
-    const limit = Math.min(Math.max(Number(params.limit) || 20, 1), 100);
+    // Every result carries its description and input schema, which the caller reads in full; past
+    // the best few matches they are mostly near-duplicates. `hasMore` and `offset` page the rest.
+    const limit = Math.min(Math.max(Number(params.limit) || DEFAULT_SEARCH_LIMIT, 1), 100);
     const offset = Math.max(Number(params.offset) || 0, 0);
 
     // Retrieve caller's user controls

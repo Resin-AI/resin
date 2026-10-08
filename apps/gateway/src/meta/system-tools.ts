@@ -100,7 +100,7 @@ const SEARCH_TOOLS_RAW: ToolManifest = {
       },
       limit: {
         type: "integer",
-        description: "Maximum number of tools to return (default: 20, max: 100).",
+        description: "Maximum number of tools to return (default: 5, max: 100).",
         minimum: 1,
         maximum: 100,
       },

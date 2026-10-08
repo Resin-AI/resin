@@ -336,10 +336,16 @@ export function createInvokeToolHandler(
     const isRecordedDiscoveryTool =
       isDiscoveryTool(resolvedTool.toolId) || isDiscoveryTool(resolvedTool.name);
 
+    /**
+     * Records one call. `shown` is what the caller receives (default `result`): output usage is
+     * estimated from the content the caller reads, never from Resin's own `_meta` or a raw value
+     * the caller is shown in another form.
+     */
     const recordInvocation = (
       outcome: "success" | InvocationFailureReason,
       result?: CallToolResult,
       errorMessage?: string,
+      shown: CallToolResult | undefined = result,
     ) => {
       const status = outcome === "success" ? "success" : invocationStatusFor(outcome);
       if (outcome !== "success") {
@@ -357,7 +363,7 @@ export function createInvokeToolHandler(
       if (isMetaTool) {
         if (isRecordedDiscoveryTool) {
           const inBytes = estimatePayloadBytes(params);
-          const outBytes = result !== undefined ? estimatePayloadBytes(result) : undefined;
+          const outBytes = shown !== undefined ? estimatePayloadBytes(shown.content) : undefined;
           if (inBytes !== undefined && outBytes !== undefined) {
             discoveryTracker.recordDiscoveryOverhead(
               sessionId,
@@ -388,7 +394,7 @@ export function createInvokeToolHandler(
         const invocationId = `inv_${randomUUID().replace(/-/g, "")}`;
 
         const inputBytes = estimatePayloadBytes(targetParams);
-        const outputBytes = result !== undefined ? estimatePayloadBytes(result) : undefined;
+        const outputBytes = shown !== undefined ? estimatePayloadBytes(shown.content) : undefined;
         let usageEstimate: InvocationUsageEstimate | undefined;
         if (inputBytes !== undefined && outputBytes !== undefined) {
           const inputTokens = bytesToTokens(inputBytes);
@@ -651,23 +657,22 @@ export function createInvokeToolHandler(
         onProgress: options?.onProgress,
         timeoutMs,
       });
-      recordInvocation(result.isError ? failureReasonOfResult(result) : "success", result);
-      if (composed && !result.isError) {
-        // The caller composed this call, so it gets a handle to the result rather than
-        // the bare payload: later calls in the same session can name the handle instead
-        // of copying the value, and the record keeps the connection.
+      // The caller composed this call, so it gets a handle to the result rather than the bare
+      // payload: later calls in the same session can name the handle instead of copying the
+      // value, and the record keeps the connection.
+      const handled = (): CallToolResult => {
         const value = composedResultValue(result);
-        const handle = composed.entry.scope.registerResult(composed.callId, value);
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ result: value, handle }),
-            },
-          ],
-        };
-      }
-      return result.isError ? result : presentedResult(result);
+        const handle = composed!.entry.scope.registerResult(composed!.callId, value);
+        return { content: [{ type: "text", text: JSON.stringify({ result: value, handle }) }] };
+      };
+      const shown = result.isError ? result : composed ? handled() : presentedResult(result);
+      recordInvocation(
+        result.isError ? failureReasonOfResult(result) : "success",
+        result,
+        undefined,
+        shown,
+      );
+      return shown;
     } catch (error) {
       if (timedOut) {
         const res: CallToolResult = {

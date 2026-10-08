@@ -484,8 +484,11 @@ function outcomeLine(
 }
 
 /**
- * The bounded text an observed run returns (or fails with): a first line, each pipeline's outcome,
- * the program's own output, the diagnostics its filters hid, and where its whole output is kept.
+ * The bounded text an observed run returns (or fails with). A failure gets a first line, each
+ * pipeline's outcome, the program's own output, the diagnostics its filters hid, and where its
+ * whole output is kept. A success gets only what a run of the recorded command shows: the
+ * program's output, plus the hidden diagnostics and where the whole output is kept when there is
+ * something the filters hid or the output was shortened.
  * At most `DISPLAY_FILTER_REPORT_LIMIT` characters: the output is shortened first, then lines of
  * pipelines that exited 0; status and failure lines are kept.
  */
@@ -574,17 +577,21 @@ export function displayFilterReport(report: ObservedRunReport): {
     report.stderr.trim().length === 0
       ? report.stdout
       : `${report.stdout.length === 0 ? "" : `${report.stdout.replace(/\n$/, "")}\n`}stderr:\n${report.stderr}`;
-  const fixed = [head, ...statusLines, "Output:", "", ...hidden, ...where].join("\n");
+  const fixedLines = isFailure ? [head, ...statusLines, "Output:"] : [];
+  const budgetWith = (lines: string[]) =>
+    DISPLAY_FILTER_REPORT_LIMIT - [...fixedLines, "", ...hidden, ...lines].join("\n").length;
   let output = fullOutput.length === 0 ? "(none: the program printed nothing)" : fullOutput;
-  const budget = DISPLAY_FILTER_REPORT_LIMIT - fixed.length;
-  if (output.length > budget) {
+  // A success shows where the whole output is only when something was hidden or shortened, so its
+  // output is measured against the room left without that pointer first.
+  const shortened = output.length > budgetWith(isFailure || hidden.length > 0 ? where : []);
+  const shownWhere = isFailure || hidden.length > 0 || shortened ? where : [];
+  if (shortened) {
+    const budget = budgetWith(shownWhere);
     const note = `…[output shortened to its last part${report.directory === undefined ? "" : `; all of it is in ${report.directory}`}]\n`;
     const keep = Math.max(0, budget - note.length);
     output = `${note}${keep > 0 ? output.slice(output.length - keep) : ""}`;
   }
-  let text = [head, ...statusLines, "Output:", output.replace(/\n$/, ""), ...hidden, ...where].join(
-    "\n",
-  );
+  let text = [...fixedLines, output.replace(/\n$/, ""), ...hidden, ...shownWhere].join("\n");
   if (text.length > DISPLAY_FILTER_REPORT_LIMIT) {
     const note = `\n…[report truncated at ${DISPLAY_FILTER_REPORT_LIMIT} characters${report.directory === undefined ? "" : `; full output in ${report.directory}`}]`;
     text = text.slice(0, DISPLAY_FILTER_REPORT_LIMIT - note.length) + note;

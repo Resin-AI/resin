@@ -439,7 +439,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     if (tool.isSystem) {
       if (isDiscoveryTool(name) || isDiscoveryTool(tool.toolId)) {
         const inBytes = estimatePayloadBytes(params);
-        const outBytes = estimatePayloadBytes(executed);
+        const outBytes = estimatePayloadBytes(executed.content);
         if (inBytes !== undefined && outBytes !== undefined) {
           this.discoveryTracker.recordDiscoveryOverhead(
             sessionId,
@@ -467,7 +467,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const { output, reason } = outcome;
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
     const inBytes = estimatePayloadBytes(params);
-    const outBytes = estimatePayloadBytes(output);
+    // The caller reads a result's content, not Resin's `_meta`; an error object is read whole.
+    const outBytes = estimatePayloadBytes("content" in output ? output.content : output);
     let usageEstimate: InvocationUsageEstimate | undefined;
     if (inBytes !== undefined && outBytes !== undefined) {
       const inputTokens = bytesToTokens(inBytes);
