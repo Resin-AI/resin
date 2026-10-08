@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -187,6 +188,45 @@ describe("Release Packaging Hygiene & Forbidden Artifact Protection", () => {
       // Verify against real protocol package in workspace without mutating it
       const protocolDir = path.join(rootDir, "packages/protocol");
       expect(isProductionDistFile(protocolDir, "mock.js")).toBe(true);
+    });
+
+    it("accepts the runtime's generated stdlib ZIP only when it matches its pin, refusing a tampered one", () => {
+      const archive = Buffer.from("precompiled stdlib");
+      const pin = crypto.createHash("sha256").update(archive).digest("hex");
+      function stagePackage(name, bytes) {
+        const pkgDir = fs.mkdtempSync(path.join(tempDir, "stdlib-pkg-"));
+        fs.mkdirSync(path.join(pkgDir, "src/workflow"), { recursive: true });
+        fs.mkdirSync(path.join(pkgDir, "dist/workflow"), { recursive: true });
+        fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ name }));
+        fs.writeFileSync(
+          path.join(pkgDir, "src/workflow/derivation-assets.json"),
+          JSON.stringify({ sources: {}, compiledStdlibSha256: pin }),
+        );
+        fs.writeFileSync(path.join(pkgDir, "dist/workflow/python_stdlib.zip"), bytes);
+        return pkgDir;
+      }
+
+      const runtime = stagePackage("@resin/runtime", archive);
+      expect(isProductionDistFile(runtime, "workflow/python_stdlib.zip")).toBe(true);
+      expect(() => assertCleanProductionDist(rootDir, runtime)).not.toThrow();
+
+      const tampered = stagePackage("@resin/runtime", Buffer.concat([archive, Buffer.from("x")]));
+      for (const check of [
+        () => isProductionDistFile(tampered, "workflow/python_stdlib.zip"),
+        () => assertCleanProductionDist(rootDir, tampered),
+        () => collectPackageProductionDistFiles(rootDir, tampered),
+      ]) {
+        let thrown;
+        try {
+          check();
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown?.code).toBe("ERR_RUNTIME_STDLIB_INTEGRITY");
+      }
+
+      const other = stagePackage("@resin/other", archive);
+      expect(isProductionDistFile(other, "workflow/python_stdlib.zip")).toBe(false);
     });
   });
 

@@ -34,6 +34,10 @@ Run `pnpm check` for the same checks as PR CI. It builds the workspace and runs 
 
 When adding a TypeScript workspace, add its project to the root `tsconfig.json` references and declare its dependency references in its own config. The existing boundary check rejects workspace projects missing from the root solution. Keep the root config as plain JSON.
 
+The build also precompiles the derivation sandbox's Python standard library with the pinned Pyodide interpreter. Turbo caches this archive separately, so ordinary TypeScript edits do not regenerate it. Run `pnpm build` before running sandbox tests from a clean checkout.
+
+`packages/runtime/src/workflow/derivation-assets.json` pins both the original Pyodide assets and the generated archive. A Pyodide upgrade must update those pins and verify the generator's output. The archive retains Python sources; every derivation still starts a fresh, permission-restricted process and verifies its asset hashes before execution.
+
 ### Complete Local Verification Gate
 
 Run the full verification sequence by hand when a change touches release, security or packaging paths:

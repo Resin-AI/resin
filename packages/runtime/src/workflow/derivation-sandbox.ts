@@ -22,18 +22,24 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { WorkflowJsonValue } from "@resin/contracts";
 import { resolveDenoExecutable } from "../worker/deno-executable.js";
+import derivationAssets from "./derivation-assets.json" with { type: "json" };
 
 /** Pinned Pyodide release; must equal the exact `pyodide` dependency of this package. */
 export const PYODIDE_VERSION = "314.0.7";
 
-/** SHA-256 of every Pyodide asset a derivation loads, from the pinned release. */
+/**
+ * SHA-256 of every Pyodide asset a derivation loads: the pinned release's own files, except
+ * `python_stdlib.zip`, which is the build's precompiled copy of the pinned standard library.
+ */
 const PYODIDE_ASSET_SHA256: Readonly<Record<string, string>> = {
-  "pyodide.mjs": "6f1d60f7bf529beb300f0f47983c921d3982363640ba20af0e38efdddbc66109",
-  "pyodide.asm.mjs": "f7cdc8ece80678ceb712f8e65ebe6d3a83203a180c399865f49612a051693635",
-  "pyodide.asm.wasm": "cc36e3cab04fdfc9a63ff13eb52eae2b911bf46c025cc7b281f394bd3de1d5e6",
-  "python_stdlib.zip": "fa1957e5777068fc4f7437f96d860ae2fbe9c19732ba06c84e004ec16dd7dd7a",
-  "pyodide-lock.json": "5dc2fc119108bc148c7457dc86e7675b5c87e1cafd420b9c34c1eaef7b36c010",
+  ...derivationAssets.sources,
+  "python_stdlib.zip": derivationAssets.compiledStdlibSha256,
 };
+
+/** The build's precompiled standard library; read from built output in source and dist alike. */
+const COMPILED_STDLIB = fileURLToPath(
+  new URL("../../dist/workflow/python_stdlib.zip", import.meta.url),
+);
 
 /** Modules a derivation may import: pre-imported before the derivation runs. */
 export const DERIVATION_MODULES = [
@@ -119,7 +125,7 @@ function copyAssets(): PyodideAssets {
   const digests: Record<string, string> = {};
   for (const [file, expected] of Object.entries(PYODIDE_ASSET_SHA256)) {
     const target = path.join(directory, file);
-    copyFileSync(path.join(source, file), target);
+    copyFileSync(file === "python_stdlib.zip" ? COMPILED_STDLIB : path.join(source, file), target);
     // The copy is what Deno reads, so the copy is what must match the pin.
     if (sha256(target) !== expected)
       throw new Error(`Pyodide asset '${file}' does not match its pin`);

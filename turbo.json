@@ -25,7 +25,17 @@
     "clean": {
       "cache": false
     },
+    "//#build:derivation-stdlib": {
+      "inputs": [
+        "scripts/build-derivation-stdlib.mjs",
+        "packages/runtime/src/workflow/derivation-assets.json",
+        "packages/runtime/package.json",
+        "pnpm-lock.yaml"
+      ],
+      "outputs": ["packages/runtime/dist/workflow/python_stdlib.zip"]
+    },
     "//#compile": {
+      "dependsOn": ["//#build:derivation-stdlib"],
       "inputs": [
         "tsconfig.json",
         "tsconfig.base.json",
@@ -48,6 +58,7 @@
       "outputs": [
         "apps/*/dist/**",
         "packages/*/dist/**",
+        "!packages/runtime/dist/workflow/python_stdlib.zip",
         "adapters/*/dist/**",
         "fixtures/*/dist/**",
         "apps/cli/.tsbuildinfo"

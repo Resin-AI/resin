@@ -76,7 +76,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b && node ../../scripts/write-cli-bundled-release-trust.mjs",
+    "build": "tsc -b && node ../../scripts/build-derivation-stdlib.mjs && node ../../scripts/write-cli-bundled-release-trust.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo .tsbuildinfo",
     "postinstall": "node bin/postinstall.mjs",
     "typecheck": "tsc -b"

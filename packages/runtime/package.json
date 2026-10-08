@@ -50,7 +50,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node ../../scripts/build-derivation-stdlib.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "clean": "rm -rf dist *.tsbuildinfo"
