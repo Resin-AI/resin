@@ -61,7 +61,7 @@ pnpm run check:all
 
 `check:all` runs the security suites once, through `pnpm run test`. The focused scripts below still run each group on its own.
 
-Turbo includes the root `tsconfig.base.json` in every task hash, so changing it invalidates cached builds and typechecks. The release candidate caches the pnpm content store and Turbo outputs per OS and CPU architecture; it never caches `node_modules`, and installs still run `pnpm install --frozen-lockfile`. In both CI and the release candidate, the pnpm store cache is keyed by OS, CPU architecture and the exact lockfile hash with no prefix fallback, so a lockfile change starts a fresh store instead of carrying obsolete packages forward.
+Turbo includes the root `tsconfig.base.json` in every task hash, so changing it invalidates cached builds and typechecks. The release candidate caches the pnpm content store and Turbo outputs per OS and CPU architecture; it never caches `node_modules`, and installs still run `pnpm install --frozen-lockfile`. In CI, Static Checks writes the shared per-OS, per-architecture compiler cache, while unit and sandbox jobs only restore it and do not depend on Static Checks; Turbo's content hashes remain the authority for invalidation. In both CI and the release candidate, the pnpm store cache is keyed by OS, CPU architecture and the exact lockfile hash with no prefix fallback, so a lockfile change starts a fresh store instead of carrying obsolete packages forward.
 
 ### Individual Verification Commands
 - **Lint & Format:** `pnpm run lint` / `pnpm run format`

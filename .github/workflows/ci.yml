@@ -78,14 +78,15 @@ jobs:
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
+      # Sole writer of the shared compiler cache; other jobs restore it without
+      # depending on this job, and Turbo content hashes decide what is reused.
       - name: Restore turbo cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.TURBO_CACHE_DIR }}
-          key: ${{ runner.os }}-turbo-static-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-compile-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-turbo-static-
-            ${{ runner.os }}-turbo-
+            ${{ runner.os }}-${{ runner.arch }}-turbo-compile-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -144,14 +145,14 @@ jobs:
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
+      # Static Checks writes the shared compiler cache; this job only restores it.
       - name: Restore turbo cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.TURBO_CACHE_DIR }}
-          key: ${{ runner.os }}-turbo-unit-${{ matrix.shard }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-compile-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-turbo-unit-${{ matrix.shard }}-
-            ${{ runner.os }}-turbo-
+            ${{ runner.os }}-${{ runner.arch }}-turbo-compile-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -206,14 +207,14 @@ jobs:
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
+      # Static Checks writes the shared compiler cache; this job only restores it.
       - name: Restore turbo cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.TURBO_CACHE_DIR }}
-          key: ${{ runner.os }}-turbo-sandbox-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-turbo-compile-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-turbo-sandbox-
-            ${{ runner.os }}-turbo-
+            ${{ runner.os }}-${{ runner.arch }}-turbo-compile-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
