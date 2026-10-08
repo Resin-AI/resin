@@ -10592,6 +10592,7 @@ var HarnessHealthSnapshotSchema = external_exports.object({
   trigger: HarnessHealthTriggerSchema,
   autoRepair: external_exports.boolean(),
   settingsDiagnostic: HarnessHealthSettingsDiagnosticSchema.optional(),
+  disabledHarnesses: external_exports.array(HarnessIdSchema).max(64).optional(),
   success: external_exports.boolean(),
   hasDrift: external_exports.boolean(),
   configFiles: external_exports.record(external_exports.string(), HarnessConfigHealthCacheSchema),
@@ -10603,7 +10604,8 @@ var HarnessHealthSnapshotSchema = external_exports.object({
 }).strict();
 var HarnessHealthSettingsSchema = external_exports.object({
   format: external_exports.literal(HARNESS_HEALTH_SETTINGS_FORMAT),
-  autoRepair: external_exports.boolean()
+  autoRepair: external_exports.boolean(),
+  disabledHarnesses: external_exports.array(external_exports.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u)).max(64).optional()
 }).strict();
 var ABSENT_CONFIG_FILE = { present: false, mtimeMs: null };
 var EMPTY_CONFIG_CACHE = Object.fromEntries(

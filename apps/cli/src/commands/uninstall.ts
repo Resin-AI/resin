@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { applyOmpCatalogInstructions } from "@resin/adapter-omp";
+import type { HarnessId } from "@resin/contracts";
 import {
   type ConfigFsBridge,
   type HarnessInstallDefinition,
@@ -12,8 +13,13 @@ import {
   resolveHarnessUserHome,
 } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
-import { HARNESS_DEFINITIONS } from "../harness-registry.js";
+import {
+  HARNESS_DEFINITIONS,
+  getHarnessDefinition,
+  isSupportedHarnessId,
+} from "../harness-registry.js";
 import { removeShellPath } from "../installer/bootstrap-entry.js";
+import { updateHarnessHealthSettings } from "../installer/harness-health.js";
 import {
   type HarnessReconcileFsBridge,
   HarnessReconciler,
@@ -90,6 +96,11 @@ export interface UninstallCommandFlags {
   json?: boolean;
   home?: string;
   help?: boolean;
+  /**
+   * Harnesses (comma-separated ids) to remove Resin from, leaving the service and every other
+   * harness in place. Resin then never re-registers them on its own.
+   */
+  harness?: string;
 }
 
 export interface UninstallResult {
@@ -155,6 +166,10 @@ export function parseUninstallFlags(args: string[]): UninstallCommandFlags {
       flags.home = args[++i];
     } else if (arg.startsWith("--home=")) {
       flags.home = arg.slice(7);
+    } else if (arg === "--harness" && i + 1 < args.length) {
+      flags.harness = args[++i];
+    } else if (arg.startsWith("--harness=")) {
+      flags.harness = arg.slice("--harness=".length);
     }
   }
   return flags;
@@ -164,11 +179,17 @@ export function printUninstallHelp(): void {
   const text = `
 Usage:
   resin uninstall [options]
+  resin uninstall --harness <id>[,<id>...] [--dry-run] [--json]
 
 Stops and removes the Resin background daemon service and removes Resin
 MCP gateway registrations from all installed AI agent harnesses.
 
+With --harness, removes Resin only from the named harnesses and keeps the
+service and every other harness. Resin records the choice and does not
+add itself back to those harnesses; \`resin init --harness <id>\` does.
+
 Options:
+  --harness <ids>     Remove Resin from these harnesses only (e.g. omp,claude-code).
   --purge-data        Delete state databases, telemetry, and log files.
   --purge-secrets     Delete secure secret vault and cached cloud credentials.
   --purge-all, --all  Purge all Resin state, secrets, and directories completely.
@@ -216,6 +237,8 @@ export async function removeHarnessMcpConfigurations(options: {
   customHome?: string;
   env?: NodeJS.ProcessEnv;
   fsBridge?: HarnessReconcileFsBridge;
+  /** Only these harnesses; all supported ones when omitted. */
+  harnesses?: readonly HarnessId[];
 }): Promise<string[]> {
   const fsBridge = options.fsBridge ?? new ReconciliationNodeFsBridge();
   const home = path.resolve(
@@ -226,6 +249,9 @@ export async function removeHarnessMcpConfigurations(options: {
   const cleaned: string[] = [];
 
   for (const definition of HARNESS_DEFINITIONS) {
+    if (options.harnesses !== undefined && !options.harnesses.includes(definition.id)) {
+      continue;
+    }
     if (await removeHarnessRegistration(definition, home, env, fsBridge, reconciler)) {
       cleaned.push(definition.displayName);
     }
@@ -377,6 +403,10 @@ export async function uninstallCommand(
   const resinHome = path.join(customHome, ".resin");
   const daemonPaths = resolvePaths({ home: customHome });
   const fsBridge = options.fsBridge ?? defaultFsBridge;
+
+  if (flags.harness !== undefined) {
+    return uninstallFromHarnesses(flags, { customHome, env, fsBridge: options.fsBridge });
+  }
 
   const removedPaths: string[] = [];
   const purgeFailures: { path: string; error: string }[] = [];
@@ -613,5 +643,88 @@ export async function uninstallCommand(
       process.stderr.write(`\nUninstall failed: ${msg}\n`);
     }
     return 1;
+  }
+}
+
+/**
+ * `resin uninstall --harness <ids>`: removes Resin from the named harnesses only and records
+ * the opt-out first, so the resident daemon's repair never races the removal and never adds
+ * Resin back. The service, other harnesses and Resin's data stay.
+ */
+async function uninstallFromHarnesses(
+  flags: UninstallCommandFlags,
+  options: {
+    readonly customHome: string;
+    readonly env: NodeJS.ProcessEnv;
+    readonly fsBridge: HarnessReconcileFsBridge | undefined;
+  },
+): Promise<number> {
+  const fail = (message: string): number => {
+    if (flags.json) {
+      process.stdout.write(`${JSON.stringify({ success: false, error: message }, null, 2)}\n`);
+    } else {
+      process.stderr.write(`\nUninstall failed: ${message}\n`);
+    }
+    return 1;
+  };
+  const requested = (flags.harness ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  const unsupported = requested.filter((value) => !isSupportedHarnessId(value));
+  if (requested.length === 0 || unsupported.length > 0) {
+    const supported = HARNESS_DEFINITIONS.map((definition) => definition.id).join(", ");
+    return fail(
+      requested.length === 0
+        ? `--harness needs at least one harness id (${supported})`
+        : `Unsupported harness '${unsupported.join("', '")}' (supported: ${supported})`,
+    );
+  }
+  if (flags.purgeData || flags.purgeSecrets || flags.purgeAll) {
+    return fail("--harness cannot be combined with --purge-data, --purge-secrets or --purge-all");
+  }
+  const harnesses = HARNESS_DEFINITIONS.filter((definition) =>
+    requested.includes(definition.id),
+  ).map((definition) => definition.id);
+  const names = harnesses.map((harnessId) => getHarnessDefinition(harnessId).displayName);
+
+  if (flags.dryRun) {
+    if (flags.json) {
+      process.stdout.write(
+        `${JSON.stringify({ success: true, dryRun: true, disabledHarnesses: harnesses, harnessesCleaned: names }, null, 2)}\n`,
+      );
+    } else {
+      process.stdout.write(
+        `\n[DRY-RUN] Resin would be removed from ${names.join(", ")} and not added back automatically.\n\n`,
+      );
+    }
+    return 0;
+  }
+
+  try {
+    await updateHarnessHealthSettings(
+      { disableHarnesses: harnesses },
+      { home: options.customHome, fsBridge: options.fsBridge },
+    );
+    const cleaned = await removeHarnessMcpConfigurations({
+      customHome: options.customHome,
+      env: options.env,
+      fsBridge: options.fsBridge,
+      harnesses,
+    });
+    if (flags.json) {
+      process.stdout.write(
+        `${JSON.stringify({ success: true, dryRun: false, disabledHarnesses: harnesses, harnessesCleaned: cleaned }, null, 2)}\n`,
+      );
+    } else {
+      process.stdout.write(`\n✓ Resin removed from ${names.join(", ")}.\n`);
+      process.stdout.write(
+        "  • Resin will not add itself back to these harnesses. Running sessions keep Resin until they restart.\n",
+      );
+      process.stdout.write(`  • To add it back: resin init --harness ${harnesses.join(",")}\n\n`);
+    }
+    return 0;
+  } catch (error: unknown) {
+    return fail(errorMessage(error));
   }
 }

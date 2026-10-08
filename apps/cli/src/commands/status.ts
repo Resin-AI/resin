@@ -36,7 +36,11 @@ import {
 } from "@resin/protocol";
 import type { MembershipType } from "@resin/protocol";
 import { AttestationVerifier, SafetyGateEvaluator } from "@resin/runtime";
-import { HARNESS_DEFINITIONS, isSupportedHarnessId } from "../harness-registry.js";
+import {
+  HARNESS_DEFINITIONS,
+  findHarnessDefinition,
+  isSupportedHarnessId,
+} from "../harness-registry.js";
 import { getActiveVersion } from "../installer/asset-downloader.js";
 import { compareSemver } from "../installer/channel-verifier.js";
 import {
@@ -44,13 +48,23 @@ import {
   resolveInstalledResinMcpCommand,
   verifyHarnessRegistration,
 } from "../installer/harness-config.js";
-import { resolveLocalSourceResinCommand } from "../installer/harness-health.js";
+import {
+  HARNESS_HEALTH_SETTINGS_FILENAME,
+  loadHarnessHealthSettings,
+  resolveLocalSourceResinCommand,
+} from "../installer/harness-health.js";
 import { fetchAccountProfile } from "../service/account-profile.js";
 import {
   type CloudCredentialLoadResult,
   type CloudCredentialStatus,
   DeviceAuthClient,
 } from "../service/auth-bootstrap.js";
+import {
+  type HarnessSessionRestartReason,
+  type ProcessTableReader,
+  createProcessTableReader,
+  findHarnessSessionsNeedingRestart,
+} from "../service/harness-sessions.js";
 import {
   type LocalStateReader,
   type ServedCatalogReading,
@@ -285,6 +299,23 @@ export interface DaemonStatusSummary {
     success: boolean | null;
     hasDrift: boolean | null;
     autoRepair: boolean | null;
+    /** Harnesses the user removed Resin from (`resin uninstall --harness`); never repaired. */
+    disabledHarnesses?: HarnessId[];
+  };
+  /**
+   * Running harness sessions that need a restart to reach the current Resin: started without a
+   * Resin gateway, or running an older one. `available` is false where the process table cannot
+   * be read (native Windows). Absent from reports written before this existed.
+   */
+  harnessSessions?: {
+    available: boolean;
+    sessions: Array<{
+      harnessId: HarnessId;
+      name: string;
+      pid: number;
+      reason: HarnessSessionRestartReason;
+      version: string | null;
+    }>;
   };
   harnesses: Array<{
     id: HarnessId;
@@ -292,7 +323,8 @@ export interface DaemonStatusSummary {
     installed: boolean;
     configured: boolean;
     mcpAttached: boolean;
-    status: "attached" | "unconfigured" | "not_installed" | "drift" | "error";
+    /** `disabled`: installed, and the user removed Resin from it on purpose. */
+    status: "attached" | "unconfigured" | "not_installed" | "drift" | "error" | "disabled";
     /** Installed version as reported by the harness; null when not installed or unreadable. */
     version: string | null;
     /** `version` against the definition's exact tested versions. */
@@ -392,6 +424,8 @@ interface StatusCollectionOptions {
   now?: () => number;
   /** Read-only local state store view; defaults to `<dataDir>/state.db`. Not closed when injected. */
   stateReader?: LocalStateReader;
+  /** Process table for the harness session check; defaults to this platform's reader. */
+  readProcessTable?: ProcessTableReader;
 }
 
 interface LocalConfigSnapshot {
@@ -657,9 +691,18 @@ export async function fetchDaemonStatusSummary(
   );
 
   const harnessSnapshot = await readHarnessSnapshot(fsBridge, resinHome);
+  const disabledHarnesses = await readDisabledHarnesses(fsBridge, resinHome);
   const stateReader = options.stateReader ?? openLocalStateReader({ dataDir: daemonPaths.dataDir });
   const [harnesses, servedCatalog] = await Promise.all([
-    collectHarnessStatuses(home, fsBridge, harnessSnapshot, env, stateReader, options.entryPath),
+    collectHarnessStatuses(
+      home,
+      fsBridge,
+      harnessSnapshot,
+      env,
+      stateReader,
+      options.entryPath,
+      disabledHarnesses,
+    ),
     stateReader.servedCatalog(options.cwd ?? process.cwd()),
   ]).finally(() => {
     if (options.stateReader === undefined) stateReader.close();
@@ -673,6 +716,16 @@ export async function fetchDaemonStatusSummary(
     gatewayResinHome: daemonPaths.homeDir,
     configPath: daemonPaths.configFile,
     env,
+  });
+  const harnessSessions = await readHarnessSessionsStatus({
+    resinHome: daemonPaths.homeDir,
+    harnesses: harnesses
+      .filter((harness) => harness.status === "attached")
+      .map((harness) => harness.id),
+    // Under Vitest the machine's own harness sessions would leak into status assertions; tests
+    // that cover the check inject a table.
+    readProcessTable: options.readProcessTable ?? (process.env.VITEST ? async () => [] : undefined),
+    nowMs: now,
   });
   const privacy = collectPrivacySnapshot(
     localConfig,
@@ -750,7 +803,9 @@ export async function fetchDaemonStatusSummary(
       success: harnessSnapshot.success,
       hasDrift: harnessSnapshot.hasDrift,
       autoRepair: harnessSnapshot.autoRepair,
+      ...(disabledHarnesses.length > 0 ? { disabledHarnesses } : {}),
     },
+    harnessSessions,
     harnesses,
     safetyGate,
     tools: {
@@ -839,6 +894,7 @@ export function formatStatusForTerminal(
         versionTag === null
           ? escapeTerminalControls(harness.name)
           : `${escapeTerminalControls(harness.name)} ${escapeTerminalControls(harness.version ?? "")} (${escapeTerminalControls(versionTag)})`;
+      if (harness.status === "disabled") return `${name} (Resin removed by you)`;
       if (harness.status === "drift" || harness.status === "error") return `${name} (needs repair)`;
       if (!harness.configured || !harness.mcpAttached || harness.status !== "attached") {
         return `${name} (needs setup)`;
@@ -875,6 +931,8 @@ export function formatStatusForTerminal(
   if (automaticUpdateNotice) lines.push("", automaticUpdateNotice);
   const staleGateways = formatStaleMcpGateways(summary.update?.staleMcpGateways);
   if (staleGateways) lines.push("", staleGateways);
+  const harnessSessions = formatHarnessSessionsNotice(summary.harnessSessions);
+  if (harnessSessions) lines.push("", harnessSessions);
 
   if (remediations.length > 0) {
     lines.push("", "Next steps:");
@@ -1165,8 +1223,19 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
       : harness.version === null
         ? "Installed, version unknown"
         : `Installed ${escapeTerminalControls(harness.version)}, ${escapeTerminalControls(harness.versionLabel ?? harness.versionStatus)}`;
-    const attached = harness.configured ? "Configured (MCP Attached)" : "Not Configured";
+    const attached = harness.configured
+      ? "Configured (MCP Attached)"
+      : harness.status === "disabled"
+        ? `Resin removed by you (resin init --harness ${harness.id} adds it back)`
+        : "Not Configured";
     lines.push(`  - ${harness.name.padEnd(16)} [${installed}] - ${attached}`);
+  }
+  if (summary.harnessSessions && !summary.harnessSessions.available) {
+    lines.push("  Running sessions: not checked on this platform");
+  }
+  const harnessSessions = formatHarnessSessionsNotice(summary.harnessSessions);
+  if (harnessSessions) {
+    for (const line of harnessSessions.split("\n")) lines.push(`  ${line}`);
   }
 
   const remediations = summary.remediations ?? [];
@@ -1504,6 +1573,7 @@ async function collectHarnessStatuses(
   env: NodeJS.ProcessEnv,
   stateReader: LocalStateReader,
   entryPath?: string,
+  disabledHarnesses: readonly HarnessId[] = [],
 ): Promise<DaemonStatusSummary["harnesses"]> {
   const resinCommand =
     resolveLocalSourceResinCommand(env, entryPath) ?? resolveInstalledResinMcpCommand(home);
@@ -1554,15 +1624,18 @@ async function collectHarnessStatuses(
         versionStatus,
         versionEvidence,
         versionLabel: describeHarnessVersion(versionStatus, versionEvidence),
-        status: error
-          ? "error"
-          : drift
-            ? "drift"
-            : !installed
-              ? "not_installed"
-              : configured
-                ? "attached"
-                : "unconfigured",
+        status:
+          installed && !configured && disabledHarnesses.includes(id)
+            ? "disabled"
+            : error
+              ? "error"
+              : drift
+                ? "drift"
+                : !installed
+                  ? "not_installed"
+                  : configured
+                    ? "attached"
+                    : "unconfigured",
         lastCheckedAt: cachedHarness?.checkedAt ?? cached.checkedAt,
         recentAction: useCachedDiagnostic ? (cachedHarness?.recentAction ?? null) : null,
       };
@@ -1734,6 +1807,95 @@ export function formatStaleMcpGateways(
   if (credentialUnsafe)
     notices.push(`${credentialUnsafe} \`resin login\` will not pair while they run.`);
   return notices.length > 0 ? notices.join(" ") : null;
+}
+
+/** Harnesses the user removed Resin from, from the harness health settings. Never throws. */
+async function readDisabledHarnesses(
+  fsBridge: ConfigFsBridge,
+  resinHome: string,
+): Promise<HarnessId[]> {
+  try {
+    const settings = await loadHarnessHealthSettings({
+      settingsPath: path.join(resinHome, "config", HARNESS_HEALTH_SETTINGS_FILENAME),
+      fsBridge,
+    });
+    return settings.disabledHarnesses.filter(isSupportedHarnessId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Running sessions of `harnesses` (those whose config registers Resin) that need a restart:
+ * no `resin mcp` gateway below them, or one older than the active install. Never throws.
+ */
+export async function readHarnessSessionsStatus(options: {
+  readonly resinHome: string;
+  readonly harnesses: readonly HarnessId[];
+  readonly readProcessTable?: ProcessTableReader;
+  readonly nowMs: number;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly procRoot?: string;
+}): Promise<NonNullable<DaemonStatusSummary["harnessSessions"]>> {
+  if (options.harnesses.length === 0) return { available: true, sessions: [] };
+  try {
+    const table = await (options.readProcessTable ?? createProcessTableReader())();
+    if (table === null) return { available: false, sessions: [] };
+    const registered = await listRunningGateways({
+      resinHome: options.resinHome,
+      isAlive: options.isAlive,
+      procRoot: options.procRoot,
+    });
+    const sessions = findHarnessSessionsNeedingRestart(table, {
+      harnesses: options.harnesses,
+      gatewayVersions: new Map(registered.map((gateway) => [gateway.pid, gateway.version])),
+      activeVersion: getActiveVersion(options.resinHome),
+      resinHome: options.resinHome,
+      nowMs: options.nowMs,
+    });
+    return {
+      available: true,
+      sessions: sessions.map((session) => ({
+        ...session,
+        name: findHarnessDefinition(session.harnessId)?.shortName ?? session.harnessId,
+        version: safeVersion(session.version),
+      })),
+    };
+  } catch {
+    return { available: false, sessions: [] };
+  }
+}
+
+/** One line per harness naming the sessions to restart, or null when there are none. */
+export function formatHarnessSessionsNotice(
+  status: DaemonStatusSummary["harnessSessions"] | undefined,
+): string | null {
+  if (!status || status.sessions.length === 0) return null;
+  const lines: string[] = [];
+  const pids = (sessions: readonly { pid: number }[]) =>
+    `${sessions.length === 1 ? "PID" : "PIDs"} ${sessions.map((session) => session.pid).join(", ")}`;
+  for (const harnessId of new Set(status.sessions.map((session) => session.harnessId))) {
+    const sessions = status.sessions.filter((session) => session.harnessId === harnessId);
+    const name = escapeTerminalControls(sessions[0]?.name ?? harnessId);
+    const missing = sessions.filter((session) => session.reason === "missing");
+    const outdated = sessions.filter((session) => session.reason === "outdated");
+    if (missing.length > 0) {
+      lines.push(
+        `${missing.length} ${name} session(s) started without Resin (${pids(missing)}); restart them to use Resin's tools.`,
+      );
+    }
+    if (outdated.length > 0) {
+      const versions = [
+        ...new Set(
+          outdated.map((session) => (session.version ? `v${session.version}` : "unknown version")),
+        ),
+      ].sort();
+      lines.push(
+        `${outdated.length} ${name} session(s) run an older Resin (${versions.join(", ")}; ${pids(outdated)}); restart them to load the current version.`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 function readDeferralStatus(

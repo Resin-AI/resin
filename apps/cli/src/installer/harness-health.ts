@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { type Stats, constants as fsConstants, realpathSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import os from "node:os";
@@ -25,6 +25,14 @@ import {
 } from "./harness-reconciler.js";
 
 export const HARNESS_HEALTH_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
+/**
+ * How often the resident scheduler looks for changed harness files. A look that finds no change
+ * costs a settings read, a state read and a few `stat` calls; a full check runs only when a
+ * fingerprinted file changed or {@link HARNESS_HEALTH_CHECK_INTERVAL_MS} elapsed. Another tool
+ * that rewrites a harness config and drops Resin is thereby repaired within seconds, before most
+ * new harness sessions start without Resin.
+ */
+export const HARNESS_HEALTH_POLL_INTERVAL_MS = 15_000;
 export const HARNESS_HEALTH_STATE_FORMAT = "resin-harness-health/v1" as const;
 export const HARNESS_HEALTH_STATE_FILENAME = "harness-health.json";
 export const HARNESS_HEALTH_COMMAND_DEADLINE_MS = 250;
@@ -55,10 +63,11 @@ export interface HarnessConfigHealthCache {
   readonly mtimeMs: number | null;
 }
 
-/** Config-file fingerprints keyed by harness id; a missing id reads as absent. */
-export type HarnessHealthConfigFiles = Readonly<
-  Partial<Record<HarnessId, HarnessConfigHealthCache>>
->;
+/**
+ * File fingerprints: the MCP config under the harness id, and each guidance or install-extension
+ * file under `<harness id>:<path digest>`. A missing key reads as absent.
+ */
+export type HarnessHealthConfigFiles = Readonly<Partial<Record<string, HarnessConfigHealthCache>>>;
 
 export interface HarnessHealthHarnessSnapshot {
   readonly harnessId: HarnessId;
@@ -87,11 +96,33 @@ export interface HarnessHealthSnapshot {
   readonly trigger: HarnessHealthTrigger;
   readonly autoRepair: boolean;
   readonly settingsDiagnostic?: HarnessHealthSettingsDiagnostic;
+  /** Harnesses the user removed Resin from on purpose; never checked or repaired. */
+  readonly disabledHarnesses?: readonly HarnessId[];
   readonly success: boolean;
   readonly hasDrift: boolean;
   readonly configFiles: HarnessHealthConfigFiles;
   readonly harnesses: readonly HarnessHealthHarnessSnapshot[];
   readonly lastFailure?: HarnessHealthFailureSnapshot;
+}
+
+export interface HarnessHealthSettings {
+  readonly format: typeof HARNESS_HEALTH_SETTINGS_FORMAT;
+  readonly autoRepair: boolean;
+  /**
+   * Harness ids the user removed Resin from with `resin uninstall --harness`. Resin never
+   * re-registers them on its own; `resin init --harness <id>` clears the entry. Ids this build
+   * does not know are kept so a newer build's choices survive a downgrade.
+   */
+  readonly disabledHarnesses: readonly string[];
+  readonly diagnostic?: HarnessHealthSettingsDiagnostic;
+}
+
+export interface HarnessHealthSettingsChange {
+  readonly autoRepair?: boolean;
+  /** Records a user opt-out for these harnesses. */
+  readonly disableHarnesses?: readonly HarnessId[];
+  /** Clears a user opt-out for these harnesses. */
+  readonly enableHarnesses?: readonly HarnessId[];
 }
 
 export interface HarnessHealthSettings {
@@ -237,6 +268,7 @@ const HarnessHealthSnapshotSchema = z
     trigger: HarnessHealthTriggerSchema,
     autoRepair: z.boolean(),
     settingsDiagnostic: HarnessHealthSettingsDiagnosticSchema.optional(),
+    disabledHarnesses: z.array(HarnessIdSchema).max(64).optional(),
     success: z.boolean(),
     hasDrift: z.boolean(),
     configFiles: z.record(z.string(), HarnessConfigHealthCacheSchema),
@@ -254,6 +286,10 @@ const HarnessHealthSettingsSchema = z
   .object({
     format: z.literal(HARNESS_HEALTH_SETTINGS_FORMAT),
     autoRepair: z.boolean(),
+    disabledHarnesses: z
+      .array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u))
+      .max(64)
+      .optional(),
   })
   .strict();
 
@@ -454,6 +490,7 @@ function failClosedHarnessHealthSettings(
   return {
     format: HARNESS_HEALTH_SETTINGS_FORMAT,
     autoRepair: false,
+    disabledHarnesses: [],
     diagnostic,
   };
 }
@@ -475,6 +512,7 @@ export async function loadHarnessHealthSettings(
     return {
       format: HARNESS_HEALTH_SETTINGS_FORMAT,
       autoRepair: DEFAULT_HARNESS_AUTO_REPAIR,
+      disabledHarnesses: [],
     };
   }
   if (source.kind === "failed") {
@@ -489,7 +527,14 @@ export async function loadHarnessHealthSettings(
   }
 
   const parsed = HarnessHealthSettingsSchema.safeParse(decoded);
-  return parsed.success ? parsed.data : failClosedHarnessHealthSettings("settings_invalid");
+  if (!parsed.success) {
+    return failClosedHarnessHealthSettings("settings_invalid");
+  }
+  return {
+    format: parsed.data.format,
+    autoRepair: parsed.data.autoRepair,
+    disabledHarnesses: [...new Set(parsed.data.disabledHarnesses ?? [])].sort(),
+  };
 }
 
 export async function saveHarnessHealthSettings(
@@ -500,23 +545,51 @@ export async function saveHarnessHealthSettings(
     readonly fsBridge?: HarnessReconcileFsBridge;
   } = {},
 ): Promise<HarnessHealthSettings> {
+  return updateHarnessHealthSettings({ autoRepair }, options);
+}
+
+/**
+ * Read-modify-write of the harness health settings under the settings file lock. Fields the
+ * change leaves unset keep their stored value; an unreadable or invalid file contributes its
+ * fail-closed values (automatic repair off, no opt-outs).
+ */
+export async function updateHarnessHealthSettings(
+  change: HarnessHealthSettingsChange,
+  options: {
+    readonly home?: string;
+    readonly settingsPath?: string;
+    readonly fsBridge?: HarnessReconcileFsBridge;
+  } = {},
+): Promise<HarnessHealthSettings> {
   const bridge = options.fsBridge ?? new ReconciliationNodeFsBridge();
   const settingsPath = options.settingsPath
     ? path.resolve(options.settingsPath)
     : resolveHarnessHealthSettingsPath(options.home);
-  const settings: HarnessHealthSettings = {
-    format: HARNESS_HEALTH_SETTINGS_FORMAT,
-    autoRepair,
-  };
-  const content = `${JSON.stringify(settings, null, 2)}\n`;
   const nodeBridge = isNodeHarnessSettingsBridge(bridge);
+  let saved: HarnessHealthSettings | undefined;
   const persist = async (): Promise<void> => {
+    const current = await loadHarnessHealthSettings({ settingsPath, fsBridge: bridge });
+    const disabled = new Set(current.disabledHarnesses);
+    for (const harnessId of change.disableHarnesses ?? []) disabled.add(harnessId);
+    for (const harnessId of change.enableHarnesses ?? []) disabled.delete(harnessId);
+    const settings: HarnessHealthSettings = {
+      format: HARNESS_HEALTH_SETTINGS_FORMAT,
+      autoRepair: change.autoRepair ?? current.autoRepair,
+      disabledHarnesses: [...disabled].sort(),
+    };
+    // An empty opt-out list is left out so builds that predate opt-outs still read the file.
+    const stored =
+      settings.disabledHarnesses.length === 0
+        ? { format: settings.format, autoRepair: settings.autoRepair }
+        : settings;
+    const content = `${JSON.stringify(stored, null, 2)}\n`;
     if (nodeBridge) {
       await writeNodeHarnessHealthSettings(settingsPath, content);
-      return;
+    } else {
+      await bridge.mkdirp(path.dirname(settingsPath));
+      await bridge.writeFile(settingsPath, content);
     }
-    await bridge.mkdirp(path.dirname(settingsPath));
-    await bridge.writeFile(settingsPath, content);
+    saved = settings;
   };
 
   if (nodeBridge) {
@@ -527,7 +600,10 @@ export async function saveHarnessHealthSettings(
   } else {
     await persist();
   }
-  return settings;
+  if (saved === undefined) {
+    throw new Error("Harness health settings were not written");
+  }
+  return saved;
 }
 
 export function resolveLocalSourceResinCommand(
@@ -650,6 +726,9 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
     });
     const autoRepair = autoRepairOverride ?? settings.autoRepair;
     const settingsDiagnostic = settings.diagnostic;
+    const disabledHarnesses = SUPPORTED_HARNESS_IDS.filter((harnessId) =>
+      settings.disabledHarnesses.includes(harnessId),
+    );
     let previous: HarnessHealthSnapshot | null = null;
     let configFiles: HarnessHealthConfigFiles = EMPTY_CONFIG_CACHE;
     let attemptedAt = new Date(0);
@@ -662,25 +741,48 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
       });
       configFiles = await this.captureConfigFiles();
 
-      if (
-        options.force !== true &&
-        previous !== null &&
-        !isHarnessHealthCheckDue(
+      const fullCheckDue =
+        options.force === true ||
+        previous === null ||
+        isFullHarnessHealthCheckDue(
           previous,
-          configFiles,
           autoRepair,
           settingsDiagnostic,
+          disabledHarnesses,
           attemptedAt.getTime(),
           this.checkIntervalMs,
-        )
-      ) {
+        );
+      // A harness the user removed Resin from on purpose is left alone, by every trigger.
+      const requested = (options.harnesses ?? this.harnesses).filter(
+        (harnessId) => !disabledHarnesses.includes(harnessId),
+      );
+      // Between full checks only harnesses whose files changed are checked, without probing
+      // their installation when the config file exists: a harness that rewrites its own config
+      // on every session (Claude Code's ~/.claude.json) costs one read and parse per poll.
+      const changed =
+        fullCheckDue || previous === null
+          ? null
+          : changedHarnessIds(previous.configFiles, configFiles).filter((harnessId) =>
+              requested.includes(harnessId),
+            );
+      if (changed !== null && changed.length === 0) {
         return { status: "debounced", snapshot: previous };
       }
+      const scope = changed ?? requested;
+      const installedHarnesses =
+        changed === null
+          ? (options.installedHarnesses ?? this.installedHarnesses)
+          : [
+              ...new Set([
+                ...(options.installedHarnesses ?? this.installedHarnesses ?? []),
+                ...changed.filter((harnessId) => configFiles[harnessId]?.present === true),
+              ]),
+            ];
 
       const report = await this.reconciler.reconcile({
         autoRepair,
-        harnesses: options.harnesses ?? this.harnesses,
-        installedHarnesses: options.installedHarnesses ?? this.installedHarnesses,
+        harnesses: scope,
+        installedHarnesses,
         customHome: this.home,
         env: this.env,
         workspacePath: this.workspacePath,
@@ -693,17 +795,30 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
 
       const checkedAt = attemptedAt.toISOString();
       const postCheckConfigFiles = await this.captureConfigFiles();
-      const snapshot: HarnessHealthSnapshot = {
-        format: HARNESS_HEALTH_STATE_FORMAT,
-        checkedAt,
-        trigger,
-        autoRepair,
-        settingsDiagnostic,
-        success: report.success,
-        hasDrift: report.hasDrift,
-        configFiles: postCheckConfigFiles,
-        harnesses: sanitizeHarnessResults(report, previous, checkedAt),
-      };
+      const checkedHarnesses = sanitizeHarnessResults(report, previous, checkedAt);
+      const snapshot: HarnessHealthSnapshot =
+        changed === null || previous === null
+          ? {
+              format: HARNESS_HEALTH_STATE_FORMAT,
+              checkedAt,
+              trigger,
+              autoRepair,
+              settingsDiagnostic,
+              ...(disabledHarnesses.length > 0 ? { disabledHarnesses } : {}),
+              success: report.success,
+              hasDrift: report.hasDrift,
+              configFiles: postCheckConfigFiles,
+              harnesses: checkedHarnesses,
+            }
+          : mergePartialHarnessCheck(previous, {
+              trigger,
+              success: report.success,
+              checked: changed,
+              checkedHarnesses,
+              // Unchecked harnesses keep the fingerprints they had before this check, so a change
+              // landing while it ran is still seen by the next poll.
+              configFiles: mergeFingerprints(configFiles, postCheckConfigFiles, changed),
+            });
 
       await this.persistSnapshot(snapshot);
       return { status: "checked", snapshot };
@@ -742,17 +857,23 @@ export class HarnessHealthCoordinator implements HarnessHealthRunner {
   }
 
   private async captureConfigFiles(): Promise<HarnessHealthConfigFiles> {
+    const targets: Array<readonly [string, string]> = [];
+    for (const harnessId of SUPPORTED_HARNESS_IDS) {
+      targets.push([harnessId, resolveHarnessConfigPath(harnessId, this.home, this.env)]);
+      for (const artifactPath of resolveHarnessArtifactPaths(harnessId, this.home, this.env)) {
+        targets.push([`${harnessId}:${digestPath(artifactPath)}`, artifactPath]);
+      }
+    }
     const entries = await Promise.all(
-      SUPPORTED_HARNESS_IDS.map(async (harnessId) => {
-        const configPath = resolveHarnessConfigPath(harnessId, this.home, this.env);
-        const present = await this.fsBridge.exists(configPath);
+      targets.map(async ([key, filePath]) => {
+        const present = await this.fsBridge.exists(filePath);
         if (!present) {
-          return [harnessId, ABSENT_CONFIG_FILE] as const;
+          return [key, ABSENT_CONFIG_FILE] as const;
         }
 
-        const fileStat = await this.statFile(configPath);
+        const fileStat = await this.statFile(filePath);
         return [
-          harnessId,
+          key,
           {
             present: true,
             mtimeMs:
@@ -861,7 +982,7 @@ export function startHarnessHealthScheduler(
     Number.isSafeInteger(requestedIntervalMs) &&
     requestedIntervalMs > 0
       ? requestedIntervalMs
-      : HARNESS_HEALTH_CHECK_INTERVAL_MS;
+      : HARNESS_HEALTH_POLL_INTERVAL_MS;
   let stopped = false;
   const dispatch = (trigger: "startup" | "scheduled"): void => {
     if (stopped) {
@@ -943,19 +1064,21 @@ function sanitizeHarnessResults(
   return snapshots;
 }
 
-function isHarnessHealthCheckDue(
+function isFullHarnessHealthCheckDue(
   previous: HarnessHealthSnapshot,
-  configFiles: HarnessHealthConfigFiles,
   autoRepair: boolean,
   settingsDiagnostic: HarnessHealthSettingsDiagnostic | undefined,
+  disabledHarnesses: readonly HarnessId[],
   nowMs: number,
   intervalMs: number,
 ): boolean {
+  const previouslyDisabled = previous.disabledHarnesses ?? [];
   if (
     previous.checkedAt === null ||
     previous.autoRepair !== autoRepair ||
     previous.settingsDiagnostic !== settingsDiagnostic ||
-    configFilesChanged(previous.configFiles, configFiles)
+    previouslyDisabled.length !== disabledHarnesses.length ||
+    previouslyDisabled.some((harnessId) => !disabledHarnesses.includes(harnessId))
   ) {
     return true;
   }
@@ -965,15 +1088,103 @@ function isHarnessHealthCheckDue(
   return !Number.isFinite(checkedAtMs) || elapsedMs < 0 || elapsedMs >= intervalMs;
 }
 
-function configFilesChanged(
+/**
+ * The guidance file and install-extension files Resin keeps for `harnessId`, other than its MCP
+ * config. A path an adapter cannot resolve is left out.
+ */
+function resolveHarnessArtifactPaths(
+  harnessId: HarnessId,
+  home: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const definition = getHarnessDefinition(harnessId);
+  const paths = new Set<string>();
+  const add = (resolve: () => readonly string[]): void => {
+    try {
+      for (const artifactPath of resolve()) paths.add(path.resolve(artifactPath));
+    } catch {
+      // An unresolvable artifact is still repaired by the hourly full check.
+    }
+  };
+  const { guidance } = definition;
+  if (guidance !== undefined) add(() => [guidance.resolvePath(home, env)]);
+  for (const extension of definition.installExtensions ?? []) {
+    const { watchPaths } = extension;
+    if (watchPaths !== undefined) add(() => watchPaths.call(extension, home, env));
+  }
+  paths.delete(path.resolve(resolveHarnessConfigPath(harnessId, home, env)));
+  return [...paths].sort();
+}
+
+/** Stable key part for a fingerprinted artifact; persisted state never holds the path itself. */
+function digestPath(filePath: string): string {
+  return createHash("sha256").update(filePath).digest("hex").slice(0, 16);
+}
+
+function harnessIdOfFingerprintKey(key: string): string {
+  const separator = key.indexOf(":");
+  return separator === -1 ? key : key.slice(0, separator);
+}
+
+function changedHarnessIds(
   previous: HarnessHealthConfigFiles,
   current: HarnessHealthConfigFiles,
-): boolean {
-  return SUPPORTED_HARNESS_IDS.some((harnessId) => {
-    const before = previous[harnessId] ?? ABSENT_CONFIG_FILE;
-    const after = current[harnessId] ?? ABSENT_CONFIG_FILE;
-    return before.present !== after.present || before.mtimeMs !== after.mtimeMs;
-  });
+): HarnessId[] {
+  const changed = new Set<string>();
+  for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+    const before = previous[key] ?? ABSENT_CONFIG_FILE;
+    const after = current[key] ?? ABSENT_CONFIG_FILE;
+    if (before.present !== after.present || before.mtimeMs !== after.mtimeMs) {
+      changed.add(harnessIdOfFingerprintKey(key));
+    }
+  }
+  return SUPPORTED_HARNESS_IDS.filter((harnessId) => changed.has(harnessId));
+}
+
+function mergeFingerprints(
+  before: HarnessHealthConfigFiles,
+  after: HarnessHealthConfigFiles,
+  checked: readonly HarnessId[],
+): HarnessHealthConfigFiles {
+  const checkedIds = new Set<string>(checked);
+  const merged: Record<string, HarnessConfigHealthCache> = {};
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const source = checkedIds.has(harnessIdOfFingerprintKey(key)) ? after : before;
+    merged[key] = source[key] ?? ABSENT_CONFIG_FILE;
+  }
+  return merged;
+}
+
+/**
+ * Folds a check of only `checked` harnesses into the last full snapshot. `checkedAt` stays the
+ * last full check's, so the hourly full check keeps its cadence.
+ */
+function mergePartialHarnessCheck(
+  previous: HarnessHealthSnapshot,
+  partial: {
+    readonly trigger: HarnessHealthTrigger;
+    readonly success: boolean;
+    readonly checked: readonly HarnessId[];
+    readonly checkedHarnesses: readonly HarnessHealthHarnessSnapshot[];
+    readonly configFiles: HarnessHealthConfigFiles;
+  },
+): HarnessHealthSnapshot {
+  const byId = new Map(previous.harnesses.map((snapshot) => [snapshot.harnessId, snapshot]));
+  for (const harnessId of partial.checked) byId.delete(harnessId);
+  for (const snapshot of partial.checkedHarnesses) byId.set(snapshot.harnessId, snapshot);
+  const harnesses = SUPPORTED_HARNESS_IDS.flatMap((harnessId) => byId.get(harnessId) ?? []);
+  return {
+    ...previous,
+    trigger: partial.trigger,
+    success: previous.success && partial.success,
+    hasDrift: harnesses.some(
+      (snapshot) =>
+        snapshot.installed &&
+        (snapshot.status === "unregistered" || snapshot.status === "drift_detected"),
+    ),
+    configFiles: partial.configFiles,
+    harnesses,
+  };
 }
 
 async function readNodeFileStat(filePath: string): Promise<HarnessConfigFileStat | null> {
