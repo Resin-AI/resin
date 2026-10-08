@@ -24,6 +24,34 @@
     },
     "clean": {
       "cache": false
+    },
+    "//#compile": {
+      "inputs": [
+        "tsconfig.json",
+        "tsconfig.base.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "scripts/write-cli-bundled-release-trust.mjs",
+        "apps/*/src/**",
+        "apps/*/tsconfig*.json",
+        "apps/*/package.json",
+        "packages/*/src/**",
+        "packages/*/tsconfig*.json",
+        "packages/*/package.json",
+        "adapters/*/src/**",
+        "adapters/*/tsconfig*.json",
+        "adapters/*/package.json",
+        "fixtures/*/src/**",
+        "fixtures/*/tsconfig*.json",
+        "fixtures/*/package.json"
+      ],
+      "outputs": [
+        "apps/*/dist/**",
+        "packages/*/dist/**",
+        "adapters/*/dist/**",
+        "fixtures/*/dist/**",
+        "apps/cli/.tsbuildinfo"
+      ]
     }
   }
 }

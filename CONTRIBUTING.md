@@ -30,6 +30,10 @@ Speed targets: PR CI ≤ 4 min, merge to `main` → published release ≤ 15 min
 
 Run `pnpm check` for the same checks as PR CI. It builds the workspace and runs static, unit and sandbox checks, but does not package release archives. Use `pnpm check:all` for the additional release and installer checks.
 
+`pnpm build` and `pnpm typecheck` share one fully checked TypeScript solution build and its Turbo cache. One compiler process builds the workspace in dependency order. Running both commands does not compile it twice.
+
+When adding a TypeScript workspace, add its project to the root `tsconfig.json` references and declare its dependency references in its own config. The existing boundary check rejects workspace projects missing from the root solution. Keep the root config as plain JSON.
+
 ### Complete Local Verification Gate
 
 Run the full verification sequence by hand when a change touches release, security or packaging paths:

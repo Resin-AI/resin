@@ -16,6 +16,15 @@
     },
     {
       "path": "../windows-security"
+    },
+    {
+      "path": "../crypto"
+    },
+    {
+      "path": "../db"
+    },
+    {
+      "path": "../../apps/observer"
     }
   ]
 }

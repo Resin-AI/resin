@@ -517,6 +517,81 @@ export function checkPackageBoundaries(pkg, allPackages, rootDir, manifest) {
   return violations;
 }
 
+const ROOT_TSCONFIG_FILENAME = "tsconfig.json";
+
+/**
+ * Require the root solution tsconfig to reference exactly the workspace TypeScript projects,
+ * so a new workspace cannot silently fall out of the shared root build/typecheck.
+ * @param {string} rootDir
+ * @param {Map<string, PackageInfo>} allPackages
+ * @returns {BoundaryViolation[]}
+ */
+function checkRootProjectReferences(rootDir, allPackages) {
+  const violation = (message) => ({
+    file: ROOT_TSCONFIG_FILENAME,
+    line: 1,
+    rule: "root-project-references",
+    message,
+  });
+
+  const rootConfigPath = path.join(rootDir, ROOT_TSCONFIG_FILENAME);
+  let rootConfig;
+  try {
+    rootConfig = JSON.parse(fs.readFileSync(rootConfigPath, "utf-8"));
+  } catch (err) {
+    return [
+      violation(`Root "${ROOT_TSCONFIG_FILENAME}" could not be read as JSON: ${err.message}`),
+    ];
+  }
+  const references = rootConfig?.references;
+  if (
+    !Array.isArray(references) ||
+    references.some((ref) => typeof ref?.path !== "string" || ref.path.length === 0)
+  ) {
+    return [
+      violation(
+        `Root "${ROOT_TSCONFIG_FILENAME}" must declare a "references" array of { "path": string } entries.`,
+      ),
+    ];
+  }
+
+  /** Workspace project config path -> workspace dir. */
+  const workspaceProjects = new Map();
+  for (const pkg of allPackages.values()) {
+    const configPath = path.join(pkg.fullDir, ROOT_TSCONFIG_FILENAME);
+    if (fs.existsSync(configPath)) workspaceProjects.set(path.resolve(configPath), pkg.dir);
+  }
+
+  const violations = [];
+  const referenced = new Set();
+  for (const ref of references) {
+    const resolved = path.resolve(rootDir, ref.path);
+    // tsc accepts a project directory or a direct path to its config file.
+    const configPath = resolved.endsWith(".json")
+      ? resolved
+      : path.join(resolved, ROOT_TSCONFIG_FILENAME);
+    if (workspaceProjects.has(configPath)) {
+      referenced.add(configPath);
+    } else {
+      violations.push(
+        violation(
+          `Root project reference "${ref.path}" does not resolve to a workspace TypeScript project.`,
+        ),
+      );
+    }
+  }
+  for (const [configPath, dir] of workspaceProjects) {
+    if (!referenced.has(configPath)) {
+      violations.push(
+        violation(
+          `Workspace TypeScript project "${dir}" is missing from root "${ROOT_TSCONFIG_FILENAME}" references.`,
+        ),
+      );
+    }
+  }
+  return violations;
+}
+
 /**
  * Main boundary check function.
  * @param {string} [rootDir=process.cwd()]
@@ -528,6 +603,7 @@ export function checkPackageBoundaries(pkg, allPackages, rootDir, manifest) {
 export function checkBoundaries(rootDir = process.cwd(), options = {}) {
   const allViolations = [];
   const allPackages = discoverPackages(rootDir);
+  allViolations.push(...checkRootProjectReferences(rootDir, allPackages));
 
   let manifest = options.manifest;
   if (!manifest) {
