@@ -16,6 +16,7 @@ import {
   DISPLAY_FILTER_REPORT_LIMIT,
   KEPT_INVOCATION_OUTPUTS,
   diagnosticKind,
+  displayFilterReport,
   isRecordedCheckFailure,
   observeDisplayFilters,
 } from "../../src/workflow/display-filter-observation.js";
@@ -125,9 +126,11 @@ function directoryOf(report: string): string {
   return match![1]!;
 }
 
-/** The `Output:` section of an invocation's report. */
+/** The program output an invocation's report shows: all of a success's head, a failure's `Output:`. */
 function outputOf(report: string): string {
-  const match = /\nOutput:\n([\s\S]*?)\n(?:From the unfiltered output|Full output)/.exec(report);
+  const match = report.startsWith("step '")
+    ? /\nOutput:\n([\s\S]*?)\n(?:From the unfiltered output|Full output)/.exec(report)
+    : /^([\s\S]*?)(?:\nFrom the unfiltered output|\nFull output|$)/.exec(report);
   expect(match, report).not.toBeNull();
   return match![1]!;
 }
@@ -193,11 +196,11 @@ describe.skipIf(process.platform === "win32")("version-2 display-filter steps", 
           const report = String(await invoke(source, dialect, workspace));
           expect(`${outputOf(report)}\n`, source).toBe(recorded(source, dialect, workspace));
         }
-        // The PR body reached the command whole, through the opaque heredoc.
+        // The PR body reached the command whole, through the opaque heredoc; nothing was hidden, so
+        // no capture location is shown.
         const report = String(await invoke(HEREDOCS[0]!, dialect, workspace));
-        expect(await readFile(join(directoryOf(report), "o1"), "utf8")).toContain(
-          `[${BODY.slice(0, -1)}]`,
-        );
+        expect(report).toContain(`${BODY.slice(BODY.indexOf("EOF;echo z"), -1)}]`);
+        expect(report).not.toContain("Full output");
       });
 
       it("runs the program as recorded: the filter's status decides what follows `&&`", async () => {
@@ -205,10 +208,7 @@ describe.skipIf(process.platform === "win32")("version-2 display-filter steps", 
         // grep selected nothing, so `echo ran` did not run, exactly as recorded; the command passed.
         const ran = "./emit | grep zzz && echo ran; echo after";
         const passed = String(await invoke(ran, dialect, workspace));
-        expect(passed).toMatch(/^The program exited 0\.\n/);
-        expect(passed).toContain(
-          "  1 (./emit): exit 0; its output is shown filtered (filter exit 1)\n  2 (echo): did not run\n  3 (echo): exit 0\n",
-        );
+        expect(passed).not.toContain("Commands:");
         expect(outputOf(passed)).toBe("after");
         // The replay pipes the bracketed output through grep, nothing else changes.
         expect(await invoke(ran, dialect, workspace, true)).toBe("ran\nafter\n");
@@ -363,9 +363,8 @@ describe.skipIf(process.platform === "win32")("version-2 display-filter steps", 
       // Later steps bind what the program printed; the caller sees the report.
       expect(invoked.result).toBe(`${expected}c\n`);
       const outcome = invoked.steps[0];
-      expect(outcome?.status === "completed" ? outcome.display : undefined).toContain(
-        `\nOutput:\n${expected}c\n`,
-      );
+      const display = outcome?.status === "completed" ? outcome.display : undefined;
+      expect(outputOf(String(display))).toBe(`${expected}c`);
       const replayed = await executeRecordedWorkflow(plan, {
         inputs: { first, second },
         adapters,
@@ -445,7 +444,8 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     expect(continued).toContain("  2 (./lint): exit 0; its output is shown filtered\n");
     // `|| true` consumes the status: no failure.
     const tested = String(await invoke("./fmt || true; ./lint | tail -n 1", "bash", workspace));
-    expect(tested).toContain("  1 (./fmt): exit 1 (tested by && or ||, not a failure)\n");
+    expect(tested).not.toContain("Commands:");
+    expect(outputOf(tested)).toBe("0 errors\nstderr:\nsrc/a.lua would be reformatted");
   });
 
   it("classifies a check that ran to completion and failed apart from execution failures", async () => {
@@ -512,7 +512,6 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
   it("passes a check whose filter hides a non-zero warning summary, and shows the summary", async () => {
     const workspace = await makeTools();
     const report = String(await invoke("./lint 2>&1 | tail -n 1", "bash", workspace));
-    expect(report).toMatch(/^The program exited 0\.\n/);
     expect(outputOf(report)).toBe("0 errors");
     // The non-zero summary is shown; the plain warning line of a passing check is not essential
     // and stays only in the full output.
@@ -536,7 +535,6 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
   it("reports empty filtered output, passing on exit 0 and failing on exit 1", async () => {
     const workspace = await makeTools();
     const passed = String(await invoke("./emit | grep zzz || true", "bash", workspace));
-    expect(passed).toMatch(/^The program exited 0\.\n/);
     expect(outputOf(passed)).toBe("(none: the program printed nothing)");
     const failed = await failure(invoke("./emit | grep zzz", "bash", workspace));
     expect(failed).toMatch(/^step 'run' failed: the program exited 1\.\n/);
@@ -564,13 +562,36 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     expect(long).toContain("Full output, kept without re-running anything, in ");
   });
 
+  it("shows a success's whole output when it fits without the output-location lines", () => {
+    const success = (stdout: string) =>
+      displayFilterReport({
+        stepId: "run",
+        exitCode: 0,
+        pipelines: [],
+        failed: new Set(),
+        stdout,
+        stderr: "",
+        hidden: [],
+        directory: "/tmp/kept",
+        files: ["o1", "stdout", "stderr"],
+      });
+    // Fits the report only while the location lines, shown on a success only when something was
+    // hidden or shortened, are left out.
+    const fits = `${"x".repeat(DISPLAY_FILTER_REPORT_LIMIT - 2)}\n`;
+    expect(success(fits)).toEqual({ failed: false, text: fits.slice(0, -1) });
+    const tooLong = success(`${"y".repeat(DISPLAY_FILTER_REPORT_LIMIT)}z\n`);
+    expect(tooLong.text.length).toBeLessThanOrEqual(DISPLAY_FILTER_REPORT_LIMIT);
+    expect(tooLong.text).toMatch(
+      /^…\[output shortened to its last part; all of it is in \/tmp\/kept\]\n/,
+    );
+    expect(tooLong.text).toContain(
+      "z\nFull output, kept without re-running anything, in /tmp/kept:",
+    );
+  });
+
   it("reports a command its `head` filter stopped early as no failure", async () => {
     const workspace = await makeTools();
     const report = String(await invoke("yes | head -n 2 && echo done", "bash", workspace));
-    expect(report).toMatch(/^The program exited 0\.\n/);
-    expect(report).toContain(
-      "  1 (yes): stopped early when its output filter stopped reading; its output is shown filtered\n  2 (echo): exit 0\n",
-    );
     expect(outputOf(report)).toBe("y\ny\ndone");
   });
 
@@ -620,7 +641,6 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     );
     return { value, display };
   }
-  const UNOBSERVED = "Per-command statuses were not available for this program.";
 
   it("runs exactly as recorded, without statuses, when no capture directory can be made", async () => {
     const workspace = await makeTools();
@@ -630,7 +650,7 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
       invocationOutputRoot: join(blocked, "out"),
     });
     expect(value).toBe("c\nok\n");
-    expect(display).toBe(`The program exited 0.\n${UNOBSERVED}\nOutput:\nc\nok`);
+    expect(display).toBe("c\nok");
   });
 
   it("runs a program that may change shell options exactly as recorded, unobserved", async () => {
@@ -638,21 +658,21 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     // `set -e`: unwrapped, the failing producer of a cut pipeline does not stop the program.
     const set = await run("set -e; ./fail | tail -n 1; echo after", workspace);
     expect(set.value).toBe("c\nafter\n");
-    expect(set.display).toContain(`The program exited 0.\n${UNOBSERVED}\n`);
+    expect(set.display).toBe("c\nafter");
     const shopt = await run("shopt -s nullglob\n./emit | head -n 1", workspace);
     expect(shopt.value).toBe("a\n");
-    expect(shopt.display).toContain(UNOBSERVED);
+    expect(shopt.display).toBe("a");
     const read = await run('echo "$SHELLOPTS" >/dev/null; ./emit | head -n 1', workspace);
-    expect(read.display).toContain(UNOBSERVED);
+    expect(read.display).toBe("a");
     for (const name of ["SHELLOPTS", "BASHOPTS"]) {
       const inherited = await run("./emit | head -n 1", workspace, {
         env: { [name]: name === "SHELLOPTS" ? "errexit" : "nullglob" },
       });
       expect(inherited.value, name).toBe("a\n");
-      expect(inherited.display, name).toContain(UNOBSERVED);
+      expect(inherited.display, name).toBe("a");
     }
-    // Without any of them the same program is observed.
-    expect((await run("./emit | head -n 1", workspace)).display).toContain("Commands:\n");
+    // Without any of them the same program runs observed and shows the same output.
+    expect((await run("./emit | head -n 1", workspace)).display).toBe("a");
   });
 
   it("keeps only the newest capture directories", async () => {
@@ -745,7 +765,7 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     const [run, show] = invoked.steps;
     expect(run?.status === "completed" ? run.result : undefined).toBe("c\n0 errors\n");
     expect(run?.status === "completed" ? run.display : undefined).toMatch(
-      /^The program exited 0\.\nCommands:\n[\s\S]*\n {4}1 warnings\n/,
+      /^c\n0 errors\nFrom the unfiltered output[\s\S]*\n {4}1 warnings\n/,
     );
     expect(invoked.result).toBe("[c\n0 errors\n]\n");
     expect(show?.status === "completed" ? show.display : "absent").toBeUndefined();
