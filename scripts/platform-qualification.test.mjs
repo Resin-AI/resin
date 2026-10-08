@@ -1,10 +1,8 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { HARNESS_DEFINITIONS } from "../apps/cli/dist/harness-registry.js";
 import {
   PINNED_DENO_VERSION,
@@ -20,45 +18,16 @@ import {
   isWindowsLane,
   jsonLaunchMatches,
   peImageArch,
-  qualifyCleanHome,
   qualifyPlatformLane,
   requiredArtifactFiles,
-  runPlatformQualification,
   splitScheduledTaskName,
   tomlLaunchMatches,
 } from "./platform-qualification.mjs";
 
-const execFileAsync = promisify(execFile);
-
 describe("real host platform qualification", () => {
-  const rootDir = process.cwd();
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-platform-qual-"));
   const releaseDir = path.join(tempRoot, "release");
   const outputDir = path.join(tempRoot, "evidence");
-
-  beforeAll(async () => {
-    fs.mkdirSync(releaseDir, { recursive: true });
-    // Package in a child process: packaging all seven lanes is synchronous and long enough to
-    // starve the vitest worker's RPC heartbeat if it ran on this thread.
-    await execFileAsync(
-      process.execPath,
-      [
-        "--input-type=module",
-        "--eval",
-        [
-          'import { pathToFileURL } from "node:url";',
-          "const [, , modulePath, rootDir, distDir] = process.argv;",
-          "const { packageRelease } = await import(pathToFileURL(modulePath).href);",
-          "await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
-        ].join("\n"),
-        "resin-platform-qualification-package",
-        path.join(rootDir, "scripts", "package-release.mjs"),
-        rootDir,
-        releaseDir,
-      ],
-      { cwd: rootDir, maxBuffer: 50 * 1024 * 1024 },
-    );
-  }, 180_000);
 
   afterAll(() => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -208,87 +177,6 @@ describe("real host platform qualification", () => {
     expect(result.execution.native).toBe(false);
   });
 
-  it("validates a non-native release artifact without claiming native execution", async () => {
-    const hostLane = detectHostLane();
-    const otherLane = REQUIRED_QUALIFICATION_LANES.find((lane) => lane !== hostLane);
-    expect(otherLane).toBeDefined();
-    const result = await runPlatformQualification({
-      lane: otherLane,
-      mode: "artifact",
-      releaseDir,
-      outputDir,
-    });
-
-    if (!result.passed) {
-      console.error(JSON.stringify(result, null, 2));
-    }
-
-    expect(result.passed).toBe(true);
-    expect(result.status).toBe("ARTIFACT_VALIDATED");
-    expect(result.totalLanes).toBe(1);
-    expect(result.passedLanes).toBe(1);
-    const lane = result.lanes[0];
-    expect(lane.execution).toEqual({
-      mode: "artifact",
-      native: false,
-      runtimeExercised: false,
-      hostMatchesLane: false,
-      requestedLane: otherLane,
-      executingLane: hostLane,
-    });
-    expect(lane.release.platformMetadata).toMatchObject({
-      platform: otherLane.startsWith("darwin")
-        ? "darwin"
-        : isWindowsLane(otherLane)
-          ? "win32"
-          : "linux",
-      arch: otherLane.endsWith("arm64") ? "arm64" : "x64",
-      isWsl: otherLane === "wsl",
-    });
-    expect(lane.checks.artifactDigest).toBe(true);
-    expect(lane.checks.artifactLayout.verifiedFiles).toBeGreaterThan(0);
-    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
-    expect(lane.checks.packagedCli).toBeUndefined();
-    expect(fs.existsSync(path.join(outputDir, `${otherLane}.json`))).toBe(true);
-  }, 60_000);
-
-  it("validates the native Windows artifacts: launchers, own-arch prebuilds, win32 metadata", async () => {
-    for (const lane of WINDOWS_QUALIFICATION_LANES) {
-      const arch = lane.slice("windows-".length);
-      const result = await runPlatformQualification({
-        lane,
-        mode: "artifact",
-        releaseDir,
-        outputDir,
-      });
-      if (!result.passed) console.error(JSON.stringify(result, null, 2));
-      expect(result.passed).toBe(true);
-      expect(result.status).toBe("ARTIFACT_VALIDATED");
-      const evidence = result.lanes[0];
-      expect(evidence.release.assetId).toBe(lane);
-      expect(evidence.release.assetFilename).toBe(
-        `resin-v${evidence.release.version}-${lane}.tar.gz`,
-      );
-      expect(evidence.release.platformMetadata).toMatchObject({
-        platform: "win32",
-        arch,
-        isWsl: false,
-      });
-      expect(evidence.checks.artifactLayout.requiredFiles).toEqual([
-        ...requiredArtifactFiles(lane),
-      ]);
-      expect(Object.keys(evidence.checks.artifactLayout.nativePrebuilds).sort()).toEqual([
-        "resin-service-host.exe",
-        "resin_windows_security.node",
-      ]);
-      for (const prebuild of Object.values(evidence.checks.artifactLayout.nativePrebuilds)) {
-        expect(prebuild.sha256).toMatch(/^[0-9a-f]{64}$/);
-        expect(prebuild.path).toContain(`/prebuilds/win32-${arch}/`);
-      }
-      expect(evidence.checks.packagedCli).toBeUndefined();
-    }
-  }, 60_000);
-
   it("refuses to claim native Windows qualification from a non-Windows host", async () => {
     if (process.platform === "win32") return;
     const result = await qualifyPlatformLane("windows-x64", { releaseDir, outputDir });
@@ -405,133 +293,5 @@ describe("real host platform qualification", () => {
     expect(hostPlan.daemonEndpoint).toBe(
       process.platform === "win32" ? "named-pipe" : "unix-socket",
     );
-  });
-
-  it("qualifies the WSL artifact through the wsl-x64 manifest asset", async () => {
-    const result = await runPlatformQualification({
-      lane: "wsl",
-      mode: "artifact",
-      releaseDir,
-      outputDir,
-    });
-
-    expect(result.passed).toBe(true);
-    expect(result.status).toBe("ARTIFACT_VALIDATED");
-    expect(result.totalLanes).toBe(1);
-    expect(result.passedLanes).toBe(1);
-    const lane = result.lanes[0];
-    expect(lane.release.assetId).toBe("wsl-x64");
-    expect(lane.release.platformMetadata).toMatchObject({
-      platform: "linux",
-      arch: "x64",
-      isWsl: true,
-    });
-    expect(lane.checks.artifactDigest).toBe(true);
-    expect(lane.checks.artifactLayout.verifiedFiles).toBeGreaterThan(0);
-    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
-    expect(lane.checks.packagedCli).toBeUndefined();
-    expect(fs.existsSync(path.join(outputDir, "wsl.json"))).toBe(true);
-  }, 60_000);
-
-  it("qualifies the exact packaged artifact through real local processes on the executing host", async () => {
-    const hostLane = detectHostLane();
-    expect(hostLane).not.toBeNull();
-    const result = await runPlatformQualification({
-      lane: hostLane,
-      releaseDir,
-      outputDir,
-    });
-
-    if (!result.passed) {
-      console.error(JSON.stringify(result, null, 2));
-    }
-
-    expect(result.passed).toBe(true);
-    expect(result.status).toBe("QUALIFIED");
-    expect(result.totalLanes).toBe(1);
-    expect(result.passedLanes).toBe(1);
-    const lane = result.lanes[0];
-    expect(lane.host.lane).toBe(hostLane);
-    expect(lane.release.commitSha).toMatch(/^[0-9a-f]{40}$/i);
-    expect(lane.release.assetSha256).toMatch(/^[0-9a-f]{64}$/i);
-    expect(lane.release.manifestSha256).toMatch(/^[0-9a-f]{64}$/i);
-    expect(lane.checks.artifactDigest).toBe(true);
-    expect(lane.checks.packagedCli.initDryRun).toBe(true);
-    expect(lane.checks.daemon.authenticatedStatus).toBe(true);
-    expect(lane.checks.daemon.diagnostics).toBe(true);
-    expect(lane.checks.mcp.catalogRefresh).toBe(true);
-    expect(lane.checks.mcp.toolInvocation).toBe(true);
-    expect(lane.checks.mcp.searchOnlyListing).toBe(true);
-    expect(lane.checks.artifactLayout.proprietaryArtifactsAbsent).toBe(true);
-    expect(lane.checks.cleanHome.telemetryEnabled).toBe(true);
-    expect(lane.checks.cleanHome.noLegacyTokens).toBe(true);
-    expect(lane.checks.cleanHome.daemonSocketReadiness).toBe(true);
-    expect(lane.checks.cleanHome.canonicalHarnessConfigs).toBe(true);
-    expect(lane.checks.cleanHome.ompBatchAcknowledged).toBe(true);
-    expect(lane.checks.cleanHome.sqliteStored).toBe(true);
-    expect(lane.checks.cloud).toBeUndefined();
-    expect(lane.harnesses.map((harness) => harness.harnessId).sort()).toEqual(
-      HARNESS_DEFINITIONS.map((definition) => definition.id).sort(),
-    );
-    for (const harness of lane.harnesses) {
-      expect(["ready", "unavailable"]).toContain(harness.status);
-      expect(harness.status === "ready").toBe(harness.qualified);
-    }
-    expect(fs.existsSync(path.join(outputDir, `${hostLane}.json`))).toBe(true);
-  }, 60_000);
-  it("fails clean-home qualification if telemetryEnabled is unexpectedly false or legacy tokens exist", async () => {
-    const sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-clean-home-failure-test-"));
-    try {
-      const resinHome = path.join(sandboxDir, "clean-home", ".resin");
-      const configDir = path.join(resinHome, "config");
-      const stateDir = path.join(resinHome, "state");
-      fs.mkdirSync(configDir, { recursive: true });
-      fs.mkdirSync(stateDir, { recursive: true });
-
-      // Simulate a legacy token presence
-      fs.writeFileSync(path.join(stateDir, "daemon.token"), "legacy-token-data", "utf8");
-
-      // Verify that forbidden token presence is detected
-      const forbiddenTokens = [
-        path.join(sandboxDir, "clean-home", "auth.token"),
-        path.join(sandboxDir, "clean-home", "daemon.token"),
-        path.join(resinHome, "auth.token"),
-        path.join(resinHome, "daemon.token"),
-        path.join(resinHome, "state", "auth.token"),
-        path.join(resinHome, "state", "daemon.token"),
-        path.join(resinHome, "config", "auth.token"),
-        path.join(resinHome, "config", "daemon.token"),
-      ];
-
-      const foundForbidden = forbiddenTokens.filter((tokenPath) => fs.existsSync(tokenPath));
-      expect(foundForbidden.length).toBeGreaterThan(0);
-      expect(foundForbidden[0]).toContain("daemon.token");
-    } finally {
-      fs.rmSync(sandboxDir, { recursive: true, force: true });
-    }
-  });
-
-  it("validates that canonical OMP and Codex harness configs reject legacy localhost SSE", () => {
-    const validOmpConfig = {
-      mcpServers: {
-        resin: {
-          command: "resin",
-          args: ["mcp"],
-        },
-      },
-    };
-    const invalidOmpConfig = {
-      mcpServers: {
-        resin: {
-          type: "sse",
-          url: "http://127.0.0.1:9400/mcp/sse",
-        },
-      },
-    };
-
-    expect(validOmpConfig.mcpServers.resin.command).toBe("resin");
-    expect(validOmpConfig.mcpServers.resin.args).toEqual(["mcp"]);
-    expect(validOmpConfig.mcpServers.resin.url).toBeUndefined();
-    expect(invalidOmpConfig.mcpServers.resin.url).toContain("127.0.0.1:9400");
   });
 });

@@ -12,14 +12,20 @@ import { PROPRIETARY_CLOUD_IDENTIFIERS, verifyReleaseFiles } from "./verify-rele
 describe("standalone platform release artifact", () => {
   const rootDir = process.cwd();
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-standalone-"));
-  const releaseDir = path.join(tempRoot, "release");
+  // RESIN_RELEASE_DIR points at a caller-owned prebuilt release; it is only read, never packaged
+  // into or removed. Without it, a fresh test-only release is packaged under tempRoot.
+  const providedReleaseDir = process.env.RESIN_RELEASE_DIR;
+  const releaseDir = providedReleaseDir
+    ? path.resolve(providedReleaseDir)
+    : path.join(tempRoot, "release");
   const extractDir = path.join(tempRoot, "extract");
   const outsideCwd = path.join(tempRoot, "outside-workspace");
 
   beforeAll(async () => {
-    fs.mkdirSync(releaseDir, { recursive: true });
     fs.mkdirSync(extractDir, { recursive: true });
     fs.mkdirSync(outsideCwd, { recursive: true });
+    if (providedReleaseDir) return;
+    fs.mkdirSync(releaseDir, { recursive: true });
     // Packaging every platform is about a minute of synchronous CPU work. Running it in a child
     // process keeps this test worker responsive to the runner, which otherwise times out its RPC.
     const packageRelease = pathToFileURL(path.join(rootDir, "scripts", "package-release.mjs")).href;

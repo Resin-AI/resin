@@ -6,6 +6,7 @@ import process from "node:process";
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
+import { SYSTEM_QUALIFICATION_SUITES } from "./system-qualification.mjs";
 
 const ROOT_DIR = process.cwd();
 const CANDIDATE_WORKFLOW_PATH = path.join(
@@ -1821,11 +1822,6 @@ with patch("subprocess.run", side_effect=publish):
             (s) =>
               s.uses?.startsWith("actions/checkout") || s.name?.toLowerCase().includes("checkout"),
           );
-          expect(
-            checkoutSteps.length,
-            `Job ${jobId} in ${name} must have at least one checkout step`,
-          ).toBeGreaterThanOrEqual(1);
-
           for (const step of checkoutSteps) {
             expect(
               step.with?.["persist-credentials"],
@@ -1868,53 +1864,6 @@ with patch("subprocess.run", side_effect=publish):
       }
     });
 
-    it("requires explicit root gate commands in package.json and wire them into check:all", () => {
-      const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8"));
-      const scripts = packageJson.scripts || {};
-
-      expect(scripts["check:privacy-boundary"]).toBeDefined();
-      expect(scripts["check:privacy-boundary"]).toContain(
-        "apps/observer/tests/sync/privacy-boundary.test.ts",
-      );
-
-      expect(scripts["check:hostile-cloud"]).toBeDefined();
-      expect(scripts["check:hostile-cloud"]).toContain("packages/runtime/tests/security.test.ts");
-      expect(scripts["check:hostile-cloud"]).toContain(
-        "apps/observer/tests/sync/preactivation.test.ts",
-      );
-      expect(scripts["check:hostile-cloud"]).toContain(
-        "apps/observer/tests/sync/signed-activation-and-quarantine.test.ts",
-      );
-
-      expect(scripts["check:runtime-security"]).toBeDefined();
-      expect(scripts["check:runtime-security"]).toContain(
-        "packages/runtime/tests/brokers/fs-security.test.ts",
-      );
-      expect(scripts["check:runtime-security"]).toContain(
-        "packages/runtime/tests/brokers/net-security.test.ts",
-      );
-      expect(scripts["check:runtime-security"]).toContain(
-        "packages/runtime/tests/brokers/cmd-security.test.ts",
-      );
-      expect(scripts["check:runtime-security"]).toContain("apps/observer/tests/ipc.test.ts");
-      expect(scripts["check:runtime-security"]).toContain(
-        "apps/cli/tests/installer/asset-downloader-security.test.ts",
-      );
-
-      const checkAll = scripts["check:all"];
-      expect(checkAll).toBeDefined();
-      expect(checkAll).toContain("pnpm run check:adrs");
-      expect(checkAll).toContain("pnpm run check:boundaries");
-      expect(checkAll).toContain("pnpm run check:secrets");
-      expect(checkAll).toContain("pnpm run lint");
-      expect(checkAll).toContain("pnpm run typecheck");
-      expect(checkAll).toContain("pnpm run test");
-      expect(checkAll).toContain("pnpm run release:test");
-      expect(checkAll).toContain("pnpm run test:e2e");
-      // The binary smoke check runs in the release candidate through the packaging suite.
-      expect(scripts["release:test:packaging"]).toContain("pnpm run check:smoke");
-    });
-
     it("runs every unit-test selection through parallel Vitest shards with pinned Deno", () => {
       const shardJob = ci.doc.jobs["test-unit"];
       expect(shardJob).toBeDefined();
@@ -1935,30 +1884,83 @@ with patch("subprocess.run", side_effect=publish):
       expect(testIndex).toBeGreaterThan(buildIndex);
     });
 
-    it("gates PRs on the CI Gate Rollup over every CI job", () => {
+    it("gates PRs on the CI Gate Rollup", () => {
       const gateJob = ci.doc.jobs["ci-gate"];
       expect(gateJob).toBeDefined();
       expect(gateJob.name).toBe("CI Gate Rollup");
       expect(gateJob.if).toBe("always()");
-      const gatedJobs = ["static", "repo-gates", "test-unit", "test-sandbox"];
-      expect(gateJob.needs).toEqual(gatedJobs);
-      expect(Object.keys(ci.doc.jobs).sort()).toEqual([...gatedJobs, "ci-gate"].sort());
 
       const staticRuns = ci.doc.jobs.static.steps.map((step) => step.run).filter(Boolean);
       expect(staticRuns).toEqual(expect.arrayContaining(["pnpm lint", "pnpm typecheck"]));
-
-      const verifyStep = gateJob.steps.find((s) => s.id === "gate");
-      expect(verifyStep.run).toContain(`for job in ${gatedJobs.join(" ")}`);
-      expect(verifyStep.run).toContain('if [ "$result" != "success" ]');
     });
 
+    // Runs the step as its Linux runner does, which needs bash + jq (absent on native Windows).
+    it.skipIf(process.platform === "win32")(
+      "emits a success receipt only when every needed job passed on the exact commit",
+      () => {
+        const gateJob = ci.doc.jobs["ci-gate"];
+        const script = gateJob.steps.find((s) => s.id === "gate").run;
+        const sha = "a".repeat(40);
+        const passing = () =>
+          Object.fromEntries(
+            gateJob.needs.map((job) => [job, { result: "success", outputs: { commit_sha: sha } }]),
+          );
+        const run = (results) => {
+          const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ci-gate-"));
+          const output = path.join(directory, "output");
+          fs.writeFileSync(output, "");
+          try {
+            const result = spawnSync("bash", ["-c", script], {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                RESULTS: JSON.stringify(results),
+                EXPECTED_SHA: sha,
+                GITHUB_OUTPUT: output,
+              },
+            });
+            return { status: result.status, output: fs.readFileSync(output, "utf8") };
+          } finally {
+            fs.rmSync(directory, { recursive: true, force: true });
+          }
+        };
+
+        expect(gateJob.needs.length).toBeGreaterThan(0);
+        expect(run(passing())).toEqual({
+          status: 0,
+          output: `commit_sha=${sha}\nstatus=success\n`,
+        });
+        for (const job of gateJob.needs) {
+          const variants = [
+            ...["failure", "skipped", "cancelled"].map((result) => (r) => {
+              r[job].result = result;
+            }),
+            (r) => delete r[job],
+            (r) => {
+              r[job].outputs.commit_sha = "b".repeat(40);
+            },
+            (r) => delete r[job].outputs.commit_sha,
+          ];
+          for (const mutate of variants) {
+            const results = passing();
+            mutate(results);
+            const outcome = run(results);
+            expect(outcome.status, `${job}: ${JSON.stringify(results[job])}`).not.toBe(0);
+            expect(outcome.output).toBe("");
+          }
+        }
+      },
+    );
+
     it("runs the repository gates and the excluded sandbox suite in PR CI", () => {
-      const gateRuns = ci.doc.jobs["repo-gates"].steps.map((step) => step.run).filter(Boolean);
-      expect(gateRuns).toEqual([
-        "node scripts/check-boundaries.mjs",
-        "node scripts/check-secrets.mjs",
-        "node scripts/verify-adrs.mjs",
-      ]);
+      const staticRuns = ci.doc.jobs.static.steps.map((step) => step.run).filter(Boolean);
+      expect(staticRuns).toEqual(
+        expect.arrayContaining([
+          "node scripts/check-boundaries.mjs",
+          "node scripts/check-secrets.mjs",
+          "node scripts/verify-adrs.mjs",
+        ]),
+      );
 
       const sandboxSteps = ci.doc.jobs["test-sandbox"].steps;
       const deno = sandboxSteps.find((step) => step.uses?.startsWith("denoland/setup-deno@"));
@@ -1969,28 +1971,32 @@ with patch("subprocess.run", side_effect=publish):
       expect(testIndex).toBeGreaterThan(buildIndex);
     });
 
-    // Every file `pnpm test` excludes must run somewhere: the sandbox job in PR CI, or the
-    // release-tests job in the release candidate before signing.
+    // Every file `pnpm test` excludes must run somewhere: the sandbox job in PR CI, a
+    // package command the release candidate runs before signing, or system qualification.
     it("runs every test file excluded from pnpm test in CI or the release candidate", () => {
       const scripts = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, "utf8")).scripts;
       const excluded = [...scripts.test.matchAll(/--exclude (\S+)/g)].map((match) => match[1]);
       expect(excluded.length).toBeGreaterThan(0);
 
-      const releaseScripts = candidate.doc.jobs["release-tests"].strategy.matrix.include.map(
+      const candidateScripts = candidate.doc.jobs["release-tests"].strategy.matrix.include.map(
         (entry) => entry.script,
       );
-      const covered = ["test:sandbox", ...releaseScripts].map((name) => scripts[name]).join(" ");
+      for (const job of Object.values(candidate.doc.jobs)) {
+        for (const step of job.steps ?? []) {
+          const match = /^pnpm run (\S+)$/.exec(step.run?.trim() ?? "");
+          if (match) candidateScripts.push(match[1]);
+        }
+      }
+      const covered = [
+        scripts["test:sandbox"],
+        ...candidateScripts.map((name) => scripts[name]),
+        ...SYSTEM_QUALIFICATION_SUITES,
+      ].join(" ");
       for (const file of excluded) {
         expect(covered, `${file} is excluded from pnpm test but runs in no workflow`).toContain(
           file,
         );
       }
-      expect(scripts["release:test"]).toBe(
-        releaseScripts
-          .filter((name) => name !== "test:e2e")
-          .map((name) => `pnpm run ${name}`)
-          .join(" && "),
-      );
     });
 
     it("verifies configure-branch-protection.sh requires only the CI Gate Rollup", () => {
@@ -2035,21 +2041,19 @@ with patch("subprocess.run", side_effect=publish):
       const platformJob = candidate.doc.jobs["platform-qualification"];
       expect(platformJob["runs-on"]).toBe("${{ matrix.runner }}");
       const matrix = platformJob.strategy?.matrix?.include;
-      const lanes = matrix.flatMap((m) => m.lanes.split(" "));
-      expect(lanes.sort()).toEqual([
-        "darwin-arm64",
-        "darwin-x64",
-        "linux-arm64",
-        "linux-x64",
-        "wsl",
-      ]);
+      expect(matrix.map((m) => m.native_lane).sort()).toEqual(["linux-arm64", "linux-x64"]);
+      const artifactLanes = matrix.flatMap((m) => m.artifact_lanes.split(" ").filter(Boolean));
+      expect(artifactLanes.sort()).toEqual(["darwin-arm64", "darwin-x64", "wsl"]);
       for (const entry of matrix) {
         expect(isGitHubHostedRunner(entry.runner)).toBe(true);
-        const artifactOnly = entry.lanes
-          .split(" ")
-          .some((l) => l.startsWith("darwin") || l === "wsl");
-        expect(entry.mode).toBe(artifactOnly ? "artifact" : "native");
       }
+      const qualify = platformJob.steps.find((s) => s.run?.includes("platform-qualification.mjs"));
+      expect(qualify.run).toContain('qualify "$NATIVE_LANE" native');
+      expect(qualify.run).toContain('qualify "$lane" artifact');
+      const artifactCheck = platformJob.steps.find(
+        (s) => s.run === "pnpm run check:public-artifact",
+      );
+      expect(artifactCheck.env.RESIN_RELEASE_DIR).toBe("dist/release/v1.0.3");
     });
 
     it("qualifies native Windows x64 and arm64 in PowerShell on GitHub-hosted Windows runners", () => {

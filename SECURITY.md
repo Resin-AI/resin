@@ -199,7 +199,7 @@ The Resin repository implements defense-in-depth for all continuous integration 
 - **Ephemeral Release Runners**: Release-candidate signing, channel renewal and production promotion run on fresh GitHub-hosted `ubuntu-24.04` VMs, behind protected GitHub environments. Nothing persists between release jobs or is shared with other builds.
 - **Protected Workflow Separation**: Release and deployment workflows execute exclusively on protected `main` or tag refs with explicit promotion confirmations, auditable workflow dispatch, and offline verification receipts.
 - **Optional Human Review**: Human reviews are optional and are not automatically requested through code ownership rules; pull requests enforce PR-only release gates with zero required approving reviews while requiring 100% automated machine qualification.
-- **Branch Protection & Automated Gating**: Direct pushes and force pushes are blocked on `main`. Merging requires all 13 CI status checks, package and privacy boundary checks, security scans, and the `ci-gate` rollup to pass.
+- **Branch Protection & Automated Gating**: Direct pushes and force pushes are blocked on `main`. Merging requires `CI Gate Rollup`, which verifies that static checks, every unit-test shard and sandbox tests passed on the exact commit. Static checks include repository boundaries, secret scanning and ADR validation.
 
 ---
 

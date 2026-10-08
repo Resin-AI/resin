@@ -11,6 +11,8 @@ export const SYSTEM_QUALIFICATION_SUITES = Object.freeze([
   "apps/cli/tests/installer/production-release-transaction.test.ts",
   "apps/cli/tests/installer/signed-channel-verifier.test.ts",
   "apps/cli/tests/installer/packaged-cli-production-http.test.ts",
+  "apps/cli/tests/installer-e2e.test.ts",
+  "apps/cli/tests/installer/npm-pack-offline-install.test.ts",
 ]);
 
 function sha256File(filePath) {
@@ -148,6 +150,7 @@ export function runSystemQualification(options = {}) {
       "run",
       "--config",
       "vitest.packaged.config.ts",
+      "--no-file-parallelism",
       "--testTimeout=60000",
       "--hookTimeout=60000",
       ...suites,
