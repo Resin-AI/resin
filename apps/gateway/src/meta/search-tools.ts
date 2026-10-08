@@ -1,4 +1,5 @@
 import type { CapabilityManifest, ToolParameterSchema } from "@resin/contracts";
+import { recordDiscoverySearch } from "@resin/observer/discovery-funnel";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -814,6 +815,8 @@ export function createSearchToolsHandler(
     const total = scoredTools.length;
     const paginated = scoredTools.slice(offset, offset + limit).map((s) => s.item);
     const hasMore = offset + limit < total;
+    // The discovery funnel counts the search and whether it found anything; never the query.
+    recordDiscoverySearch(total);
 
     const response: SearchToolsResponse = {
       tools: paginated,

@@ -4,6 +4,7 @@ import type {
   ToolOutputSchema,
   ToolParameterSchema,
 } from "@resin/contracts";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import { offersForEach, withForEachInput, withForEachSentence } from "../for-each.js";
 import type { CallToolResult, JsonRpcParams, McpToolInput } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -269,6 +270,7 @@ export function createGetToolSchemaHandler(
       isPinned,
       isDisabled,
     };
+    if (!resolvedTool.isSystem) recordDiscoveryFunnelEvent("schema_read");
 
     return {
       content: [

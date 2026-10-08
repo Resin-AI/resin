@@ -24,6 +24,10 @@ import {
   parseCloudUploadStatus,
   resolvePaths,
 } from "@resin/observer";
+import {
+  type DiscoveryFunnelSummary,
+  readDiscoveryFunnelSummary,
+} from "@resin/observer/discovery-funnel";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -374,6 +378,11 @@ export interface DaemonStatusSummary {
    * reports written before this existed.
    */
   cloudUpload?: CloudUploadSummary;
+  /**
+   * Learned-tool discovery over the last seven UTC days, as the gateway and suggestion hooks
+   * counted it locally: counts only. Absent when it could not be read.
+   */
+  discoveryFunnel?: DiscoveryFunnelSummary;
 }
 
 export interface CloudUploadSummary {
@@ -426,6 +435,8 @@ interface StatusCollectionOptions {
   stateReader?: LocalStateReader;
   /** Process table for the harness session check; defaults to this platform's reader. */
   readProcessTable?: ProcessTableReader;
+  /** Reads the local discovery funnel counts; defaults to the shards under `<stateDir>`. */
+  readDiscoveryFunnel?: (stateDir: string, nowMs: number) => DiscoveryFunnelSummary;
 }
 
 interface LocalConfigSnapshot {
@@ -710,6 +721,12 @@ export async function fetchDaemonStatusSummary(
   const recovery = await readRecoveryStatus(fsBridge, resinHome);
   const toolSignatures = await readToolSignaturesStatus(fsBridge, daemonPaths.stateDir);
   const cloudUpload = await readCloudUploadSummary(fsBridge, daemonPaths.stateDir);
+  const discoveryFunnel = readDiscoveryFunnelStatus(
+    options.readDiscoveryFunnel ??
+      ((stateDir, nowMs) => readDiscoveryFunnelSummary(stateDir, { nowMs })),
+    daemonPaths.stateDir,
+    now,
+  );
   const update = await readUpdateStatus(fsBridge, {
     home,
     resinHome,
@@ -818,6 +835,7 @@ export async function fetchDaemonStatusSummary(
     notifications: reportedNotifications,
     toolSignatures,
     cloudUpload,
+    ...(discoveryFunnel === undefined ? {} : { discoveryFunnel }),
   };
 }
 
@@ -1031,6 +1049,50 @@ export async function readCloudUploadSummary(
   };
 }
 
+function readDiscoveryFunnelStatus(
+  read: (stateDir: string, nowMs: number) => DiscoveryFunnelSummary,
+  stateDir: string,
+  nowMs: number,
+): DiscoveryFunnelSummary | undefined {
+  try {
+    return read(stateDir, nowMs);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The `[Learned Tool Discovery]` lines of `resin status --verbose`: searches through to calls over
+ * the last seven UTC days, then per day. Counts only.
+ */
+export function formatDiscoveryFunnelLines(funnel: DiscoveryFunnelSummary | undefined): string[] {
+  const lines = [`[Learned Tool Discovery] (since ${funnel?.since ?? "unknown"}, UTC)`];
+  if (funnel === undefined) {
+    lines.push("  Unavailable");
+    return lines;
+  }
+  if (funnel.days.length === 0) {
+    lines.push("  No searches, suggestions or learned-tool calls recorded yet");
+    return lines;
+  }
+  const total = funnel.totals;
+  lines.push(`  Searches:       ${total.searches} (${total.searches_with_results} with results)`);
+  lines.push(`  Tools listed:   ${total.tools_listed}`);
+  lines.push(`  Schema reads:   ${total.schema_reads}`);
+  lines.push(`  Suggestions:    ${total.suggestions_shown}`);
+  lines.push(
+    `  Calls:          ${total.invocations_succeeded} succeeded, ${total.invocations_failed} failed`,
+  );
+  lines.push(`  Not available here: ${total.unavailable_here}`);
+  for (const { day, counts } of funnel.days) {
+    const calls = counts.invocations_succeeded + counts.invocations_failed;
+    lines.push(
+      `  ${day}: ${counts.searches} searches -> ${counts.schema_reads} schema reads -> ${calls} calls; ${counts.suggestions_shown} suggestions`,
+    );
+  }
+  return lines;
+}
+
 function formatMembershipType(membershipType: MembershipType | null | undefined): string {
   const labels: Record<MembershipType, string> = {
     free: "Free",
@@ -1214,6 +1276,8 @@ function formatDetailedStatusForTerminal(summary: DaemonStatusSummary): string {
   lines.push("\n[Tools & MCP Catalog]");
   lines.push(`  System Tools:   ${summary.tools.metaToolsCount}`);
   lines.push(`  Custom Tools:   ${formatCustomToolsCount(summary.tools)}`);
+
+  lines.push("", ...formatDiscoveryFunnelLines(summary.discoveryFunnel));
 
   lines.push("\n[Harness Integrations]");
   lines.push("  [Agent Harness Connections]");

@@ -42,6 +42,11 @@
       "import": "./dist/client-api.js",
       "default": "./dist/client-api.js"
     },
+    "./discovery-funnel": {
+      "types": "./dist/discovery-funnel.d.ts",
+      "import": "./dist/discovery-funnel.js",
+      "default": "./dist/discovery-funnel.js"
+    },
     "./daemon": {
       "types": "./dist/bin/daemon.d.ts",
       "import": "./dist/bin/daemon.js",

@@ -13,6 +13,7 @@ import {
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
@@ -366,6 +367,9 @@ export function createInvokeToolHandler(
         }
         return;
       }
+      recordDiscoveryFunnelEvent(
+        outcome === "success" ? "invocation_succeeded" : "invocation_failed",
+      );
       if (!onInvocationRecorded) {
         return;
       }
