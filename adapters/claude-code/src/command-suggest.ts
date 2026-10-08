@@ -216,7 +216,8 @@ export async function verifyClaudeCommandSuggest(
   return found === 1;
 }
 
-const extension = {
+/** Resin's Claude Code hook that suggests learned tools as the agent is about to run a command. */
+export const claudeCommandSuggestExtension: HarnessInstallExtension = {
   name: "command suggestions",
   install: installClaudeCommandSuggest,
   uninstall: uninstallClaudeCommandSuggest,
@@ -226,6 +227,3 @@ const extension = {
     resolveClaudeSettingsPath(home, env),
   ],
 };
-
-/** Resin's Claude Code hook that suggests learned tools as the agent is about to run a command. */
-export const claudeCommandSuggestExtension: HarnessInstallExtension = extension;

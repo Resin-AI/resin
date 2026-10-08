@@ -386,6 +386,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     // A learned tool scoped to another repository (or unable to run from here) is not offered
     // here, so a call by name is refused rather than run against the wrong checkout.
     if (!isToolOfferedHere(this.registry, tool, context)) {
+      recordDiscoveryFunnelEvent("unavailable_here");
       return { content: [{ type: "text", text: unavailableHereMessage(name) }], isError: true };
     }
     // `for_each` on a learned tool is one ordinary call per value: each run is gated,

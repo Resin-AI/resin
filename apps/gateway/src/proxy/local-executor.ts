@@ -28,6 +28,7 @@ import {
   RESIN_INVOKE_TOOL_RUNTIME,
   resolvePrivateReference,
 } from "@resin/observer";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
@@ -730,7 +731,10 @@ export class LocalArtifactExecutor {
    * steps it replays (see `recordedWorkStepCount`), the repositories its located steps run in, and
    * why it cannot run for this caller, if it cannot. Undefined for any other tool.
    */
-  recordedWorkflowProfile(artifactDigest: string, context: WorkspaceContext): ToolProfile | undefined {
+  recordedWorkflowProfile(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): ToolProfile | undefined {
     const plan = this.recordedPlan(artifactDigest);
     if (plan === undefined) return undefined;
     const availability = this.recordedWorkflowAvailability(artifactDigest, context);
@@ -1990,6 +1994,7 @@ export class LocalArtifactExecutor {
       { resolvePrivate: this.ownedPrivateResolver(plan, owner) },
     );
     if (!availability.available) {
+      recordDiscoveryFunnelEvent("unavailable_here");
       return failedToolResult(
         "runtime_unavailable",
         `This tool cannot run here: ${availability.reason}.`,

@@ -299,6 +299,56 @@ describe("plans without a location", () => {
     ).toBe(false);
   });
 
+  it("read the leading cd of a program that arrived as a tool argument (a harness's bash command)", () => {
+    const caller = repositoryIdentity(makeRepository("kappa"));
+    const viaArgument = (source: WorkflowArgument["source"]): RecordedWorkflow => {
+      const step = shellStep("tests", "", { arguments: [{ name: "command", source }] });
+      return plan({
+        ...step,
+        callable: {
+          ...step.callable,
+          program: { kind: "shell", source: "", argument: "command" },
+        },
+      });
+    };
+    const gone = "cd /synthetic/deleted-scratch/wt/apps/web && npx vitest run";
+    const sources: WorkflowArgument["source"][] = [
+      { kind: "literal", value: gone },
+      {
+        kind: "template",
+        template: {
+          type: "program",
+          language: "shell",
+          source: { type: "literal", value: gone },
+          holes: [],
+        },
+      },
+    ];
+    for (const source of sources) {
+      expect(workflowLocationAvailability(viaArgument(source), { repository: caller })).toEqual({
+        available: false,
+        reason: "it runs in a directory recorded on another checkout that does not exist here",
+      });
+    }
+    const privateCommand = viaArgument({ kind: "private", reference: "ref:scope:command" });
+    expect(
+      workflowLocationAvailability(
+        privateCommand,
+        { repository: caller },
+        { resolvePrivate: () => gone },
+      ).available,
+    ).toBe(false);
+    // Unresolvable here, the command pins nothing this machine can check.
+    expect(workflowLocationAvailability(privateCommand, { repository: caller }).available).toBe(
+      true,
+    );
+    expect(
+      workflowLocationAvailability(viaArgument({ kind: "literal", value: "npx vitest run" }), {
+        repository: caller,
+      }).available,
+    ).toBe(true);
+  });
+
   it("are unavailable when pinned to a checkout of another repository, available in their own", () => {
     const pinned = makeRepository("theta");
     const legacy = plan(shellStep("tests", `cd ${pinned}/pkg && pwd`));

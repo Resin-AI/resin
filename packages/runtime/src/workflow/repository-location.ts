@@ -74,6 +74,19 @@ export interface WorkflowLocationAvailabilityOptions {
   homeDir?: string;
 }
 
+/** A private reference's value when it resolves to text here; undefined otherwise. */
+function resolvePrivateText(
+  reference: string,
+  options: WorkflowLocationAvailabilityOptions,
+): unknown {
+  if (options.resolvePrivate === undefined) return undefined;
+  try {
+    return options.resolvePrivate(reference);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The absolute directory a legacy (unlocated) step pins itself to, when its record names one. */
 function pinnedDirectories(
   step: WorkflowStep,
@@ -82,8 +95,27 @@ function pinnedDirectories(
 ): string[] {
   const pinned: string[] = [];
   const program = step.callable.program;
-  if (program !== undefined && program.kind !== "patch" && typeof program.source === "string") {
-    const cd = splitLeadingCd(program.source);
+  if (program !== undefined && program.kind !== "patch") {
+    // The program text is the source, or, for a program that arrived as a tool argument (a
+    // harness's bash `command`), that argument's recorded text: a literal, a projected program's
+    // literal source text (with the recorded values at its holes), or a private value.
+    const carried =
+      program.argument === undefined
+        ? undefined
+        : step.arguments.find((argument) => argument.name === program.argument)?.source;
+    const text =
+      carried === undefined
+        ? program.source
+        : carried.kind === "literal"
+          ? carried.value
+          : carried.kind === "template" &&
+              carried.template.type === "program" &&
+              carried.template.source.type === "literal"
+            ? carried.template.source.value
+            : carried.kind === "private"
+              ? resolvePrivateText(carried.reference, options)
+              : undefined;
+    const cd = typeof text === "string" ? splitLeadingCd(text) : undefined;
     if (cd !== undefined) {
       const target = cd.home ? `${homeDir}${cd.directory}` : cd.directory;
       if (path.posix.isAbsolute(target)) pinned.push(target);
@@ -93,12 +125,8 @@ function pinnedDirectories(
     if (!(WORKING_DIRECTORY_ARGUMENT_NAMES as readonly string[]).includes(argument.name)) continue;
     let value: unknown;
     if (argument.source.kind === "literal") value = argument.source.value;
-    else if (argument.source.kind === "private" && options.resolvePrivate !== undefined) {
-      try {
-        value = options.resolvePrivate(argument.source.reference);
-      } catch {
-        value = undefined;
-      }
+    else if (argument.source.kind === "private") {
+      value = resolvePrivateText(argument.source.reference, options);
     }
     if (typeof value === "string" && path.isAbsolute(value)) pinned.push(value);
   }

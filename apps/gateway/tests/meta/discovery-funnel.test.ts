@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import {
   CapabilityManifestSchema,
   ToolLimitConfigSchema,
@@ -14,15 +15,24 @@ import {
   setDiscoveryFunnelStore,
 } from "@resin/observer/discovery-funnel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DIRECT_LISTING_MAX_TOOLS } from "../../src/gateway.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import { createManageToolsHandler } from "../../src/meta/manage-tools.js";
 import type { ToolInvocationRouter } from "../../src/meta/router-contract.js";
 import { createSearchToolsHandler } from "../../src/meta/search-tools.js";
-import type { CallToolResult } from "../../src/protocol/types.js";
+import { McpFrameDecoder, encodeMcpMessage } from "../../src/protocol/framing.js";
+import {
+  type CallToolResult,
+  type JsonRpcMessage,
+  RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_META,
+} from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { createRegistryGatewayRouter } from "../../src/router.js";
+import { createToolSearchSurface } from "../../src/shim/tool-search-surface.js";
+import { countSuggestionShown } from "../../src/suggest/funnel.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
 const WORKSPACE = "ws-funnel";
@@ -88,6 +98,13 @@ afterEach(() => {
 async function registry(): Promise<ToolRegistry> {
   const tools = new ToolRegistry();
   await tools.registerTool(makeManifest(), undefined, { workspaceId: WORKSPACE });
+  return tools;
+}
+
+/** A registry whose one learned tool this machine says cannot run here. */
+async function unavailableRegistry(): Promise<ToolRegistry> {
+  const tools = await registry();
+  tools.setLocalToolProfile(() => ({ steps: 1, unavailableReason: "its directory is gone" }));
   return tools;
 }
 
@@ -163,5 +180,67 @@ describe("gateway discovery funnel", () => {
       invocations_succeeded: 1,
       invocations_failed: 1,
     });
+  });
+
+  it("counts refusals of a tool not offered here, and nothing else for them", async () => {
+    const tools = await unavailableRegistry();
+    const params = { name: "draft_release_notes", parameters: { since: "v1.2.0" } };
+
+    const viaInvoke = await createInvokeToolHandler(tools, ok)(makeContext(), params);
+    const byName = await createRegistryGatewayRouter(tools, ok).callTool(
+      makeContext(),
+      "draft_release_notes",
+      { since: "v1.2.0" },
+    );
+    const schema = await createGetToolSchemaHandler(tools)(makeContext(), {
+      name: "draft_release_notes",
+    });
+
+    for (const result of [viaInvoke, byName, schema]) expect(result.isError).toBe(true);
+    expect(store.pending()).toEqual({ ...emptyDiscoveryFunnelCounts(), unavailable_here: 3 });
+  });
+
+  it("counts the learned tools a search-listing connection lists directly", () => {
+    const output = new PassThrough();
+    const surface = createToolSearchSurface(output);
+    const decoder = new McpFrameDecoder();
+    const received: JsonRpcMessage[] = [];
+    output.on("data", (chunk: Buffer) => received.push(...decoder.push(chunk)));
+    surface.output.pipe(output);
+    const list = (id: number, learned: number) => {
+      surface.input.write(encodeMcpMessage({ jsonrpc: "2.0", id, method: "tools/list" }));
+      surface.output.write(
+        encodeMcpMessage({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            tools: [
+              { name: "search_tools", inputSchema: { type: "object" } },
+              ...Array.from({ length: learned }, (_, index) => ({
+                name: `learned_${index}`,
+                inputSchema: { type: "object" },
+                _meta: { [RESIN_LEARNED_TOOL_META]: true },
+              })),
+            ],
+            _meta: { [RESIN_LEARNED_TOOL_COUNT_META]: learned },
+          },
+        }),
+      );
+    };
+    try {
+      list(1, 3);
+      // Above the limit the tools are not listed, so none is counted.
+      list(2, DIRECT_LISTING_MAX_TOOLS + 1);
+      expect(received).toHaveLength(2);
+      expect(store.pending()).toEqual({ ...emptyDiscoveryFunnelCounts(), tools_listed: 3 });
+    } finally {
+      surface.input.end();
+      surface.output.end();
+    }
+  });
+
+  it("counts a shown command suggestion by default", () => {
+    countSuggestionShown({ harness: "claude-code" });
+    expect(store.pending()).toEqual({ ...emptyDiscoveryFunnelCounts(), suggestions_shown: 1 });
   });
 });

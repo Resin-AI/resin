@@ -206,7 +206,8 @@ export async function verifyOmpCommandSuggest(
   return (await context.fsBridge.readFile(filePath)) === expectedExtension(context);
 }
 
-const extension = {
+/** Resin's OMP extension that suggests learned tools as the agent is about to run a command. */
+export const ompCommandSuggestExtension: HarnessInstallExtension = {
   name: "command suggestions",
   install: installOmpCommandSuggest,
   uninstall: uninstallOmpCommandSuggest,
@@ -216,6 +217,3 @@ const extension = {
     resolveOmpCommandSuggestExtensionPath(home, env),
   ],
 };
-
-/** Resin's OMP extension that suggests learned tools as the agent is about to run a command. */
-export const ompCommandSuggestExtension: HarnessInstallExtension = extension;

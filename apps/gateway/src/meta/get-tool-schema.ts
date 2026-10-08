@@ -150,6 +150,7 @@ export function createGetToolSchemaHandler(
     }
     // Discovery offers a learned tool only where it was learned and can run (see repository-scope).
     if (!isToolOfferedHere(registry, resolvedTool, context)) {
+      recordDiscoveryFunnelEvent("unavailable_here");
       return {
         isError: true,
         content: [

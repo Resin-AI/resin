@@ -5,6 +5,7 @@
  * The catalog is already scoped to the connection's repository by the router, so the index is too.
  */
 import { RESIN_LEARNED_TOOL_META } from "../protocol/types.js";
+import { callerRepository } from "../proxy/tool-location.js";
 import type { CatalogNoticeTool } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { type SuggestTool, writeRepositoryTools } from "./index-file.js";
@@ -52,7 +53,8 @@ export function createCommandSuggestIndexWriter(
   const written = new Map<string, string>();
   return (context, tools) => {
     try {
-      const identity = resolve(context.startupPath || context.canonicalRoot);
+      // The same checkout the router scoped the catalog to and the tools run in.
+      const identity = callerRepository(context, resolve);
       if (identity === undefined) return;
       const entries = suggestToolsFromCatalog(tools);
       const key = JSON.stringify(entries);

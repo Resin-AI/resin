@@ -12,7 +12,7 @@
  * all that is compared; no path leaves this machine.
  */
 
-import path from "node:path";
+import { callerRepository } from "../proxy/tool-location.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -55,19 +55,12 @@ export function toolInRepository(
   return declared === undefined || (repositoryId !== undefined && declared.includes(repositoryId));
 }
 
-/** The directory a caller's session works in: where it started, else its project root. */
-function callerDirectory(context: WorkspaceContext): string | undefined {
-  const base = context.projectRoot || context.canonicalRoot;
-  if (context.startupPath) {
-    return base ? path.resolve(base, context.startupPath) : path.resolve(context.startupPath);
-  }
-  return base || undefined;
-}
-
-/** The repository the caller works in, or undefined outside one (or without git). */
+/**
+ * The repository the caller works in, or undefined outside one (or without git): the same
+ * checkout a learned tool runs in (see `callerRepository`).
+ */
 export function callerRepositoryId(context: WorkspaceContext): string | undefined {
-  const directory = callerDirectory(context);
-  return directory === undefined ? undefined : repositoryIdentity(directory)?.id;
+  return callerRepository(context, repositoryIdentity)?.id;
 }
 
 /** Whether discovery scopes this tool by repository at all: only learned (workspace) tools. */

@@ -1,4 +1,5 @@
 import { Transform } from "node:stream";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
   DIRECT_LISTING_MAX_TOOLS,
@@ -470,30 +471,26 @@ export function createToolSearchSurface(
           if (result && Array.isArray(result.tools)) {
             learnedTools = learnedToolsOf(result);
             const direct = searchOnlyListing && listsDirectly(learnedTools);
-            return {
-              jsonrpc: "2.0",
-              id: message.id,
-              result: {
-                ...result,
-                tools: result.tools
-                  .filter((tool) => {
-                    const listed = record(tool);
-                    const name = listed?.name;
-                    if (typeof name !== "string") return false;
-                    // Search-only listing: the meta tools, plus the learned tools themselves when the
-                    // caller's catalog is small enough to list directly. Unlisted learned tools are
-                    // found by search and still answer tools/call by name.
-                    if (searchOnlyListing) {
-                      return (
-                        META_TOOL_NAMES[name] === true ||
-                        (direct && record(listed?._meta)?.[RESIN_LEARNED_TOOL_META] === true)
-                      );
-                    }
-                    return searchEnabled || !isSearch(name);
-                  })
-                  .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool)),
-              },
-            };
+            const isLearned = (tool: unknown) =>
+              record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true;
+            const tools = result.tools
+              .filter((tool) => {
+                const name = record(tool)?.name;
+                if (typeof name !== "string") return false;
+                // Search-only listing: the meta tools, plus the learned tools themselves when the
+                // caller's catalog is small enough to list directly. Unlisted learned tools are
+                // found by search and still answer tools/call by name.
+                if (searchOnlyListing)
+                  return META_TOOL_NAMES[name] === true || (direct && isLearned(tool));
+                return searchEnabled || !isSearch(name);
+              })
+              .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool));
+            if (direct) {
+              // The discovery funnel counts the learned tools a direct listing showed.
+              const shown = tools.filter(isLearned).length;
+              if (shown > 0) recordDiscoveryFunnelEvent("tools_listed", { count: shown });
+            }
+            return { jsonrpc: "2.0", id: message.id, result: { ...result, tools } };
           }
         }
       }

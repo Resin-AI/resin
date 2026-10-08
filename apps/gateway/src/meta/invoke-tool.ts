@@ -453,12 +453,12 @@ export function createInvokeToolHandler(
         }
       }
     };
-    // A learned tool scoped to another repository, or unable to run from here, is refused.
+    // A learned tool scoped to another repository, or unable to run from here, is refused like one
+    // that is not accessible: nothing ran, so no invocation is recorded, only the funnel's refusal.
     if (!isMetaTool && !isToolOfferedHere(registry, resolvedTool, context)) {
+      recordDiscoveryFunnelEvent("unavailable_here");
       const message = unavailableHereMessage(resolvedTool.exposedName || resolvedTool.name);
-      const res: CallToolResult = { isError: true, content: [{ type: "text", text: message }] };
-      recordInvocation("tool_unavailable", res, message);
-      return res;
+      return { isError: true, content: [{ type: "text", text: message }] };
     }
     // Composed calls carry argument envelopes ({value}, {reference}, {literal}, nested
     // composites). They are analyzed once here: the transcript records the envelope form
