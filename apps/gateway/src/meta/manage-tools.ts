@@ -1,4 +1,5 @@
 import type { ProductionSafetyGateStatus } from "@resin/contracts";
+import { recordDiscoverySearch } from "@resin/observer/discovery-funnel";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
@@ -395,6 +396,9 @@ export function createManageToolsHandler(
         const total = summaries.length;
         const paginated = summaries.slice(offset, offset + limit);
         const hasMore = offset + limit < total;
+        // With a query this is the search path when search_tools is not listed: count it as one
+        // (never the query itself). A plain listing is not a search.
+        if (query) recordDiscoverySearch(total);
 
         return {
           content: [

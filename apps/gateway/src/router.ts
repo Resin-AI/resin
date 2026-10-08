@@ -12,6 +12,7 @@ import {
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import {
   FOR_EACH_ARGUMENT,
@@ -399,6 +400,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     try {
       executed = await this.executeTool(context, tool, name, params, options);
     } catch (error) {
+      if (!tool.isSystem) recordDiscoveryFunnelEvent("invocation_failed");
       // A call the routing layer refused or lost is still a failed invocation of this tool,
       // and the error the caller receives is its output: estimate usage from it like a result.
       if (recorder) {
@@ -410,6 +412,10 @@ export class RegistryGatewayRouter implements GatewayRouter {
       throw error;
     }
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
+    if (!tool.isSystem) {
+      // A learned tool the harness called by name: the end of the discovery funnel.
+      recordDiscoveryFunnelEvent(executed.isError ? "invocation_failed" : "invocation_succeeded");
+    }
 
     if (tool.isSystem) {
       if (isDiscoveryTool(name) || isDiscoveryTool(tool.toolId)) {
