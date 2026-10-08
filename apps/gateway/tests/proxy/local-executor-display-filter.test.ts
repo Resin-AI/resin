@@ -2,9 +2,9 @@
  * A plan step marked `displayFilter` (`display-filter-v1`, `display-filter-v2`), run by the real
  * local executor. A version-1 invocation returns the recorded command's whole output without its
  * display filter. A version-2 invocation runs the program as recorded, filters inline: its value is
- * what the program printed, and the caller is shown a report (`RESIN_DISPLAY_TEXT_META`) of each
- * command's status, that output, and where its whole output is kept under the Resin home. The
- * step's boolean input pipes the commands' output through the filters.
+ * what the program printed, and the caller is shown a report (`RESIN_DISPLAY_TEXT_META`): on success
+ * just that output (plus anything hidden and where the whole output is kept), on failure each
+ * command's status too. The step's boolean input pipes the commands' output through the filters.
  */
 
 import crypto from "node:crypto";
@@ -230,20 +230,14 @@ describe.skipIf(process.platform === "win32")("display-filter steps in the gatew
         return;
       }
       // Version 2 runs as recorded. The content is what the program printed (what composition and
-      // later steps read); the caller is shown a report with each command's status instead.
+      // later steps read); on success the caller is shown just that output, nothing hidden.
       const { result, text } = await invoke(program, version, {});
       expect(result.isError, text).toBeUndefined();
       expect(text).toBe(JSON.stringify(filtered));
       const report = result._meta?.[RESIN_DISPLAY_TEXT_META] as string;
-      expect(report).toMatch(/^The program exited 0\.\nCommands:\n/);
-      expect(report).toContain(`\nOutput:\n${filtered}`);
+      expect(report).toBe(filtered.replace(/\n$/, ""));
       expect(report).not.toContain(program);
       expect(withDisplayText(result)).toEqual({ content: [{ type: "text", text: report }] });
-      // Its whole output is kept under the Resin home, for reading without re-running it.
-      const directory = /kept without re-running anything, in (.+):\n/.exec(report)![1]!;
-      expect(path.dirname(directory)).toBe(path.join(resinHome, "data", "invocation-output"));
-      expect(fs.readFileSync(path.join(directory, "o1"), "utf8")).toBe("a\nb\nc\n");
-      expect(fs.readFileSync(path.join(directory, "stdout"), "utf8")).toBe(filtered);
     });
 
     it("pipes the command's output through the filter when the caller switches it on", async () => {
@@ -295,10 +289,8 @@ describe.skipIf(process.platform === "win32")("display-filter steps in the gatew
     const failed = await invoke(first, 2, {}, [showStep(`${second}; exit 3`)]);
     expect(failed.result.isError).toBe(true);
     expect(failed.text).toContain("Step 2 of 2 failed:");
-    expect(failed.text).toContain(
-      "--- step 1/2 ---\nThe program exited 0.\nCommands:\n  1 (./emit): exit 0; its output is shown filtered\n",
-    );
-    expect(failed.text).toContain("Output:\nc\na\nc\nok\n");
+    expect(failed.text).toContain("--- step 1/2 ---\nc\na\nc\nok\n");
+    expect(failed.text).not.toContain("The program exited 0.");
   });
 
   it("reports a failing check apart from a step that failed to execute", async () => {

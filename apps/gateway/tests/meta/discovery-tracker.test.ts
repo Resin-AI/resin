@@ -17,7 +17,7 @@ import type {
   ToolInvocationRouter,
 } from "../../src/meta/router-contract.js";
 import { JSON_RPC_ERROR_CODES } from "../../src/protocol/errors.js";
-import type { CallToolResult } from "../../src/protocol/types.js";
+import { type CallToolResult, RESIN_DISPLAY_TEXT_META } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { RegistryGatewayRouter } from "../../src/router.js";
@@ -270,6 +270,39 @@ describe("Gateway SessionDiscoveryTracker & Usage Estimates", () => {
       expect(capturedRecord?.usageEstimate).toBeDefined();
       expect(capturedRecord?.usageEstimate?.method).toBe("tool_io_utf8_v1");
       expect(capturedRecord?.usageEstimate?.totalTokens).toBeGreaterThan(0);
+    });
+
+    it("estimates output from the displayed text the caller receives, not raw content and meta", async () => {
+      const registry = new ToolRegistry();
+      await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-discovery" });
+
+      let capturedRecord: InvocationRecord | undefined;
+      const report = "c\nok";
+      const raw: CallToolResult = {
+        content: [{ type: "text", text: JSON.stringify("a\nb\nc\n".repeat(200)) }],
+        _meta: { [RESIN_DISPLAY_TEXT_META]: report },
+      };
+      const mockRouter: ToolInvocationRouter = {
+        async invoke(): Promise<CallToolResult> {
+          return raw;
+        },
+      };
+      const handler = createInvokeToolHandler(registry, mockRouter, {
+        onInvocationRecorded: async (record) => {
+          capturedRecord = record;
+        },
+        discoveryTracker: tracker,
+      });
+
+      const res = await handler(makeContext("ws-discovery", "session-display"), {
+        toolId: "tool_echo",
+        parameters: { message: "show" },
+      });
+
+      expect(res.content).toEqual([{ type: "text", text: report }]);
+      const outputTokens = capturedRecord?.usageEstimate?.outputTokens;
+      expect(outputTokens).toBe(bytesToTokens(estimatePayloadBytes(res.content) ?? 0));
+      expect(outputTokens).toBeLessThan(bytesToTokens(estimatePayloadBytes(raw) ?? 0));
     });
   });
 
