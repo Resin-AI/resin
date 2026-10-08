@@ -89,6 +89,7 @@ describe("InvocationTelemetryUploader", () => {
         discoveryTokens: 33,
         totalTokens: 66,
       },
+      executionDurationMs: 640,
     });
     const inv2 = makeInvocation({
       invocationId: "inv_ws1_2",
@@ -146,6 +147,8 @@ describe("InvocationTelemetryUploader", () => {
     expect(alphaBatch?.invocations.map((i) => i.invocationId)).toEqual(["inv_ws1_1", "inv_ws1_2"]);
     expect(alphaBatch?.invocations[0].usageEstimate).toEqual(inv1.usageEstimate);
     expect(alphaBatch?.invocations[1].usageEstimate).toBeUndefined();
+    expect(alphaBatch?.invocations[0].executionDurationMs).toBe(640);
+    expect(alphaBatch?.invocations[1].executionDurationMs).toBeUndefined();
     expect(betaBatch?.invocations).toHaveLength(1);
     expect(betaBatch?.invocations[0].invocationId).toBe("inv_ws2_1");
 

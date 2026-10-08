@@ -513,6 +513,15 @@ DROP TABLE IF EXISTS pattern_outbox;
 `;
 
 /**
+ * Migration 007: Add execution_duration_ms to invocation_records: the wall-clock ms the tool's
+ * recorded calls spent running, so the cloud can separate Resin's own overhead from the work a
+ * direct run would also do. NULL when the gateway did not measure it.
+ */
+export const MIGRATION_007_SQL = `
+ALTER TABLE invocation_records ADD COLUMN execution_duration_ms INTEGER;
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -551,6 +560,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "006_drop_pattern_outbox",
     sql: MIGRATION_006_SQL,
     checksum: hashCanonicalContent(MIGRATION_006_SQL),
+  },
+  {
+    version: 7,
+    name: "007_add_invocation_records_execution_duration",
+    sql: MIGRATION_007_SQL,
+    checksum: hashCanonicalContent(MIGRATION_007_SQL),
   },
 ];
 

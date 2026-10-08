@@ -57,6 +57,7 @@ import {
   inspectArtifactImports,
   instantiateRecordedWorkflow,
   resolveDenoExecutable,
+  timeRecordedCall,
   validateBundleEntryPath,
   verifyBundleSignature,
   workflowLocationAvailability,
@@ -2064,16 +2065,18 @@ export class LocalArtifactExecutor {
       adapters.register({
         runtime: RESIN_INVOKE_TOOL_RUNTIME,
         call: async (request) => {
-          const result = await stepInvoker({
-            name: request.step.callable.name,
-            ...(request.step.callable.connection
-              ? { connection: request.step.callable.connection }
-              : {}),
-            parameters: request.arguments as Record<string, unknown>,
-            context,
-            ...(signal ? { signal } : {}),
-            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-          });
+          const result = await timeRecordedCall(() =>
+            stepInvoker({
+              name: request.step.callable.name,
+              ...(request.step.callable.connection
+                ? { connection: request.step.callable.connection }
+                : {}),
+              parameters: request.arguments as Record<string, unknown>,
+              context,
+              ...(signal ? { signal } : {}),
+              ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+            }),
+          );
           if (result.isError) {
             const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
             throw new Error(text ?? `step '${request.step.id}' failed`);

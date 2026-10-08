@@ -13,7 +13,7 @@ import {
   isSafetyGateBypassTool,
 } from "@resin/contracts";
 import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
-import type { SafetyGateEvaluator } from "@resin/runtime";
+import { RecordedExecutionClock, type SafetyGateEvaluator } from "@resin/runtime";
 import {
   FOR_EACH_ARGUMENT,
   invalidForEachResult,
@@ -415,9 +415,13 @@ export class RegistryGatewayRouter implements GatewayRouter {
     // from it) only ever sees the meta-tool path.
     const recorder = tool.isSystem ? undefined : this.registry.getInvocationRecorder();
     const startedAtMs = Date.now();
+    // Times the tool's recorded calls apart from Resin's own work around them. A system tool is
+    // not recorded here (invoke_tool measures the call it makes itself), so it gets no clock.
+    const executionClock = recorder ? new RecordedExecutionClock() : undefined;
     let executed: CallToolResult;
     try {
-      executed = await this.executeTool(context, tool, name, params, options);
+      const execute = () => this.executeTool(context, tool, name, params, options);
+      executed = await (executionClock ? executionClock.run(execute) : execute());
     } catch (error) {
       if (!tool.isSystem) recordDiscoveryFunnelEvent("invocation_failed");
       // A call the routing layer refused or lost is still a failed invocation of this tool,
@@ -426,6 +430,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
           output: jsonRpcErrorOf(error instanceof Error ? error : String(error)),
           reason: failureReasonOfError(error),
+          executionDurationMs: executionClock?.durationMs(),
         });
       }
       throw error;
@@ -451,6 +456,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
       this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
         output: executed,
         ...(executed.isError ? { reason: failureReasonOfResult(executed) } : {}),
+        executionDurationMs: executionClock?.durationMs(),
       });
     }
     return executed;
@@ -462,9 +468,14 @@ export class RegistryGatewayRouter implements GatewayRouter {
     tool: RegistryTool,
     params: JsonRpcParams,
     startedAtMs: number,
-    outcome: { output: CallToolResult | JsonRpcErrorObject; reason?: InvocationFailureReason },
+    outcome: {
+      output: CallToolResult | JsonRpcErrorObject;
+      reason?: InvocationFailureReason;
+      /** Time the tool's recorded calls ran; undefined when none ran. */
+      executionDurationMs: number | undefined;
+    },
   ): void {
-    const { output, reason } = outcome;
+    const { output, reason, executionDurationMs } = outcome;
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
     const inBytes = estimatePayloadBytes(params);
     // The caller reads a result's content, not Resin's `_meta`; an error object is read whole.
@@ -481,6 +492,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
       });
     }
     const status = reason === undefined ? "success" : invocationStatusFor(reason);
+    const completedAtMs = Date.now();
+    const durationMs = Math.max(0, completedAtMs - startedAtMs);
     const record: InvocationRecord = {
       invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
       sessionId,
@@ -488,8 +501,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
       toolId: tool.toolId,
       toolVersion: /^\d+\.\d+\.\d+/.test(tool.version) ? tool.version : "1.0.0",
       startedAt: new Date(startedAtMs).toISOString(),
-      completedAt: new Date().toISOString(),
-      durationMs: Math.max(0, Date.now() - startedAtMs),
+      completedAt: new Date(completedAtMs).toISOString(),
+      durationMs,
+      ...(executionDurationMs === undefined
+        ? {}
+        : { executionDurationMs: Math.min(executionDurationMs, durationMs) }),
       status,
       inputDigest: hashCanonicalContent(params),
       outputDigest: hashCanonicalContent(output),

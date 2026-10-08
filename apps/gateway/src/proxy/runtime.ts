@@ -34,6 +34,7 @@ import {
   createProcessAdapter,
   createProgramAdapter,
   createToolProtocolAdapter,
+  timeRecordedCall,
 } from "@resin/runtime";
 import type { LocalToolDatedInputs, LocalToolRecordedDefaults } from "../meta/dated-defaults.js";
 import { composedResultValue } from "../meta/invoke-tool.js";
@@ -299,12 +300,14 @@ export function recordedWorkflowRuntimeAdapters(
           {
             runtime: RESIN_HARNESS_TOOL_RUNTIME,
             call: async (request) => {
-              const result = await recordedHarnessToolInvoker({
-                name: request.step.callable.name,
-                parameters: request.arguments as Record<string, unknown>,
-                cwd: request.workingDirectory ?? cwd ?? process.cwd(),
-                ...(host.signal ? { signal: host.signal } : {}),
-              });
+              const result = await timeRecordedCall(() =>
+                recordedHarnessToolInvoker({
+                  name: request.step.callable.name,
+                  parameters: request.arguments as Record<string, unknown>,
+                  cwd: request.workingDirectory ?? cwd ?? process.cwd(),
+                  ...(host.signal ? { signal: host.signal } : {}),
+                }),
+              );
               if (result.isError) {
                 throw new Error(
                   result.content[0]?.text ??

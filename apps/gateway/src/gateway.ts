@@ -256,10 +256,11 @@ export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} El
 
 /**
  * How a search-listing connection runs what search_tools found: each result already carries the
- * tool's recorded steps and its inputSchema, so the next call is invoke_tool, not get_tool_schema.
+ * tool's recorded steps and its inputSchema, so the next call is invoke_tool, not get_tool_schema,
+ * and a tool found earlier in the session is invoked again without another search.
  */
 const INVOKE_FROM_SEARCH =
-  "Each result has the tool's recorded steps and inputSchema: call invoke_tool(name, parameters) with it directly (get_tool_schema only for output schema or limits); learned tools rerun recorded work and omitted inputs reuse recorded values.";
+  "Each result has the tool's recorded steps and inputSchema: call invoke_tool(name, parameters) with it directly (get_tool_schema only for output schema or limits); omitted inputs reuse recorded values. Invoke a tool you already found again without searching; search again only if invoke_tool rejects it.";
 
 /**
  * The first sentence of search_tools' description on a search-listing connection: how many
@@ -282,8 +283,8 @@ export function learnedToolCountSentence(
   }
   const tools = `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
   return commands.length === 0
-    ? `${tools}: search them before running a multi-step job by hand.`
-    : `${tools}: search them before running a multi-step job or one of the commands they run (${commands.map((command) => `\`${command}\``).join(", ")}) by hand.`;
+    ? `${tools}: before running a multi-step job by hand, search them, or call invoke_tool directly with a tool an earlier search found.`
+    : `${tools}: before running a multi-step job or one of the commands they run (${commands.map((command) => `\`${command}\``).join(", ")}) by hand, search them, or call invoke_tool directly with a tool an earlier search found.`;
 }
 
 /** The longest purpose a direct listing's instructions give one tool. */
@@ -330,7 +331,7 @@ export function searchListingGatewayInstructions(
       ? "Resin may have learned tools for this workspace"
       : `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
   if (commands.length === 0) {
-    return `${available}, not listed: before running a multi-step job by hand, call search_tools(query=<the job in a few words, e.g. the commands or scripts you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
+    return `${available}, not listed: before running a multi-step job by hand, call search_tools(query=<the job or command line you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
   }
   return `${available}, not listed; they run commands such as ${commands.map((command) => `\`${command}\``).join(", ")}. Before running one of those commands or another multi-step job by hand, call search_tools(query=<the command line or job you are about to run>). ${INVOKE_FROM_SEARCH}\n${GATEWAY_USE_RULES}`;
 }

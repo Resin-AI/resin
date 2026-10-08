@@ -69,7 +69,7 @@ const SEARCH_TOOLS_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.SEARCH_TOOLS,
   version: "1.0.0",
   description:
-    "Read-only live lookup of tools available in the caller's scope, including new tools absent from a stale initial native catalog. Before native project work, use query=<task> when a matching tool may exist (an empty query lists every tool), then call invoke_tool with a result's toolId: each result includes its inputSchema. Honors user tool restrictions; supports tags, capabilities, scope, summaries, and pagination. Does not refresh the native catalog.",
+    "Read-only live lookup of tools available in the caller's scope, including new tools absent from a stale initial native catalog. Use query=<task> when a matching tool may exist (an empty query lists every tool), then call invoke_tool with a result's toolId: each result includes its inputSchema. A tool found earlier needs no new search unless invoke_tool rejects it. Honors user tool restrictions; supports tags, capabilities, scope, summaries, and pagination. Does not refresh the native catalog.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -100,13 +100,14 @@ const SEARCH_TOOLS_RAW: ToolManifest = {
       },
       limit: {
         type: "integer",
-        description: "Maximum number of tools to return (default: 5, max: 100).",
+        description:
+          "Maximum number of result items to return (default: 5, max: 100); tools running the same commands share one item, listed under its `similar`.",
         minimum: 1,
         maximum: 100,
       },
       offset: {
         type: "integer",
-        description: "Number of tools to skip for pagination (default: 0).",
+        description: "Number of result items to skip for pagination (default: 0).",
         minimum: 0,
       },
     },

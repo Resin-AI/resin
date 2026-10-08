@@ -1471,7 +1471,8 @@ describe("search-only listing", () => {
       const description = searchDescriptionOf(client, 2);
       const first = firstSentence(description);
       expect(first).toMatch(/^Resin has 12 learned tools for this workspace/);
-      expect(first).toMatch(/search .*before running a multi-step job by hand/);
+      expect(first).toMatch(/before running a multi-step job by hand, search them/);
+      expect(first).toMatch(/invoke_tool directly with a tool an earlier search found/);
       expect(description.endsWith(SEARCH_DESCRIPTION)).toBe(true);
 
       // A catalog small enough to list directly says so, in the singular for one tool.
@@ -1631,8 +1632,9 @@ describe("search-only listing", () => {
         },
       });
       const first = firstSentence(searchDescriptionOf(client, 2));
-      expect(first).toBe(
-        "Resin has 92 learned tools for this workspace: search them before running a multi-step job or one of the commands they run (`vitest`, `gh pr checks`, `stylua`) by hand.",
+      expect(first).toMatch(/^Resin has 92 learned tools for this workspace:/);
+      expect(first).toContain(
+        "one of the commands they run (`vitest`, `gh pr checks`, `stylua`) by hand, search them",
       );
     } finally {
       client.close();
@@ -1665,6 +1667,7 @@ describe("search-only listing", () => {
       expect(instructions).toContain("inputSchema");
       expect(instructions).not.toMatch(/get_tool_schema\(name\)\s+and\s+invoke_tool/);
       expect(instructions).toMatch(/get_tool_schema only for/);
+      expect(instructions).toMatch(/already found again without searching/);
     }
   });
 

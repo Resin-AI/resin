@@ -354,6 +354,12 @@ export const InvocationRecordSchema = z.object({
   startedAt: ISOTimestampSchema,
   completedAt: ISOTimestampSchema,
   durationMs: z.number().nonnegative(),
+  /**
+   * Wall-clock ms the tool's recorded calls spent running, within `durationMs`. The rest of
+   * `durationMs` is Resin's own work (validation, artifact checks, setup, report building,
+   * presentation, recording). Omitted when not measured, e.g. a failure before any recorded call ran.
+   */
+  executionDurationMs: z.number().int().nonnegative().optional(),
   status: z.enum(["success", "error", "timeout", "rejected_capability"]),
   inputDigest: Sha256DigestSchema,
   outputDigest: Sha256DigestSchema.optional(),

@@ -352,15 +352,21 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
         manifest.version,
         conn.workspaceContext.workspaceId,
       );
-      expect(parseJson(await call("search_tools", searchArgs))).toMatchObject({
+      // An active, enabled tool lists neither status nor isDisabled: only unusual values are named.
+      expect(parseJson(await call("search_tools", searchArgs))).toEqual({
         tools: [
-          expect.objectContaining({
+          {
             toolId: manifest.id,
             name: manifest.name,
-            status: "active",
-            isDisabled: false,
-          }),
+            description: expect.any(String),
+            inputSchema: expect.any(Object),
+            score: expect.any(Number),
+          },
         ],
+        total: 1,
+        limit: 5,
+        offset: 0,
+        hasMore: false,
       });
       expect(
         parseJson(
@@ -370,7 +376,7 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
           }),
         ),
       ).toMatchObject({
-        tools: [expect.objectContaining({ toolId: manifest.id, isDisabled: false })],
+        tools: [expect.objectContaining({ toolId: manifest.id, name: manifest.name })],
       });
       const discoveryArgs = { action: "list_versions", scope: "workspace" };
       expect(parseJson(await call("manage_tools", discoveryArgs))).toMatchObject({

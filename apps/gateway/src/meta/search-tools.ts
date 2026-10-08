@@ -8,7 +8,7 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 import { isToolOfferedHere } from "./repository-scope.js";
 import { multiStepBonus, replacesStepsHint } from "./tool-profile.js";
 
-export interface CapabilitySummary {
+interface CapabilitySummary {
   types: string[];
   summary: string;
   auditLevel: string;
@@ -23,31 +23,58 @@ export interface CapabilitySummary {
   };
 }
 
+/**
+ * One tool as a search lists it: what an agent reads to choose it and invoke it. Fields that hold
+ * their usual value are left out; tags and capabilities stay filters, not output.
+ */
 export interface SearchToolsResultItem {
   toolId: string;
   name: string;
-  version: string;
-  scope: string;
-  status: string;
+  /** Present only when not "active"; a disabled tool reads "disabled". */
+  status?: string;
+  /** Present only when not "workspace". */
+  scope?: string;
+  /** Present only for a pinned version; otherwise the listed version is the one invoke_tool runs. */
+  version?: string;
+  isPinned?: true;
+  isDisabled?: true;
+  /** The catalog's purpose sentences followed by this machine's recorded program; see {@link shownDescription}. */
   description: string;
   /** The tool's input schema, so a caller can invoke it without a separate schema lookup. */
   inputSchema: ToolParameterSchema | JsonRpcParams;
-  tags: string[];
-  capabilities: CapabilitySummary;
-  isPinned: boolean;
-  isDisabled: boolean;
   score?: number;
   /** How much recorded work the tool replaces ("Replaces 4 recorded steps."), when more than one. */
   replaces?: string;
+  /** Lower-ranked matches running the same set of commands as this tool, listed compactly. */
+  similar?: SimilarTool[];
 }
 
+/** A match that runs the same commands as the item it is listed under. */
+export interface SimilarTool {
+  toolId: string;
+  name: string;
+  /** The first sentence of what the tool does, at most {@link PURPOSE_MAX_LENGTH} characters. */
+  purpose: string;
+  /** Its input schema with every property's `description` left out; all else as invoked. */
+  inputSchema: ToolParameterSchema | JsonRpcParams;
+  score?: number;
+}
+
+/**
+ * A page of search results. `limit`, `offset`, `total` and `hasMore` count items in `tools`: each
+ * item stands for its group of tools running the same commands, so a tool listed under another's
+ * `similar` is not counted and never appears on another page.
+ */
 export interface SearchToolsResponse {
   tools: SearchToolsResultItem[];
   total: number;
   limit: number;
   offset: number;
   hasMore: boolean;
-  /** Present only when a non-empty query matched no tool; see {@link noMatchingToolNote}. */
+  /**
+   * With no match for a non-empty query, {@link NO_MATCHING_TOOL_NOTE}; with results, what the
+   * items leave unsaid once (see {@link resultNote}); otherwise absent.
+   */
   note?: string;
 }
 
@@ -139,9 +166,158 @@ export function describeToolLocally(
 }
 
 /**
+ * The sentence the cloud ends the description of a tool learned from one recording with
+ * (`RECORDED_WORKFLOW_PROVISIONAL_NOTE`). A search says once, in its note, what it means for a call.
+ */
+const PROVISIONAL_SENTENCE = /\s*Learned from [^.;]*; defaults are the recorded values\./gu;
+/**
+ * Sentences a learned tool's input descriptions repeat for every input (`recordedWorkflowInputSchema`
+ * in @resin/runtime). A search drops them and says each once, in its note.
+ */
+const OMIT_INPUT_SENTENCE = /\s*Omit to use the recorded value\.?/gu;
+const LIST_INPUT_SENTENCE =
+  /A list of words: each item is passed to the command as one separate argument\.\s*/gu;
+
+const RECORDED_VALUES_NOTE = "Omitted inputs reuse their recorded values.";
+const LIST_INPUT_NOTE =
+  "Each item of an array input is passed to the command as one separate argument.";
+const SIMILAR_NOTE =
+  "A tool under `similar` runs the same commands as the item it is listed under; invoke it by name with its `inputSchema` (input descriptions left out).";
+
+/** The longest `purpose` a similar tool is listed with. */
+const PURPOSE_MAX_LENGTH = 140;
+
+/** Which repeated sentences a search dropped from the tools it lists, so its note says each once. */
+interface Omissions {
+  recordedValues: boolean;
+  listInputs: boolean;
+}
+
+const SENTENCE_FOLLOWS = /\s+\p{Lu}/uy;
+
+/**
+ * The index just past the first sentence of `text`: a `.`, `!` or `?` outside a `code span`,
+ * followed by whitespace and a capital letter. Undefined when the text is one sentence.
+ */
+function firstSentenceEnd(text: string): number | undefined {
+  let inCode = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === "`") {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode || (char !== "." && char !== "!" && char !== "?")) {
+      continue;
+    }
+    SENTENCE_FOLLOWS.lastIndex = index + 1;
+    if (SENTENCE_FOLLOWS.test(text)) {
+      return index + 1;
+    }
+  }
+  return undefined;
+}
+
+/** Words a "Runs …" sentence joins its commands with; they say nothing about what the tool does. */
+const COMMAND_LIST_WORDS: ReadonlySet<string> = new Set(searchTokens("runs and then step steps"));
+
+/**
+ * The catalog description as a search shows it: without the one-recording sentence, and without a
+ * leading "Runs …" sentence whose every word the recorded program shown after it already holds —
+ * a list of the commands it runs. A "Runs …" sentence that adds a word ("to verify the caller
+ * identity") stays, and so does one that is all the catalog says.
+ */
+function shownCatalog(catalog: string, local: string | undefined, omissions: Omissions): string {
+  const whole = catalog.trim();
+  const kept = whole.replace(PROVISIONAL_SENTENCE, "").trim();
+  omissions.recordedValues ||= kept !== whole;
+  const end = local === undefined || !kept.startsWith("Runs ") ? undefined : firstSentenceEnd(kept);
+  if (local === undefined || end === undefined) {
+    return kept;
+  }
+  const recorded = new Set(searchTokens(local));
+  const restates = searchTokens(kept.slice(0, end)).every(
+    (token) => recorded.has(token) || COMMAND_LIST_WORDS.has(token) || /^\p{N}+$/u.test(token),
+  );
+  return restates ? kept.slice(end).trim() : kept;
+}
+
+/** The first sentence of `text`, on one line and cut to {@link PURPOSE_MAX_LENGTH} characters. */
+function purposeOf(text: string): string {
+  const end = firstSentenceEnd(text);
+  const sentence = (end === undefined ? text : text.slice(0, end)).replace(/\s+/gu, " ").trim();
+  const chars = Array.from(sentence);
+  return chars.length <= PURPOSE_MAX_LENGTH
+    ? sentence
+    : `${chars
+        .slice(0, PURPOSE_MAX_LENGTH - 1)
+        .join("")
+        .trimEnd()}…`;
+}
+
+/**
+ * The input schema with each property's description rewritten by `rewrite`; a description it
+ * empties is dropped. Types, items, patterns, enums, `required` and the rest stay.
+ */
+function rewriteInputDescriptions<T extends object>(
+  schema: T,
+  rewrite: (description: string) => string,
+): T {
+  const properties = "properties" in schema ? schema.properties : undefined;
+  if (properties === null || typeof properties !== "object" || Array.isArray(properties)) {
+    return schema;
+  }
+  let shown: Record<string, unknown> | undefined;
+  for (const [name, property] of Object.entries(properties)) {
+    if (property === null || typeof property !== "object" || Array.isArray(property)) {
+      continue;
+    }
+    const description = "description" in property ? property.description : undefined;
+    if (typeof description !== "string") {
+      continue;
+    }
+    const kept = rewrite(description);
+    if (kept === description) {
+      continue;
+    }
+    shown ??= { ...properties };
+    shown[name] =
+      kept === ""
+        ? Object.fromEntries(Object.entries(property).filter(([key]) => key !== "description"))
+        : { ...property, description: kept };
+  }
+  return shown === undefined ? schema : { ...schema, properties: shown };
+}
+
+/** The input schema without the sentences every learned input's description repeats. */
+function shownInputSchema<T extends object>(schema: T, omissions: Omissions): T {
+  return rewriteInputDescriptions(schema, (description) => {
+    const withoutList = description.replace(LIST_INPUT_SENTENCE, "");
+    const kept = withoutList.replace(OMIT_INPUT_SENTENCE, "").trim();
+    omissions.listInputs ||= withoutList !== description;
+    omissions.recordedValues ||= kept !== withoutList.trim();
+    return kept;
+  });
+}
+
+/** The note a page of results carries: each sentence its items dropped, said once. */
+function resultNote(
+  omissions: Omissions,
+  hasSimilar: boolean,
+): { note: string } | Record<string, never> {
+  const sentences = [
+    // A similar tool's schema carries no descriptions, so this is its only word on omitted inputs.
+    ...(omissions.recordedValues || hasSimilar ? [RECORDED_VALUES_NOTE] : []),
+    ...(omissions.listInputs ? [LIST_INPUT_NOTE] : []),
+    ...(hasSimilar ? [SIMILAR_NOTE] : []),
+  ];
+  return sentences.length === 0 ? {} : { note: sentences.join(" ") };
+}
+
+/**
  * Summarizes tool capability manifest into a human and agent-readable summary.
  */
-export function summarizeCapabilities(caps?: CapabilityManifest): CapabilitySummary {
+function summarizeCapabilities(caps?: CapabilityManifest): CapabilitySummary {
   if (!caps) {
     return {
       types: ["none"],
@@ -622,6 +798,26 @@ function scoreToolsForQuery(
   });
 }
 
+/** A tool that passed the filters, with what scoring and listing it read. */
+interface SearchCandidate {
+  tool: RegistryTool;
+  /** The exposed name, else the registered one. */
+  name: string;
+  isPinned: boolean;
+  isDisabled: boolean;
+  tags: string[];
+  description: ToolDescriptionParts;
+  /** The commands a learned tool's recorded programs run; tools running the same set share an item. */
+  commands: string[];
+  steps: number | undefined;
+}
+
+/** A candidate in result order; scored only when the search has a query. */
+interface RankedCandidate {
+  candidate: SearchCandidate;
+  score?: number;
+}
+
 /**
  * Factory for creating the search_tools handler.
  */
@@ -646,8 +842,8 @@ export function createSearchToolsHandler(
       : [];
     const requestedScope = params.scope;
     const requestedStatus = params.status ?? "active";
-    // Every result carries its description and input schema, which the caller reads in full; past
-    // the best few matches they are mostly near-duplicates. `hasMore` and `offset` page the rest.
+    // Every item carries its description and input schema, which the caller reads in full; tools
+    // running the same commands share one item. `hasMore` and `offset` page the rest.
     const limit = Math.min(Math.max(Number(params.limit) || DEFAULT_SEARCH_LIMIT, 1), 100);
     const offset = Math.max(Number(params.offset) || 0, 0);
 
@@ -716,14 +912,7 @@ export function createSearchToolsHandler(
     }
 
     // Filter, then score against the tools that remain: word weights depend on the whole set.
-    // The registered name stays searchable when the exposed one is disambiguated.
-    const filtered: {
-      item: SearchToolsResultItem;
-      registeredName: string;
-      description: ToolDescriptionParts;
-      commands: string[];
-      steps: number | undefined;
-    }[] = [];
+    const filtered: SearchCandidate[] = [];
 
     for (const { tool, isPinned, isDisabled } of candidateMap.values()) {
       // A learned tool is offered only in its repository, and only where it can run.
@@ -731,7 +920,6 @@ export function createSearchToolsHandler(
         continue;
       }
       const tags = extractTags(tool);
-      const capSummary = summarizeCapabilities(tool.manifest.capabilities);
 
       // Filter by requested tags
       if (requestedTags.length > 0) {
@@ -743,93 +931,155 @@ export function createSearchToolsHandler(
 
       // Filter by requested capabilities
       if (requestedCaps.length > 0) {
-        const hasCap = requestedCaps.some((rc) =>
-          capSummary.types.map((t) => t.toLowerCase()).includes(rc),
+        const capTypes = summarizeCapabilities(tool.manifest.capabilities).types.map((t) =>
+          t.toLowerCase(),
         );
-        if (!hasCap) {
+        if (!requestedCaps.some((rc) => capTypes.includes(rc))) {
           continue;
         }
       }
 
-      const description = toolDescriptionParts(tool, context, describer);
-      const steps = tool.isSystem ? undefined : registry.learnedToolProfile(tool, context)?.steps;
-      const replaces = replacesStepsHint(steps);
       filtered.push({
-        registeredName: tool.name,
-        description,
+        tool,
+        name: tool.exposedName || tool.name,
+        isPinned,
+        isDisabled,
+        tags,
+        description: toolDescriptionParts(tool, context, describer),
         commands: tool.isSystem ? [] : registry.learnedToolCommands(tool, context),
-        steps,
-        item: {
-          toolId: tool.toolId,
-          name: tool.exposedName || tool.name,
-          version: tool.version,
-          scope: tool.scope ?? "workspace",
-          status: isDisabled ? "disabled" : tool.status || "active",
-          description: registry.scrubLearnedToolText(tool, context, joinDescription(description)),
-          inputSchema: registry.learnedToolInputSchema(tool, context, toolInputSchema(tool)),
-          tags,
-          capabilities: capSummary,
-          isPinned,
-          isDisabled,
-          score: undefined,
-          ...(replaces === undefined ? {} : { replaces }),
-        },
+        steps: tool.isSystem ? undefined : registry.learnedToolProfile(tool, context)?.steps,
       });
     }
 
     const scores = query
       ? scoreToolsForQuery(
           query,
-          filtered.map(({ item, registeredName, description, commands, steps }) => ({
-            names: [item.name, registeredName],
-            tags: item.tags,
+          // The registered name stays searchable when the exposed one is disambiguated.
+          filtered.map(({ tool, name, tags, description, commands, steps, isPinned }) => ({
+            names: [name, tool.name],
+            tags,
             description: description.catalog,
             ...(description.local === undefined ? {} : { recorded: description.local }),
             commands,
             ...(steps === undefined ? {} : { steps }),
-            isPinned: item.isPinned,
+            isPinned,
           })),
         )
       : [];
-    const scoredTools = query
-      ? filtered.flatMap(({ item, steps }, index) => {
+    const scoredTools: RankedCandidate[] = query
+      ? filtered.flatMap((candidate, index) => {
           const score = scores[index];
-          return score === undefined
-            ? []
-            : [{ item: { ...item, score }, score, steps: steps ?? 1 }];
+          return score === undefined ? [] : [{ candidate, score }];
         })
-      : filtered.map(({ item, steps }) => ({ item, score: 0, steps: steps ?? 1 }));
+      : filtered.map((candidate) => ({ candidate }));
 
     // Sort by score descending, then name ascending
-    scoredTools.sort((a, b) => {
+    scoredTools.sort(({ candidate: a, score: aScore = 0 }, { candidate: b, score: bScore = 0 }) => {
       if (query) {
-        if (b.score !== a.score) {
-          return b.score - a.score;
+        if (bScore !== aScore) {
+          return bScore - aScore;
         }
       } else {
         // System tools first, then pinned, then those replacing more recorded work, then by name
-        if (a.item.toolId.startsWith("sys_") && !b.item.toolId.startsWith("sys_")) return -1;
-        if (!a.item.toolId.startsWith("sys_") && b.item.toolId.startsWith("sys_")) return 1;
-        if (a.item.isPinned && !b.item.isPinned) return -1;
-        if (!a.item.isPinned && b.item.isPinned) return 1;
-        if (a.steps !== b.steps) return b.steps - a.steps;
+        if (a.tool.toolId.startsWith("sys_") && !b.tool.toolId.startsWith("sys_")) return -1;
+        if (!a.tool.toolId.startsWith("sys_") && b.tool.toolId.startsWith("sys_")) return 1;
+        if (a.isPinned && !b.isPinned) return -1;
+        if (!a.isPinned && b.isPinned) return 1;
+        if ((a.steps ?? 1) !== (b.steps ?? 1)) return (b.steps ?? 1) - (a.steps ?? 1);
       }
-      return a.item.name.localeCompare(b.item.name);
+      return a.name.localeCompare(b.name);
     });
 
-    const total = scoredTools.length;
-    const paginated = scoredTools.slice(offset, offset + limit).map((s) => s.item);
-    const hasMore = offset + limit < total;
+    // Tools running the same set of commands are one result: the best-ranked gets a full item and
+    // the rest are listed under its `similar`. A tool with no recorded command stands alone.
+    const groups: { lead: RankedCandidate; similar: RankedCandidate[] }[] = [];
+    const groupByCommands = new Map<string, (typeof groups)[number]>();
+    for (const ranked of scoredTools) {
+      const commands = ranked.candidate.commands;
+      const key = commands.length === 0 ? undefined : [...new Set(commands)].sort().join("\n");
+      const group = key === undefined ? undefined : groupByCommands.get(key);
+      if (group) {
+        group.similar.push(ranked);
+        continue;
+      }
+      const created = { lead: ranked, similar: [] };
+      groups.push(created);
+      if (key !== undefined) {
+        groupByCommands.set(key, created);
+      }
+    }
+
+    const total = groups.length;
+    const omissions: Omissions = { recordedValues: false, listInputs: false };
+    const tools = groups.slice(offset, offset + limit).map(({ lead, similar }) => {
+      const { tool, name, isPinned, isDisabled, description, steps } = lead.candidate;
+      const status = isDisabled ? "disabled" : tool.status || "active";
+      const scope = tool.scope ?? "workspace";
+      const catalog = shownCatalog(description.catalog, description.local, omissions);
+      const replaces = replacesStepsHint(steps);
+      const item: SearchToolsResultItem = {
+        toolId: tool.toolId,
+        name,
+        ...(status === "active" ? {} : { status }),
+        ...(scope === "workspace" ? {} : { scope }),
+        ...(isPinned ? { version: tool.version, isPinned: true as const } : {}),
+        ...(isDisabled ? { isDisabled: true as const } : {}),
+        description: registry.scrubLearnedToolText(
+          tool,
+          context,
+          joinDescription({ ...description, catalog }),
+        ),
+        inputSchema: shownInputSchema(
+          registry.learnedToolInputSchema(tool, context, toolInputSchema(tool)),
+          omissions,
+        ),
+        ...(lead.score === undefined ? {} : { score: lead.score }),
+        ...(replaces === undefined ? {} : { replaces }),
+        ...(similar.length === 0
+          ? {}
+          : {
+              similar: similar.map(({ candidate, score }) => {
+                // What the item would show, minus the program: its purpose sentence comes first.
+                const shown =
+                  shownCatalog(candidate.description.catalog, candidate.description.local, {
+                    recordedValues: false,
+                    listInputs: false,
+                  }) || `Runs ${candidate.commands.join(", ")}.`;
+                return {
+                  toolId: candidate.tool.toolId,
+                  name: candidate.name,
+                  purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
+                  // The lead item's descriptions say what the shared inputs mean.
+                  inputSchema: rewriteInputDescriptions(
+                    registry.learnedToolInputSchema(
+                      candidate.tool,
+                      context,
+                      toolInputSchema(candidate.tool),
+                    ),
+                    () => "",
+                  ),
+                  ...(score === undefined ? {} : { score }),
+                };
+              }),
+            }),
+      };
+      return item;
+    });
     // The discovery funnel counts the search and whether it found anything; never the query.
-    recordDiscoverySearch(total);
+    recordDiscoverySearch(scoredTools.length);
 
     const response: SearchToolsResponse = {
-      tools: paginated,
+      tools,
       total,
       limit,
       offset,
-      hasMore,
-      ...noMatchingToolNote(query, total),
+      hasMore: offset + limit < total,
+      ...(total === 0
+        ? noMatchingToolNote(query, total)
+        : resultNote(
+            omissions,
+            tools.some((item) => item.similar !== undefined),
+          )),
     };
 
     return {

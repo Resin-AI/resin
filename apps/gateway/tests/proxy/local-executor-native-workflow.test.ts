@@ -20,6 +20,7 @@ import {
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
   RESIN_TOOL_PROTOCOL_RUNTIME,
+  RecordedExecutionClock,
   compileRecordedWorkflow,
   createProcessAdapter,
   createProgramAdapter,
@@ -227,6 +228,71 @@ describe("recorded workflows of ordinary calls", () => {
     expect(result.isError, String(result.content[0]?.text)).toBeUndefined();
     expect(fs.readFileSync(path.join(workspaceDir, "upper.txt"), "utf8")).toBe("A\nB\nC\n");
     expect(result.content[0]?.text).toContain("3");
+  });
+
+  it("times the recorded program's run on the invocation's clock, not the executor's own work", async () => {
+    const privateValues = new InMemoryPrivateValueStore();
+    const program = "sleep 0.2 && echo done";
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:sess:0", program, { workspaceId: context.workspaceId });
+    const plan = {
+      schemaVersion: 1,
+      workflowId: "wf_sleep",
+      inputs: [],
+      privateReferences: ["private:sess:0"],
+      steps: [
+        {
+          id: "step0",
+          callId: "call_1",
+          callable: {
+            runtime: RESIN_PROCESS_RUNTIME,
+            name: "bash",
+            program: { kind: "shell", source: "", argument: "command" },
+          },
+          arguments: [
+            {
+              name: "command",
+              source: {
+                kind: "template",
+                template: { type: "private", reference: "private:sess:0" },
+              },
+            },
+          ],
+          dependsOn: [],
+          failurePolicy: { onError: "abort", policy: "default" },
+          observed: { outcome: "succeeded" },
+        },
+      ],
+    };
+    const installed = await installPlan(
+      {
+        id: "tool_sleep_001",
+        name: "wf_sleep",
+        version: "1.0.0",
+        description: "recorded sleeping program",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      plan,
+    );
+
+    const clock = new RecordedExecutionClock();
+    const started = performance.now();
+    const result = await clock.run(() => execute({ ...installed, privateValues }, {}, context));
+    const total = performance.now() - started;
+    expect(result.isError, String(result.content[0]?.text)).toBeUndefined();
+    const execution = clock.durationMs() ?? 0;
+    expect(execution).toBeGreaterThanOrEqual(190);
+    expect(execution).toBeLessThanOrEqual(Math.ceil(total));
+    // The measurement stays with the clock; the result carries none of it.
+    expect(JSON.stringify(result)).not.toMatch(/execution/i);
   });
 
   it("describes a cached recorded program only to the workspace that recorded it", async () => {
