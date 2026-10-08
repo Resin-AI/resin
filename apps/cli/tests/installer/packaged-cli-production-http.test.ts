@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
+import { injectPackedNpmBootstrap } from "../support/packed-npm-bootstrap.js";
 
 const execFileAsync = promisify(execFile);
 const cleanupPaths: string[] = [];
@@ -148,25 +149,16 @@ function stripNodeRuntimeWarnings(stderr: string): string {
 
 describe("packed CLI production bootstrap", () => {
   it("runs the npm-packed CLI entrypoint through a signed channel and HTTP fixture", async () => {
-    const rootDir = process.cwd();
     const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-packed-http-e2e-"));
     cleanupPaths.push(runDir);
-    const packDir = path.join(runDir, "pack");
     const installDir = path.join(runDir, "install");
     const home = path.join(runDir, "home");
     const workspace = path.join(runDir, "workspace");
-    fs.mkdirSync(packDir, { recursive: true });
     fs.mkdirSync(installDir, { recursive: true });
     fs.mkdirSync(home, { recursive: true });
     fs.mkdirSync(workspace, { recursive: true });
 
-    const { stdout: packStdout } = await execFileAsync(
-      process.execPath,
-      [path.join(rootDir, "scripts", "pack-npm-bootstrap.mjs"), `--output-dir=${packDir}`],
-      { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
-    );
-    // SAFETY: Output from npm pack --json contains tarballPath.
-    const packed = JSON.parse(packStdout) as { tarballPath: string };
+    const packed = injectPackedNpmBootstrap();
     const npm = process.platform === "win32" ? "npm.cmd" : "npm";
     await execFileAsync(
       npm,
@@ -451,6 +443,6 @@ describe("packed CLI production bootstrap", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    // Packing and offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
+    // Offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
   }, 600_000);
 });

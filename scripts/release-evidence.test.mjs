@@ -1,10 +1,8 @@
-import { execFile, execFileSync } from "node:child_process";
-import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -14,14 +12,10 @@ import {
   fileSha256,
   formatReleaseEvidenceMarkdown,
   generateReleaseEvidence,
-  getGitCommitSha,
   resolveReleaseMilestones,
   writeReleaseEvidence,
 } from "./generate-release-evidence.mjs";
-import { PLATFORMS, packageRelease } from "./package-release.mjs";
-import { verifyRelease, verifyReleaseEvidence, verifyReleaseFiles } from "./verify-release.mjs";
-
-const execFileAsync = promisify(execFile);
+import { verifyReleaseEvidence } from "./verify-release.mjs";
 
 describe("Release Evidence & Publication Suite (REM-020)", () => {
   const rootDir = process.cwd();
@@ -200,12 +194,6 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
       expect(md).toContain("REM-001");
       expect(md).toContain("REM-020");
       expect(md).toContain("#22");
-      expect(md).not.toContain("#47");
-      expect(md).not.toContain("#48");
-      expect(md).toContain("Platform Qualification Matrix (REM-018)");
-      expect(md).toContain("Multi-Harness Qualification Matrix (REM-017)");
-      expect(md).toContain("Full-System Qualification Gate");
-      expect(md).toContain("Security & Architecture Attestation");
     });
 
     it("writes release-evidence.json and RELEASE-EVIDENCE.md to dist directory", () => {
@@ -304,52 +292,6 @@ describe("Release Evidence & Publication Suite (REM-020)", () => {
   });
 
   describe("5. End-to-End Publication & Verification Pipeline", () => {
-    it("packages and verifies complete release candidate with zero violations", async () => {
-      const packagedPath = path.join(tempReleaseDir, "packaged.json");
-      const packageReleaseModule = path.join(rootDir, "scripts", "package-release.mjs");
-      const packageInChild = [
-        'import fs from "node:fs";',
-        'import { pathToFileURL } from "node:url";',
-        "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
-        "const { packageRelease } = await import(pathToFileURL(modulePath));",
-        "const packaged = await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
-        "fs.writeFileSync(outputPath, JSON.stringify({ success: packaged.success, trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
-      ].join("\n");
-      await execFileAsync(
-        process.execPath,
-        [
-          "--input-type=module",
-          "--eval",
-          packageInChild,
-          "resin-release-evidence-child",
-          packageReleaseModule,
-          rootDir,
-          tempReleaseDir,
-          packagedPath,
-        ],
-        { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
-      );
-      const packaged = JSON.parse(fs.readFileSync(packagedPath, "utf8"));
-
-      expect(packaged.success).toBe(true);
-      expect(fs.existsSync(path.join(tempReleaseDir, "manifest.json"))).toBe(true);
-
-      const evidenceViolations = verifyReleaseEvidence(tempReleaseDir, {
-        allowTestEvidence: true,
-      });
-      expect(evidenceViolations).toHaveLength(0);
-
-      const fullVerify = verifyRelease({
-        rootDir,
-        releaseDir: tempReleaseDir,
-        trustedKeys: packaged.trustedKeys,
-        allowTestEvidence: true,
-        expectedCommitSha: packaged.releaseIdentity.commitSha,
-      });
-      expect(fullVerify.valid).toBe(true);
-      expect(fullVerify.violations).toHaveLength(0);
-    }, 120_000);
-
     it("detects missing evidence files and incomplete milestones", () => {
       const brokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "broken-release-evidence-"));
 

@@ -11,13 +11,12 @@ Thank you for contributing to Resin! Please follow the guidelines below to maint
 CI is deliberately small. Don't add CI jobs, required checks or pre-push gates without the owner's approval.
 
 Pull-request CI (`.github/workflows/ci.yml`) runs only:
-- **Static Checks:** `pnpm lint` and `pnpm typecheck`
-- **Repository Gates:** `check-boundaries`, `check-secrets` and `verify-adrs`
+- **Static Checks:** repository boundary, secret and ADR checks, then `pnpm lint` and `pnpm typecheck`
 - **Unit Tests:** `pnpm test`, sharded across parallel jobs
 - **Sandbox Tests:** `pnpm test:sandbox`, the derivation sandbox suites `pnpm test` excludes
 - **CI Gate Rollup:** the single required check; it fails unless every job above passes
 
-`ci.yml` is the only workflow that runs on pushes to `main`; everything the release needs beyond it runs inside `release-candidate.yml`, including the `release-tests` job (`release:test:*`, `check:public-artifact`, `test:e2e`). The remaining checks below run by hand.
+`ci.yml` is the only workflow that runs on pushes to `main`. Release-only checks run inside `release-candidate.yml`: verifier and packaging tests in `release-tests`, installer tests in system qualification, and `check:public-artifact` against the candidate already built by the linux-x64 lane. Darwin and WSL artifact checks reuse that candidate too. All seven platform evidence files remain required before signing.
 
 Speed targets: PR CI ≤ 4 min, merge to `main` → published release ≤ 15 min (release candidate 10–13 min, publication 2–4 min). Keep signing, integrity verification, the packaged vulnerability scan, exact-SHA pinning and channel verification; anything that only repeats a test run must not be added to the release critical path.
 
@@ -26,6 +25,10 @@ Speed targets: PR CI ≤ 4 min, merge to `main` → published release ≤ 15 min
 1. Merge to `main`. The `ci.yml` push run for the merge commit starts immediately.
 2. Right away, dispatch `release-candidate.yml` with `commit_sha` (the merge commit), `release_tag` and `ci_run_id` (the ID of that `ci.yml` push run; it may still be running). Its first job fails within seconds if `release_tag` is already a published GitHub release (a draft with that tag is allowed), so a second operator racing the same release gets a clear error instead of a duplicate candidate. The RC then runs platform qualification (linux-x64 and linux-arm64 natively, darwin-x64/darwin-arm64/wsl artifact validation, windows-x64 and windows-arm64 natively in PowerShell including install, service, second-user isolation and uninstall), system qualification and the release test suites in parallel on GitHub-hosted runners, then the signing job audits production dependencies, generates the qualification evidence, and builds, signs and verifies the candidate.
 3. When the RC and the CI run have both succeeded, dispatch `release.yml` with `commit_sha`, `release_tag`, `candidate_run_id`, `confirm_promotion=PROMOTE_PRODUCTION` and `environment=production`. A production run fails before downloading the candidate if `release_tag` is already published (a draft from an earlier failed attempt is reused). It fails before publishing anything unless the CI run recorded in the candidate evidence completed successfully on the exact SHA, then publishes and verifies the channel.
+
+### Everyday checks
+
+Run `pnpm check` for the same checks as PR CI. It builds the workspace and runs static, unit and sandbox checks, but does not package release archives. Use `pnpm check:all` for the additional release and installer checks.
 
 ### Complete Local Verification Gate
 
@@ -38,17 +41,19 @@ pnpm run check:all
 `pnpm run check:all` executes the complete sequence in order:
 1. `pnpm run check:adrs` — Architecture Decision Record (ADR) format, sequence, and glossary validation
 2. `pnpm run check:boundaries` — Monorepo package boundary and architectural import validation
-3. `pnpm run check:privacy-boundary` — Fail-closed privacy boundary verification and zero-raw-upload enforcement
-4. `pnpm run check:hostile-cloud` — Hostile cloud authority rejection and certificate validation
-5. `pnpm run check:runtime-security` — Runtime IPC, process sandbox, and sensitive path security verification
-6. `pnpm run check:secrets` — Standalone secret scanner checking for unencrypted private keys, tokens, credentials, and canary leaks
-7. `pnpm run lint` — Biome formatting and code style linting
-8. `pnpm run typecheck` — TypeScript strict type checking across all packages and apps
-9. `pnpm run build` — Topological build of all workspace packages and apps
-10. `pnpm run test` — Unit test suite execution via Vitest
-10a. `pnpm run test:sandbox` — Derivation tests against the real Deno + Pyodide sandbox
-11. `pnpm run release:test` — Release packaging, Ed25519 signing and evidence suites, including the binary entry point smoke check (`check:smoke`)
-12. `pnpm run test:e2e` — End-to-end integration test suite
+3. `pnpm run check:secrets` — Standalone secret scanner checking for unencrypted private keys, tokens, credentials, and canary leaks
+4. `pnpm run lint` — Biome formatting and code style linting
+5. `pnpm run typecheck` — TypeScript strict type checking across all packages and apps
+6. `pnpm run build` — Topological build of all workspace packages and apps
+7. `pnpm run test` — Unit test suite execution via Vitest, including the privacy boundary, hostile cloud and runtime security suites
+8. `pnpm run test:sandbox` — Derivation tests against the real Deno + Pyodide sandbox
+9. `node scripts/build-install-helper.mjs --check` — Committed install-helper freshness, also checked by PR CI
+10. `pnpm run release:test` — Release packaging, signer/verifier, standalone artifact and binary smoke checks
+11. `pnpm run test:e2e` — End-to-end installer tests
+
+`check:all` runs the security suites once, through `pnpm run test`. The focused scripts below still run each group on its own.
+
+Turbo includes the root `tsconfig.base.json` in every task hash, so changing it invalidates cached builds and typechecks. The release candidate caches the pnpm content store and Turbo outputs per OS and CPU architecture; it never caches `node_modules`, and installs still run `pnpm install --frozen-lockfile`.
 
 ### Individual Verification Commands
 - **Lint & Format:** `pnpm run lint` / `pnpm run format`
@@ -60,11 +65,19 @@ pnpm run check:all
 - **Smoke Tests:** `pnpm run check:smoke`
 - **Package Boundaries:** `pnpm run check:boundaries`
 - **ADR Check:** `pnpm run check:adrs`
-- **Privacy Boundary Check:** `pnpm run check:privacy-boundary`
-- **Hostile Cloud Check:** `pnpm run check:hostile-cloud`
-- **Runtime Security Check:** `pnpm run check:runtime-security`
+- **Privacy Boundary Check (also in `pnpm run test`):** `pnpm run check:privacy-boundary`
+- **Hostile Cloud Check (also in `pnpm run test`):** `pnpm run check:hostile-cloud`
+- **Runtime Security Check (also in `pnpm run test`):** `pnpm run check:runtime-security`
 - **Release Verification:** `pnpm run release:verify`
 - **Release Test Suite:** `pnpm run release:test`
+
+`pnpm run test:e2e` runs through `vitest.packaged.config.ts`. Its global setup packs the npm bootstrap tarball once per run into a fresh temporary directory and deletes it when the run ends; nothing is cached between runs. Each suite installs into its own temporary directory.
+
+To run one packaged suite on its own, pass the same config:
+
+```bash
+pnpm exec vitest run --config vitest.packaged.config.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts
+```
 
 ### Running the Locally Built CLI
 
@@ -95,7 +108,7 @@ The `main` branch is strictly protected and enforces PR-only release gates:
 - **Force Pushes Disabled:** Force-pushing to `main` is strictly forbidden.
 - **Review Policy:** Pull requests enforce PR-only integration with zero required approving reviews. Human reviews are optional and are not automatically requested through code ownership rules. Automated gating relies entirely on required machine verification.
 - **Branch Protection Automation:** Run `./scripts/configure-branch-protection.sh` (or `pnpm exec ./scripts/configure-branch-protection.sh`) to automatically configure strict branch protection rules via GitHub API / gh CLI.
-- **Required Status Check:** `CI Gate Rollup` is the only required check; it passes only when every `ci.yml` job (Static Checks, Repository Gates, every Unit Tests shard, Sandbox Tests) passed on the exact commit.
+- **Required Status Check:** `CI Gate Rollup` is the only required check; it passes only when Static Checks, every Unit Tests shard and Sandbox Tests passed on the exact commit.
 
 ### PR Template & Checklist
 All pull requests must use `.github/pull_request_template.md` and provide:

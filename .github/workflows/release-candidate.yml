@@ -79,18 +79,16 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - lanes: linux-x64
-            check_name: Qualify linux-x64
-            mode: native
+          # linux-x64 also validates the darwin-x64, darwin-arm64 and wsl artifacts
+          # against the same packaged seven-platform candidate it qualifies natively.
+          - native_lane: linux-x64
+            artifact_lanes: darwin-x64 darwin-arm64 wsl
+            check_name: Qualify linux-x64 and validate darwin-x64, darwin-arm64 and wsl artifacts
             runner: ubuntu-24.04
-          - lanes: linux-arm64
+          - native_lane: linux-arm64
+            artifact_lanes: ""
             check_name: Qualify linux-arm64
-            mode: native
             runner: ubuntu-24.04-arm
-          - lanes: darwin-x64 darwin-arm64 wsl
-            check_name: Validate darwin-x64, darwin-arm64 and wsl artifacts
-            mode: artifact
-            runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
@@ -124,6 +122,20 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -134,7 +146,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -147,19 +158,30 @@ jobs:
       - name: Package signed test-domain release candidate
         run: pnpm release:package
 
-      - name: Validate artifact or exercise native packaged stack on GitHub-hosted Linux
+      - name: Exercise native packaged stack and validate artifact lanes on GitHub-hosted Linux
         shell: bash
         env:
-          LANES: ${{ matrix.lanes }}
-          MODE: ${{ matrix.mode }}
+          NATIVE_LANE: ${{ matrix.native_lane }}
+          ARTIFACT_LANES: ${{ matrix.artifact_lanes }}
         run: |
           set -euo pipefail
-          for lane in $LANES; do
-            node scripts/platform-qualification.mjs --lane="$lane" --mode="$MODE" \
+          mkdir -p dist/platform-evidence
+          qualify() {
+            node scripts/platform-qualification.mjs --lane="$1" --mode="$2" \
               --release-dir=dist/release/v1.0.3 --output-dir=dist/qualification
-            mkdir -p dist/platform-evidence
-            cp "dist/qualification/$lane.json" dist/platform-evidence/
+            cp "dist/qualification/$1.json" dist/platform-evidence/
+          }
+          qualify "$NATIVE_LANE" native
+          for lane in $ARTIFACT_LANES; do
+            qualify "$lane" artifact
           done
+
+      # Standalone public-artifact suite against the candidate packaged above (read-only fixture).
+      - name: Check standalone public artifact
+        if: matrix.native_lane == 'linux-x64'
+        env:
+          RESIN_RELEASE_DIR: dist/release/v1.0.3
+        run: pnpm run check:public-artifact
 
       - name: Upload qualification evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -233,6 +255,24 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        id: pnpm_store
+        shell: pwsh
+        run: |
+          $store = pnpm store path --silent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "STORE_PATH=$store" -Encoding utf8
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
 
@@ -243,7 +283,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -540,6 +579,24 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        id: pnpm_store
+        shell: pwsh
+        run: |
+          $store = pnpm store path --silent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "STORE_PATH=$store" -Encoding utf8
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: Add-Content -Path $env:GITHUB_ENV -Value "TURBO_CACHE_DIR=$env:RUNNER_TEMP\turbo-cache" -Encoding utf8
 
@@ -550,7 +607,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -571,9 +627,10 @@ jobs:
           pnpm exec vitest run --no-file-parallelism @suites
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # Release-script, packaging and installer suites (package.json release:test and test:e2e),
-  # kept out of PR CI because each packs or installs real release artifacts. One job per
-  # suite so the slowest stays off the Windows critical path.
+  # Release-script and packaging suites (package.json release:test:verify and
+  # release:test:packaging), kept out of PR CI because each packs real release artifacts.
+  # Installer end-to-end suites run in system-qualification; the standalone artifact check
+  # runs in the linux-x64 platform-qualification job.
   release-tests:
     name: ${{ matrix.check_name }}
     needs: release-tag-guard
@@ -583,14 +640,8 @@ jobs:
         include:
           - script: release:test:verify
             check_name: Release tests (verify-release)
-          - script: release:test:evidence
-            check_name: Release tests (qualification and evidence)
           - script: release:test:packaging
             check_name: Release tests (packaging)
-          - script: check:public-artifact
-            check_name: Release tests (standalone artifact)
-          - script: test:e2e
-            check_name: Installer end-to-end tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -628,6 +679,20 @@ jobs:
         with:
           deno-version: "2.9.5"
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -638,7 +703,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -687,6 +751,20 @@ jobs:
           version: 10.24.0
           run_install: false
 
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      # Content-addressed store only (never node_modules); pnpm verifies package
+      # integrity against the frozen lockfile, and native builds still run on install.
+      - name: Restore pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
       - name: Locate turbo cache
         run: echo "TURBO_CACHE_DIR=$RUNNER_TEMP/turbo-cache" >> "$GITHUB_ENV"
 
@@ -697,7 +775,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-turbo-release-${{ inputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-turbo-release-
-            ${{ runner.os }}-turbo-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

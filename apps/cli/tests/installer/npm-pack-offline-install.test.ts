@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { injectPackedNpmBootstrap } from "../support/packed-npm-bootstrap.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,22 +18,13 @@ afterEach(async () => {
 });
 
 describe("public npm bootstrap offline installation", () => {
-  it("packs all runtime dependencies and executes from a clean npm install with network disabled", async () => {
-    const rootDir = process.cwd();
+  it("installs the packed bootstrap with all runtime dependencies from a clean npm install with network disabled", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-npm-offline-"));
     tempDirs.push(tempDir);
-    const packDir = path.join(tempDir, "pack");
     const installDir = path.join(tempDir, "install");
-    fs.mkdirSync(packDir, { recursive: true });
     fs.mkdirSync(installDir, { recursive: true });
 
-    const { stdout: packStdout } = await execFileAsync(
-      process.execPath,
-      [path.join(rootDir, "scripts", "pack-npm-bootstrap.mjs"), `--output-dir=${packDir}`],
-      { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
-    );
-    // SAFETY: JSON output of pack-npm-bootstrap.mjs contains tarballPath and filename.
-    const packed = JSON.parse(packStdout) as { tarballPath: string; filename: string };
+    const packed = injectPackedNpmBootstrap();
 
     expect(packed.filename).toBe("resin-1.0.0.tgz");
     expect(fs.existsSync(packed.tarballPath)).toBe(true);
@@ -90,6 +82,6 @@ describe("public npm bootstrap offline installation", () => {
       env,
     });
     expect(version.trim()).toBe("resin v1.0.0");
-    // Packing and offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
+    // Offline-installing the ~340 MB bootstrap (~26k files) alone takes minutes.
   }, 600_000);
 });

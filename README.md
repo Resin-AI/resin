@@ -103,11 +103,13 @@ cd resin
 pnpm install --frozen-lockfile
 ```
 
-Run the full verification suite before opening a pull request:
+Run the PR checks during development:
 
 ```sh
-pnpm check:all
+pnpm check
 ```
+
+For release, packaging, or security changes, run `pnpm check:all` as well.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for development commands, package boundaries, and pull request requirements.
 
