@@ -1,6 +1,7 @@
 import type { CapabilityManifest, ToolParameterSchema } from "@resin/contracts";
 import { recordDiscoverySearch } from "@resin/observer/discovery-funnel";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
+import { isAutomaticallyRecommended } from "../registry/recommendation.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
@@ -45,18 +46,24 @@ export interface SearchToolsResultItem {
   score?: number;
   /** How much recorded work the tool replaces ("Replaces 4 recorded steps."), when more than one. */
   replaces?: string;
+  /**
+   * Present only as `false`: repeated measurements showed this tool costing more than doing the
+   * job directly, so it is listed after every recommended match. It still invokes by name.
+   */
+  recommended?: false;
   /** Lower-ranked matches running the same set of commands as this tool, listed compactly. */
   similar?: SimilarTool[];
 }
 
-/** A match that runs the same commands as the item it is listed under. */
+/**
+ * A match that runs the same commands as the item it is listed under. No input schema: ten of
+ * them cost thousands of characters per search, so its inputs come from get_tool_schema(name).
+ */
 export interface SimilarTool {
   toolId: string;
   name: string;
   /** The first sentence of what the tool does, at most {@link PURPOSE_MAX_LENGTH} characters. */
   purpose: string;
-  /** Its input schema with every property's `description` left out; all else as invoked. */
-  inputSchema: ToolParameterSchema | JsonRpcParams;
   score?: number;
 }
 
@@ -182,7 +189,7 @@ const RECORDED_VALUES_NOTE = "Omitted inputs reuse their recorded values.";
 const LIST_INPUT_NOTE =
   "Each item of an array input is passed to the command as one separate argument.";
 const SIMILAR_NOTE =
-  "A tool under `similar` runs the same commands as the item it is listed under; invoke it by name with its `inputSchema` (input descriptions left out).";
+  "A tool under `similar` runs the same commands as the item it is listed under; get_tool_schema(name) gives its inputs, then invoke it by name.";
 
 /** The longest `purpose` a similar tool is listed with. */
 const PURPOSE_MAX_LENGTH = 140;
@@ -306,8 +313,7 @@ function resultNote(
   hasSimilar: boolean,
 ): { note: string } | Record<string, never> {
   const sentences = [
-    // A similar tool's schema carries no descriptions, so this is its only word on omitted inputs.
-    ...(omissions.recordedValues || hasSimilar ? [RECORDED_VALUES_NOTE] : []),
+    ...(omissions.recordedValues ? [RECORDED_VALUES_NOTE] : []),
     ...(omissions.listInputs ? [LIST_INPUT_NOTE] : []),
     ...(hasSimilar ? [SIMILAR_NOTE] : []),
   ];
@@ -810,6 +816,8 @@ interface SearchCandidate {
   /** The commands a learned tool's recorded programs run; tools running the same set share an item. */
   commands: string[];
   steps: number | undefined;
+  /** False when measurements showed the tool costing more than doing the job directly. */
+  recommended: boolean;
 }
 
 /** A candidate in result order; scored only when the search has a query. */
@@ -948,6 +956,7 @@ export function createSearchToolsHandler(
         description: toolDescriptionParts(tool, context, describer),
         commands: tool.isSystem ? [] : registry.learnedToolCommands(tool, context),
         steps: tool.isSystem ? undefined : registry.learnedToolProfile(tool, context)?.steps,
+        recommended: isAutomaticallyRecommended(tool),
       });
     }
 
@@ -973,8 +982,10 @@ export function createSearchToolsHandler(
         })
       : filtered.map((candidate) => ({ candidate }));
 
-    // Sort by score descending, then name ascending
+    // Recommended tools first, so a group's lead is its best recommended member; then by score
+    // descending, then name ascending
     scoredTools.sort(({ candidate: a, score: aScore = 0 }, { candidate: b, score: bScore = 0 }) => {
+      if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
       if (query) {
         if (bScore !== aScore) {
           return bScore - aScore;
@@ -1035,6 +1046,7 @@ export function createSearchToolsHandler(
         ),
         ...(lead.score === undefined ? {} : { score: lead.score }),
         ...(replaces === undefined ? {} : { replaces }),
+        ...(lead.candidate.recommended ? {} : { recommended: false as const }),
         ...(similar.length === 0
           ? {}
           : {
@@ -1049,15 +1061,6 @@ export function createSearchToolsHandler(
                   toolId: candidate.tool.toolId,
                   name: candidate.name,
                   purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
-                  // The lead item's descriptions say what the shared inputs mean.
-                  inputSchema: rewriteInputDescriptions(
-                    registry.learnedToolInputSchema(
-                      candidate.tool,
-                      context,
-                      toolInputSchema(candidate.tool),
-                    ),
-                    () => "",
-                  ),
                   ...(score === undefined ? {} : { score }),
                 };
               }),

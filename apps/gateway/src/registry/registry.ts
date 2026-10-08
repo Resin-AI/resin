@@ -1173,6 +1173,34 @@ export class ToolRegistry {
   }
 
   /**
+   * Applies the recommendation each catalog manifest carries to every registered version of its
+   * tool. A recommendation is measured across versions and changes without a new version, so a
+   * tool already active at the catalog's version (which sync does not re-register) still gets it.
+   */
+  applyToolRecommendations(manifests: readonly ToolManifest[]): void {
+    let changed = false;
+    for (const manifest of manifests) {
+      const recommendation = manifest.recommendation;
+      for (const tool of this.registeredTools.get(manifest.id)?.values() ?? []) {
+        const current = tool.manifest.recommendation;
+        if (
+          current === recommendation ||
+          (current !== undefined &&
+            recommendation !== undefined &&
+            canonicalJson(current) === canonicalJson(recommendation))
+        ) {
+          continue;
+        }
+        const { recommendation: _previous, ...rest } = tool.manifest;
+        tool.manifest = recommendation === undefined ? rest : { ...rest, recommendation };
+        changed = true;
+      }
+    }
+    // Resolved catalogs hold the previous manifest objects.
+    if (changed) this.cache.invalidateAll();
+  }
+
+  /**
    * Registers a tool asynchronously, staging manifest and optional artifact.
    */
   async registerTool(

@@ -66,6 +66,27 @@ export const ToolLimitConfigSchema = z.object({
 export type ToolLimitConfig = z.infer<typeof ToolLimitConfigSchema>;
 
 /**
+ * The cloud's measured recommendation for a learned tool, across all its versions. Absent means
+ * the tool is recommended. `automatic: false` means repeated measured invocations cost more than
+ * doing the job directly, so the client stops offering the tool on its own (instructions, command
+ * suggestions, direct listings) and ranks it last in search; it stays invocable by name.
+ *
+ * Passthrough: the catalog snapshot checksum is computed over the parsed tools, so keys a newer
+ * cloud adds here must survive parsing or every snapshot carrying them would fail verification.
+ */
+export const ToolRecommendationSchema = z
+  .object({
+    automatic: z.boolean(),
+    reason: z.string().min(1).max(128),
+    invocations: z.number().int().nonnegative(),
+    savedTokens: z.number(),
+    savedCostUsd: z.number().optional(),
+  })
+  .passthrough();
+
+export type ToolRecommendation = z.infer<typeof ToolRecommendationSchema>;
+
+/**
  * Tool Manifest: Canonical definition of an evolved or built-in tool.
  */
 export const ToolManifestSchema = z.object({
@@ -83,6 +104,8 @@ export const ToolManifestSchema = z.object({
   metadata: z.record(z.unknown()).default({}),
   createdAt: ISOTimestampSchema,
   updatedAt: ISOTimestampSchema.optional(),
+  /** Catalog delivery metadata, not part of the manifest digest (see ToolRecommendationSchema). */
+  recommendation: ToolRecommendationSchema.optional(),
 });
 
 export type ToolManifest = z.infer<typeof ToolManifestSchema>;

@@ -495,6 +495,7 @@ export class CloudCatalogSyncCoordinator {
       if (!unchanged || !this.reconcileSettled(snapshot)) {
         await this.reconcileSnapshot(snapshot);
       }
+      this.registry?.applyToolRecommendations(snapshot.tools ?? []);
 
       this.lastCatalogSyncAt = Date.now();
       this.catalogLoaded.resolve();

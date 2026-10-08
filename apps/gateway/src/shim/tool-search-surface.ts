@@ -471,8 +471,17 @@ export function createToolSearchSurface(
           if (result && Array.isArray(result.tools)) {
             learnedTools = learnedToolsOf(result);
             const direct = searchOnlyListing && listsDirectly(learnedTools);
-            const isLearned = (tool: unknown) =>
-              record(record(tool)?._meta)?.[RESIN_LEARNED_TOOL_META] === true;
+            // The listing names only the tools to offer: a learned tool measured to cost more than
+            // doing the job directly is left out of it, though tools/list still carries it.
+            const listedNames = learnedTools?.listing?.map((tool) => tool.name);
+            const isListed = (tool: unknown) => {
+              const entry = record(tool);
+              return (
+                record(entry?._meta)?.[RESIN_LEARNED_TOOL_META] === true &&
+                (listedNames === undefined ||
+                  (typeof entry?.name === "string" && listedNames.includes(entry.name)))
+              );
+            };
             const tools = result.tools
               .filter((tool) => {
                 const name = record(tool)?.name;
@@ -481,13 +490,13 @@ export function createToolSearchSurface(
                 // caller's catalog is small enough to list directly. Unlisted learned tools are
                 // found by search and still answer tools/call by name.
                 if (searchOnlyListing)
-                  return META_TOOL_NAMES[name] === true || (direct && isLearned(tool));
+                  return META_TOOL_NAMES[name] === true || (direct && isListed(tool));
                 return searchEnabled || !isSearch(name);
               })
               .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool));
             if (direct) {
               // The discovery funnel counts the learned tools a direct listing showed.
-              const shown = tools.filter(isLearned).length;
+              const shown = tools.filter(isListed).length;
               if (shown > 0) recordDiscoveryFunnelEvent("tools_listed", { count: shown });
             }
             return { jsonrpc: "2.0", id: message.id, result: { ...result, tools } };

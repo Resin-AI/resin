@@ -62,6 +62,7 @@ import {
   createEvolvedToolHandler,
   extractToolRepo,
 } from "./registry/index.js";
+import { isAutomaticallyRecommended } from "./registry/recommendation.js";
 import type { CatalogEntry, RegistryTool } from "./registry/types.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
 
@@ -82,15 +83,22 @@ export interface CatalogNoticeTool extends McpTool {
   catalogOutputSchema?: McpTool["outputSchema"];
   /** The commands a learned tool's recorded programs run, resolved on this machine. */
   localCommands?: string[];
+  /**
+   * False for a learned tool whose measured invocations cost more than doing the job directly:
+   * no automatic surface (instructions, command suggestions, direct listing) names it.
+   */
+  recommended?: false;
 }
 
 /** Internal metadata must never reach a harness: no unsupported output contract, no local detail. */
 export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
   return tools.map((tool) => {
-    if (!("catalogOutputSchema" in tool) && !("localCommands" in tool)) return tool;
+    if (!("catalogOutputSchema" in tool) && !("localCommands" in tool) && !("recommended" in tool))
+      return tool;
     const {
       catalogOutputSchema: _catalogOutputSchema,
       localCommands: _localCommands,
+      recommended: _recommended,
       ...nativeTool
     } = tool;
     return nativeTool;
@@ -309,7 +317,13 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const listed = (tool: CatalogEntry | RegistryTool, catalog: string) => {
       const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
       if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
-        return { description: catalog, inputSchema: schema, _meta: undefined, localCommands: [] };
+        return {
+          description: catalog,
+          inputSchema: schema,
+          _meta: undefined,
+          localCommands: [],
+          recommended: true,
+        };
       }
       const hint = replacesStepsHint(this.registry.learnedToolProfile(tool, context)?.steps);
       return {
@@ -321,6 +335,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         inputSchema: listedInputSchema(this.registry.learnedToolInputSchema(tool, context, schema)),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
         localCommands: this.registry.learnedToolCommands(tool, context),
+        recommended: isAutomaticallyRecommended(tool),
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;
@@ -328,7 +343,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
       for (const entry of Object.values(record.entries)) {
         // A learned tool is listed only where it was learned and can run (see repository-scope).
         if (!isToolOfferedHere(this.registry, entry, context)) continue;
-        const { description, inputSchema, _meta, localCommands } = listed(
+        const { description, inputSchema, _meta, localCommands, recommended } = listed(
           entry,
           entry.description || entry.manifest?.description || `Tool ${entry.name}`,
         );
@@ -340,6 +355,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           annotations: discoveryAnnotations(entry),
           ...(_meta === undefined ? {} : { _meta }),
           ...(localCommands.length === 0 ? {} : { localCommands }),
+          ...(recommended ? {} : { recommended: false as const }),
         });
       }
     } else {
@@ -351,7 +367,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         );
         if (tool) {
           if (!isToolOfferedHere(this.registry, tool, context)) continue;
-          const { description, inputSchema, _meta, localCommands } = listed(
+          const { description, inputSchema, _meta, localCommands, recommended } = listed(
             tool,
             tool.description || tool.manifest?.description || `Tool ${tool.name}`,
           );
@@ -363,6 +379,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
             annotations: discoveryAnnotations(tool),
             ...(_meta === undefined ? {} : { _meta }),
             ...(localCommands.length === 0 ? {} : { localCommands }),
+            ...(recommended ? {} : { recommended: false as const }),
           });
         }
       }

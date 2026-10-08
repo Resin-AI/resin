@@ -1559,6 +1559,43 @@ describe("search-only listing", () => {
       }
     });
 
+    it("lists only the learned tools the listing names, leaving a demoted one to search", () => {
+      const client = createSurfaceClient({});
+      try {
+        client.send(initialize(1));
+        client.respond(initializeWithListing(1, 1));
+        client.send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+        client.respond({
+          jsonrpc: "2.0",
+          id: 2,
+          result: {
+            tools: [
+              { name: "search_tools", description: SEARCH_DESCRIPTION, inputSchema: {} },
+              { name: "get_tool_schema", inputSchema: { type: "object" } },
+              { name: "invoke_tool", inputSchema: { type: "object" } },
+              { name: "manage_tools", inputSchema: { type: "object" } },
+              { name: "build_site", inputSchema: { type: "object" }, _meta: LEARNED },
+              // Measured to cost more: still in tools/list, left out of the listing.
+              { name: "run_tests", inputSchema: { type: "object" }, _meta: LEARNED },
+            ],
+            _meta: {
+              [RESIN_LEARNED_TOOL_COUNT_META]: 1,
+              [RESIN_LEARNED_TOOL_LISTING_META]: listing.slice(0, 1),
+            },
+          },
+        });
+        const response = client.received.find((message) => "id" in message && message.id === 2);
+        expect(
+          z
+            .object({ result: z.object({ tools: z.array(z.object({ name: z.string() })) }) })
+            .parse(response)
+            .result.tools.map((tool) => tool.name),
+        ).toEqual(["search_tools", "get_tool_schema", "invoke_tool", "manage_tools", "build_site"]);
+      } finally {
+        client.close();
+      }
+    });
+
     it("keeps search instructions above the limit and while the catalog is unknown", () => {
       const above = DIRECT_LISTING_MAX_TOOLS + 1;
       for (const [count, expected] of [
