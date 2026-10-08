@@ -1020,12 +1020,26 @@ describe("search_tools over near-duplicate learned tools", () => {
         .map((tool) => tool.name)
         .sort(),
     );
-    for (const similar of lead?.similar ?? []) {
-      // Compact: its inputs come from get_tool_schema(name), not from every search.
-      expect(Object.keys(similar).sort()).toEqual(["name", "purpose", "score", "toolId"]);
+    for (const [index, similar] of (lead?.similar ?? []).entries()) {
+      // The two closest contenders carry their schemas, so picking one needs no lookup; the rest
+      // (here exact duplicates tying the item) are compact.
+      const close = index < 2 && (similar.score ?? 0) >= 0.9 * (lead?.score ?? 0);
+      expect(Object.keys(similar).sort()).toEqual(
+        close
+          ? ["inputSchema", "name", "purpose", "score", "toolId"]
+          : ["name", "purpose", "score", "toolId"],
+      );
+      if (close) {
+        expect(Object.keys(similar.inputSchema?.properties ?? {}).sort()).toEqual(
+          Object.keys(
+            workspaceTool(similar.name)?.parameters.properties ?? { missing: true },
+          ).sort(),
+        );
+      }
       expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
       expect(similar.purpose.length).toBeLessThanOrEqual(140);
     }
+    expect(lead?.similar?.filter((tool) => tool.inputSchema !== undefined)).toHaveLength(2);
     expect(lead?.similar?.[0]?.purpose).toMatch(
       /^Runs the \w+ test suite, then checks formatting and lints the Luau sources\.$/,
     );
@@ -1036,7 +1050,7 @@ describe("search_tools over near-duplicate learned tools", () => {
     expect(new Set(groups).size).toBe(groups.length);
     expect(response.total).toBe(response.tools.length);
     expect(response.note).toContain("A tool under `similar` runs the same commands");
-    expect(response.note).toContain("get_tool_schema(name) gives its inputs");
+    expect(response.note).toContain("with the inputs get_tool_schema(name) gives");
   });
 
   it("keeps a tool measured to cost more at its rank, leading its group, and marks it", async () => {

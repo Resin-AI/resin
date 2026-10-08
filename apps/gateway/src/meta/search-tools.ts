@@ -57,8 +57,10 @@ export interface SearchToolsResultItem {
 }
 
 /**
- * A match that runs the same commands as the item it is listed under. No input schema: ten of
- * them cost thousands of characters per search, so its inputs come from get_tool_schema(name).
+ * A match that runs the same commands as the item it is listed under. Only a close contender (see
+ * {@link CLOSE_MATCH_RATIO}) carries its input schema, so an agent can invoke the one it picks
+ * without another lookup; ten schemas per search would cost thousands of characters, so the rest
+ * get their inputs from get_tool_schema(name).
  */
 export interface SimilarTool {
   toolId: string;
@@ -66,7 +68,18 @@ export interface SimilarTool {
   /** The first sentence of what the tool does, at most {@link PURPOSE_MAX_LENGTH} characters. */
   purpose: string;
   score?: number;
+  inputSchema?: ToolParameterSchema | JsonRpcParams;
 }
+
+/**
+ * A similar tool scoring at least this share of its item's score is a close contender. In
+ * measured runs the job's exact tool scored 10.58 under an item scoring 10.61; the agent picked
+ * it and spent a request reading its schema.
+ */
+const CLOSE_MATCH_RATIO = 0.9;
+
+/** At most this many close contenders per item carry a schema; exact duplicates all tie. */
+const CLOSE_MATCH_LIMIT = 2;
 
 /**
  * A page of search results. `limit`, `offset`, `total` and `hasMore` count items in `tools`: each
@@ -190,7 +203,7 @@ const RECORDED_VALUES_NOTE = "Omitted inputs reuse their recorded values.";
 const LIST_INPUT_NOTE =
   "Each item of an array input is passed to the command as one separate argument.";
 const SIMILAR_NOTE =
-  "A tool under `similar` runs the same commands as the item it is listed under; get_tool_schema(name) gives its inputs, then invoke it by name.";
+  "A tool under `similar` runs the same commands as the item it is listed under; invoke it by name with its inputSchema, or, when none is listed, with the inputs get_tool_schema(name) gives.";
 
 /** The longest `purpose` a similar tool is listed with. */
 const PURPOSE_MAX_LENGTH = 140;
@@ -1050,18 +1063,36 @@ export function createSearchToolsHandler(
         ...(similar.length === 0
           ? {}
           : {
-              similar: similar.map(({ candidate, score }) => {
+              similar: similar.map(({ candidate, score }, index) => {
                 // What the item would show, minus the program: its purpose sentence comes first.
                 const shown =
                   shownCatalog(candidate.description.catalog, candidate.description.local, {
                     recordedValues: false,
                     listInputs: false,
                   }) || `Runs ${candidate.commands.join(", ")}.`;
+                // `similar` is in rank order, so the first contenders are the closest.
+                const close =
+                  index < CLOSE_MATCH_LIMIT &&
+                  score !== undefined &&
+                  lead.score !== undefined &&
+                  score >= CLOSE_MATCH_RATIO * lead.score;
                 return {
                   toolId: candidate.tool.toolId,
                   name: candidate.name,
                   purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
                   ...(score === undefined ? {} : { score }),
+                  ...(close
+                    ? {
+                        inputSchema: shownInputSchema(
+                          registry.learnedToolInputSchema(
+                            candidate.tool,
+                            context,
+                            toolInputSchema(candidate.tool),
+                          ),
+                          omissions,
+                        ),
+                      }
+                    : {}),
                 };
               }),
             }),
