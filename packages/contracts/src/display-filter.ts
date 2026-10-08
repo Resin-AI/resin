@@ -2,10 +2,12 @@
  * The display filters a recorded shell program piped its output through: `pnpm vitest run 2>&1 |
  * tail -30`, `cd web && npx vitest run 2>&1 | grep -E "×|FAIL" | head -40`. The agent wanted the
  * command; the trailing `tail`, `head` or `grep` only trimmed what its terminal showed, and as the
- * pipeline's last stage it also decided the exit status the recording saw. A step marked
+ * pipeline's last stage it also decided the exit status the recording saw. A version-1 step marked
  * `displayFilter` (see `WorkflowStep.displayFilter`) runs the program without those stages, so its
- * caller gets the whole output and the command's own exit status; a recording check pipes that
- * output through the dropped stages to compare it with what the recording printed.
+ * caller gets the whole output and the command's own exit status; a version-2 step runs the
+ * program as recorded and reports each pipeline's status and what its filters hid. A recording
+ * check pipes the commands' output through the dropped stages to compare it with what the
+ * recording printed.
  *
  * Version 1 (`splitDisplayFilter`) splits only the program's last pipeline, and only a program
  * written entirely in an allowlist grammar of its own (the program is never run apart, so unlike
@@ -370,12 +372,18 @@ interface ListStage {
   redirects: boolean;
 }
 
+/** What ends a top-level pipeline: a separator, an and-or operator, or the end of the program. */
+export type DisplayFilterPipelineEnd = ";" | "\n" | "&&" | "||" | "end";
+
 /**
- * A lexed list: its pipelines, where lexing ended, where its last token or heredoc body ended, and
- * the heredoc bodies it holds (from the line after their operator through their delimiter line).
+ * A lexed list: its pipelines and the operator ending each, where lexing ended, where its last
+ * token or heredoc body ended, and the heredoc bodies it holds (from the line after their operator
+ * through their delimiter line).
  */
 interface LexedList {
   pipelines: ListStage[][];
+  /** What ended each of `pipelines`, at the same index. */
+  ends: DisplayFilterPipelineEnd[];
   end: number;
   contentEnd: number;
   bodies: { start: number; end: number }[];
@@ -571,6 +579,7 @@ function lexWord(text: string, start: number, depth: number, lexer: Lexer): Shel
 function lexList(text: string, from: number, depth: number, lexer: Lexer): LexedList | undefined {
   if (depth > MAX_SUBSTITUTION_DEPTH) return undefined;
   const pipelines: ListStage[][] = [];
+  const ends: DisplayFilterPipelineEnd[] = [];
   /** Heredocs of this list whose bodies start after its next line break. */
   const heredocs: Heredoc[] = [];
   const bodies: { start: number; end: number }[] = [];
@@ -589,8 +598,9 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
     stage = undefined;
     return true;
   };
-  const endPipeline = (): void => {
+  const endPipeline = (by: DisplayFilterPipelineEnd): void => {
     pipelines.push(stages);
+    ends.push(by);
     stages = [];
   };
   const begin = (start: number): ListStage => {
@@ -613,11 +623,11 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
       if ((char === undefined) !== (depth === 0) || heredocs.length > 0) return undefined;
       if (stage !== undefined) {
         if (!endStage()) return undefined;
-        endPipeline();
+        endPipeline("end");
       } else if (continues) {
         return undefined;
       }
-      return { pipelines, end: char === undefined ? index : index + 1, contentEnd, bodies };
+      return { pipelines, ends, end: char === undefined ? index : index + 1, contentEnd, bodies };
     }
     if (char === " " || char === "\t") {
       index += 1;
@@ -631,7 +641,7 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
       // A line break ends a command; a blank line or one after `|`, `&&`, `||` is nothing.
       if (stage !== undefined) {
         if (!endStage()) return undefined;
-        endPipeline();
+        endPipeline("\n");
       }
       index += 1;
       // The bodies of the heredocs this line opened follow it.
@@ -648,7 +658,7 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
     }
     if (char === ";") {
       if (text[index + 1] === ";" || text[index + 1] === "&" || !endStage()) return undefined;
-      endPipeline();
+      endPipeline(";");
       index += 1;
       contentEnd = index;
       continue;
@@ -656,7 +666,7 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
     if (char === "&") {
       // `&&` only: a lone `&` runs in the background, `&>` is one in sh.
       if (text[index + 1] !== "&" || !endStage()) return undefined;
-      endPipeline();
+      endPipeline("&&");
       continues = true;
       index += 2;
       contentEnd = index;
@@ -666,7 +676,7 @@ function lexList(text: string, from: number, depth: number, lexer: Lexer): Lexed
       const next = text[index + 1];
       if (next === "&" || !endStage()) return undefined;
       if (next === "|") {
-        endPipeline();
+        endPipeline("||");
         index += 2;
       } else {
         pipe = index;
@@ -848,13 +858,32 @@ export function splitDisplayFilters(
   text: string,
   version: number = DISPLAY_FILTER_VERSION,
 ): DisplayFilterSplit | undefined {
+  const lexed = lexDisplayFilters(shell, text, version);
+  if (lexed === undefined) return undefined;
+  const { list, cuts } = lexed;
+  let command = "";
+  let from = 0;
+  for (const cut of cuts) {
+    command += text.slice(from, cut.start);
+    from = cut.end;
+  }
+  return { command: command + text.slice(from, Math.max(from, list.contentEnd)), cuts };
+}
+
+/** The lexed top-level list of a program `splitDisplayFilters` accepts, its cuts, and their pipelines. */
+function lexDisplayFilters(
+  shell: string,
+  text: string,
+  version: number,
+): { list: LexedList; cuts: DisplayFilterCut[]; cutPipelines: number[] } | undefined {
   if (version !== 2 || !Object.hasOwn(POSIX_SHELLS, shell) || PIPE_STATUS.test(text)) {
     return undefined;
   }
   const list = lexList(text, 0, 0, { hereStrings: shell === "bash", pending: 0 });
   if (list === undefined) return undefined;
   const cuts: DisplayFilterCut[] = [];
-  for (const stages of list.pipelines) {
+  const cutPipelines: number[] = [];
+  for (const [index, stages] of list.pipelines.entries()) {
     let first = stages.length;
     while (first > 0 && isDisplayFilterListStage(stages[first - 1]!)) first -= 1;
     if (first === stages.length || first === 0) continue;
@@ -866,6 +895,7 @@ export function splitDisplayFilters(
       end,
       filter: text.slice(stages[first]!.pipe! + 1, end).trim(),
     });
+    cutPipelines.push(index);
   }
   // A cut never holds a heredoc body (`cat <<EOF |`, the body, then `grep x`).
   if (
@@ -874,13 +904,48 @@ export function splitDisplayFilters(
   ) {
     return undefined;
   }
-  let command = "";
-  let from = 0;
-  for (const cut of cuts) {
-    command += text.slice(from, cut.start);
-    from = cut.end;
-  }
-  return { command: command + text.slice(from, Math.max(from, list.contentEnd)), cuts };
+  return { list, cuts, cutPipelines };
+}
+
+/** One top-level pipeline of a version-2 display-filter program, as offsets into its text. */
+export interface DisplayFilterPipeline {
+  /** Offset of the pipeline's first stage. */
+  start: number;
+  /** Offset after its last stage's last word (before any blanks or comment after it). */
+  end: number;
+  /** Index into `splitDisplayFilters(...).cuts` of the cut taken from this pipeline, if any. */
+  cut?: number;
+  /** What ends it: `;`, a line break, `&&`, `||`, or the end of the program. */
+  next: DisplayFilterPipelineEnd;
+  /** Its first stage's command word (after any assignments), when that is a literal word. */
+  command?: string;
+}
+
+/**
+ * Every top-level pipeline, in order, of a program `splitDisplayFilters` accepts (undefined for any
+ * other): where it starts and ends, which cut (if any) it holds, the operator after it, and its
+ * command word. Read by the same lexer, so its offsets and cuts agree with `splitDisplayFilters`.
+ */
+export function displayFilterPipelines(
+  shell: string,
+  text: string,
+  version: number = DISPLAY_FILTER_VERSION,
+): DisplayFilterPipeline[] | undefined {
+  const lexed = lexDisplayFilters(shell, text, version);
+  if (lexed === undefined) return undefined;
+  const { list, cutPipelines } = lexed;
+  return list.pipelines.map((stages, index) => {
+    const first = stages[0]!;
+    const word = first.words.find((entry) => !ASSIGNMENT.test(entry.raw));
+    const cut = cutPipelines.indexOf(index);
+    return {
+      start: first.start,
+      end: stages.at(-1)!.end,
+      ...(cut === -1 ? {} : { cut }),
+      next: list.ends[index]!,
+      ...(word?.value === undefined ? {} : { command: word.value }),
+    };
+  });
 }
 
 /**

@@ -49,12 +49,24 @@ export interface RecordedCallRequest {
   /** Cancels owned I/O; adapter calls must settle after abort before replay cleanup. */
   signal?: AbortSignal;
   /**
-   * How a step marked `displayFilter` treats the filter it drops. Absent: the command runs alone.
+   * How a step marked `displayFilter` treats the filter it drops. Absent (an ordinary invocation):
+   * a version-1 step runs its command alone and returns its whole output; a version-2 step runs
+   * as recorded, filters inline, returns what the program printed, and passes `onDisplay` a bounded
+   * report of each command's status, that output, the diagnostics the filters hid, and where its
+   * whole output is kept.
    * `replay` (replay confirmation only): the command's output is piped through the filter, so the
    * result compares with what the recording printed. `whole`: the caller switched the filter on
-   * through its input, so the recorded pipeline runs as recorded.
+   * through its input, so it gets the filtered output the same way. In these two modes the
+   * command's own exit status decides the step; a filter that selects nothing prints nothing, and
+   * a filter error fails the step.
    */
   displayFilter?: "replay" | "whole";
+  /**
+   * Receives the text the caller should see in place of the step's value, when the step has one
+   * (a version-2 display-filter invocation's report). The value stays what the program printed:
+   * that is what later steps bind.
+   */
+  onDisplay?: (text: string) => void;
 }
 
 /**
@@ -107,14 +119,19 @@ export interface RecordedWorkflowExecutionOptions {
   onUnavailable?: (step: WorkflowStep, reason: string) => void;
   /**
    * Set only by replays that compare results with a recording (`binding-validation.ts`): see
-   * `RecordedCallRequest.displayFilter`. An invocation never sets it, so a caller gets the
-   * command's whole output.
+   * `RecordedCallRequest.displayFilter`. An invocation never sets it.
    */
   applyDisplayFilters?: boolean;
 }
 
 export type RecordedStepOutcome =
-  | { stepId: string; status: "completed"; result: WorkflowJsonValue }
+  | {
+      stepId: string;
+      status: "completed";
+      result: WorkflowJsonValue;
+      /** What the caller sees in place of `result`, when the step reported one. */
+      display?: string;
+    }
   | { stepId: string; status: "failed"; error: string }
   | { stepId: string; status: "skipped"; reason: string }
   /** An optional step the caller turned off through its toggle input; never ran. */
@@ -774,12 +791,22 @@ export async function executeRecordedWorkflow(
   const results = new Map<string, WorkflowJsonValue>();
   const state = new Map<string, "completed" | "failed" | "skipped" | "omitted">();
   let aborted = false;
+  // Set once the caller's signal fired: the remaining steps never run, and the run fails even
+  // when no step was running at that moment, so a cancelled invocation never reads as completed.
+  let cancelled: string | undefined;
 
   for (const step of workflow.steps) {
-    if (options.signal?.aborted) aborted = true;
+    if (cancelled === undefined && options.signal?.aborted) {
+      cancelled = workflowCancellation(options.signal);
+    }
+    if (cancelled !== undefined) aborted = true;
     if (aborted) {
       state.set(step.id, "skipped");
-      outcomes.push({ stepId: step.id, status: "skipped", reason: "an earlier step failed" });
+      outcomes.push({
+        stepId: step.id,
+        status: "skipped",
+        reason: cancelled ?? "an earlier step failed",
+      });
       continue;
     }
     // A caller-omitted optional step never produces a result any step reads (the contract forbids
@@ -835,6 +862,7 @@ export async function executeRecordedWorkflow(
     }
 
     try {
+      let display: string | undefined;
       const result = await adapter.call({
         step,
         arguments: args,
@@ -846,10 +874,18 @@ export async function executeRecordedWorkflow(
           : step.displayFilter?.input !== undefined && inputs[step.displayFilter.input] === true
             ? { displayFilter: "whole" as const }
             : {}),
+        onDisplay: (text) => {
+          display = text;
+        },
       });
       results.set(step.id, result);
       state.set(step.id, "completed");
-      outcomes.push({ stepId: step.id, status: "completed", result });
+      outcomes.push({
+        stepId: step.id,
+        status: "completed",
+        result,
+        ...(display === undefined ? {} : { display }),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       state.set(step.id, "failed");
@@ -859,6 +895,7 @@ export async function executeRecordedWorkflow(
   }
 
   const failure = outcomes.find((outcome) => outcome.status === "failed");
+  const error = failure?.status === "failed" ? failure.error : cancelled;
   const lastCompleted = [...outcomes].reverse().find((outcome) => outcome.status === "completed");
   // A run of independent steps returns every output it produced, in recorded order; a chain, the
   // result its last step produced.
@@ -874,11 +911,21 @@ export async function executeRecordedWorkflow(
         ? lastCompleted.result
         : undefined;
   return {
-    status: failure ? "failed" : "completed",
+    status: error === undefined ? "completed" : "failed",
     steps: outcomes,
     result,
-    ...(failure?.status === "failed" ? { error: failure.error } : {}),
+    ...(error === undefined ? {} : { error }),
   };
+}
+
+/** Why the remaining steps of a run cancelled through `signal` did not run, with its reason. */
+function workflowCancellation(signal: AbortSignal): string {
+  const reason: unknown = signal.reason;
+  const detail =
+    reason instanceof Error ? reason.message : typeof reason === "string" ? reason : undefined;
+  return detail && detail.length > 0
+    ? `the invocation was cancelled (${detail})`
+    : "the invocation was cancelled";
 }
 
 /**

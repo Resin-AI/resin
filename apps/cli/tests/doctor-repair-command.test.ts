@@ -480,7 +480,7 @@ describe("doctor & repair commands", () => {
     });
 
     const omp = JSON.parse((await fsBridge.readFile(ompConfigPath)) ?? "{}");
-    expect(omp.mcpServers.resin).toEqual(resinLaunch);
+    expect(omp.mcpServers.resin).toEqual({ ...resinLaunch, timeout: 615_000 });
     expect(omp.mcpServers.custom).toEqual({ command: "custom-cmd" });
 
     const codex = await fsBridge.readFile(codexConfigPath);

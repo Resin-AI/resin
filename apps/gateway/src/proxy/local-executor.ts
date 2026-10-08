@@ -67,6 +67,7 @@ import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-val
 import {
   type CallToolResult,
   type JsonRpcParams,
+  RESIN_DISPLAY_TEXT_META,
   RESIN_OUTPUT_STEPS_META,
 } from "../protocol/types.js";
 import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
@@ -156,7 +157,9 @@ function failedWorkflowReport(
   );
   const lines = [`Step ${numberOf.get(failed.stepId)} of ${total} failed: ${failed.error}`];
   for (const outcome of completed) {
-    lines.push(`--- step ${numberOf.get(outcome.stepId)}/${total} ---\n${stepOutputText(outcome)}`);
+    lines.push(
+      `--- step ${numberOf.get(outcome.stepId)}/${total} ---\n${outcome.display ?? stepOutputText(outcome)}`,
+    );
   }
   for (const outcome of failures.slice(1)) {
     lines.push(`Step ${numberOf.get(outcome.stepId)} of ${total} also failed: ${outcome.error}`);
@@ -217,6 +220,11 @@ export interface RecordedWorkflowHostContext {
   workspace: WorkspaceContext;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Where a recorded program step keeps each invocation's full output (`<resinHome>/data/
+   * invocation-output`), for the caller to read without re-running it. Absent without a Resin home.
+   */
+  invocationOutputRoot?: string;
   routeToHost: (request: {
     name: string;
     connection?: string;
@@ -1918,6 +1926,9 @@ export class LocalArtifactExecutor {
         workspace: context,
         ...(signal ? { signal } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(this.resinHome === undefined
+          ? {}
+          : { invocationOutputRoot: path.join(this.resinHome, "data", "invocation-output") }),
         routeToHost: async (request) => {
           if (!stepInvoker) {
             return {
@@ -2030,14 +2041,30 @@ export class LocalArtifactExecutor {
       },
     });
     try {
-      const execution = await callable.invoke(parameters as Record<string, WorkflowJsonValue>);
+      // The invocation's signal (the caller's cancel or the call deadline) reaches every step: the
+      // step in flight is stopped, its process tree killed, and no later step runs.
+      const execution = await callable.invoke(
+        parameters as Record<string, WorkflowJsonValue>,
+        signal ? { signal } : {},
+      );
       if (execution.status !== "completed") {
-        return failedToolResult(
-          "tool_error",
+        const report =
           failedWorkflowReport(plan, execution) ??
-            execution.error ??
-            "Recorded workflow execution failed",
-        );
+          execution.error ??
+          "Recorded workflow execution failed";
+        if (signal?.aborted) {
+          const reason: unknown = signal.reason;
+          const detail =
+            reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "";
+          const timedOut =
+            (reason instanceof Error && reason.name === "TimeoutError") ||
+            /\btimed out\b|deadline/i.test(detail);
+          return failedToolResult(
+            timedOut ? "timeout" : "cancelled",
+            `${timedOut ? "Tool invocation timed out" : "Tool invocation was cancelled"}${detail.length > 0 ? ` (${detail})` : ""}: the step in flight was stopped and no later step ran.\n${report}`,
+          );
+        }
+        return failedToolResult("tool_error", report);
       }
       const result = execution.result ?? null;
       // Several returned outputs are labeled by the plan steps that produced them; the content
@@ -2056,15 +2083,43 @@ export class LocalArtifactExecutor {
           outcome.status === "omitted" ? [outcome.stepId] : [],
         ),
       );
+      const skipped = new Set(
+        sinks.flatMap((stepId, index) => (omitted.has(stepId) ? [index] : [])),
+      );
+      // A step that reported caller-facing text (a version-2 display-filter step's report) is shown
+      // by it; the content keeps the steps' values, which composition reads.
+      const completedOf = new Map(
+        execution.steps.flatMap((outcome) =>
+          outcome.status === "completed" ? [[outcome.stepId, outcome] as const] : [],
+        ),
+      );
+      const lastCompleted = [...execution.steps]
+        .reverse()
+        .find((outcome) => outcome.status === "completed");
+      const display =
+        sinks.length > 1 && numbers !== undefined
+          ? sinks.some((stepId) => completedOf.get(stepId)?.display !== undefined)
+            ? presentStepSections(
+                sinks.map((stepId) => {
+                  const outcome = completedOf.get(stepId);
+                  return outcome === undefined
+                    ? null
+                    : (outcome.display ?? stepOutputText(outcome));
+                }),
+                skipped,
+                numbers,
+              )
+            : undefined
+          : lastCompleted?.status === "completed"
+            ? lastCompleted.display
+            : undefined;
+      const displayMeta = display === undefined ? {} : { [RESIN_DISPLAY_TEXT_META]: display };
       if (
         omitted.size > 0 &&
         Array.isArray(result) &&
         result.length > 1 &&
         result.every((item) => typeof item === "string" || item === null)
       ) {
-        const skipped = new Set(
-          sinks.flatMap((stepId, index) => (omitted.has(stepId) ? [index] : [])),
-        );
         return {
           content: [
             {
@@ -2072,15 +2127,24 @@ export class LocalArtifactExecutor {
               text: presentStepSections(result as Array<string | null>, skipped, numbers),
             },
           ],
+          ...(display === undefined ? {} : { _meta: displayMeta }),
         };
       }
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
-        ...(numbers === undefined
+        ...(numbers === undefined && display === undefined
           ? {}
           : {
               _meta: {
-                [RESIN_OUTPUT_STEPS_META]: { steps: [...numbers.steps], total: numbers.total },
+                ...(numbers === undefined
+                  ? {}
+                  : {
+                      [RESIN_OUTPUT_STEPS_META]: {
+                        steps: [...numbers.steps],
+                        total: numbers.total,
+                      },
+                    }),
+                ...displayMeta,
               },
             }),
       };

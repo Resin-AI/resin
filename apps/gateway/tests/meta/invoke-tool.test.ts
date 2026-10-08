@@ -18,6 +18,7 @@ import { MCP_ERROR_CODES, McpProtocolError } from "../../src/protocol/errors.js"
 import {
   type CallToolResult,
   type JsonRpcParams,
+  RESIN_DISPLAY_TEXT_META,
   RESIN_OUTPUT_STEPS_META,
 } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
@@ -147,6 +148,25 @@ describe("invoke_tool Meta-Tool", () => {
     ]);
     // The numbering is Resin's own bookkeeping: it does not reach the client.
     expect(result._meta?.[RESIN_OUTPUT_STEPS_META]).toBeUndefined();
+  });
+
+  it("shows a result's display text in place of its content, dropping Resin's keys", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest(), undefined, { workspaceId: "ws-invoke" });
+    const result = await createInvokeToolHandler(registry, {
+      async invoke(): Promise<CallToolResult> {
+        return {
+          content: [{ type: "text", text: JSON.stringify("c\n") }],
+          _meta: { [RESIN_DISPLAY_TEXT_META]: "The program exited 0.\nOutput:\nc" },
+        };
+      },
+    })(makeContext("ws-invoke"), {
+      toolId: "tool_validator",
+      parameters: { count: 1, mode: "fast" },
+    });
+
+    expect(result.content).toEqual([{ type: "text", text: "The program exited 0.\nOutput:\nc" }]);
+    expect(result._meta).toBeUndefined();
   });
 
   it("validates parameter types, enums, and bounds strictly", async () => {

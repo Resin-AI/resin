@@ -2,10 +2,12 @@ import path from "node:path";
 import {
   ConfigPreconditionFailedError,
   InMemoryConfigFsBridge,
+  RESIN_TOOL_CALL_TIMEOUT_MS,
   computeConfigHash,
 } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import {
+  OMP_RESIN_MCP_TIMEOUT_MS,
   applyOmpMcpConfig,
   planOmpMcpConfig,
   resolveOmpConfigPath,
@@ -69,6 +71,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
     expect(plannedParsed.mcpServers.resin.url).toBeUndefined();
     expect(plannedParsed.mcpServers.resin.type).toBeUndefined();
@@ -137,6 +140,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       command: "resin-mcp",
       args: ["--stdio"],
       env: { PORT: "4000" },
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
 
     const verified = await verifyOmpMcpConfig({
@@ -187,6 +191,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
     expect(plannedParsed.mcpServers?.["existing-db-server"]).toEqual({
       command: "node",
@@ -218,9 +223,61 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
     expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
     expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
+  });
+
+  it("writes an OMP request timeout covering Resin's tools/call deadline", async () => {
+    expect(OMP_RESIN_MCP_TIMEOUT_MS).toBeGreaterThan(RESIN_TOOL_CALL_TIMEOUT_MS);
+    const fsBridge = new InMemoryConfigFsBridge();
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
+
+    const fresh = await planOmpMcpConfig({ customConfigPath: configPath, fsBridge });
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+    const freshParsed = JSON.parse(fresh.plannedContent) as OmpConfigDoc;
+    expect(freshParsed.mcpServers?.resin?.timeout).toBe(OMP_RESIN_MCP_TIMEOUT_MS);
+  });
+
+  it("adds the timeout when re-registering over an entry without one or with a smaller one", async () => {
+    for (const existing of [
+      { command: "resin", args: ["mcp"] },
+      { command: "resin", args: ["mcp"], timeout: 30_000 },
+    ]) {
+      const fsBridge = new InMemoryConfigFsBridge();
+      const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
+      await fsBridge.writeFile(configPath, JSON.stringify({ mcpServers: { resin: existing } }));
+
+      const plan = await planOmpMcpConfig({ customConfigPath: configPath, fsBridge });
+      // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+      const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
+      expect(parsed.mcpServers?.resin).toEqual({
+        command: "resin",
+        args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
+      });
+    }
+  });
+
+  it("keeps a larger user-chosen timeout on the resin entry", async () => {
+    const fsBridge = new InMemoryConfigFsBridge();
+    const configPath = path.resolve("/test/home/.omp/agent/mcp.json");
+    const userTimeout = OMP_RESIN_MCP_TIMEOUT_MS * 2;
+    await fsBridge.writeFile(
+      configPath,
+      JSON.stringify({
+        mcpServers: { resin: { command: "resin", args: ["mcp"], timeout: userTimeout } },
+      }),
+    );
+
+    const plan = await planOmpMcpConfig({ customConfigPath: configPath, fsBridge });
+    // SAFETY: Planned configuration JSON content conforms to OmpConfigDoc.
+    const parsed = JSON.parse(plan.plannedContent) as OmpConfigDoc;
+    expect(parsed.mcpServers?.resin?.timeout).toBe(userTimeout);
+    expect(await verifyOmpMcpConfig({ customConfigPath: configPath, fsBridge: fsBridge })).toBe(
+      true,
+    );
   });
 
   it("migrates existing legacy SSE resin entry to canonical stdio using gatewayUrl as migration context", async () => {
@@ -246,6 +303,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
     expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
     expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
@@ -268,6 +326,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers?.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
     expect(plannedParsed.mcpServers?.resin?.url).toBeUndefined();
     expect(plannedParsed.mcpServers?.resin?.type).toBeUndefined();
@@ -287,6 +346,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(plannedParsed.mcpServers?.resin).toEqual({
       type: "sse",
       url: "http://127.0.0.1:4000/mcp/sse",
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
   });
   it("prefers agent/mcp.json and leaves legacy config.json untouched when present", async () => {
@@ -316,6 +376,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
     expect(parsedDoc.mcpServers?.resin).toEqual({
       command: "resin",
       args: ["mcp"],
+      timeout: OMP_RESIN_MCP_TIMEOUT_MS,
     });
   });
 
@@ -368,6 +429,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
       expect(parsed.mcpServers?.resin_gateway).toBeUndefined();
@@ -401,6 +463,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toBeUndefined();
     });
@@ -428,6 +491,7 @@ describe("OMP Config Planner, MCP Registration, Idempotency & Rollback", () => {
       expect(parsed.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsed.mcpServers?.["resin-gateway"]).toEqual({
         type: "sse",

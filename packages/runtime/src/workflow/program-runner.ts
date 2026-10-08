@@ -12,18 +12,20 @@
 
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
-import { type FileHandle, mkdtemp, open, rm } from "node:fs/promises";
+import { type FileHandle, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { parse } from "@babel/parser";
 import {
   type DisplayFilterCut,
+  type DisplayFilterPipeline,
   MAX_WORKFLOW_PYTHON_REPLAY_BYTES,
   MAX_WORKFLOW_PYTHON_SOURCE_BYTES,
   WORKFLOW_PATCH_STEP_RESULT,
   type WorkflowJsonValue,
   type WorkflowRecordedProgram,
+  displayFilterPipelines,
   displayFilterShell,
   programNotLearnableReason,
   splitDisplayFilter,
@@ -34,8 +36,23 @@ import {
 import { serviceHostExecutablePath } from "@resin/windows-security";
 import { runDerivation } from "./derivation-sandbox.js";
 import {
+  type HiddenDiagnostics,
+  type ObservedPipeline,
+  changesShellOptions,
+  createInvocationOutputDirectory,
+  displayFilterReport,
+  failedPipelines,
+  hiddenDiagnostics,
+  keepProgramOutput,
+  observationNonce,
+  observeDisplayFilters,
+  pruneInvocationOutputs,
+  readObservedPipelines,
+} from "./display-filter-observation.js";
+import {
   displayFilterChunks,
   displayFilterNonce,
+  displayFilterStages,
   instrumentDisplayFilters,
   withoutDisplayFilterMarkers,
 } from "./display-filter-replay.js";
@@ -84,11 +101,18 @@ export interface ProgramRunnerOptions {
   platform?: NodeJS.Platform;
   /** Whether an executable exists at a path, for resolving a shell; overridable for tests. */
   executableExists?: (candidate: string) => boolean;
+  /**
+   * Directory each ordinary invocation of a version-2 display-filter step keeps its full output in,
+   * one private subdirectory per run, the newest 20 kept. A private temp directory when absent.
+   */
+  invocationOutputRoot?: string;
 }
 
 /** Long enough for a real build or install, short enough that a hung program cannot pin a run. */
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
+/** Display-filter commands whose exit status 1 means they selected no lines, not an error. */
+const GREP_FAMILY: Readonly<Record<string, true>> = { grep: true, egrep: true, fgrep: true };
 /** Share of the byte budget kept from the start of a stream; the rest is kept from the end. */
 const HEAD_SHARE = 0.5;
 /** Bounded PATH probe: enough directories for a normal host, never an unbounded filesystem walk. */
@@ -1240,6 +1264,16 @@ function killProcessTree(child: ChildProcess, lifetime: ChildLifetime): void {
   }
 }
 
+/** The failure of a run its caller cancelled, naming why when the signal carries a reason. */
+function replayCancelled(signal: AbortSignal): string {
+  const reason: unknown = signal.reason;
+  const detail =
+    reason instanceof Error ? reason.message : typeof reason === "string" ? reason : undefined;
+  return detail && detail.length > 0
+    ? `recorded program replay was cancelled (${detail})`
+    : "recorded program replay was cancelled";
+}
+
 function runChild(
   invocation: ChildInvocation,
   options: ProgramRunnerOptions,
@@ -1250,8 +1284,7 @@ function runChild(
   const stdout = new BoundedOutput(maxOutputBytes);
   const stderr = new BoundedOutput(maxOutputBytes);
   const cwd = options.cwd ?? process.cwd();
-  if (options.signal?.aborted)
-    return Promise.reject(new Error("recorded program replay was cancelled"));
+  if (options.signal?.aborted) return Promise.reject(new Error(replayCancelled(options.signal)));
   return new Promise<CapturedRun>((resolve, reject) => {
     const stdio: SpawnOptions["stdio"] =
       invocation.privateResultFd === undefined
@@ -1297,7 +1330,7 @@ function runChild(
       termination = reason;
       killProcessTree(child, lifetime);
     };
-    const onAbort = (): void => terminate("recorded program replay was cancelled");
+    const onAbort = (): void => terminate(replayCancelled(options.signal!));
     options.signal?.addEventListener("abort", onAbort, { once: true });
     if (options.signal?.aborted) onAbort();
     const timer = setTimeout(
@@ -1863,12 +1896,17 @@ export async function runRecordedCall(
     ...(options.access === undefined && request.access ? { access: request.access } : {}),
     ...(request.signal ? { signal: request.signal } : {}),
   };
-  // A display-filter step runs its commands alone: the caller gets their whole output and exit
-  // statuses. A caller who switched the filter on through its input runs the recorded program.
+  // A display-filter step. Version 1 runs its command without the filter it drops: an invocation
+  // gets the command's whole output. Version 2 runs as recorded, filters inline, observed per
+  // pipeline (see `display-filter-observation.ts`): an invocation gets what the program printed,
+  // each pipeline's status and the diagnostics its filters hid. A replay compared with the
+  // recording (`replay`), or a caller who switched the filter on through its input (`whole`), gets
+  // the commands' output piped through the dropped filters (see `runDisplayFilter`).
   let filter: string | undefined;
   let cuts: DisplayFilterCut[] | undefined;
+  let pipelines: DisplayFilterPipeline[] | undefined;
   let command = source;
-  if (step.displayFilter !== undefined && request.displayFilter !== "whole") {
+  if (step.displayFilter !== undefined) {
     const { version } = step.displayFilter;
     const shell = displayFilterShell(step.callable.name, request.arguments, program);
     const refused = new Error(
@@ -1894,20 +1932,115 @@ export async function runRecordedCall(
       ) {
         throw refused;
       }
-      command = split.command;
       cuts = split.cuts;
+      pipelines = displayFilterPipelines(shell, source, version);
     }
   }
-  if (cuts !== undefined && request.displayFilter === "replay") {
-    return await replayDisplayFilters(request, source, cuts, replayOptions);
+  const filtered = request.displayFilter !== undefined;
+  if (cuts !== undefined) {
+    return filtered
+      ? await replayDisplayFilters(request, source, cuts, replayOptions)
+      : await observeDisplayFilterRun(request, source, pipelines, cuts, replayOptions);
   }
   const run = await runRecordedProgram({ ...program, source: command }, replayOptions, step.callId);
   if (run.exitCode !== 0) throw programFailed(request, run, run.stdout);
-  if (filter === undefined || request.displayFilter !== "replay") return run.value;
-  // A replay compared with the recording passes the output through the dropped stages, in the
-  // same shell, directory and environment. Their exit status is ignored as the recorded pipeline's
-  // was (grep exits 1 printing nothing when nothing matches); a filter killed by a signal fails.
+  if (filter === undefined || !filtered) return run.value;
   return await runDisplayFilter(request, filter, run.stdout, replayOptions);
+}
+
+/**
+ * An ordinary invocation of a version-2 display-filter step: `source` runs as recorded, filters
+ * inline, with observation wrappers writing each pipeline's status and each check's unfiltered
+ * output into a fresh capture directory (see `display-filter-observation.ts`). Returns what the
+ * program printed, as the recording saw it, for later steps to bind; the bounded report goes to
+ * `request.onDisplay` for the caller to see. Throws the report when a check or an and-or list failed
+ * or the program exited non-zero. A program the wrappers cannot be inserted into safely, or one that
+ * may change shell options (`changesShellOptions`), runs exactly as recorded, without per-pipeline
+ * statuses.
+ */
+async function observeDisplayFilterRun(
+  request: RecordedCallRequest,
+  source: string,
+  pipelines: readonly DisplayFilterPipeline[] | undefined,
+  cuts: readonly DisplayFilterCut[],
+  options: ProgramRunnerOptions,
+): Promise<WorkflowJsonValue> {
+  const { step } = request;
+  let directory: string | undefined;
+  try {
+    directory = await createInvocationOutputDirectory(options.invocationOutputRoot);
+  } catch {
+    directory = undefined;
+  }
+  try {
+    const observed =
+      directory === undefined ||
+      pipelines === undefined ||
+      changesShellOptions(source, pipelines, { ...process.env, ...options.env })
+        ? undefined
+        : observeDisplayFilters(source, pipelines, cuts, directory, observationNonce());
+    const run = await runRecordedProgram(
+      { ...step.callable.program!, source: observed ?? source },
+      options,
+      step.callId,
+    );
+    let outcomes: ObservedPipeline[] | undefined;
+    let failed = new Set<number>();
+    const hidden: HiddenDiagnostics[] = [];
+    let files: string[] = [];
+    if (directory !== undefined) {
+      await keepProgramOutput(directory, run.stdout, run.stderr);
+      if (observed !== undefined) {
+        outcomes = await readObservedPipelines(directory, pipelines!);
+        failed = failedPipelines(outcomes);
+        const displayed = new Set(
+          `${run.stdout}\n${run.stderr}`
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+        );
+        for (const outcome of outcomes) {
+          if (!outcome.check) continue;
+          const found = await hiddenDiagnostics(
+            join(directory, `o${outcome.number}`),
+            displayed,
+            failed.has(outcome.number),
+          );
+          if (found !== undefined) {
+            hidden.push({
+              number: outcome.number,
+              ...(outcome.command === undefined ? {} : { command: outcome.command }),
+              ...found,
+            });
+          }
+        }
+      }
+      const names = await readdir(directory);
+      files = [
+        ...names
+          .filter((name) => /^o\d+$/.test(name))
+          .sort((left, right) => Number(left.slice(1)) - Number(right.slice(1))),
+        ...["stdout", "stderr"].filter((name) => names.includes(name)),
+      ];
+    }
+    const report = displayFilterReport({
+      stepId: step.id,
+      exitCode: run.exitCode,
+      ...(run.signal === undefined ? {} : { signal: run.signal }),
+      ...(outcomes === undefined ? {} : { pipelines: outcomes }),
+      failed,
+      stdout: run.stdout,
+      stderr: run.stderr,
+      hidden,
+      ...(directory === undefined ? {} : { directory }),
+      files,
+    });
+    if (report.failed) throw new Error(report.text);
+    request.onDisplay?.(report.text);
+    return run.value;
+  } finally {
+    if (directory !== undefined) await pruneInvocationOutputs(directory);
+  }
 }
 
 /** The error of a recorded call whose program exited non-zero; `stdout` without any markers. */
@@ -1926,32 +2059,53 @@ function programFailed(
 
 /**
  * The output of a display filter `filter` dropped from a recorded call's shell program, given the
- * `input` it was piped, run in the same shell, directory and environment. Its exit status is
- * ignored as the recorded pipeline's was; a filter killed by a signal fails.
+ * `input` it was piped, run in the same shell, directory and environment. Its stages run one after
+ * another, each reading what the one before printed, so every stage's own exit status is known (a
+ * pipeline reports only its last stage's). A grep-family stage exiting 1 selected no lines: empty
+ * output, as the recording printed. Any other non-zero status or a signal is the filter's own
+ * error, never output, and fails the step naming the stage.
  */
 async function runDisplayFilter(
   request: RecordedCallRequest,
   filter: string,
   input: string,
   options: ProgramRunnerOptions,
-): Promise<WorkflowJsonValue> {
+): Promise<string> {
   const { step } = request;
-  const filtered = await runRecordedProgram(
-    { ...step.callable.program!, source: filter },
-    options,
-    step.callId,
-    input,
-  );
-  if (filtered.signal !== undefined || filtered.exitCode > 128) {
+  let output = input;
+  for (const stage of displayFilterStages(filter)) {
+    const run = await runRecordedProgram(
+      { ...step.callable.program!, source: stage.source },
+      options,
+      step.callId,
+      output,
+    );
+    if (run.signal === undefined && run.exitCode === 0) {
+      output = run.stdout;
+      continue;
+    }
+    if (
+      run.signal === undefined &&
+      run.exitCode === 1 &&
+      Object.hasOwn(GREP_FAMILY, stage.command)
+    ) {
+      output = "";
+      continue;
+    }
+    const status =
+      run.signal === undefined
+        ? `exited with code ${run.exitCode}`
+        : `was terminated by signal ${run.signal}`;
+    const tail = stderrTail(run.stderr);
     throw new Error(
-      `step '${step.id}' failed: its display filter was terminated (${filtered.signal ?? `exit code ${filtered.exitCode}`})`,
+      `step '${step.id}' failed: its display filter \`${stage.source}\` ${status}${tail.length > 0 ? `: ${tail}` : ""}`,
     );
   }
-  return filtered.value;
+  return output;
 }
 
 /**
- * A recording check's replay of a version-2 display-filter step (see `display-filter-replay.ts`):
+ * A version-2 display-filter step run with its filters applied (see `display-filter-replay.ts`):
  * the program `source` runs without its `cuts`, each cut pipeline's stdout bracketed by markers of
  * a fresh nonce; each bracketed chunk is then piped through the filter cut from that pipeline, and
  * the result spliced back between the verbatim output around it. The program must exit 0.
@@ -1985,11 +2139,7 @@ async function replayDisplayFilters(
       output += chunk.text;
       continue;
     }
-    const filtered = await runDisplayFilter(request, cuts[chunk.cut]!.filter, chunk.text, options);
-    if (typeof filtered !== "string") {
-      throw new Error(`step '${step.id}' failed: its display filter printed no text`);
-    }
-    output += filtered;
+    output += await runDisplayFilter(request, cuts[chunk.cut]!.filter, chunk.text, options);
   }
   return output;
 }

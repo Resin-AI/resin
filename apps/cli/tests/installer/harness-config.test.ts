@@ -503,6 +503,7 @@ describe("harness adapter operations", () => {
       expect(ompParsed.mcpServers.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: 615_000,
       });
       expect(ompParsed.mcpServers["resin-gateway"]).toBeUndefined();
       expect(ompParsed.mcpServers.user_tool).toBeDefined();

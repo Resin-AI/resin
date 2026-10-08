@@ -239,6 +239,33 @@ export const RESIN_LEARNED_TOOL_COMMANDS_META = "resin/learnedToolCommands";
  * has (`total`). The result's content stays the outputs array, so composition reads the same value.
  */
 export const RESIN_OUTPUT_STEPS_META = "resin/outputSteps";
+
+/**
+ * Tool-result `_meta` key a recorded workflow sets when the caller should see a text other than
+ * the result's content: a version-2 display-filter step's report (each command's status, what it
+ * printed, what its filters hid). The content stays the steps' values, so composition reads what
+ * the programs printed; the caller-facing paths show this text instead and drop the key.
+ */
+export const RESIN_DISPLAY_TEXT_META = "resin/displayText";
+
+/**
+ * The result a caller sees: its content replaced by the `RESIN_DISPLAY_TEXT_META` text when the
+ * result carries one, that key dropped. Composition reads the result before this, so it keeps the
+ * steps' values.
+ */
+export function withDisplayText<T extends { content: unknown; _meta?: Record<string, unknown> }>(
+  result: T,
+): T {
+  const text = result._meta?.[RESIN_DISPLAY_TEXT_META];
+  if (typeof text !== "string") return result;
+  const { [RESIN_DISPLAY_TEXT_META]: _text, ...meta } = result._meta!;
+  const { _meta: _dropped, ...rest } = result;
+  return {
+    ...rest,
+    content: [{ type: "text", text }],
+    ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+  } as T;
+}
 export type McpTool = z.infer<typeof McpToolSchema>;
 
 /**
