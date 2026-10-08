@@ -299,3 +299,28 @@ export function resolveResinMcpLaunch(
   }
   return { command, args: ["mcp"] };
 }
+
+/**
+ * How a harness hook runs `resin suggest --harness <harness>`: Resin's stable launcher in
+ * `<resin home>/bin` (`$RESIN_HOME`, else `<home>/.resin`). On native Windows the launcher is the
+ * Node entry `resin.mjs`, run with `nodePath` (default: the Node running Resin).
+ */
+export function resolveResinSuggestLaunch(
+  home: string,
+  env: NodeJS.ProcessEnv,
+  harness: string,
+  options: { platform?: NodeJS.Platform; nodePath?: string } = {},
+): ResinMcpLaunch {
+  const platform = options.platform ?? process.platform;
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const resinHome =
+    readHostPathEnv(env, "RESIN_HOME", platform) ?? pathApi.join(pathApi.resolve(home), ".resin");
+  const args = ["suggest", "--harness", harness];
+  if (platform === "win32") {
+    return {
+      command: options.nodePath ?? process.execPath,
+      args: [pathApi.join(resinHome, "bin", "resin.mjs"), ...args],
+    };
+  }
+  return { command: pathApi.join(resinHome, "bin", "resin"), args };
+}

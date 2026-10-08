@@ -120,6 +120,12 @@ export interface GatewayServerOptions {
    * such as a newer Resin release this long-lived process does not run. Undefined when none.
    */
   releaseNotice?: () => string | undefined;
+  /**
+   * Observes each known catalog listed for a connection (initialize, tools/list, and every open
+   * connection after a catalog change), e.g. to keep the command-suggestion index current. Called
+   * synchronously; it must not throw or block for long.
+   */
+  onCatalogListed?: (context: WorkspaceContext, tools: readonly CatalogNoticeTool[]) => void;
 }
 export interface ConnectionSession {
   connection: McpConnection;
@@ -359,6 +365,7 @@ export class LocalMcpGateway {
   private unsubscribeRouterListener?: () => void;
   private readonly catalogNotices: CatalogResponseNotices;
   private readonly releaseNotice?: () => string | undefined;
+  private readonly onCatalogListed?: GatewayServerOptions["onCatalogListed"];
   /** The release notice each connection was last given, so it is delivered once. */
   private readonly deliveredReleaseNotices = new WeakMap<McpConnection, string>();
 
@@ -389,6 +396,7 @@ export class LocalMcpGateway {
     this.onWorkspaceReady = options.onWorkspaceReady;
     this.cloudRuntime = options.cloudRuntime;
     this.releaseNotice = options.releaseNotice;
+    this.onCatalogListed = options.onCatalogListed;
     this.catalogNotices = new CatalogResponseNotices({
       listTools: (context) =>
         this.router.listCatalogNoticeTools?.(context) ?? this.router.listTools(context),
@@ -400,6 +408,7 @@ export class LocalMcpGateway {
       this.unsubscribeRouterListener = this.router.onToolListChanged(() => {
         this.catalogNotices.markChanged();
         this.broadcastToolListChanged();
+        this.observeOpenCatalogs();
       });
     }
 
@@ -757,6 +766,7 @@ export class LocalMcpGateway {
     const knownTools = connection.searchListing
       ? await this.knownCatalogTools(connection.workspaceContext, true)
       : undefined;
+    if (knownTools !== undefined) this.observeCatalog(connection.workspaceContext, knownTools);
     return {
       protocolVersion: LATEST_PROTOCOL_VERSION,
       capabilities: connection.serverCapabilities,
@@ -791,6 +801,31 @@ export class LocalMcpGateway {
     if (loaded || !waitForSync || runtime.catalogSettled === undefined) return loaded;
     await Promise.race([loading, runtime.catalogSettled(FIRST_TOOL_LIST_CATALOG_WAIT_MS)]);
     return loaded;
+  }
+
+  /** Hands a known catalog to the `onCatalogListed` observer; an observer failure is ignored. */
+  private observeCatalog(
+    context: McpConnection["workspaceContext"],
+    tools: readonly CatalogNoticeTool[],
+  ): void {
+    try {
+      this.onCatalogListed?.(context, tools);
+    } catch {
+      // Observing a listing never affects serving it.
+    }
+  }
+
+  /** After a catalog change, re-lists each open connection's known catalog for the observer. */
+  private observeOpenCatalogs(): void {
+    if (this.onCatalogListed === undefined) return;
+    for (const connection of this.getAllConnections()) {
+      if (!connection.isInitialized) continue;
+      void this.knownCatalogTools(connection.workspaceContext, false).then((tools) => {
+        if (tools !== undefined && !connection.isClosed) {
+          this.observeCatalog(connection.workspaceContext, tools);
+        }
+      });
+    }
   }
 
   /** The tools the workspace lists, or undefined while its catalog is unknown. */
@@ -854,6 +889,7 @@ export class LocalMcpGateway {
       connection.workspaceContext.workspaceId,
     );
     const knownTools = (await this.catalogKnown(false)) ? tools : undefined;
+    if (knownTools !== undefined) this.observeCatalog(context, knownTools);
     return { tools: toNativeToolCatalog(tools), ...learnedToolsMeta(knownTools) };
   }
   /**

@@ -49,6 +49,10 @@ It also installs a short guidance block in Claude's user memory, `~/.claude/CLAU
 
 Project-scope `.mcp.json` files are not touched.
 
+### Command-time suggestions
+
+`init` also registers a `PreToolUse` hook for `Bash` in Claude's user settings, `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json`), that runs `resin suggest --harness claude-code`. Before Claude runs a shell command, the hook checks whether a learned tool offered in that repository already runs it (for example `npx vitest run …` when a tool runs `vitest`) and, if one does, adds one line of context naming the tool and how to call it through `mcp__resin__invoke_tool`. It never blocks or changes the command, prints nothing otherwise, suggests a tool at most twice per session, and skips read-only lookups such as `git status` or `gh pr view`. Before changing an existing settings file Resin writes a backup beside it (`settings.json.resin-backup.<time>.bak`); other settings and hooks are preserved, running `init` again changes nothing, and `resin uninstall` removes only Resin's hook. See [Configuration](configuration.md#command-time-suggestions) to turn suggestions off.
+
 ### Manual Verification
 
 ```bash
@@ -177,6 +181,8 @@ Resin qualifies OMP against real sessions recorded with that release (`adapters/
 ```
 
 Resin keeps its learned-tool guidance in a managed block of `$OMP_HOME/agent/AGENTS.md` (`~/.omp/agent/AGENTS.md`), which OMP loads as a user context file in every project; a project's `.omp/APPEND_SYSTEM.md` would replace a global `APPEND_SYSTEM.md`, so Resin does not use that file. `resin uninstall` removes the block, the entry from the active config, and the entry from the legacy `~/.omp/config.json`.
+
+`resin init` also installs a Resin extension, `$OMP_HOME/agent/extensions/resin-command-suggest.ts` (`~/.omp/agent/extensions/…`). On each `bash` call it asks `resin suggest --harness omp` whether a learned tool in the command's repository already runs the command and, if one does, returns one line of `additionalContext` naming the tool and how to write its call to `xd://mcp__resin_invoke_tool`. It never blocks or rewrites the call and gives up silently after one second. Running `init` again leaves the file unchanged, a same-named file Resin did not write is never overwritten, and `resin uninstall` deletes it. New OMP sessions load it; running sessions do not.
 
 ### Session Observation
 

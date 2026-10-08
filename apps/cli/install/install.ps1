@@ -1,7 +1,7 @@
 # Resin Standalone Bootstrap Installer for Windows / PowerShell
 # Cryptographically verified, standalone bootstrap installer.
 # Helper URL: https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs
-# Helper SHA-256: f0cfb5a80d82ea752eaee9677e29fb8aedfeb83e4391815e33b0fcbba1f607c5
+# Helper SHA-256: ac2a1618bac75c1950c79d609a279ef975132d61834505f90911b4e1ca77ec14
 #
 # Native Windows (Windows PowerShell 5.1 or PowerShell 7+, Node.js >= 22):
 #   irm https://resin.sh/install.ps1 | iex
@@ -51,7 +51,7 @@ $ErrorActionPreference = 'Stop'
 
 # Pinned security constants
 $PINNED_HELPER_URL = "https://dist.resin.sh/releases/v1/installers/install-helper-v1.mjs"
-$PINNED_HELPER_SHA256 = "f0cfb5a80d82ea752eaee9677e29fb8aedfeb83e4391815e33b0fcbba1f607c5"
+$PINNED_HELPER_SHA256 = "ac2a1618bac75c1950c79d609a279ef975132d61834505f90911b4e1ca77ec14"
 $MIN_NODE_VERSION = 22
 
 # Install telemetry: best-effort install_started / install_completed / install_failed events
