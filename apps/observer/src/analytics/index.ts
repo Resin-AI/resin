@@ -58,6 +58,16 @@ export {
   effectiveWorkingDirectory,
   findRepositoryRoot,
 } from "./working-directory-identity.js";
+export {
+  RepositoryLocationAnnotator,
+  type RepositoryLocationAnnotatorOptions,
+} from "./repository-location.js";
+export {
+  type RepositoryIdentity,
+  clearRepositoryIdentityCache,
+  repositoryIdentity,
+  repositoryRelativeDirectory,
+} from "../repository-identity.js";
 
 export {
   type InvocationTelemetryUploaderOptions,

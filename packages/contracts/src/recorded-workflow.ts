@@ -27,6 +27,7 @@ import {
   programTokenValueAt,
   tokenizeProgram,
 } from "./program-tokens.js";
+import { type WorkflowStepLocation, workflowStepLocationProblem } from "./repository-location.js";
 import { isOptionalSetupSegment } from "./shell-and-chain.js";
 import {
   type ShellDialect,
@@ -422,6 +423,11 @@ export type WorkflowStep = {
    * came from the recording is established by the observer that builds the plan, not here.
    */
   origin?: "recorded" | "derivation";
+  /**
+   * Run this step in the caller's own checkout instead of where the recording ran (see
+   * {@link WorkflowStepLocation}). Absent: the step runs where it always has.
+   */
+  location?: WorkflowStepLocation;
 };
 
 /**
@@ -1600,6 +1606,7 @@ export function validateRecordedWorkflow(value: unknown): {
     }
   }
   const stepIds = new Set<string>();
+  const locatedRepositories = new Set<string>();
   for (const step of steps ?? []) {
     if (!isPlainObject(step) || typeof step.id !== "string" || step.id.length === 0) {
       errors.push("every step needs a non-empty id");
@@ -1659,6 +1666,27 @@ export function validateRecordedWorkflow(value: unknown): {
     if (origin === "derivation") {
       validateDerivationStep(step, errors);
     }
+    if (Object.hasOwn(step, "location")) {
+      const problem = workflowStepLocationProblem(step.location);
+      if (problem !== undefined) {
+        errors.push(`step ${step.id} ${problem}`);
+      } else {
+        const program = isPlainObject(callable) ? callable.program : undefined;
+        if (
+          origin === "derivation" ||
+          !isPlainObject(program) ||
+          program.kind === "patch" ||
+          typeof program.kind !== "string"
+        ) {
+          errors.push(`step ${step.id} location is only valid on a recorded program step`);
+        } else {
+          locatedRepositories.add((step.location as WorkflowStepLocation).repository);
+        }
+      }
+    }
+  }
+  if (locatedRepositories.size > 1) {
+    errors.push("every located step must name the same repository");
   }
   // Dependencies and bindings may only address steps that exist and come earlier.
   const order = new Map<string, number>();

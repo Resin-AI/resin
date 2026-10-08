@@ -49,6 +49,7 @@ import {
   ToolBundleLoader,
   type WorkerExecutionResult,
   WorkerProcess,
+  type WorkflowLocationAvailability,
   createInvocationGrant,
   encodeDeterministicTar,
   inspectArtifactImports,
@@ -56,6 +57,7 @@ import {
   resolveDenoExecutable,
   validateBundleEntryPath,
   verifyBundleSignature,
+  workflowLocationAvailability,
 } from "@resin/runtime";
 import {
   isDatedValue,
@@ -74,6 +76,7 @@ import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import { type WorkspaceContext, sessionWorkingDirectory } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
+import { callerRepository, toolRunnableHere } from "./tool-location.js";
 
 import {
   type OutputStepNumbers,
@@ -678,6 +681,62 @@ export class LocalArtifactExecutor {
     context: WorkspaceContext,
   ): ReadonlyMap<string, string> {
     return this.recordedWorkflowSummary(artifactDigest, context)?.defaults ?? new Map();
+  }
+
+  /**
+   * Whether the recorded-workflow tool stored under `artifactDigest` can run for the caller
+   * `context` describes (see `workflowLocationAvailability`); undefined when the digest is not a
+   * readable recorded-workflow artifact.
+   */
+  recordedWorkflowAvailability(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): WorkflowLocationAvailability | undefined {
+    const plan = this.readRecordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    return toolRunnableHere(plan, context, {
+      resolvePrivate: this.ownedPrivateResolver(plan, owner),
+    });
+  }
+
+  /** The verified-on-disk recorded plan of an artifact, or undefined. */
+  private readRecordedPlan(artifactDigest: string): RecordedWorkflow | undefined {
+    if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
+      return undefined;
+    }
+    const artifactDir = this.cache.getArtifactPath(artifactDigest);
+    const entrypoint = [BUNDLE_FILE_ENTRYPOINT_TS, BUNDLE_FILE_ENTRYPOINT_JS]
+      .map((file) => path.join(artifactDir, file))
+      .find(isRegularFileWithoutFollowingSymlink);
+    if (entrypoint === undefined) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
+      return validateRecordedWorkflow(parsed).valid ? (parsed as RecordedWorkflow) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Resolves a private value `plan` declares, only for the workspace that recorded it. */
+  private ownedPrivateResolver(
+    plan: RecordedWorkflow,
+    owner: string | undefined,
+  ): (reference: string) => unknown {
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    return (reference) => {
+      if (!declared.has(reference)) return undefined;
+      const recorded = store.origin?.(reference)?.workspaceId;
+      if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
+        return undefined;
+      }
+      try {
+        return resolvePrivateReference(store, reference);
+      } catch {
+        return undefined;
+      }
+    };
   }
 
   private recordedWorkflowSummary(
@@ -1909,6 +1968,21 @@ export class LocalArtifactExecutor {
       return failedToolResult("validation_error", missingDatedInputsMessage(dated, missing));
     }
 
+    // A plan pinned to a place the caller's checkout does not have is not runnable here: refused
+    // with the reason, never run in the recorded directory or anywhere else.
+    const caller = callerRepository(context);
+    const availability = workflowLocationAvailability(
+      plan,
+      { repository: caller },
+      { resolvePrivate: this.ownedPrivateResolver(plan, owner) },
+    );
+    if (!availability.available) {
+      return failedToolResult(
+        "runtime_unavailable",
+        `This tool cannot run here: ${availability.reason}.`,
+      );
+    }
+
     // A plan that routes a step back through this host needs the dispatcher; a plan that only runs
     // programs of its own does not, so the refusal is per requirement rather than per plan.
     const requiredRuntimes = [...new Set(plan.steps.map((step) => step.callable.runtime))];
@@ -2014,6 +2088,7 @@ export class LocalArtifactExecutor {
     const callable = instantiateRecordedWorkflow(artifact, {
       adapters,
       access: { workspaceId: executingWorkspaceId },
+      repository: { caller },
       resolvePrivate: (reference: string, access?: { workspaceId?: string }) => {
         if (!declaredPrivateReferences.has(reference)) {
           throw new Error(

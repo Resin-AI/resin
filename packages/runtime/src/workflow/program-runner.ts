@@ -1878,6 +1878,8 @@ export async function runRecordedCall(
   const replayOptions: ProgramRunnerOptions = {
     ...options,
     ...(workdirProfile && typeof requestedWorkdir === "string" ? { cwd: requestedWorkdir } : {}),
+    // A located step runs in the caller's checkout (the executor already pointed `workdir` there).
+    ...(request.workingDirectory === undefined ? {} : { cwd: request.workingDirectory }),
     ...(shellProfile === "bash-login-v1" || nativeCodexShell
       ? {
           shellInvocation: "bash-login" as const,

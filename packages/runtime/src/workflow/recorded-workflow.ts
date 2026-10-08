@@ -35,6 +35,11 @@ import type {
   WorkflowValueTemplate,
 } from "@resin/contracts";
 import { isRecordedCheckFailure } from "./display-filter-observation.js";
+import {
+  type CallerRepository,
+  locateStepCall,
+  resolveStepLocation,
+} from "./repository-location.js";
 
 /** One call, with the callable the record names and the arguments resolved for it. */
 export interface RecordedCallRequest {
@@ -68,6 +73,12 @@ export interface RecordedCallRequest {
    * that is what later steps bind.
    */
   onDisplay?: (text: string) => void;
+  /**
+   * The directory the call runs in, set for a step with a `location` resolved in the caller's
+   * checkout. It overrides the adapter's own default directory; the executor has already pointed
+   * every recorded working-directory argument at it.
+   */
+  workingDirectory?: string;
 }
 
 /**
@@ -123,6 +134,13 @@ export interface RecordedWorkflowExecutionOptions {
    * `RecordedCallRequest.displayFilter`. An invocation never sets it.
    */
   applyDisplayFilters?: boolean;
+  /**
+   * The checkout this invocation's caller works in (undefined: not in a git checkout). Given, a
+   * step with a `location` runs in `<caller root>/<location.path>`, and the run fails before any
+   * step starts when a located step cannot resolve there. Absent (replays and recording checks),
+   * locations are ignored and every step runs as recorded.
+   */
+  repository?: { caller: CallerRepository | undefined };
 }
 
 export type RecordedStepOutcome =
@@ -802,6 +820,30 @@ export async function executeRecordedWorkflow(
   // when no step was running at that moment, so a cancelled invocation never reads as completed.
   let cancelled: string | undefined;
 
+  // A located step that cannot resolve in the caller's checkout means the tool is not runnable
+  // here: nothing runs, rather than running some steps or running them somewhere else.
+  const locatedDirectories = new Map<string, string>();
+  if (options.repository !== undefined) {
+    for (const step of workflow.steps) {
+      if (step.location === undefined) continue;
+      const resolved = resolveStepLocation(step.location, options.repository.caller);
+      if ("reason" in resolved) {
+        const reason = `this tool cannot run here: ${resolved.reason}`;
+        return {
+          status: "failed",
+          steps: workflow.steps.map((skipped) => ({
+            stepId: skipped.id,
+            status: "skipped" as const,
+            reason,
+          })),
+          result: undefined,
+          error: reason,
+        };
+      }
+      locatedDirectories.set(step.id, resolved.directory);
+    }
+  }
+
   for (const step of workflow.steps) {
     if (cancelled === undefined && options.signal?.aborted) {
       cancelled = workflowCancellation(options.signal);
@@ -868,11 +910,18 @@ export async function executeRecordedWorkflow(
       continue;
     }
 
+    const locatedDirectory = locatedDirectories.get(step.id);
+    const call =
+      locatedDirectory === undefined
+        ? { step, arguments: args }
+        : locateStepCall(step, args, locatedDirectory);
+
     try {
       let display: string | undefined;
       const result = await adapter.call({
-        step,
-        arguments: args,
+        step: call.step,
+        arguments: call.arguments,
+        ...(locatedDirectory === undefined ? {} : { workingDirectory: locatedDirectory }),
         ...(options.resolvePrivate ? { resolvePrivate: options.resolvePrivate } : {}),
         ...(options.access ? { access: options.access } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
