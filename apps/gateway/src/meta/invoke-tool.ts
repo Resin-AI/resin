@@ -15,7 +15,11 @@ import {
 } from "@resin/contracts";
 import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
-import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
+import {
+  RecordedExecutionClock,
+  type SafetyGateEvaluator,
+  WorkflowReferenceScope,
+} from "@resin/runtime";
 import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
 import {
   type CallToolResult,
@@ -232,6 +236,8 @@ export function createInvokeToolHandler(
   ): Promise<CallToolResult> => {
     const startTime = Date.now();
     const startedAt = new Date(startTime).toISOString();
+    // Times the tool's recorded calls apart from Resin's own work around them.
+    const executionClock = new RecordedExecutionClock();
     const publicName = normalizeIdentifier(params.name) ?? normalizeIdentifier(params.tool_name);
     const toolId = normalizeIdentifier(params.toolId);
     const displayIdentifier = publicName ?? toolId;
@@ -320,7 +326,7 @@ export function createInvokeToolHandler(
             text:
               (publicName && registry.retiredToolMessage(publicName, context.workspaceId)) ||
               (toolId && registry.retiredToolMessage(toolId, context.workspaceId)) ||
-              `Tool '${displayIdentifier}' not found or not accessible in workspace '${context.workspaceId}'.`,
+              `Tool '${displayIdentifier}' not found or not accessible in workspace '${context.workspaceId}'. Call search_tools to find the current tool for this job.`,
           },
         ],
       };
@@ -383,6 +389,7 @@ export function createInvokeToolHandler(
         const completedTime = Date.now();
         const completedAt = new Date(completedTime).toISOString();
         const durationMs = Math.max(0, completedTime - startTime);
+        const measuredExecutionMs = executionClock.durationMs();
         const semVerRegex =
           /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
         const toolVersion =
@@ -416,6 +423,9 @@ export function createInvokeToolHandler(
           startedAt,
           completedAt,
           durationMs,
+          ...(measuredExecutionMs === undefined
+            ? {}
+            : { executionDurationMs: Math.min(measuredExecutionMs, durationMs) }),
           status,
           inputDigest,
           ...(outputDigest ? { outputDigest } : {}),
@@ -526,7 +536,7 @@ export function createInvokeToolHandler(
           content: [
             {
               type: "text",
-              text: `Version '${requestedVersion}' of tool '${displayIdentifier}' not found or not accessible.`,
+              text: `Version '${requestedVersion}' of tool '${displayIdentifier}' not found or not accessible. Omit version to run the current one.`,
             },
           ],
         };
@@ -595,7 +605,7 @@ export function createInvokeToolHandler(
         content: [
           {
             type: "text",
-            text: `Parameter validation failed for tool '${resolvedTool.name}': ${validation.errors.join("; ")}`,
+            text: `Parameter validation failed for tool '${resolvedTool.name}': ${validation.errors.join("; ")}. Its inputs may have changed: get_tool_schema(name) shows the current inputSchema.`,
           },
         ],
       };
@@ -646,17 +656,19 @@ export function createInvokeToolHandler(
     }
 
     try {
-      const result = await invocationRouter.invoke({
-        toolId: resolvedTool.toolId,
-        name: resolvedTool.name,
-        version: resolvedTool.version,
-        parameters: dispatchParams as JsonRpcParams,
-        context,
-        manifest: resolvedTool.manifest,
-        signal: abortController.signal,
-        onProgress: options?.onProgress,
-        timeoutMs,
-      });
+      const result = await executionClock.run(() =>
+        invocationRouter.invoke({
+          toolId: resolvedTool.toolId,
+          name: resolvedTool.name,
+          version: resolvedTool.version,
+          parameters: dispatchParams as JsonRpcParams,
+          context,
+          manifest: resolvedTool.manifest,
+          signal: abortController.signal,
+          onProgress: options?.onProgress,
+          timeoutMs,
+        }),
+      );
       // The caller composed this call, so it gets a handle to the result rather than the bare
       // payload: later calls in the same session can name the handle instead of copying the
       // value, and the record keeps the connection.

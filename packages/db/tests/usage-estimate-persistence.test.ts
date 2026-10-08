@@ -34,6 +34,7 @@ describe("Invocation Record Usage Estimate Persistence", () => {
       startedAt: "2026-08-17T14:05:00.000Z",
       completedAt: "2026-08-17T14:05:01.250Z",
       durationMs: 1250,
+      executionDurationMs: 1100,
       status: "success",
       inputDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       outputDigest: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
@@ -62,6 +63,9 @@ describe("Invocation Record Usage Estimate Persistence", () => {
     const pending = store.audit.listPendingInvocationUploads(10);
     expect(pending).toHaveLength(1);
     expect(pending[0].usageEstimate).toEqual(usageEstimate);
+    expect(fetched?.executionDurationMs).toBe(1100);
+    expect(list[0].executionDurationMs).toBe(1100);
+    expect(pending[0].executionDurationMs).toBe(1100);
 
     // 4. Verify raw DB column contains valid JSON
     const rawRow = store.conn.get<{ usage_estimate_json: string }>(
@@ -115,5 +119,6 @@ describe("Invocation Record Usage Estimate Persistence", () => {
     const pending = store.audit.listPendingInvocationUploads(10);
     expect(pending).toHaveLength(1);
     expect(pending[0].usageEstimate).toBeUndefined();
+    expect(pending[0].executionDurationMs).toBeUndefined();
   });
 });

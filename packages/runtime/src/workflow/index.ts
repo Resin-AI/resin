@@ -6,6 +6,7 @@ export * from "./recorded-workflow.js";
 export * from "./repository-location.js";
 export * from "./runtime-families.js";
 export * from "./program-runner.js";
+export * from "./execution-time.js";
 export * from "./shell-invocation.js";
 export * from "./process-adapter.js";
 export * from "./program-adapter.js";

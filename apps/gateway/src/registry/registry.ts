@@ -679,7 +679,7 @@ export class ToolRegistry {
       retired.ids.get(identifier) ?? (retired.names.has(identifier) ? identifier : undefined);
     return name === undefined
       ? undefined
-      : `Tool '${name}' is no longer available: it was removed from this workspace's catalog.`;
+      : `Tool '${name}' is no longer available: it was removed from this workspace's catalog. Call search_tools to find the current tool for this job.`;
   }
 
   /**

@@ -180,18 +180,19 @@ describe("serving a learned tool with a dated recorded default", () => {
     return { registry, context };
   }
 
-  function expectDatedRequired(schema: {
-    required?: string[];
-    properties?: Record<string, { description?: string }>;
-  }) {
+  function expectDatedRequired(
+    schema: {
+      required?: string[];
+      properties?: Record<string, { description?: string }>;
+    },
+    plainDescription = "AWS CLI profile name. Omit to use the recorded value.",
+  ) {
     expect(schema.required).toEqual(["cost_time_period"]);
     expect(schema.properties?.cost_time_period?.description).toContain(
       `Required: its recorded value (${RECORDED_PERIOD}) was a date`,
     );
     expect(schema.properties?.cost_time_period?.description).not.toContain("Omit to use");
-    expect(schema.properties?.aws_profile?.description).toBe(
-      "AWS CLI profile name. Omit to use the recorded value.",
-    );
+    expect(schema.properties?.aws_profile?.description).toBe(plainDescription);
   }
 
   it("lists the dated input as required in search_tools", async () => {
@@ -201,7 +202,9 @@ describe("serving a learned tool with a dated recorded default", () => {
     );
     const tool = response.tools.find((each) => each.name === "verify_identity_and_get_cost_usage");
     expect(tool).toBeDefined();
-    expectDatedRequired(tool?.inputSchema as never);
+    // A search says once, in its note, what omitting an input does.
+    expectDatedRequired(tool?.inputSchema as never, "AWS CLI profile name.");
+    expect(response.note).toBe("Omitted inputs reuse their recorded values.");
   });
 
   it("lists the dated input as required in get_tool_schema", async () => {

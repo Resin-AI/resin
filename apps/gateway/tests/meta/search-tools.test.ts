@@ -114,7 +114,12 @@ describe("search_tools Meta-Tool", () => {
     // The session started with 1.0.1 registered; the catalog sync then brought 1.0.2.
     for (const version of ["1.0.1", "1.0.2"]) {
       await registry.registerTool(
-        makeManifest({ id: "tool_deploy", name: "deploy_application", version }),
+        makeManifest({
+          id: "tool_deploy",
+          name: "deploy_application",
+          version,
+          description: `Deploys the application (${version}).`,
+        }),
         undefined,
         { workspaceId: "ws-versions" },
       );
@@ -132,7 +137,9 @@ describe("search_tools Meta-Tool", () => {
       );
 
     expect(inspected.version).toBe("1.0.2");
-    expect(found?.version).toBe(inspected.version);
+    expect(found?.description).toBe("Deploys the application (1.0.2).");
+    // Only a pinned version is named: otherwise the listed one is the one invoke_tool runs.
+    expect(found).not.toHaveProperty("version");
   });
 
   it("strictly enforces workspace isolation and never leaks other workspaces' tools", async () => {
@@ -330,41 +337,63 @@ describe("search_tools Meta-Tool", () => {
     expect(capData.tools.map((t) => t.name)).not.toContain("github_fetcher");
   });
 
-  it("generates structured capability summaries for tools", async () => {
+  it("lists only what an agent uses, naming a field only when it holds an unusual value", async () => {
     const registry = new ToolRegistry();
     const handler = createSearchToolsHandler(registry);
-    const context = makeContext("ws-summary");
-
+    const context = makeContext("ws-shape", "session-shape");
     await registry.registerTool(
       makeManifest({
-        id: "tool_caps_summary",
-        name: "s3_syncer",
+        id: "tool_plain",
+        name: "plain_syncer",
         capabilities: {
-          net: {
-            allowedHosts: ["s3.amazonaws.com"],
-            allowedPorts: [443],
-            allowOutbound: true,
-          },
-          fs: {
-            readPaths: ["/data"],
-            writePaths: [],
-            allowWorkspaceRoot: false,
-            allowTemp: false,
-          },
+          net: { allowedHosts: ["s3.amazonaws.com"], allowedPorts: [443], allowOutbound: true },
         },
+        metadata: { tags: ["sync"] },
       }),
       undefined,
-      { workspaceId: "ws-summary" },
+      { workspaceId: "ws-shape" },
+    );
+    await registry.registerTool(
+      makeManifest({ id: "tool_pinned", name: "pinned_syncer" }),
+      undefined,
+      { workspaceId: "ws-shape" },
+    );
+    await registry.pinToolVersion("tool_pinned", "1.0.0", "ws-shape");
+    await registry.registerTool(
+      makeManifest({ id: "tool_disabled", name: "disabled_syncer" }),
+      undefined,
+      { workspaceId: "ws-shape" },
+    );
+    await registry.disableTool("tool_disabled", "ws-shape");
+    await registry.registerTool(
+      makeManifest({ id: "tool_session", name: "session_syncer", scope: "session" }),
+      undefined,
+      { workspaceId: "ws-shape", sessionId: "session-shape", scope: "session" },
     );
 
-    const res = await handler(context, { query: "s3_syncer" });
-    const data = parseSearchResponse(res);
-    const tool = data.tools.find((t) => t.name === "s3_syncer");
-    expect(tool).toBeDefined();
-    expect(tool?.capabilities.types).toEqual(expect.arrayContaining(["network", "filesystem"]));
-    expect(tool?.capabilities.network?.allowedHosts).toContain("s3.amazonaws.com");
-    expect(tool?.capabilities.filesystem?.readOnly).toBe(true);
-    expect(tool?.capabilities.filesystem?.allowedPaths).toContain("/data");
+    const byName = new Map(
+      parseSearchResponse(await handler(context, { query: "syncer", status: "all" })).tools.map(
+        (tool) => [tool.name, tool],
+      ),
+    );
+
+    const plain = byName.get("plain_syncer");
+    expect(Object.keys(plain ?? {}).sort()).toEqual([
+      "description",
+      "inputSchema",
+      "name",
+      "score",
+      "toolId",
+    ]);
+    expect(byName.get("pinned_syncer")).toMatchObject({ version: "1.0.0", isPinned: true });
+    expect(byName.get("pinned_syncer")).not.toHaveProperty("status");
+    expect(byName.get("disabled_syncer")).toMatchObject({ status: "disabled", isDisabled: true });
+    expect(byName.get("session_syncer")).toMatchObject({ scope: "session" });
+    // Tags and capabilities still filter, though no item lists them.
+    const tagged = parseSearchResponse(await handler(context, { tags: ["sync"] }));
+    expect(tagged.tools.map((tool) => tool.name)).toEqual(["plain_syncer"]);
+    const networked = parseSearchResponse(await handler(context, { capabilities: ["network"] }));
+    expect(networked.tools.map((tool) => tool.name)).toEqual(["plain_syncer"]);
   });
 });
 
@@ -618,9 +647,12 @@ describe("search_tools over a small catalog of learned AWS tools", () => {
       note: NO_MATCHING_TOOL_NOTE,
     });
 
-    expect(await searchAwsResponse("aws cost")).not.toHaveProperty("note");
-    expect(await searchAwsResponse("")).not.toHaveProperty("note");
-    expect(await searchAwsResponse("   ")).not.toHaveProperty("note");
+    // With results, the note only says once what the items no longer repeat.
+    for (const query of ["aws cost", "", "   "]) {
+      expect((await searchAwsResponse(query)).note).toBe(
+        "Omitted inputs reuse their recorded values.",
+      );
+    }
   });
 
   it("matches a command a tool's recorded program runs, but not a value one run passed it", async () => {
@@ -676,6 +708,22 @@ describe("search_tools over the learned tools of a later run", () => {
     return (await searchLearnedCatalog(laterTools, query)).tools.map((tool) => tool.name);
   }
 
+  it("keeps a leading Runs sentence that says more than the recorded program", async () => {
+    const listed = await searchLearnedCatalog(laterTools, "");
+    const byName = new Map(listed.tools.map((tool) => [tool.name, tool.description]));
+
+    // "to verify the caller identity and retrieve monthly" is not in the recorded program.
+    expect(byName.get("get_aws_cost_and_usage")).toMatch(
+      /^Runs `aws sts get-caller-identity .* to verify the caller identity and retrieve monthly\. The job ran 2 times/,
+    );
+    // A sentence listing only the recorded command goes; the purpose after it stays.
+    expect(byName.get("describe_cloudwatch_alarms")).toMatch(
+      /^Returns the JSON result of describing the specified CloudWatch alarms\. .*\n\nRecorded on this machine:\n/s,
+    );
+    // One sentence the program restates is all the catalog says, so it stays.
+    expect(byName.get("run_omp_grievances")).toMatch(/^Runs omp grievances, processing complaint/);
+  });
+
   it("finds nothing for a question about the acme daemon that only recorded values mention", async () => {
     // `acme` is only in the recorded profile and alarm names, `daemons` only in an alarm name,
     // `service` only in `Key=SERVICE` and `machine` only in Resin's "Recorded on this machine".
@@ -705,5 +753,387 @@ describe("search_tools over the learned tools of a later run", () => {
     expect(
       await searchLater("PostHog errors analytics insights exception issues last 36 hours"),
     ).toEqual([]);
+  });
+});
+
+/** A learned tool with its local recorded program and the commands that program runs. */
+interface RecordedLuauTool {
+  name: string;
+  catalog: string;
+  recorded: string;
+  commands: string[];
+  parameters: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+    additionalProperties: false;
+  };
+}
+
+const PROVISIONAL = "Learned from one run; defaults are the recorded values.";
+const OMIT = " Omit to use the recorded value.";
+const LIST = "A list of words: each item is passed to the command as one separate argument.";
+const LIST_ITEMS = { type: "string", minLength: 1, pattern: "^[^-]" };
+
+/** One of the near-duplicate tools a Luau project accumulates: tests, then format and lint. */
+function luauChecks(name: string, suite: string): RecordedLuauTool {
+  return {
+    name,
+    catalog: `Runs \`lune run {test_script} --suite {test_suite} 2>&1 | grep -E "FAILED|Totals"\`, \`stylua --check {format_paths}\` and \`selene {lint_paths}\`. Runs the ${suite} test suite, then checks formatting and lints the Luau sources. Returns the combined output as JSON. Call this when you need to verify Luau changes before committing instead of running each command by hand. ${PROVISIONAL}`,
+    recorded: [
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      'lune run {test_script} --suite {test_suite} 2>&1 | grep -E "FAILED|Totals"',
+      "Step 2 runs this recorded shell program:",
+      "stylua --check {format_paths}",
+      "Step 3 runs this recorded shell program:",
+      "selene {lint_paths}",
+      `Parameters (each replaces its {name} above; omitted, the recorded value runs): test_script = scripts/test.luau; test_suite = ${suite}; format_paths = ["src","scripts","tests"]; lint_paths = ["src"]`,
+    ].join("\n"),
+    commands: ["lune run", "grep", "stylua", "selene"],
+    parameters: {
+      type: "object",
+      properties: {
+        test_script: {
+          type: "string",
+          description: `A file path under scripts/, used in step 1 as the Luau script to run.${OMIT}`,
+        },
+        test_suite: {
+          type: "string",
+          description: `Test suite name, used in step 1's --suite flag.${OMIT}`,
+        },
+        format_paths: {
+          type: "array",
+          items: LIST_ITEMS,
+          minItems: 1,
+          description: `${LIST} Paths to check with stylua, used in step 2.${OMIT}`,
+        },
+        lint_paths: {
+          type: "array",
+          items: LIST_ITEMS,
+          minItems: 1,
+          description: `${LIST}${OMIT}`,
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  };
+}
+
+function luauSuite(name: string, suite: string): RecordedLuauTool {
+  return {
+    name,
+    catalog: `Runs \`lune run {test_script} --suite {test_suite} 2>&1 | grep -E "FAILED|Totals"\`. Runs the ${suite} test suite and keeps only failures and totals. ${PROVISIONAL}`,
+    recorded: [
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      'lune run {test_script} --suite {test_suite} 2>&1 | grep -E "FAILED|Totals"',
+      `Parameters (each replaces its {name} above; omitted, the recorded value runs): test_script = scripts/test.luau; test_suite = ${suite}`,
+    ].join("\n"),
+    commands: ["lune run", "grep"],
+    parameters: {
+      type: "object",
+      properties: {
+        test_script: { type: "string", description: `The Luau test runner script.${OMIT}` },
+        test_suite: { type: "string", description: `Test suite name.${OMIT}` },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  };
+}
+
+/** Fifteen tools in five command sets, ten of them running the same tests, format and lint. */
+const luauTools: RecordedLuauTool[] = [
+  ...[
+    "HighwayRunService",
+    "RoundService",
+    "ShopService",
+    "DataService",
+    "VehicleService",
+    "LeaderboardService",
+    "QuestService",
+    "InventoryService",
+    "CameraController",
+    "SoundController",
+  ].map((suite, index) =>
+    luauChecks(index === 0 ? "run_luau_checks" : `run_luau_checks_${index + 1}`, suite),
+  ),
+  luauSuite("run_lune_suite", "HighwayRunService"),
+  luauSuite("run_lune_suite_2", "RoundService"),
+  {
+    name: "run_lune_tests",
+    // The cloud cut this summary short: the "Runs" sentence is all it says.
+    catalog: `Runs \`lune run {test_script} 2>&1 | tail -40\`. ${PROVISIONAL}`,
+    recorded: [
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      "lune run {test_script} 2>&1 | tail -40",
+      "Parameters (each replaces its {name} above; omitted, the recorded value runs): test_script = scripts/test.luau",
+    ].join("\n"),
+    commands: ["lune run", "tail"],
+    parameters: {
+      type: "object",
+      properties: { test_script: { type: "string", description: `Script to run.${OMIT}` } },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "check_luau_format",
+    catalog: `Runs \`stylua --check {format_paths}\`. Checks Luau formatting without rewriting files. ${PROVISIONAL}`,
+    recorded: [
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      "stylua --check {format_paths}",
+      'Parameters (each replaces its {name} above; omitted, the recorded value runs): format_paths = ["src"]',
+    ].join("\n"),
+    commands: ["stylua"],
+    parameters: {
+      type: "object",
+      properties: {
+        format_paths: {
+          type: "array",
+          items: LIST_ITEMS,
+          minItems: 1,
+          description: `${LIST}${OMIT}`,
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "lint_luau",
+    catalog: `Runs \`selene src && stylua --check src\`. Lints and format-checks the Luau sources. ${PROVISIONAL}`,
+    recorded: [
+      "Recorded on this machine:",
+      "Step 1 runs this recorded shell program:",
+      "selene src && stylua --check src",
+    ].join("\n"),
+    commands: ["selene", "stylua"],
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+];
+
+/**
+ * The rest of the workspace: tools for other jobs. With them, the Luau tools are fewer than half
+ * the catalog, so `lune`, `stylua` and `selene` stay distinctive enough to match.
+ */
+const otherTools: RecordedLuauTool[] = [
+  ["show_git_log", "git log --oneline -n {count}", "git"],
+  ["view_pull_request", "gh pr view {pr}", "gh pr view"],
+  ["install_packages", "pnpm install --frozen-lockfile", "pnpm"],
+  ["fetch_release_notes", "curl -sL {url}", "curl"],
+  ["publish_place", "rojo upload --asset_id {asset}", "rojo"],
+  ["build_place", "rojo build -o {output}", "rojo build"],
+  ["sync_wally_packages", "wally install", "wally"],
+  ["list_docker_containers", "docker ps --format {format}", "docker"],
+  ["tail_daemon_log", "journalctl -u {unit} -n 200", "journalctl"],
+  ["describe_alarms", "aws cloudwatch describe-alarms --alarm-names {names}", "aws"],
+  ["query_posthog_events", "posthog-cli query {hogql}", "posthog-cli"],
+  ["render_logo", "blender -b {file} -o {out}", "blender"],
+  ["resize_icons", "magick mogrify -resize {size} {glob}", "magick"],
+  ["count_source_lines", "tokei src", "tokei"],
+  ["diff_place_files", "rbxdiff {left} {right}", "rbxdiff"],
+  ["export_translations", "jq '.entries' {file}", "jq"],
+  ["ping_studio_bridge", "nc -z localhost {port}", "nc"],
+  ["archive_screenshots", "tar czf {archive} screenshots", "tar"],
+  ["upload_audio", "rbxcloud assets create --file {file}", "rbxcloud"],
+  ["clean_build_cache", "rm -rf {cache_dir}", "rm"],
+].map(([name, program, command]) => ({
+  name: String(name),
+  catalog: `Runs \`${program}\`. ${PROVISIONAL}`,
+  recorded: ["Recorded on this machine:", "Step 1 runs this recorded shell program:", program].join(
+    "\n",
+  ),
+  commands: [String(command)],
+  parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+}));
+
+/** A fixture tool by name. */
+function workspaceTool(name: string): RecordedLuauTool | undefined {
+  return [...luauTools, ...otherTools].find((each) => each.name === name);
+}
+
+/** Searches the fixture workspace. The Luau tools alone are tagged `luau`. */
+async function searchLuau(
+  params: Record<string, unknown>,
+  privateValues: readonly string[] = [],
+): Promise<SearchToolsResponse> {
+  const registry = new ToolRegistry();
+  const byDigest = new Map<string, RecordedLuauTool>();
+  for (const [index, tool] of [...luauTools, ...otherTools].entries()) {
+    const artifactDigest = index.toString(16).padStart(64, "0");
+    byDigest.set(artifactDigest, tool);
+    await registry.registerTool(
+      makeManifest({
+        id: `tool_${tool.name}`,
+        name: tool.name,
+        description: tool.catalog,
+        parameters: ToolParameterSchema.parse(tool.parameters),
+        metadata: { tags: luauTools.includes(tool) ? ["shell", "luau"] : ["shell"] },
+      }),
+      undefined,
+      { workspaceId: "ws-luau", artifactDigest },
+    );
+  }
+  const lookup = (tool: { artifactDigest?: string }) =>
+    tool.artifactDigest === undefined ? undefined : byDigest.get(tool.artifactDigest);
+  registry.setLocalToolCommands((tool) => lookup(tool)?.commands ?? []);
+  registry.setLocalToolPrivateValues(() => privateValues);
+  return parseSearchResponse(
+    await createSearchToolsHandler(registry, (tool) => lookup(tool)?.recorded)(
+      makeContext("ws-luau"),
+      params,
+    ),
+  );
+}
+
+describe("search_tools over near-duplicate learned tools", () => {
+  const query = "lune run scripts/test.luau --suite, stylua --check, selene";
+
+  it("gives each command set one full item and lists the rest of the set under it", async () => {
+    const response = await searchLuau({ query, limit: 100 });
+    const [lead] = response.tools;
+
+    expect(lead?.name).toBe("run_luau_checks");
+    expect(lead?.similar?.map((tool) => tool.name).sort()).toEqual(
+      luauTools
+        .filter((tool) => tool.name.startsWith("run_luau_checks_"))
+        .map((tool) => tool.name)
+        .sort(),
+    );
+    for (const similar of lead?.similar ?? []) {
+      expect(Object.keys(similar).sort()).toEqual([
+        "inputSchema",
+        "name",
+        "purpose",
+        "score",
+        "toolId",
+      ]);
+      expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
+      expect(similar.purpose.length).toBeLessThanOrEqual(140);
+      // Invocable as listed: its whole schema, only the property descriptions left out.
+      const declared = workspaceTool(similar.name)?.parameters;
+      expect(similar.inputSchema).toEqual({
+        ...declared,
+        properties: Object.fromEntries(
+          Object.entries(declared?.properties ?? {}).map(([name, property]) => [
+            name,
+            Object.fromEntries(
+              Object.entries(property ?? {}).filter(([key]) => key !== "description"),
+            ),
+          ]),
+        ),
+      });
+    }
+    expect(lead?.similar?.[0]?.purpose).toMatch(
+      /^Runs the \w+ test suite, then checks formatting and lints the Luau sources\.$/,
+    );
+    // Materially different tools keep items of their own, one per command set.
+    const groups = response.tools.map((tool) =>
+      [...(workspaceTool(tool.name)?.commands ?? [])].sort().join(" "),
+    );
+    expect(new Set(groups).size).toBe(groups.length);
+    expect(response.total).toBe(response.tools.length);
+    expect(response.note).toContain("A tool under `similar` runs the same commands");
+  });
+
+  it("serves every full item's whole input schema, without the sentences each input repeated", async () => {
+    const response = await searchLuau({ query, limit: 100 });
+    for (const item of response.tools) {
+      expect(Object.keys(item.inputSchema.properties ?? {}).sort()).toEqual(
+        Object.keys(workspaceTool(item.name)?.parameters.properties ?? { missing: true }).sort(),
+      );
+    }
+    const schema = response.tools[0]?.inputSchema;
+    expect(schema).toEqual({
+      type: "object",
+      properties: {
+        test_script: {
+          type: "string",
+          description: "A file path under scripts/, used in step 1 as the Luau script to run.",
+        },
+        test_suite: {
+          type: "string",
+          description: "Test suite name, used in step 1's --suite flag.",
+        },
+        format_paths: {
+          type: "array",
+          items: LIST_ITEMS,
+          minItems: 1,
+          description: "Paths to check with stylua, used in step 2.",
+        },
+        // A description that held nothing but the repeated sentences is dropped.
+        lint_paths: { type: "array", items: LIST_ITEMS, minItems: 1 },
+      },
+      required: [],
+      additionalProperties: false,
+    });
+    expect(response.note).toContain("Omitted inputs reuse their recorded values.");
+    expect(response.note).toContain(
+      "Each item of an array input is passed to the command as one separate argument.",
+    );
+  });
+
+  it("keeps the purpose and the recorded program but says neither the commands nor the defaults twice", async () => {
+    const response = await searchLuau({ query, limit: 100 });
+    const lead = response.tools[0];
+    const recordedProgram = luauTools[0]?.recorded;
+
+    expect(lead?.description).toBe(
+      `Runs the HighwayRunService test suite, then checks formatting and lints the Luau sources. Returns the combined output as JSON. Call this when you need to verify Luau changes before committing instead of running each command by hand.\n\n${recordedProgram}`,
+    );
+    // A "Runs" sentence that is all the catalog says stays.
+    const listed = await searchLuau({ tags: ["luau"], limit: 100 });
+    const tests = listed.tools.find((tool) => tool.name === "run_lune_tests");
+    expect(tests?.description).toMatch(/^Runs `lune run \{test_script\} 2>&1 \| tail -40`\.\n\n/);
+    expect(JSON.stringify(response)).not.toContain("Learned from one run");
+  });
+
+  it("never shows a private value in a similar tool's purpose", async () => {
+    const response = await searchLuau({ query, limit: 100 }, ["RoundService"]);
+    const purposes = (response.tools[0]?.similar ?? []).map((tool) => tool.purpose);
+    expect(purposes.join("\n")).not.toContain("RoundService");
+    expect(JSON.stringify(response)).not.toContain("RoundService");
+  });
+
+  it("pages through items, each standing for its command set, so no tool shows twice", async () => {
+    const all = await searchLuau({ tags: ["luau"] });
+    expect(all.total).toBe(5);
+
+    const seen: string[] = [];
+    for (const offset of [0, 2, 4]) {
+      const page = await searchLuau({ tags: ["luau"], limit: 2, offset });
+      expect(page.total).toBe(5);
+      expect(page.tools).toHaveLength(offset === 4 ? 1 : 2);
+      expect(page.hasMore).toBe(offset < 4);
+      for (const item of page.tools) {
+        seen.push(item.name, ...(item.similar ?? []).map((tool) => tool.name));
+      }
+    }
+    expect(seen.sort()).toEqual(luauTools.map((tool) => tool.name).sort());
+  });
+
+  it("never groups tools that run no recorded command", async () => {
+    const registry = new ToolRegistry();
+    for (const name of ["describe_alpha", "describe_beta"]) {
+      await registry.registerTool(
+        makeManifest({ id: `tool_${name}`, name, description: "Describes the release." }),
+        undefined,
+        { workspaceId: "ws-plain" },
+      );
+    }
+    registry.setLocalToolCommands(() => []);
+    const response = parseSearchResponse(
+      await createSearchToolsHandler(registry)(makeContext("ws-plain"), { query: "describe" }),
+    );
+
+    expect(response.tools.map((tool) => tool.name)).toEqual(["describe_alpha", "describe_beta"]);
+    expect(response.tools.every((tool) => tool.similar === undefined)).toBe(true);
+    // Nothing was shortened, so there is nothing to note.
+    expect(response).not.toHaveProperty("note");
   });
 });

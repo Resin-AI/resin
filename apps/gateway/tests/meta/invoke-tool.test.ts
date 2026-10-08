@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import {
   CapabilityManifestSchema,
   type InvocationRecord,
@@ -7,6 +8,7 @@ import {
   ToolParameterSchema,
   ToolRuntimeRequirementSchema,
 } from "@resin/contracts";
+import { timeRecordedCall } from "@resin/runtime";
 import { describe, expect, it } from "vitest";
 import { failedToolResult } from "../../src/meta/invocation-failure.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
@@ -407,6 +409,69 @@ describe("invoke_tool Meta-Tool", () => {
     expect(validated.sessionId).toBe("session-abc");
     expect(validated.errorDetails).toBeDefined();
     expect(validated.errorDetails?.message).toContain("Target service unavailable");
+  });
+
+  it("records how long the tool's recorded calls ran, apart from the rest of the call", async () => {
+    const registry = new ToolRegistry();
+    await registry.registerTool(makeManifest({ limits: { timeoutMs: 5000 } }), undefined, {
+      workspaceId: "ws-invoke",
+    });
+    const records: InvocationRecord[] = [];
+    let mode: "success" | "error" | "throw" | "nothing" = "success";
+    const mockRouter: ToolInvocationRouter = {
+      async invoke(): Promise<CallToolResult> {
+        if (mode === "nothing") return failedToolResult("runtime_unavailable", "not here");
+        // A recorded call, then Resin's own work after it (report building, presentation).
+        await timeRecordedCall(() => sleep(120));
+        await sleep(150);
+        if (mode === "throw") throw new Error("lost after running");
+        return mode === "error"
+          ? failedToolResult("check_failed", "2 tests failed")
+          : { content: [{ type: "text", text: "ok" }] };
+      },
+    };
+    const handler = createInvokeToolHandler(registry, mockRouter, {
+      onInvocationRecorded: async (record) => {
+        records.push(record);
+      },
+    });
+    const call = (parameters: Record<string, unknown>) =>
+      handler(makeContext("ws-invoke", "session-exec"), { name: "validate_tool", parameters });
+
+    const shown: CallToolResult[] = [];
+    shown.push(await call({ count: 1, mode: "safe" }));
+    mode = "error";
+    shown.push(await call({ count: 1, mode: "safe" }));
+    mode = "throw";
+    shown.push(await call({ count: 1, mode: "safe" }));
+    mode = "success";
+    shown.push(await call({ count: { value: 1 }, mode: "safe" }));
+    mode = "nothing";
+    shown.push(await call({ count: 1, mode: "safe" }));
+    await nextTurn();
+
+    expect(records.map((record) => record.status)).toEqual([
+      "success",
+      "error",
+      "error",
+      "success",
+      "error",
+    ]);
+    for (const record of records.slice(0, 4)) {
+      InvocationRecordSchema.parse(record);
+      expect(record.executionDurationMs).toBeGreaterThanOrEqual(115);
+      expect(record.executionDurationMs).toBeLessThan(260);
+      expect(record.durationMs).toBeGreaterThanOrEqual(265);
+      expect(record.executionDurationMs).toBeLessThanOrEqual(record.durationMs);
+    }
+    // Nothing recorded ran, so no execution time is claimed.
+    expect(records[4]).not.toHaveProperty("executionDurationMs");
+    // The measurement travels outside the result: success, error, composed handle, and refused
+    // results reach the caller with no trace of it.
+    for (const result of shown) {
+      expect(JSON.stringify(result)).not.toMatch(/executionDuration/i);
+    }
+    expect(JSON.parse(shown[3]!.content[0]!.text as string)).toMatchObject({ result: "ok" });
   });
 
   it("records why a call failed as a schema-valid reason, never only as error text", async () => {

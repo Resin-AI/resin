@@ -10,6 +10,7 @@
  */
 
 import type { WorkflowJsonValue } from "@resin/contracts";
+import { timeRecordedCall } from "./execution-time.js";
 import type { McpToolConnection } from "./mcp-connection.js";
 import type { RecordedCallRequest, RuntimeAdapter } from "./recorded-workflow.js";
 import { RESIN_TOOL_PROTOCOL_RUNTIME } from "./runtime-families.js";
@@ -64,20 +65,30 @@ export function createToolProtocolAdapter(options: ToolProtocolAdapterOptions): 
           : undefined;
       if (connection) {
         // The connection owns the protocol's own error reporting; it throws rather than answering.
-        return await connection.callTool(callable.name, request.arguments, request.signal);
+        return await timeRecordedCall(() =>
+          connection.callTool(callable.name, request.arguments, request.signal),
+        );
       }
       if (recorded !== undefined && options.openConnection) {
         const dialed = await options.openConnection(recorded, request.signal);
-        if (dialed) return await dialed.callTool(callable.name, request.arguments, request.signal);
+        // Dialing is setup; only the call itself is the recorded call's time.
+        if (dialed) {
+          return await timeRecordedCall(() =>
+            dialed.callTool(callable.name, request.arguments, request.signal),
+          );
+        }
       }
       if (options.dispatch) {
-        const value = await options.dispatch({
-          name: callable.name,
-          arguments: request.arguments,
-          ...(recorded !== undefined ? { connection: recorded } : {}),
-          stepId: step.id,
-          ...(request.signal ? { signal: request.signal } : {}),
-        });
+        const dispatch = options.dispatch;
+        const value = await timeRecordedCall(() =>
+          dispatch({
+            name: callable.name,
+            arguments: request.arguments,
+            ...(recorded !== undefined ? { connection: recorded } : {}),
+            stepId: step.id,
+            ...(request.signal ? { signal: request.signal } : {}),
+          }),
+        );
         if (isErrorResult(value)) {
           throw new Error(
             `step '${step.id}' failed: tool '${callable.name}' answered with an error result`,

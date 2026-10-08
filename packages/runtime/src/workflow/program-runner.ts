@@ -59,6 +59,7 @@ import {
   instrumentDisplayFilters,
   withoutDisplayFilterMarkers,
 } from "./display-filter-replay.js";
+import { beginRecordedCall, timeRecordedCall } from "./execution-time.js";
 import { harnessLoginIdentity, inheritedHarnessEnvironment } from "./harness-environment.js";
 import { applyRecordedPatch } from "./patch-runner.js";
 import type { RecordedCallRequest } from "./recorded-workflow.js";
@@ -1314,6 +1315,8 @@ function runChild(
           };
     const hosted = jobHostedInvocation(invocation);
     const lifetime: ChildLifetime = { startedAtMs: Date.now(), jobbed: hosted.jobbed };
+    // The recorded call runs from this launch until its output pipes close.
+    const endRecordedCall = beginRecordedCall();
     const child = spawn(hosted.command, hosted.args, {
       cwd,
       env: childEnv,
@@ -1343,6 +1346,7 @@ function runChild(
     const finish = (run: CapturedRun): void => {
       if (settled) return;
       settled = true;
+      endRecordedCall();
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
       if (termination !== undefined) reject(new Error(termination));
@@ -1564,7 +1568,8 @@ export async function runRecordedProgram(
     if (options.cwd === undefined) {
       throw new Error("a recorded patch needs the working directory it is confined to");
     }
-    await applyRecordedPatch(program.source, options.cwd);
+    const cwd = options.cwd;
+    await timeRecordedCall(() => applyRecordedPatch(program.source, cwd));
     return {
       exitCode: 0,
       stdout: WORKFLOW_PATCH_STEP_RESULT,

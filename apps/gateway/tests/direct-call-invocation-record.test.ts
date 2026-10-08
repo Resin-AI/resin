@@ -1,4 +1,6 @@
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
 import type { InvocationRecord, ToolManifest } from "@resin/contracts";
+import { timeRecordedCall } from "@resin/runtime";
 import { describe, expect, it } from "vitest";
 import { LocalMcpGateway } from "../src/gateway.js";
 import { failedToolResult } from "../src/meta/invocation-failure.js";
@@ -175,5 +177,90 @@ describe("direct tools/call invocation records", () => {
     ]);
     // The reason travels without any error text.
     expect(records.map((record) => record.errorDetails?.message)).toEqual(["", ""]);
+  });
+
+  it("records how long a direct call's recorded calls ran, and the caller never sees it", async () => {
+    const records: InvocationRecord[] = [];
+    const registry = new ToolRegistry({
+      onInvocationRecorded: async (record) => {
+        records.push(record);
+      },
+    });
+    const gateway = new LocalMcpGateway({ router: createRegistryGatewayRouter(registry) });
+    const conn = gateway.createConnection({ cwd: "/tmp/workspace" });
+    await gateway.handleMessage(conn.connectionId, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test-harness", version: "1.0.0" },
+      },
+    });
+    const wsId = conn.workspaceContext.workspaceId;
+    const register = (toolId: string, handler: () => Promise<CallToolResult>) =>
+      registry.registerTool({
+        toolId,
+        name: toolId,
+        exposedName: toolId,
+        version: "1.0.0",
+        scope: "workspace",
+        workspaceId: wsId,
+        status: "active",
+        manifest: { ...makeManifest(), name: toolId },
+        handler,
+      });
+    // Each runs one recorded call, then does Resin's own work after it.
+    await register("tool_runs", async () => {
+      await timeRecordedCall(() => sleep(120));
+      await sleep(150);
+      return { content: [{ type: "text", text: "ok" }] };
+    });
+    await register("tool_check_fails", async () => {
+      await timeRecordedCall(() => sleep(120));
+      await sleep(150);
+      return failedToolResult("check_failed", "1 test failed");
+    });
+    await register("tool_lost", async () => {
+      await timeRecordedCall(() => sleep(120));
+      await sleep(150);
+      throw new McpProtocolError(MCP_ERROR_CODES.CONNECTION_CLOSED, "Cloud service is offline");
+    });
+    await register("tool_refused", async () => failedToolResult("runtime_unavailable", "gone"));
+
+    const responses: unknown[] = [];
+    for (const [id, name] of [
+      [2, "tool_runs"],
+      [3, "tool_check_fails"],
+      [4, "tool_lost"],
+      [5, "tool_refused"],
+    ] as const) {
+      responses.push(
+        await gateway.handleMessage(conn.connectionId, {
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name, arguments: { a: 1, b: 2 } },
+        }),
+      );
+    }
+    await nextTurn();
+
+    expect(records.map((record) => record.toolId)).toEqual([
+      "tool_runs",
+      "tool_check_fails",
+      "tool_lost",
+      "tool_refused",
+    ]);
+    for (const record of records.slice(0, 3)) {
+      expect(record.executionDurationMs).toBeGreaterThanOrEqual(115);
+      expect(record.executionDurationMs).toBeLessThan(260);
+      expect(record.durationMs).toBeGreaterThanOrEqual(265);
+    }
+    expect(records[3]).not.toHaveProperty("executionDurationMs");
+    for (const response of responses) {
+      expect(JSON.stringify(response)).not.toMatch(/executionDuration/i);
+    }
   });
 });

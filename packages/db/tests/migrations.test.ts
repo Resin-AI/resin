@@ -21,13 +21,13 @@ describe("MigrationRunner", () => {
 
     const result = await runner.migrate();
     expect(result.initialVersion).toBe(0);
-    expect(result.targetVersion).toBe(6);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result.targetVersion).toBe(7);
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(result.integrityOk).toBe(true);
 
-    expect(runner.getCurrentVersion()).toBe(6);
+    expect(runner.getCurrentVersion()).toBe(7);
     const applied = runner.getAppliedMigrations();
-    expect(applied).toHaveLength(6);
+    expect(applied).toHaveLength(7);
     expect(applied[0].version).toBe(1);
     expect(applied[0].name).toBe("001_initial_local_schema");
     expect(applied[1].version).toBe(2);
@@ -40,6 +40,8 @@ describe("MigrationRunner", () => {
     expect(applied[4].name).toBe("005_normalized_events_causal_step_uniqueness");
     expect(applied[5].version).toBe(6);
     expect(applied[5].name).toBe("006_drop_pattern_outbox");
+    expect(applied[6].version).toBe(7);
+    expect(applied[6].name).toBe("007_add_invocation_records_execution_duration");
     // Verify key tables exist and are queryable
     const testTables = [
       "workspaces",
@@ -77,6 +79,7 @@ describe("MigrationRunner", () => {
     const tableInfo = conn.all<{ name: string }>("PRAGMA table_info(invocation_records);");
     expect(tableInfo.some((col) => col.name === "uploaded_at")).toBe(true);
     expect(tableInfo.some((col) => col.name === "usage_estimate_json")).toBe(true);
+    expect(tableInfo.some((col) => col.name === "execution_duration_ms")).toBe(true);
     const indexList = conn.all<{ name: string }>("PRAGMA index_list(invocation_records);");
     expect(indexList.some((idx) => idx.name === "idx_invocation_records_uploaded_at")).toBe(true);
     conn.close();
@@ -88,12 +91,12 @@ describe("MigrationRunner", () => {
 
     const runner = new MigrationRunner(conn);
     const firstRun = await runner.migrate();
-    expect(firstRun.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(firstRun.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     const secondRun = await runner.migrate();
     expect(secondRun.appliedVersions).toHaveLength(0);
-    expect(secondRun.initialVersion).toBe(6);
-    expect(secondRun.targetVersion).toBe(6);
+    expect(secondRun.initialVersion).toBe(7);
+    expect(secondRun.targetVersion).toBe(7);
     conn.close();
   });
 
@@ -175,7 +178,7 @@ describe("MigrationRunner", () => {
 
     const upgrade = await new MigrationRunner(conn).migrate();
     expect(upgrade.initialVersion).toBe(4);
-    expect(upgrade.appliedVersions).toEqual([5, 6]);
+    expect(upgrade.appliedVersions).toEqual([5, 6, 7]);
 
     const upgradedIndex = conn.get<{ sql: string }>(
       "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_normalized_events_session_sequence';",
@@ -276,7 +279,7 @@ describe("MigrationRunner", () => {
 
     const upgrade = await new MigrationRunner(conn).migrate();
     expect(upgrade.initialVersion).toBe(5);
-    expect(upgrade.appliedVersions).toEqual([6]);
+    expect(upgrade.appliedVersions).toEqual([6, 7]);
     expect(upgrade.integrityOk).toBe(true);
 
     const leftovers = conn.all<{ name: string }>(
@@ -297,7 +300,7 @@ describe("MigrationRunner", () => {
 
     // Real migrations keep the full structural verification.
     expect(integrityCheckSpy).toHaveBeenCalledTimes(2);
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(result.integrityOk).toBe(true);
     conn.close();
   });
@@ -318,8 +321,8 @@ describe("MigrationRunner", () => {
     expect(integrityCheckSpy).toHaveBeenCalledTimes(0);
     expect(result.appliedVersions).toEqual([]);
     expect(result.integrityOk).toBe(true);
-    expect(result.initialVersion).toBe(6);
-    expect(result.targetVersion).toBe(6);
+    expect(result.initialVersion).toBe(7);
+    expect(result.targetVersion).toBe(7);
     conn.close();
   });
 

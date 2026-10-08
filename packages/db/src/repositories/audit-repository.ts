@@ -8,6 +8,44 @@ import {
 } from "@resin/contracts";
 import type { LocalDatabaseConnection, SQLBindValue } from "../connection.js";
 
+interface InvocationRecordRow {
+  invocation_id: string;
+  session_id: string;
+  workspace_id: string;
+  tool_id: string;
+  tool_version: string;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
+  execution_duration_ms: number | null;
+  status: "success" | "error" | "timeout" | "rejected_capability";
+  input_digest: string;
+  output_digest: string | null;
+  error_details_json: string | null;
+  resource_usage_json: string | null;
+  usage_estimate_json: string | null;
+}
+
+function invocationFromRow(row: InvocationRecordRow): InvocationRecord {
+  return InvocationRecordSchema.parse({
+    invocationId: row.invocation_id,
+    sessionId: row.session_id,
+    workspaceId: row.workspace_id,
+    toolId: row.tool_id,
+    toolVersion: row.tool_version,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    durationMs: row.duration_ms,
+    executionDurationMs: row.execution_duration_ms ?? undefined,
+    status: row.status,
+    inputDigest: row.input_digest,
+    outputDigest: row.output_digest ?? undefined,
+    errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
+    resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
+    usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
+  });
+}
+
 /**
  * Repository managing tool invocation logs and system audit trail records.
  */
@@ -26,8 +64,9 @@ export class AuditRepository {
     this.conn.run(
       `INSERT INTO invocation_records (
         invocation_id, session_id, workspace_id, tool_id, tool_version,
-        started_at, completed_at, duration_ms, status, input_digest, output_digest, error_details_json, resource_usage_json, usage_estimate_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        started_at, completed_at, duration_ms, execution_duration_ms, status, input_digest, output_digest,
+        error_details_json, resource_usage_json, usage_estimate_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(invocation_id) DO UPDATE SET
         session_id = excluded.session_id,
         workspace_id = excluded.workspace_id,
@@ -36,6 +75,7 @@ export class AuditRepository {
         started_at = excluded.started_at,
         completed_at = excluded.completed_at,
         duration_ms = excluded.duration_ms,
+        execution_duration_ms = excluded.execution_duration_ms,
         status = excluded.status,
         input_digest = excluded.input_digest,
         output_digest = excluded.output_digest,
@@ -51,6 +91,7 @@ export class AuditRepository {
         validated.startedAt,
         validated.completedAt,
         validated.durationMs,
+        validated.executionDurationMs ?? null,
         validated.status,
         validated.inputDigest,
         validated.outputDigest ?? null,
@@ -62,43 +103,16 @@ export class AuditRepository {
   }
 
   async getInvocation(invocationId: string): Promise<InvocationRecord | null> {
-    const row = this.conn.get<{
-      invocation_id: string;
-      session_id: string;
-      workspace_id: string;
-      tool_id: string;
-      tool_version: string;
-      started_at: string;
-      completed_at: string;
-      duration_ms: number;
-      status: "success" | "error" | "timeout" | "rejected_capability";
-      input_digest: string;
-      output_digest: string | null;
-      error_details_json: string | null;
-      resource_usage_json: string | null;
-      usage_estimate_json: string | null;
-    }>("SELECT * FROM invocation_records WHERE invocation_id = ?;", [invocationId]);
+    const row = this.conn.get<InvocationRecordRow>(
+      "SELECT * FROM invocation_records WHERE invocation_id = ?;",
+      [invocationId],
+    );
 
     if (!row) {
       return null;
     }
 
-    return InvocationRecordSchema.parse({
-      invocationId: row.invocation_id,
-      sessionId: row.session_id,
-      workspaceId: row.workspace_id,
-      toolId: row.tool_id,
-      toolVersion: row.tool_version,
-      startedAt: row.started_at,
-      completedAt: row.completed_at,
-      durationMs: row.duration_ms,
-      status: row.status,
-      inputDigest: row.input_digest,
-      outputDigest: row.output_digest ?? undefined,
-      errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
-      resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
-      usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
-    });
+    return invocationFromRow(row);
   }
 
   async listInvocations(options?: {
@@ -138,41 +152,9 @@ export class AuditRepository {
       params.push(options.limit);
     }
 
-    const rows = this.conn.all<{
-      invocation_id: string;
-      session_id: string;
-      workspace_id: string;
-      tool_id: string;
-      tool_version: string;
-      started_at: string;
-      completed_at: string;
-      duration_ms: number;
-      status: "success" | "error" | "timeout" | "rejected_capability";
-      input_digest: string;
-      output_digest: string | null;
-      error_details_json: string | null;
-      resource_usage_json: string | null;
-      usage_estimate_json: string | null;
-    }>(sql, params);
+    const rows = this.conn.all<InvocationRecordRow>(sql, params);
 
-    return rows.map((row) =>
-      InvocationRecordSchema.parse({
-        invocationId: row.invocation_id,
-        sessionId: row.session_id,
-        workspaceId: row.workspace_id,
-        toolId: row.tool_id,
-        toolVersion: row.tool_version,
-        startedAt: row.started_at,
-        completedAt: row.completed_at,
-        durationMs: row.duration_ms,
-        status: row.status,
-        inputDigest: row.input_digest,
-        outputDigest: row.output_digest ?? undefined,
-        errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
-        resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
-        usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
-      }),
-    );
+    return rows.map(invocationFromRow);
   }
 
   /**
@@ -188,41 +170,9 @@ export class AuditRepository {
         ? ` AND workspace_id NOT IN (${excludeWorkspaceIds.map(() => "?").join(", ")})`
         : "";
     const sql = `SELECT * FROM invocation_records WHERE uploaded_at IS NULL${exclusion} ORDER BY started_at ASC LIMIT ?;`;
-    const rows = this.conn.all<{
-      invocation_id: string;
-      session_id: string;
-      workspace_id: string;
-      tool_id: string;
-      tool_version: string;
-      started_at: string;
-      completed_at: string;
-      duration_ms: number;
-      status: "success" | "error" | "timeout" | "rejected_capability";
-      input_digest: string;
-      output_digest: string | null;
-      error_details_json: string | null;
-      resource_usage_json: string | null;
-      usage_estimate_json: string | null;
-    }>(sql, [...excludeWorkspaceIds, limit]);
+    const rows = this.conn.all<InvocationRecordRow>(sql, [...excludeWorkspaceIds, limit]);
 
-    return rows.map((row) =>
-      InvocationRecordSchema.parse({
-        invocationId: row.invocation_id,
-        sessionId: row.session_id,
-        workspaceId: row.workspace_id,
-        toolId: row.tool_id,
-        toolVersion: row.tool_version,
-        startedAt: row.started_at,
-        completedAt: row.completed_at,
-        durationMs: row.duration_ms,
-        status: row.status,
-        inputDigest: row.input_digest,
-        outputDigest: row.output_digest ?? undefined,
-        errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
-        resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
-        usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
-      }),
-    );
+    return rows.map(invocationFromRow);
   }
 
   markInvocationsUploaded(invocationIds: string[], uploadedAt: string): void {
