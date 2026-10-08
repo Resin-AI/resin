@@ -35,6 +35,7 @@ import {
   type ProgressNotificationParams,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
 } from "./protocol/types.js";
 import type { ProductionProxyRuntime } from "./proxy/runtime.js";
@@ -185,18 +186,42 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
 export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
 
 /**
+ * The most learned tools a caller's catalog may have and still be listed directly to a
+ * search-listing client: each as a tool of its own, named with its one-line purpose in the
+ * instructions. Ten one-line entries cost less context than the search round trip they replace,
+ * and an agent that sees a tool's name at every turn calls it; above this, only search scales.
+ */
+export const DIRECT_LISTING_MAX_TOOLS = 10;
+
+/** A learned tool as a direct listing names it: its name and one-line purpose. */
+export interface ListedLearnedTool {
+  name: string;
+  description?: string;
+}
+
+/**
  * Result `_meta` describing a workspace's learned tools once its catalog is known: how many there
- * are, and the commands their recorded programs run most widely, so search-listing instructions can
- * name them. Nothing while the catalog is unknown.
+ * are, the commands their recorded programs run most widely, so search-listing instructions can
+ * name them, and, for a catalog small enough to list directly, each tool's name and purpose.
+ * Nothing while the catalog is unknown.
  */
 function learnedToolsMeta(tools: readonly CatalogNoticeTool[] | undefined) {
   if (tools === undefined) return {};
   const learned = tools.filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true);
   const commands = summarizeLearnedCommands(learned.map((tool) => tool.localCommands ?? []));
+  const listing: ListedLearnedTool[] | undefined =
+    learned.length > 0 && learned.length <= DIRECT_LISTING_MAX_TOOLS
+      ? learned.map((tool) =>
+          tool.description === undefined
+            ? { name: tool.name }
+            : { name: tool.name, description: tool.description },
+        )
+      : undefined;
   return {
     _meta: {
       [RESIN_LEARNED_TOOL_COUNT_META]: learned.length,
       ...(commands.length === 0 ? {} : { [RESIN_LEARNED_TOOL_COMMANDS_META]: commands }),
+      ...(listing === undefined ? {} : { [RESIN_LEARNED_TOOL_LISTING_META]: listing }),
     },
   };
 }
@@ -239,14 +264,45 @@ const INVOKE_FROM_SEARCH =
 export function learnedToolCountSentence(
   learnedToolCount: number,
   commands: readonly string[] = [],
+  listedDirectly = false,
 ): string {
   if (learnedToolCount === 0) {
     return "Resin has no learned tools for this workspace yet, so do not search: do the task directly (tools Resin learns from it reach later sessions).";
+  }
+  if (listedDirectly) {
+    return learnedToolCount === 1
+      ? "Resin's 1 learned tool for this workspace is listed as a tool of its own: call it directly when it is your next step, no search needed."
+      : `Resin's ${learnedToolCount} learned tools for this workspace are listed as tools of their own: call one directly when it is your next step, no search needed.`;
   }
   const tools = `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
   return commands.length === 0
     ? `${tools}: search them before running a multi-step job by hand.`
     : `${tools}: search them before running a multi-step job or one of the commands they run (${commands.map((command) => `\`${command}\``).join(", ")}) by hand.`;
+}
+
+/** The longest purpose a direct listing's instructions give one tool. */
+const DIRECT_LISTING_PURPOSE_CHARS = 140;
+
+/** A listed purpose cut to its first sentence, without the input names tools/list adds after it. */
+function listingPurpose(description: string | undefined): string {
+  const line = (description ?? "").trim().split("\n")[0]?.trim() ?? "";
+  const purpose = line.replace(/\s+Inputs: .*$/u, "").trim();
+  return purpose.length > DIRECT_LISTING_PURPOSE_CHARS
+    ? `${purpose.slice(0, DIRECT_LISTING_PURPOSE_CHARS - 1).trimEnd()}…`
+    : purpose;
+}
+
+/**
+ * Initialization instructions for a search-listing connection whose catalog is small enough to
+ * list directly (see {@link DIRECT_LISTING_MAX_TOOLS}): each learned tool by name and one-line
+ * purpose. The same tools are listed as MCP tools of their own, so the agent calls one by name.
+ */
+export function directListingGatewayInstructions(tools: readonly ListedLearnedTool[]): string {
+  const lines = tools.map((tool) => {
+    const purpose = listingPurpose(tool.description);
+    return purpose === "" ? `- ${tool.name}` : `- ${tool.name}: ${purpose}`;
+  });
+  return `Resin has ${tools.length} learned tool${tools.length === 1 ? "" : "s"} for this workspace, each listed as a tool of its own; call one directly when it is your next step (omitted inputs reuse recorded values; get_tool_schema shows its recorded steps):\n${lines.join("\n")}\n${GATEWAY_USE_RULES}`;
 }
 
 /**

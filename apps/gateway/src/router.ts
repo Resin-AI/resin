@@ -30,12 +30,14 @@ import {
   failureReasonOfResult,
   invocationStatusFor,
 } from "./meta/invocation-failure.js";
+import { isToolOfferedHere, unavailableHereMessage } from "./meta/repository-scope.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   GET_TOOL_SCHEMA_MANIFEST,
   SEARCH_TOOLS_MANIFEST,
   SYSTEM_META_TOOL_IDS,
 } from "./meta/system-tools.js";
+import { replacesStepsHint } from "./meta/tool-profile.js";
 import {
   type JsonRpcErrorObject,
   MCP_ERROR_CODES,
@@ -176,18 +178,25 @@ function toMcpInputSchema(rawSchema?: JsonRpcParams | ToolParameterSchema): McpT
 const LISTED_PURPOSE_CHARS = 160;
 
 /**
- * A listed learned tool's description: the first sentence of its catalog description and the names
- * of its inputs. The full description, recorded steps and input docs come from get_tool_schema.
+ * A listed learned tool's description: the first sentence of its catalog description, a hint of
+ * how much recorded work it replaces when that is more than one step, and the names of its inputs.
+ * The full description, recorded steps and input docs come from get_tool_schema.
  */
-export function listedPurpose(description: string, inputs: readonly string[]): string {
+export function listedPurpose(
+  description: string,
+  inputs: readonly string[],
+  hint?: string,
+): string {
   const line = description.trim().split("\n")[0]!.trim();
   const sentence = /^.*?[.!?](?=\s+[A-Z`]|$)/.exec(line)?.[0] ?? line;
-  const purpose =
+  const cut =
     sentence.length > LISTED_PURPOSE_CHARS
       ? `${sentence.slice(0, LISTED_PURPOSE_CHARS - 1).trimEnd()}…`
       : sentence;
+  const ended = (text: string) => `${text}${/[.!?…]$/.test(text) ? "" : "."}`;
+  const purpose = hint === undefined ? cut : `${ended(cut)} ${hint}`;
   if (inputs.length === 0) return purpose;
-  return `${purpose}${/[.!?…]$/.test(purpose) ? "" : "."} Inputs: ${inputs.join(", ")}.`;
+  return `${ended(purpose)} Inputs: ${inputs.join(", ")}.`;
 }
 
 /**
@@ -301,11 +310,12 @@ export class RegistryGatewayRouter implements GatewayRouter {
       if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
         return { description: catalog, inputSchema: schema, _meta: undefined, localCommands: [] };
       }
+      const hint = replacesStepsHint(this.registry.learnedToolProfile(tool, context)?.steps);
       return {
         description: this.registry.scrubLearnedToolText(
           tool,
           context,
-          listedPurpose(catalog, Object.keys(schema.properties ?? {})),
+          listedPurpose(catalog, Object.keys(schema.properties ?? {}), hint),
         ),
         inputSchema: listedInputSchema(this.registry.learnedToolInputSchema(tool, context, schema)),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
@@ -315,6 +325,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
+        // A learned tool is listed only where it was learned and can run (see repository-scope).
+        if (!isToolOfferedHere(this.registry, entry, context)) continue;
         const { description, inputSchema, _meta, localCommands } = listed(
           entry,
           entry.description || entry.manifest?.description || `Tool ${entry.name}`,
@@ -337,6 +349,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           context.sessionId,
         );
         if (tool) {
+          if (!isToolOfferedHere(this.registry, tool, context)) continue;
           const { description, inputSchema, _meta, localCommands } = listed(
             tool,
             tool.description || tool.manifest?.description || `Tool ${tool.name}`,
@@ -368,6 +381,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
         MCP_ERROR_CODES.TOOL_NOT_FOUND,
         this.registry.retiredToolMessage(name, context.workspaceId) ?? `Tool '${name}' not found`,
       );
+    }
+    // A learned tool scoped to another repository (or unable to run from here) is not offered
+    // here, so a call by name is refused rather than run against the wrong checkout.
+    if (!isToolOfferedHere(this.registry, tool, context)) {
+      return { content: [{ type: "text", text: unavailableHereMessage(name) }], isError: true };
     }
     // `for_each` on a learned tool is one ordinary call per value: each run is gated,
     // executed, and recorded exactly as if the caller had made it alone.

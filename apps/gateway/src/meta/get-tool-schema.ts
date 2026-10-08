@@ -10,6 +10,7 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import { isToolOfferedHere, unavailableHereMessage } from "./repository-scope.js";
 import {
   type LocalToolDescriber,
   describeToolLocally,
@@ -145,6 +146,18 @@ export function createGetToolSchemaHandler(
           }
         }
       }
+    }
+    // Discovery offers a learned tool only where it was learned and can run (see repository-scope).
+    if (!isToolOfferedHere(registry, resolvedTool, context)) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: unavailableHereMessage(resolvedTool.exposedName || resolvedTool.name),
+          },
+        ],
+      };
     }
 
     const isPinned = controls.pinnedVersions[resolvedTool.toolId] === resolvedTool.version;

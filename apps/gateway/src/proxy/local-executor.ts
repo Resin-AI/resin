@@ -19,6 +19,7 @@ import {
   normalizeSha256,
   tokenizeProgram,
   validateRecordedWorkflow,
+  workflowLocationRepositories,
   workflowSinkStepIds,
 } from "@resin/contracts";
 import {
@@ -66,6 +67,7 @@ import {
 } from "../meta/dated-defaults.js";
 import { failedToolResult } from "../meta/invocation-failure.js";
 import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-values.js";
+import { type ToolProfile, recordedWorkStepCount } from "../meta/tool-profile.js";
 import {
   type CallToolResult,
   type JsonRpcParams,
@@ -590,6 +592,8 @@ export class LocalArtifactExecutor {
   private managedToolAccess?: ManagedToolAccess;
   /** Resolved local summaries by artifact and owning workspace; both are immutable inputs. */
   private readonly recordedWorkflowSummaries = new Map<string, RecordedWorkflowSummary>();
+  /** Parsed recorded plans by artifact digest: an artifact's bytes never change under its digest. */
+  private readonly recordedPlans = new Map<string, RecordedWorkflow>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -692,30 +696,12 @@ export class LocalArtifactExecutor {
     artifactDigest: string,
     context: WorkspaceContext,
   ): WorkflowLocationAvailability | undefined {
-    const plan = this.readRecordedPlan(artifactDigest);
+    const plan = this.recordedPlan(artifactDigest);
     if (plan === undefined) return undefined;
     const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
     return toolRunnableHere(plan, context, {
       resolvePrivate: this.ownedPrivateResolver(plan, owner),
     });
-  }
-
-  /** The verified-on-disk recorded plan of an artifact, or undefined. */
-  private readRecordedPlan(artifactDigest: string): RecordedWorkflow | undefined {
-    if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
-      return undefined;
-    }
-    const artifactDir = this.cache.getArtifactPath(artifactDigest);
-    const entrypoint = [BUNDLE_FILE_ENTRYPOINT_TS, BUNDLE_FILE_ENTRYPOINT_JS]
-      .map((file) => path.join(artifactDir, file))
-      .find(isRegularFileWithoutFollowingSymlink);
-    if (entrypoint === undefined) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
-      return validateRecordedWorkflow(parsed).valid ? (parsed as RecordedWorkflow) : undefined;
-    } catch {
-      return undefined;
-    }
   }
 
   /** Resolves a private value `plan` declares, only for the workspace that recorded it. */
@@ -739,13 +725,27 @@ export class LocalArtifactExecutor {
     };
   }
 
-  private recordedWorkflowSummary(
-    artifactDigest: string,
-    context: WorkspaceContext,
-  ): RecordedWorkflowSummary | undefined {
-    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
-    const key = `${artifactDigest}\u0000${owner}`;
-    const cached = this.recordedWorkflowSummaries.get(key);
+  /**
+   * What this machine knows about a cached recorded workflow for discovery: how many recorded
+   * steps it replays (see `recordedWorkStepCount`), the repositories its located steps run in, and
+   * why it cannot run for this caller, if it cannot. Undefined for any other tool.
+   */
+  recordedWorkflowProfile(artifactDigest: string, context: WorkspaceContext): ToolProfile | undefined {
+    const plan = this.recordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
+    const availability = this.recordedWorkflowAvailability(artifactDigest, context);
+    return {
+      steps: recordedWorkStepCount(plan),
+      locatedRepositories: workflowLocationRepositories(plan),
+      ...(availability === undefined || availability.available
+        ? {}
+        : { unavailableReason: availability.reason }),
+    };
+  }
+
+  /** The validated recorded plan a cached artifact runs, or undefined for any other artifact. */
+  private recordedPlan(artifactDigest: string): RecordedWorkflow | undefined {
+    const cached = this.recordedPlans.get(artifactDigest);
     if (cached !== undefined) return cached;
     if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
       return undefined;
@@ -755,14 +755,27 @@ export class LocalArtifactExecutor {
       .map((file) => path.join(artifactDir, file))
       .find(isRegularFileWithoutFollowingSymlink);
     if (entrypoint === undefined) return undefined;
-    let plan: RecordedWorkflow;
+    let plan: RecordedWorkflow | undefined;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
-      if (!validateRecordedWorkflow(parsed).valid) return undefined;
-      plan = parsed as RecordedWorkflow;
+      if (validateRecordedWorkflow(parsed).valid) plan = parsed as RecordedWorkflow;
     } catch {
       return undefined;
     }
+    if (plan !== undefined) this.recordedPlans.set(artifactDigest, plan);
+    return plan;
+  }
+
+  private recordedWorkflowSummary(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): RecordedWorkflowSummary | undefined {
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    const key = `${artifactDigest}\u0000${owner}`;
+    const cached = this.recordedWorkflowSummaries.get(key);
+    if (cached !== undefined) return cached;
+    const plan = this.recordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
     return this.summarizeRecordedPlan(plan, owner, key);
   }
 
