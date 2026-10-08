@@ -1021,13 +1021,11 @@ describe("search_tools over near-duplicate learned tools", () => {
         .sort(),
     );
     for (const [index, similar] of (lead?.similar ?? []).entries()) {
-      // The two closest contenders carry their schemas, so picking one needs no lookup; the rest
-      // (here exact duplicates tying the item) are compact.
+      // The two closest contenders carry their purpose and schema, so picking one needs no lookup;
+      // the rest (here exact duplicates tying the item) are listed by name.
       const close = index < 2 && (similar.score ?? 0) >= 0.9 * (lead?.score ?? 0);
       expect(Object.keys(similar).sort()).toEqual(
-        close
-          ? ["inputSchema", "name", "purpose", "score", "toolId"]
-          : ["name", "purpose", "score", "toolId"],
+        close ? ["inputSchema", "name", "purpose", "score", "toolId"] : ["name"],
       );
       if (close) {
         expect(Object.keys(similar.inputSchema?.properties ?? {}).sort()).toEqual(
@@ -1035,9 +1033,9 @@ describe("search_tools over near-duplicate learned tools", () => {
             workspaceTool(similar.name)?.parameters.properties ?? { missing: true },
           ).sort(),
         );
+        expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
+        expect(similar.purpose?.length).toBeLessThanOrEqual(140);
       }
-      expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
-      expect(similar.purpose.length).toBeLessThanOrEqual(140);
     }
     expect(lead?.similar?.filter((tool) => tool.inputSchema !== undefined)).toHaveLength(2);
     expect(lead?.similar?.[0]?.purpose).toMatch(
