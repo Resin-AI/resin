@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { OmpHarnessAdapter } from "../src/adapter.js";
 import {
   DEFAULT_GATEWAY_SERVER_NAME,
+  OMP_RESIN_MCP_TIMEOUT_MS,
   applyOmpMcpConfig,
   planOmpMcpConfig,
   resolveOmpConfigPath,
@@ -131,6 +132,7 @@ describe("Oh My Pi (OMP) Harness Qualification Suite [REM-017]", () => {
       expect(parsedWritten.mcpServers.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
 
       // 3. Verify write verification

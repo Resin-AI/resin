@@ -3,6 +3,7 @@ import {
   DISPLAY_FILTER_VERSION,
   DISPLAY_FILTER_VERSIONS,
   RECORDED_WORKFLOW_SCHEMA_VERSION,
+  displayFilterPipelines,
   renderProgramTokenValue,
   splitDisplayFilter,
   splitDisplayFilters,
@@ -390,6 +391,68 @@ ${body}EOF
       ).toEqual(recorded.cuts.map((cut) => cut.filter));
       expect(split!.command.endsWith("; ./emit"), value).toBe(true);
     }
+  });
+});
+
+describe("displayFilterPipelines", () => {
+  /** Each pipeline's text, cut, operator after it and command word. */
+  const pipelinesOf = (shell: string, text: string) =>
+    displayFilterPipelines(shell, text, 2)?.map(({ start, end, ...rest }) => ({
+      text: text.slice(start, end),
+      ...rest,
+    }));
+
+  it("lists every top-level pipeline with the operator after it and the cut it holds", () => {
+    const source =
+      "stylua src tests && selene src tests 2>&1 | tail -n 1; lune run scripts/test.luau 2>&1 | grep -E '^Totals|FAILED' | head -n 5";
+    expect(pipelinesOf("bash", source)).toEqual([
+      { text: "stylua src tests", next: "&&", command: "stylua" },
+      { text: "selene src tests 2>&1 | tail -n 1", cut: 0, next: ";", command: "selene" },
+      {
+        text: "lune run scripts/test.luau 2>&1 | grep -E '^Totals|FAILED' | head -n 5",
+        cut: 1,
+        next: "end",
+        command: "lune",
+      },
+    ]);
+    // The offsets and cuts agree with the split.
+    const split = splitDisplayFilters("bash", source, 2)!;
+    const pipelines = displayFilterPipelines("bash", source, 2)!;
+    for (const pipeline of pipelines) {
+      if (pipeline.cut === undefined) continue;
+      expect(split.cuts[pipeline.cut]!.pipelineStart).toBe(pipeline.start);
+      expect(split.cuts[pipeline.cut]!.end).toBe(pipeline.end);
+    }
+  });
+
+  it("ends a pipeline before a trailing comment, after assignments names the command", () => {
+    expect(
+      pipelinesOf("sh", "make 2>&1 | tail -3 # show the end\nA=1 B=2 ./run x ||\n  echo no;"),
+    ).toEqual([
+      { text: "make 2>&1 | tail -3", cut: 0, next: "\n", command: "make" },
+      { text: "A=1 B=2 ./run x", next: "||", command: "./run" },
+      { text: "echo no", next: ";", command: "echo" },
+    ]);
+    // A command word that is not a literal word is left out.
+    expect(pipelinesOf("bash", '"$TOOL" check; make | tail -1')).toEqual([
+      { text: '"$TOOL" check', next: ";" },
+      { text: "make | tail -1", cut: 0, next: "end", command: "make" },
+    ]);
+  });
+
+  it("ends a pipeline opening a heredoc on its own line, before the body", () => {
+    const source = "cat <<'EOF' | tail -n 1\nx | y && z\nEOF\n./emit | head -1\n";
+    expect(pipelinesOf("bash", source)).toEqual([
+      { text: "cat <<'EOF' | tail -n 1", cut: 0, next: "\n", command: "cat" },
+      { text: "./emit | head -1", cut: 1, next: "\n", command: "./emit" },
+    ]);
+  });
+
+  it("is undefined for any program splitDisplayFilters refuses", () => {
+    for (const text of ["make", "make | wc -l", "( make ) | tail -1", "make | tail -1 &"])
+      expect(displayFilterPipelines("bash", text, 2), text).toBeUndefined();
+    expect(displayFilterPipelines("bash", "make | tail -1", 1)).toBeUndefined();
+    expect(displayFilterPipelines("pwsh", "make | tail -1", 2)).toBeUndefined();
   });
 });
 

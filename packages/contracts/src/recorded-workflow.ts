@@ -389,16 +389,21 @@ export type WorkflowStep = {
    */
   segment?: { index: number; count: number; version: number };
   /**
-   * The step runs its program without the trailing display filters its recording piped output
-   * through — `| tail -30`, `| grep fail` — split under rules `version` (`DISPLAY_FILTER_VERSIONS`):
-   * version 1 drops the last pipeline's (`splitDisplayFilter`), version 2 every top-level
-   * pipeline's (`splitDisplayFilters`). The caller gets the commands' whole output and real exit
-   * statuses. A recording check replays the step by passing each cut pipeline's output through
-   * the stages dropped from it and comparing the result with the recording.
+   * The step's program ends pipelines in display filters its recording piped output through —
+   * `| tail -30`, `| grep fail` — split under rules `version` (`DISPLAY_FILTER_VERSIONS`): version
+   * 1 drops the last pipeline's (`splitDisplayFilter`), version 2 every top-level pipeline's
+   * (`splitDisplayFilters`). A version-1 step runs without its filter: the caller gets the
+   * command's whole output and real exit status. A version-2 step runs as recorded, filters inline:
+   * the caller gets each pipeline's status, what the program printed, the diagnostics the filters
+   * hid, and where the whole output is kept; a pipeline whose command failed fails the step. A
+   * recording check replays the step by passing each cut pipeline's output through the stages
+   * dropped from it and comparing the result with the recording.
    *
    * `input` names a boolean plan input defaulting to `false` that nothing else reads: a caller who
-   * sets it to `true` runs the whole recorded pipeline, filter included. Only with it may the
-   * program's holes lie inside the filter (`tail -n {lines}`, `grep {pattern}`).
+   * sets it to `true` gets the commands' output piped through the dropped stages, as a recording
+   * check does; the commands' own exit status still decides the step, a grep that selects nothing
+   * prints nothing, and a filter error fails the step. Only with it may the program's holes lie
+   * inside the filter (`tail -n {lines}`, `grep {pattern}`).
    */
   displayFilter?: { version: number; input?: string };
   /**

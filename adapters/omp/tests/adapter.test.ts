@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type StrictHarnessAdapter, classifyHarnessVersion } from "@resin/harness-contracts";
 import { describe, expect, it, vi } from "vitest";
+import { OMP_RESIN_MCP_TIMEOUT_MS } from "../src/config-planner.js";
 import * as discoveryModule from "../src/discovery.js";
 import { OmpAdapter, OmpHarnessAdapter, ompHarness } from "../src/index.js";
 import { FILE_SYMLINKS_SUPPORTED } from "./symlinks.js";
@@ -122,6 +123,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       expect(parsedPlan.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
       expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
@@ -242,6 +244,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       expect(parsedPlan.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsedPlan.mcpServers?.resin?.url).toBeUndefined();
       expect(parsedPlan.mcpServers?.resin?.type).toBeUndefined();
@@ -267,6 +270,7 @@ describe("OmpHarnessAdapter (End-to-End Contract & Lifecycle)", () => {
       expect(parsedApplied.mcpServers?.resin).toEqual({
         command: "resin",
         args: ["mcp"],
+        timeout: OMP_RESIN_MCP_TIMEOUT_MS,
       });
       expect(parsedApplied.mcpServers?.["resin-gateway"]).toBeUndefined();
       expect(parsedApplied.mcpServers?.["custom-tool"]).toEqual({

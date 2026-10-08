@@ -348,6 +348,7 @@ describe("HarnessReconciler", () => {
     expect(JSON.parse((await bridge.readFile(targetPath)) ?? "").mcpServers.resin).toEqual({
       ...resinLaunch(HOME),
       env: { KEEP: "1" },
+      timeout: 615_000,
     });
     expect(await bridge.readFile(appendSystemPath)).toBe("User notes\n");
 
@@ -688,6 +689,7 @@ describe("HarnessReconciler", () => {
     expect(repaired.mcpServers.resin).toEqual({
       ...resinLaunch(HOME),
       env: { RESIN_TOKEN: "keep" },
+      timeout: 615_000,
     });
   });
 
@@ -1346,6 +1348,7 @@ describe("HarnessReconciler", () => {
       );
       expect(omp.mcpServers.resin).toEqual({
         ...resinLaunch(HOME),
+        timeout: 615_000,
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
@@ -1435,6 +1438,7 @@ describe("HarnessReconciler", () => {
       expect(omp.mcpServers.resin).toEqual({
         ...resinLaunch(HOME),
         env: { CUSTOM_VAR: "keep-me" },
+        timeout: 615_000,
       });
       expect(omp.mcpServers["resin-gateway"]).toBeUndefined();
     });
@@ -1483,6 +1487,7 @@ describe("HarnessReconciler", () => {
       expect(omp.mcpServers.resin).toEqual({
         ...resinLaunch(HOME),
         env: { TOKEN: "user-tok" },
+        timeout: 615_000,
       });
 
       const codex = await bridge.readFile(path.join(HOME, ".codex", "config.toml"));

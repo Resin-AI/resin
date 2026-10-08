@@ -8,6 +8,7 @@ import {
   type ConfigMutationPlan,
   type HarnessWorkspace,
   NodeConfigFsBridge,
+  RESIN_TOOL_CALL_TIMEOUT_MS,
   applyConfigMutation,
   computeConfigHash,
   isRecognizedResinMcpEntry,
@@ -21,6 +22,12 @@ import { resolveOmpHome } from "./discovery.js";
 export const DEFAULT_OMP_CONFIG_FILENAME = path.join("agent", "mcp.json");
 export const DEFAULT_OMP_MCP_CONFIG_PATH = path.join("agent", "mcp.json");
 export const DEFAULT_GATEWAY_SERVER_NAME = CANONICAL_RESIN_MCP_SERVER_KEY;
+/**
+ * Request timeout written to OMP's Resin server entry. OMP abandons MCP requests after
+ * 30 s by default; waiting slightly past Resin's own tools/call deadline lets OMP
+ * receive Resin's timeout error instead of giving up first.
+ */
+export const OMP_RESIN_MCP_TIMEOUT_MS = RESIN_TOOL_CALL_TIMEOUT_MS + 15_000;
 
 export interface PlanOmpMcpConfigOptions {
   workspace?: HarnessWorkspace;
@@ -176,6 +183,20 @@ export async function planOmpMcpConfig(
     options.gatewayUrl ?? options.url,
     serverName,
   );
+
+  // Keep a larger user-chosen timeout; otherwise raise it to cover Resin's deadline. The key is
+  // always written last so planning over an earlier registration reproduces the same text.
+  const registeredEntry = updatedServers[serverName];
+  if (registeredEntry) {
+    const { timeout, ...rest } = registeredEntry;
+    updatedServers[serverName] = {
+      ...rest,
+      timeout:
+        typeof timeout === "number" && timeout > OMP_RESIN_MCP_TIMEOUT_MS
+          ? timeout
+          : OMP_RESIN_MCP_TIMEOUT_MS,
+    };
+  }
 
   const updatedConfig: OmpConfigDoc = {
     ...currentConfig,

@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { RESIN_TOOL_CALL_TIMEOUT_MS } from "@resin/harness-contracts";
 import { McpConnection, type McpConnectionOptions } from "./connection.js";
 import { summarizeLearnedCommands } from "./meta/learned-commands.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
@@ -324,7 +325,7 @@ export class LocalMcpGateway {
     this.maxConcurrentRequestsPerConnection = options.maxConcurrentRequestsPerConnection ?? 32;
     this.maxTotalConcurrentRequests = options.maxTotalConcurrentRequests ?? 128;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60000;
-    this.toolCallTimeoutMs = options.toolCallTimeoutMs ?? 600_000;
+    this.toolCallTimeoutMs = options.toolCallTimeoutMs ?? RESIN_TOOL_CALL_TIMEOUT_MS;
     this.rateLimitRps = options.rateLimitRps ?? 100;
     this.rateLimitBurst = options.rateLimitBurst ?? 50;
     this.harnessDetector = options.harnessDetector ?? defaultHarnessDetector;

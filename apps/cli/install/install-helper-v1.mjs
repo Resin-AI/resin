@@ -4543,7 +4543,7 @@ function migrateJsonMcpServers(existingServers, newServerConfig, configuredGatew
   }
   return result;
 }
-var NodeConfigFsBridge, defaultFsBridge, CANONICAL_RESIN_MCP_SERVER_KEY, CANONICAL_RESIN_MCP_COMMAND, CANONICAL_RESIN_MCP_ARGS, LEGACY_RESIN_MCP_SERVER_ALIASES, LEGACY_RESIN_GATEWAY_URL, DEFAULT_RESIN_GATEWAY_URL;
+var NodeConfigFsBridge, defaultFsBridge, CANONICAL_RESIN_MCP_SERVER_KEY, CANONICAL_RESIN_MCP_COMMAND, RESIN_TOOL_CALL_TIMEOUT_MS, CANONICAL_RESIN_MCP_ARGS, LEGACY_RESIN_MCP_SERVER_ALIASES, LEGACY_RESIN_GATEWAY_URL, DEFAULT_RESIN_GATEWAY_URL;
 var init_config = __esm({
   "packages/harness-contracts/dist/config.js"() {
     "use strict";
@@ -4619,6 +4619,7 @@ var init_config = __esm({
     defaultFsBridge = new NodeConfigFsBridge();
     CANONICAL_RESIN_MCP_SERVER_KEY = "resin";
     CANONICAL_RESIN_MCP_COMMAND = "resin";
+    RESIN_TOOL_CALL_TIMEOUT_MS = 6e5;
     CANONICAL_RESIN_MCP_ARGS = ["mcp"];
     LEGACY_RESIN_MCP_SERVER_ALIASES = ["resin_gateway", "resin-gateway"];
     LEGACY_RESIN_GATEWAY_URL = "http://127.0.0.1:9400/mcp/sse";
@@ -8163,6 +8164,14 @@ async function planOmpMcpConfig(options) {
     }
   }
   const updatedServers = migrateJsonMcpServers(existingServers, serverEntry, options.gatewayUrl ?? options.url, serverName);
+  const registeredEntry = updatedServers[serverName];
+  if (registeredEntry) {
+    const { timeout, ...rest } = registeredEntry;
+    updatedServers[serverName] = {
+      ...rest,
+      timeout: typeof timeout === "number" && timeout > OMP_RESIN_MCP_TIMEOUT_MS ? timeout : OMP_RESIN_MCP_TIMEOUT_MS
+    };
+  }
   const updatedConfig = {
     ...currentConfig,
     mcpServers: updatedServers
@@ -8180,7 +8189,7 @@ async function planOmpMcpConfig(options) {
     }
   });
 }
-var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH, DEFAULT_GATEWAY_SERVER_NAME2;
+var DEFAULT_OMP_CONFIG_FILENAME, DEFAULT_OMP_MCP_CONFIG_PATH, DEFAULT_GATEWAY_SERVER_NAME2, OMP_RESIN_MCP_TIMEOUT_MS;
 var init_config_planner7 = __esm({
   "adapters/omp/dist/config-planner.js"() {
     "use strict";
@@ -8189,6 +8198,7 @@ var init_config_planner7 = __esm({
     DEFAULT_OMP_CONFIG_FILENAME = path21.join("agent", "mcp.json");
     DEFAULT_OMP_MCP_CONFIG_PATH = path21.join("agent", "mcp.json");
     DEFAULT_GATEWAY_SERVER_NAME2 = CANONICAL_RESIN_MCP_SERVER_KEY;
+    OMP_RESIN_MCP_TIMEOUT_MS = RESIN_TOOL_CALL_TIMEOUT_MS + 15e3;
   }
 });
 

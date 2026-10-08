@@ -191,7 +191,9 @@ export function compileRecordedWorkflow(workflow: RecordedWorkflow): CompiledWor
 
 /**
  * The callable form of a compiled artifact: it runs the frozen plan through the host's adapters and
- * private resolver, and returns the last step's result.
+ * private resolver, and returns the last step's result. An invocation's `signal` reaches every
+ * adapter call, so firing it stops the step in flight (a recorded program's whole process tree is
+ * killed) and every step after it.
  */
 export function instantiateRecordedWorkflow(
   artifact: CompiledWorkflowArtifact,
@@ -207,13 +209,16 @@ export function instantiateRecordedWorkflow(
 ): {
   name: string;
   inputSchema: Record<string, unknown>;
-  invoke: (inputs: Record<string, WorkflowJsonValue>) => Promise<RecordedWorkflowExecution>;
+  invoke: (
+    inputs: Record<string, WorkflowJsonValue>,
+    invocation?: { signal?: AbortSignal },
+  ) => Promise<RecordedWorkflowExecution>;
 } {
   const missing = artifact.requiredRuntimes.filter((runtime) => !host.adapters.has(runtime));
   return {
     name: artifact.name,
     inputSchema: artifact.inputSchema,
-    invoke: async (inputs) => {
+    invoke: async (inputs, invocation) => {
       if (missing.length > 0) {
         throw new Error(`this host cannot run the workflow: no adapter for ${missing.join(", ")}`);
       }
@@ -222,6 +227,7 @@ export function instantiateRecordedWorkflow(
         adapters: host.adapters,
         ...(host.access ? { access: host.access } : {}),
         ...(host.resolvePrivate ? { resolvePrivate: host.resolvePrivate } : {}),
+        ...(invocation?.signal ? { signal: invocation.signal } : {}),
       });
     },
   };

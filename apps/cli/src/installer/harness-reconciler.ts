@@ -62,6 +62,17 @@ const HarnessJsonValueSchema: z.ZodType<HarnessJsonValue> = z.lazy(() =>
 const HarnessJsonObjectSchema: z.ZodType<HarnessJsonObject> = z.record(HarnessJsonValueSchema);
 
 const RESIN_OWNED_SERVER_FIELDS = ["type", "url", "command", "args", "endpoint"] as const;
+
+/**
+ * Server-entry fields Resin's own registration writes for `harnessId`. OMP's entry also carries the
+ * request `timeout` its planner sets so OMP waits out Resin's tool-call deadline (the planner keeps a
+ * larger value the user chose), so that field is Resin's there and not user-owned.
+ */
+function resinOwnedServerFields(harnessId: HarnessId): readonly string[] {
+  return harnessId === "omp"
+    ? [...RESIN_OWNED_SERVER_FIELDS, "timeout"]
+    : RESIN_OWNED_SERVER_FIELDS;
+}
 const BACKUP_FORMAT = "resin-harness-backup/v1" as const;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const OwnedBackupMetadataSchema = z
@@ -2309,7 +2320,7 @@ function preserveUserOwnedServerFields(
     }
 
     const mergedEntry = { ...currentEntryResult.data };
-    for (const field of RESIN_OWNED_SERVER_FIELDS) {
+    for (const field of resinOwnedServerFields(harnessId)) {
       delete mergedEntry[field];
     }
     Object.assign(mergedEntry, plannedEntryResult.data);
@@ -2380,7 +2391,7 @@ function projectUserOwnedJson(content: string, harnessId: HarnessId): HarnessJso
         const legacyEntryResult = HarnessJsonObjectSchema.safeParse(userServers[legacyAlias]);
         if (legacyEntryResult.success && isRecognizedResinMcpEntry(legacyEntryResult.data)) {
           const userEntry = { ...legacyEntryResult.data };
-          for (const field of RESIN_OWNED_SERVER_FIELDS) {
+          for (const field of resinOwnedServerFields(harnessId)) {
             delete userEntry[field];
           }
           if (Object.keys(userEntry).length > 0 && legacyExtras === null) {
@@ -2394,7 +2405,7 @@ function projectUserOwnedJson(content: string, harnessId: HarnessId): HarnessJso
     const entryResult = HarnessJsonObjectSchema.safeParse(userServers[serverName]);
     if (entryResult.success) {
       const userEntry = { ...entryResult.data };
-      for (const field of RESIN_OWNED_SERVER_FIELDS) {
+      for (const field of resinOwnedServerFields(harnessId)) {
         delete userEntry[field];
       }
       if (Object.keys(userEntry).length === 0) {

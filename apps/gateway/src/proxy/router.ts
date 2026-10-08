@@ -5,7 +5,7 @@ import type { McpToolConnection } from "@resin/runtime";
 import type { ToolInvocationRequest, ToolInvocationRouter } from "../meta/router-contract.js";
 import type { ProjectLockManager } from "../project/lock-manager.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
-import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
+import { type CallToolResult, type JsonRpcParams, withDisplayText } from "../protocol/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import type { CloudCatalogCache } from "./cache.js";
@@ -195,11 +195,12 @@ export class CloudInvocationRouter implements ToolInvocationRouter {
   }
 
   /**
-   * Factory returning a ToolHandler bound to this cloud router.
+   * Factory returning a ToolHandler bound to this cloud router. Its caller sees a result's display
+   * text when it carries one (`withDisplayText`); `invoke`, which composition uses, does not.
    */
   createToolHandler(toolIdOrName: string): ToolHandler {
     return async (context: WorkspaceContext, params: JsonRpcParams, options?: ToolCallOptions) => {
-      return await this.forwardInvocation(toolIdOrName, params, context, options);
+      return withDisplayText(await this.forwardInvocation(toolIdOrName, params, context, options));
     };
   }
 

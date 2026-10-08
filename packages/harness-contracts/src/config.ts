@@ -322,6 +322,12 @@ export const CANONICAL_RESIN_MCP_COMMAND = "resin";
 export const DEFAULT_RESIN_MCP_COMMAND = CANONICAL_RESIN_MCP_COMMAND;
 
 /**
+ * Deadline (ms) the Resin gateway enforces on a single MCP `tools/call` before
+ * cancelling the in-flight execution and returning a timeout error.
+ */
+export const RESIN_TOOL_CALL_TIMEOUT_MS = 600_000;
+
+/**
  * Canonical MCP stdio arguments for Resin.
  */
 export const CANONICAL_RESIN_MCP_ARGS = ["mcp"] as const;

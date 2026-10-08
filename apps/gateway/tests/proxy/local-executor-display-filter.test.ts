@@ -1,15 +1,17 @@
 /**
  * A plan step marked `displayFilter` (`display-filter-v1`, `display-filter-v2`), run by the real
- * local executor: an invocation returns the recorded commands' whole output without the display
- * filters the recording piped it through, and the step's boolean input switches the recorded
- * program back on.
+ * local executor. A version-1 invocation returns the recorded command's whole output without its
+ * display filter. A version-2 invocation runs the program as recorded, filters inline: its value is
+ * what the program printed, and the caller is shown a report (`RESIN_DISPLAY_TEXT_META`) of each
+ * command's status, that output, and where its whole output is kept under the Resin home. The
+ * step's boolean input pipes the commands' output through the filters.
  */
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ToolManifest } from "@resin/contracts";
+import { type ToolManifest, tokenizeProgram } from "@resin/contracts";
 import { InMemoryPrivateValueStore } from "@resin/observer";
 import {
   ArtifactCache,
@@ -20,6 +22,11 @@ import {
   encodeDeterministicTar,
 } from "@resin/runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  type CallToolResult,
+  RESIN_DISPLAY_TEXT_META,
+  withDisplayText,
+} from "../../src/protocol/types.js";
 import { LocalArtifactExecutor } from "../../src/proxy/local-executor.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { type WorkspaceContext, resolveWorkspaceContext } from "../../src/workspace-resolver.js";
@@ -35,134 +42,300 @@ const CASES = [
   },
 ] as const;
 
-describe.skipIf(process.platform === "win32").each(CASES)(
-  "display-filter version $version steps in the gateway",
-  ({ version, program: RECORDED_PROGRAM, whole, filtered }) => {
-    let tempDir: string;
-    let workspaceDir: string;
-    let cache: ArtifactCache;
-    let context: WorkspaceContext;
-    let installed: { manifest: ToolManifest; artifactDigest: string };
+/** A workspace with `./emit` printing three lines, and `./fail` printing them, then failing. */
+function makeWorkspace(workspaceDir: string): void {
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(path.join(workspaceDir, "emit"), "#!/bin/sh\nprintf 'a\\nb\\nc\\n'\n", {
+    mode: 0o755,
+  });
+  fs.writeFileSync(
+    path.join(workspaceDir, "fail"),
+    "#!/bin/sh\nprintf 'a\\nb\\nc\\n'\necho 'fail: 2 tests failed' >&2\nexit 1\n",
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(workspaceDir, "args"),
+    '#!/bin/sh\nfor arg in "$@"; do printf \'[%s]\\n\' "$arg"; done\n',
+    { mode: 0o755 },
+  );
+}
 
-    beforeEach(async () => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "display-filter-gateway-"));
-      workspaceDir = path.join(tempDir, "workspace");
-      fs.mkdirSync(workspaceDir, { recursive: true });
-      fs.writeFileSync(path.join(workspaceDir, "emit"), "#!/bin/sh\nprintf 'a\\nb\\nc\\n'\n", {
-        mode: 0o755,
-      });
-      cache = new ArtifactCache({ cacheDir: path.join(tempDir, "artifacts") });
-      context = resolveWorkspaceContext({ cwd: workspaceDir });
-      installed = await installPlan();
+/**
+ * Installs a plan running `program` as its first step, whose display filter `filter_output`
+ * switches on, followed by `laterSteps`.
+ */
+async function installPlan(
+  cache: ArtifactCache,
+  program: string,
+  version: number,
+  laterSteps: unknown[] = [],
+): Promise<{ manifest: ToolManifest; artifactDigest: string }> {
+  const raw = {
+    id: "tool_emit_lines",
+    name: "emit_lines",
+    version: "1.0.0",
+    description: "emits lines",
+    parameters: {
+      type: "object",
+      properties: { filter_output: { type: "boolean" } },
+      additionalProperties: false,
+    },
+    runtime: {
+      runtime: "recorded-workflow",
+      memoryLimitMb: 64,
+      timeoutMs: 10_000,
+      cpuLimitPercent: 100,
+      maxOutputSizeBytes: 65_536,
+    },
+    capabilities: { command: { allowShellExecution: true } },
+    limits: {},
+    scope: "workspace" as const,
+    createdAt: "2026-10-01T00:00:00.000Z",
+  };
+  const manifest = {
+    ...raw,
+    digest: computeManifestDigest(raw as ToolManifest),
+  } as ToolManifest;
+  const plan = {
+    schemaVersion: 1,
+    workflowId: "wf_emit_lines",
+    inputs: [{ name: "filter_output", type: "boolean", default: false }],
+    steps: [
+      {
+        id: "step0",
+        callId: "call_1",
+        callable: {
+          runtime: RESIN_PROCESS_RUNTIME,
+          name: "bash",
+          program: { kind: "shell", source: program, argument: "command" },
+        },
+        arguments: [{ name: "command", source: { kind: "literal", value: program } }],
+        dependsOn: [],
+        failurePolicy: { onError: "abort", policy: "recorded" },
+        observed: { outcome: "succeeded" },
+        displayFilter: { version, input: "filter_output" },
+      },
+      ...laterSteps,
+    ],
+  };
+  const entrypoint = JSON.stringify(compileRecordedWorkflow(plan as never).plan);
+  const { archive } = encodeDeterministicTar([
+    { path: "manifest.json", content: JSON.stringify(manifest) },
+    { path: "src/index.ts", content: entrypoint },
+  ]);
+  const artifactDigest = crypto.createHash("sha256").update(archive).digest("hex");
+  const stagingDir = await cache.createStagingDirectory(artifactDigest);
+  fs.mkdirSync(path.join(stagingDir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(stagingDir, "manifest.json"), JSON.stringify(manifest), "utf8");
+  fs.writeFileSync(path.join(stagingDir, "src", "index.ts"), entrypoint, "utf8");
+  await cache.commitStagingDirectory(stagingDir, artifactDigest, {
+    digest: artifactDigest,
+    extractedAt: new Date().toISOString(),
+    fileCount: 2,
+    totalSizeBytes: archive.length,
+    entrypoint: "src/index.ts",
+    verified: true,
+  });
+  return { manifest, artifactDigest };
+}
+
+describe.skipIf(process.platform === "win32")("display-filter steps in the gateway", () => {
+  let tempDir: string;
+  let workspaceDir: string;
+  let cache: ArtifactCache;
+  let context: WorkspaceContext;
+  /** A Resin home inside the test's temp directory, never the user's. */
+  let resinHome: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "display-filter-gateway-"));
+    workspaceDir = path.join(tempDir, "workspace");
+    makeWorkspace(workspaceDir);
+    cache = new ArtifactCache({ cacheDir: path.join(tempDir, "artifacts") });
+    resinHome = path.join(tempDir, "resin-home");
+    context = resolveWorkspaceContext({ cwd: workspaceDir });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /** Installs `program` as a display-filter step of `version`, then `laterSteps`, and invokes it once. */
+  async function invoke(
+    program: string,
+    version: number,
+    parameters: Record<string, unknown>,
+    laterSteps: unknown[] = [],
+  ): Promise<{ result: CallToolResult; text: string }> {
+    const installed = await installPlan(cache, program, version, laterSteps);
+    const result = await new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      resinHome,
+      privateValueStore: new InMemoryPrivateValueStore(),
+      recordedWorkflowAdapters: (host) => {
+        const bounds = {
+          cwd: workspaceDir,
+          ...(host.invocationOutputRoot === undefined
+            ? {}
+            : { invocationOutputRoot: host.invocationOutputRoot }),
+        };
+        return [createProcessAdapter(bounds), createProgramAdapter(bounds)];
+      },
+    }).execute({
+      entry: {
+        toolId: installed.manifest.id,
+        name: installed.manifest.name,
+        version: installed.manifest.version,
+        artifactDigest: installed.artifactDigest,
+      },
+      manifest: installed.manifest,
+      parameters: parameters as never,
+      context,
+    });
+    const text = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    return { result, text };
+  }
+
+  /** The text of a successful invocation. */
+  async function run(
+    program: string,
+    version: number,
+    parameters: Record<string, unknown>,
+  ): Promise<string> {
+    const { result, text } = await invoke(program, version, parameters);
+    expect(result.isError, text).toBeUndefined();
+    return text;
+  }
+
+  describe.each(CASES)("version $version", ({ version, program, whole, filtered }) => {
+    it("answers a normal invocation without piping through the dropped filter", async () => {
+      if (version === 1) {
+        // The tool result carries the step's string result as JSON text.
+        expect(await run(program, version, {})).toBe(JSON.stringify(whole));
+        expect(await run(program, version, { filter_output: false })).toBe(JSON.stringify(whole));
+        return;
+      }
+      // Version 2 runs as recorded. The content is what the program printed (what composition and
+      // later steps read); the caller is shown a report with each command's status instead.
+      const { result, text } = await invoke(program, version, {});
+      expect(result.isError, text).toBeUndefined();
+      expect(text).toBe(JSON.stringify(filtered));
+      const report = result._meta?.[RESIN_DISPLAY_TEXT_META] as string;
+      expect(report).toMatch(/^The program exited 0\.\nCommands:\n/);
+      expect(report).toContain(`\nOutput:\n${filtered}`);
+      expect(report).not.toContain(program);
+      expect(withDisplayText(result)).toEqual({ content: [{ type: "text", text: report }] });
+      // Its whole output is kept under the Resin home, for reading without re-running it.
+      const directory = /kept without re-running anything, in (.+):\n/.exec(report)![1]!;
+      expect(path.dirname(directory)).toBe(path.join(resinHome, "data", "invocation-output"));
+      expect(fs.readFileSync(path.join(directory, "o1"), "utf8")).toBe("a\nb\nc\n");
+      expect(fs.readFileSync(path.join(directory, "stdout"), "utf8")).toBe(filtered);
     });
 
-    afterEach(() => {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+    it("pipes the command's output through the filter when the caller switches it on", async () => {
+      expect(await run(program, version, { filter_output: true })).toBe(JSON.stringify(filtered));
     });
+  });
 
-    async function installPlan(): Promise<{ manifest: ToolManifest; artifactDigest: string }> {
-      const raw = {
-        id: "tool_emit_lines",
-        name: "emit_lines",
-        version: "1.0.0",
-        description: "emits lines",
-        parameters: {
-          type: "object",
-          properties: { filter_output: { type: "boolean" } },
-          additionalProperties: false,
-        },
-        runtime: {
-          runtime: "recorded-workflow",
-          memoryLimitMb: 64,
-          timeoutMs: 10_000,
-          cpuLimitPercent: 100,
-          maxOutputSizeBytes: 65_536,
-        },
-        capabilities: { command: { allowShellExecution: true } },
-        limits: {},
-        scope: "workspace" as const,
-        createdAt: "2026-10-01T00:00:00.000Z",
-      };
-      const manifest = {
-        ...raw,
-        digest: computeManifestDigest(raw as ToolManifest),
-      } as ToolManifest;
-      const plan = {
-        schemaVersion: 1,
-        workflowId: "wf_emit_lines",
-        inputs: [{ name: "filter_output", type: "boolean", default: false }],
-        steps: [
-          {
-            id: "step0",
-            callId: "call_1",
-            callable: {
-              runtime: RESIN_PROCESS_RUNTIME,
-              name: "bash",
-              program: { kind: "shell", source: RECORDED_PROGRAM, argument: "command" },
+  it("binds a later step to what the display-filter step printed, never to its report", async () => {
+    const first = "./emit | tail -1; ./emit 2>&1 | grep -E 'a|c' && echo ok";
+    const second = "./args VALUE";
+    const showStep = (source: string) => ({
+      id: "step1",
+      callId: "call_2",
+      callable: {
+        runtime: RESIN_PROCESS_RUNTIME,
+        name: "bash",
+        program: { kind: "shell", source, argument: "command" },
+      },
+      arguments: [
+        {
+          name: "command",
+          source: {
+            kind: "template",
+            template: {
+              type: "program",
+              language: "shell",
+              source: { type: "literal", value: source },
+              holes: [
+                {
+                  token: tokenizeProgram("shell", source).findIndex(
+                    (token) => token.raw === "VALUE",
+                  ),
+                  binding: { type: "result", stepId: "step0", path: [] },
+                },
+              ],
             },
-            arguments: [{ name: "command", source: { kind: "literal", value: RECORDED_PROGRAM } }],
-            dependsOn: [],
-            failurePolicy: { onError: "abort", policy: "recorded" },
-            observed: { outcome: "succeeded" },
-            displayFilter: { version, input: "filter_output" },
           },
-        ],
-      };
-      const entrypoint = JSON.stringify(compileRecordedWorkflow(plan as never).plan);
-      const { archive } = encodeDeterministicTar([
-        { path: "manifest.json", content: JSON.stringify(manifest) },
-        { path: "src/index.ts", content: entrypoint },
-      ]);
-      const artifactDigest = crypto.createHash("sha256").update(archive).digest("hex");
-      const stagingDir = await cache.createStagingDirectory(artifactDigest);
-      fs.mkdirSync(path.join(stagingDir, "src"), { recursive: true });
-      fs.writeFileSync(path.join(stagingDir, "manifest.json"), JSON.stringify(manifest), "utf8");
-      fs.writeFileSync(path.join(stagingDir, "src", "index.ts"), entrypoint, "utf8");
-      await cache.commitStagingDirectory(stagingDir, artifactDigest, {
-        digest: artifactDigest,
-        extractedAt: new Date().toISOString(),
-        fileCount: 2,
-        totalSizeBytes: archive.length,
-        entrypoint: "src/index.ts",
-        verified: true,
-      });
-      return { manifest, artifactDigest };
-    }
-
-    async function run(parameters: Record<string, unknown>): Promise<string> {
-      const result = await new LocalArtifactExecutor({
-        cache,
-        workspaceRoot: workspaceDir,
-        development: true,
-        allowDevKeys: true,
-        privateValueStore: new InMemoryPrivateValueStore(),
-        recordedWorkflowAdapters: () => [
-          createProcessAdapter({ cwd: workspaceDir }),
-          createProgramAdapter({ cwd: workspaceDir }),
-        ],
-      }).execute({
-        entry: {
-          toolId: installed.manifest.id,
-          name: installed.manifest.name,
-          version: installed.manifest.version,
-          artifactDigest: installed.artifactDigest,
         },
-        manifest: installed.manifest,
-        parameters: parameters as never,
-        context,
-      });
-      expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
-      return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-    }
+      ],
+      dependsOn: ["step0"],
+      failurePolicy: { onError: "abort", policy: "recorded" },
+      observed: { outcome: "succeeded" },
+    });
+    const passed = await invoke(first, 2, {}, [showStep(second)]);
+    expect(passed.result.isError, passed.text).toBeUndefined();
+    // Step 2 received step 1's stdout exactly as the recorded program printed it.
+    expect(passed.text).toBe(JSON.stringify("[c\na\nc\nok\n]\n"));
+    // When step 2 fails, the caller sees step 1 by its report.
+    const failed = await invoke(first, 2, {}, [showStep(`${second}; exit 3`)]);
+    expect(failed.result.isError).toBe(true);
+    expect(failed.text).toContain("Step 2 of 2 failed:");
+    expect(failed.text).toContain(
+      "--- step 1/2 ---\nThe program exited 0.\nCommands:\n  1 (./emit): exit 0; its output is shown filtered\n",
+    );
+    expect(failed.text).toContain("Output:\nc\na\nc\nok\n");
+  });
 
-    it("returns the command's whole output without the recorded display filter", async () => {
-      // The tool result carries the step's string result as JSON text.
-      expect(await run({})).toBe(JSON.stringify(whole));
-      expect(await run({ filter_output: false })).toBe(JSON.stringify(whole));
+  describe.each([1, 2])("version %i outcomes", (version) => {
+    it("succeeds with empty output when the switched-on grep selects nothing", async () => {
+      expect(await run("./emit | grep zzz", version, { filter_output: true })).toBe('""');
+      expect(await run("./emit | grep zzz | head -2", version, { filter_output: true })).toBe('""');
     });
 
-    it("runs the recorded pipeline when the caller switches the filter on", async () => {
-      expect(await run({ filter_output: true })).toBe(JSON.stringify(filtered));
+    it("fails on the command's own status, keeping its diagnostics, though the filter selects its output", async () => {
+      for (const filter_output of version === 1 ? [true, false] : [true]) {
+        const { result, text } = await invoke("./fail | grep a", version, { filter_output });
+        expect(result.isError).toBe(true);
+        expect(text).toContain(
+          "step 'step0' failed: recorded shell program exited with code 1: fail: 2 tests failed",
+        );
+      }
     });
-  },
-);
+
+    it("answers a normal invocation with the status the recorded program had", async () => {
+      if (version === 1) {
+        expect(await run("./emit | grep zzz", version, {})).toBe(JSON.stringify("a\nb\nc\n"));
+        return;
+      }
+      // grep selecting nothing exits 1: the program fails, as it did when recorded so.
+      const empty = await invoke("./emit | grep zzz", version, {});
+      expect(empty.result.isError).toBe(true);
+      expect(empty.text).toContain(
+        "Step 1 of 1 failed: step 'step0' failed: the program exited 1.",
+      );
+      expect(empty.text).toContain("Output:\n(none: the program printed nothing)");
+      // The command failing fails the step, though grep selected a line and exited 0.
+      const failing = await invoke("./fail | grep a", version, {});
+      expect(failing.result.isError).toBe(true);
+      expect(failing.text).toContain(
+        "Step 1 of 1 failed: step 'step0' failed: command 1 (./fail) exited 1; the program exited 0.",
+      );
+      expect(failing.text).toContain("1 (./fail): exit 1 (failed); its output is shown filtered");
+      expect(failing.text).toContain("Output:\na\nstderr:\nfail: 2 tests failed");
+    });
+
+    it("fails naming the filter stage when the filter itself errs", async () => {
+      for (const program of ["./emit | grep -E '('", "./emit | grep -E '(' | head -5"]) {
+        const { result, text } = await invoke(program, version, { filter_output: true });
+        expect(result.isError, program).toBe(true);
+        expect(text, program).toContain(
+          "step 'step0' failed: its display filter `grep -E '('` exited with code 2",
+        );
+      }
+    });
+  });
+});

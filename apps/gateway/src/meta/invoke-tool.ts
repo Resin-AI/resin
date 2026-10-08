@@ -21,6 +21,7 @@ import {
   type JsonRpcParamValue,
   type JsonRpcParams,
   RESIN_OUTPUT_STEPS_META,
+  withDisplayText,
 } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
@@ -157,9 +158,12 @@ function withoutOutputStepNumbers(result: CallToolResult): CallToolResult {
 /**
  * Text output reaches the caller as text rather than as a JSON string literal of it: command output
  * keeps its own formatting and costs no escaping. A workflow that returns several steps' text
- * outputs is shown one labeled section per step, in recorded order.
+ * outputs is shown one labeled section per step, in recorded order. A result carrying display text
+ * (`RESIN_DISPLAY_TEXT_META`) is shown by it.
  */
 function presentedResult(result: CallToolResult): CallToolResult {
+  const displayed = withDisplayText(result);
+  if (displayed !== result) return withoutOutputStepNumbers(displayed);
   const value = composedResultValue(result);
   const text = result.content?.[0]?.type === "text" ? result.content[0].text : undefined;
   const presented =

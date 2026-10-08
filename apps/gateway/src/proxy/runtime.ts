@@ -276,6 +276,9 @@ export function recordedWorkflowRuntimeAdapters(
   const bounds = {
     ...(cwd ? { cwd } : {}),
     ...(host.timeoutMs === undefined ? {} : { timeoutMs: host.timeoutMs }),
+    ...(host.invocationOutputRoot === undefined
+      ? {}
+      : { invocationOutputRoot: host.invocationOutputRoot }),
   };
   const { recordedHarnessToolInvoker, resolveConnection } = options;
   return [
@@ -424,8 +427,8 @@ export async function createProductionProxyRuntime(
         keyStore: localKeyStore,
         allowDevKeys,
         requireSignature: localKeyStore ? true : undefined,
-        resinHome:
-          options.resinHome ?? (options.home ? path.join(options.home, ".resin") : undefined),
+        // The resolved home (RESIN_HOME included), as the daemon executor below uses.
+        resinHome: paths.homeDir,
         privateValueOwnerWorkspaceId: identity.workspaceId,
         // A plan recorded from ordinary tools runs through the families this host can really
         // reach: a recorded program on the host, and a tool by name either over the connection the
