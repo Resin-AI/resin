@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -5,12 +6,16 @@ import { fileURLToPath } from "node:url";
 import { OmpRecordDecoder } from "@resin/adapter-omp";
 import {
   type NormalizedSessionEvent,
+  RESIN_REPOSITORY_METADATA_KEY,
   RESIN_WORKING_DIRECTORY_METADATA_KEY,
+  readRepositoryLocationMetadata,
   readWorkingDirectoryIdentity,
 } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { projectEventToMetadataOnly } from "../../src/analytics/metadata-projection.js";
 import { FilePrivateValueStore } from "../../src/analytics/private-value-store.js";
+import { RepositoryLocationAnnotator } from "../../src/analytics/repository-location.js";
+import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
 import { WorkingDirectoryIdentifier } from "../../src/analytics/working-directory-identity.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 import { resolvePaths } from "../../src/paths.js";
@@ -410,6 +415,97 @@ describe("Privacy and Data Residency Boundary Enforcement", () => {
         }
       } finally {
         fs.rmSync(resinHome, { recursive: true, force: true });
+      }
+    });
+    it("transmits a call's repository only as a root-commit hash and a repository-relative directory", async () => {
+      const scratch = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "resin-privacy-repository-")),
+      );
+      const checkout = path.join(scratch, "zq-private-checkout");
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: os.devNull,
+        GIT_AUTHOR_NAME: "Synthetic",
+        GIT_AUTHOR_EMAIL: "synthetic@example.invalid",
+        GIT_COMMITTER_NAME: "Synthetic",
+        GIT_COMMITTER_EMAIL: "synthetic@example.invalid",
+      };
+      try {
+        fs.mkdirSync(path.join(checkout, "pkg"), { recursive: true });
+        fs.writeFileSync(path.join(checkout, "pkg", "README"), "synthetic\n");
+        execFileSync("git", ["init", "-q"], { cwd: checkout, env: gitEnv });
+        execFileSync("git", ["add", "."], { cwd: checkout, env: gitEnv });
+        execFileSync("git", ["commit", "-q", "-m", "synthetic"], { cwd: checkout, env: gitEnv });
+        const resinHome = path.join(scratch, "resin-home");
+        const store = new FilePrivateValueStore(resolvePaths({ resinHome, env: {} }).dataDir);
+        const pipeline = new NormalizationPipeline({ privateValueStore: store });
+        pipeline.registerDecoder(new OmpRecordDecoder());
+        const sessionId = "ses_01j7db4n000000000000000003";
+        const workspaceId = "ws_01j7db4n000000000000000001";
+        const [result] = await pipeline.processRecord(
+          {
+            recordId: "rec_repository_location",
+            sessionId,
+            harnessId: "omp",
+            sequenceNumber: 1,
+            timestamp: "2026-08-28T12:00:00.000Z",
+            recordType: "custom",
+            rawPayload: JSON.stringify({
+              type: "custom",
+              customType: "tool_execution_start",
+              data: {
+                toolCallId: "call_repository_location",
+                toolName: "bash",
+                args: { command: `cd ${checkout}/pkg && pnpm test` },
+              },
+            }),
+            cursor: { offset: 1, line: 1, sequence: 1, timestamp: "2026-08-28T12:00:00.000Z" },
+            metadata: {},
+          },
+          { sessionId, harnessId: "omp", workspaceId },
+        );
+        if (result?.status !== "success") throw new Error("the synthetic call did not normalize");
+        const observed = new WorkflowCallRecorder({
+          privateValues: store,
+          privateValueOwnerWorkspaceId: workspaceId,
+        }).observe(result.event, { workspaceId });
+        new RepositoryLocationAnnotator().annotate(result.event, observed, checkout);
+        const projected = projectEventToMetadataOnly(observed);
+
+        let transmittedBody = "";
+        const mockFetch = vi.fn().mockImplementation(async (_url, options) => {
+          transmittedBody = options.body;
+          return {
+            ok: true,
+            json: async () => ({ accepted: 1, rejected: 0, batchId: "batch_repo" }),
+          };
+        });
+        const client = new ObservationSyncClient({
+          baseUrl: "https://api.resin.cloud",
+          // SAFETY: Mock fetch satisfies fetchFn test contract.
+          fetchFn: mockFetch as typeof fetch,
+          identityProvider: async () => ({ tenantId: "tenant_repo", token: "valid-auth-token" }),
+        });
+        await client.syncObservations([createSanitizedObservationDto(projected)], {
+          batchId: "batch_01j7db4n000000000000000003",
+          workspaceId,
+        });
+
+        const sent = JSON.parse(transmittedBody).observations[0];
+        const carrier = sent.metadata[RESIN_REPOSITORY_METADATA_KEY];
+        expect(readRepositoryLocationMetadata(carrier)).toEqual(carrier);
+        expect(carrier).toEqual({
+          id: expect.stringMatching(/^[0-9a-f]{64}$/),
+          path: "pkg",
+          leadingCd: true,
+        });
+        // The checkout's own location appears only where the upload already carried the command
+        // text (redacted by its own rules); the carrier never adds it.
+        expect(JSON.stringify(carrier)).not.toContain(scratch);
+        expect(JSON.stringify(carrier)).not.toContain("zq-private-checkout");
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
       }
     });
   });

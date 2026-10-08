@@ -14,7 +14,11 @@ import { reportEvent, reportHandledError } from "@resin/observer/error-reporting
 
 export const resolveDaemonPaths = resolvePaths;
 import type { HarnessId } from "@resin/contracts";
-import { findHarnessDefinition, isSupportedHarnessId } from "../harness-registry.js";
+import {
+  SUPPORTED_HARNESS_IDS,
+  findHarnessDefinition,
+  isSupportedHarnessId,
+} from "../harness-registry.js";
 import { type VerbosityLevel, resolveVerbosity } from "../output.js";
 import type { ServiceCommandRunner } from "../service/manager.js";
 import {
@@ -53,6 +57,7 @@ import {
   verifyChannelMetadata,
 } from "./channel-verifier.js";
 import { HarnessConfigOrchestrator, type HarnessConfigResult } from "./harness-config.js";
+import { loadHarnessHealthSettings, updateHarnessHealthSettings } from "./harness-health.js";
 import { InstallationJournal, type JournalData, type JournalDetails } from "./journal.js";
 import { type PlatformInfo, detectPlatform, validatePlatform } from "./platform.js";
 import {
@@ -627,6 +632,21 @@ export class ResinInstaller {
         }
         requestedHarnesses = values.filter(isSupportedHarnessId);
       }
+      // Harnesses the user removed Resin from (`resin uninstall --harness`) are skipped unless
+      // named again with --harness, which also clears the opt-out once registration succeeds.
+      const optedOutHarnesses = (
+        await loadHarnessHealthSettings({ home: customHome, fsBridge: this.fsBridge })
+      ).disabledHarnesses.filter(isSupportedHarnessId);
+      const skippedHarnesses: readonly HarnessId[] =
+        requestedHarnesses === undefined ? optedOutHarnesses : [];
+      if (skippedHarnesses.length > 0) {
+        const names = skippedHarnesses
+          .map((harnessId) => findHarnessDefinition(harnessId)?.displayName ?? harnessId)
+          .join(", ");
+        this.log(
+          `    Skipping ${names}: you removed Resin there. \`resin init --harness ${skippedHarnesses.join(",")}\` adds it back.`,
+        );
+      }
 
       this.journal.completeStep("harness_discovery", {
         requestedHarnesses: requestedHarnesses || "all",
@@ -652,12 +672,25 @@ export class ResinInstaller {
         resinCommand: localSourcePaths?.resinCommand,
         fsBridge: this.fsBridge,
         dryRun,
-        harnesses: requestedHarnesses,
+        harnesses:
+          requestedHarnesses ??
+          (skippedHarnesses.length > 0
+            ? SUPPORTED_HARNESS_IDS.filter((harnessId) => !skippedHarnesses.includes(harnessId))
+            : undefined),
         installedHarnesses: requestedHarnesses,
       });
 
       if (!orchestrationResult.success) {
         throw new Error(orchestrationResult.error || "Failed to configure agent harnesses.");
+      }
+      const reEnabledHarnesses = (requestedHarnesses ?? []).filter((harnessId) =>
+        optedOutHarnesses.includes(harnessId),
+      );
+      if (!dryRun && reEnabledHarnesses.length > 0) {
+        await updateHarnessHealthSettings(
+          { enableHarnesses: reEnabledHarnesses },
+          { home: customHome, fsBridge: this.fsBridge },
+        );
       }
       await this.reportUntestedHarnessVersions(orchestrationResult.results, customHome, harnessEnv);
 

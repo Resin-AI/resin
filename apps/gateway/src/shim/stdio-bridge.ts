@@ -27,6 +27,7 @@ import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../pr
 import { ToolRegistry } from "../registry/registry.js";
 import type { ToolRegistryDatabaseOption } from "../registry/types.js";
 import { type GatewayRouter, createRegistryGatewayRouter } from "../router.js";
+import { createCommandSuggestIndexWriter } from "../suggest/index-writer.js";
 import { withResolvers } from "../utils/deferred.js";
 import { type ToolSearchSurface, createToolSearchSurface } from "./tool-search-surface.js";
 export interface McpStdioShimOptions {
@@ -74,6 +75,12 @@ export interface McpStdioShimOptions {
   isPinned?: (toolId: string) => boolean;
   /** Passed to the in-process gateway; see `GatewayServerOptions.releaseNotice`. */
   releaseNotice?: () => string | undefined;
+  /**
+   * Where the command-suggestion index is kept current (`<state dir>/command-suggest`), or false
+   * for nowhere. By default it is kept only when the shim owns Resin's local state store, so a
+   * host that injects its own registry or database never writes into the user's Resin home.
+   */
+  commandSuggestDir?: string | false;
 }
 export type ShimMode = "daemon_ipc" | "standalone_inprocess" | "failed";
 
@@ -507,10 +514,21 @@ export class McpStdioShim {
       cloudRuntime = undefined;
     }
 
+    const commandSuggestDir =
+      this.options.commandSuggestDir ??
+      (this.ownedStateStore === undefined
+        ? false
+        : path.join(
+            resolvePaths({ home: this.options.home, resinHome: this.options.resinHome }).stateDir,
+            "command-suggest",
+          ));
     const gateway = new LocalMcpGateway({
       router,
       registry,
       cloudRuntime,
+      ...(commandSuggestDir === false
+        ? {}
+        : { onCatalogListed: createCommandSuggestIndexWriter({ dir: commandSuggestDir }) }),
       ...(this.options.releaseNotice === undefined
         ? {}
         : { releaseNotice: this.options.releaseNotice }),

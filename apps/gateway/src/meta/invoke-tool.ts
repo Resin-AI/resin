@@ -13,6 +13,7 @@ import {
   hashCanonicalContent,
   isSafetyGateBypassTool,
 } from "@resin/contracts";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import { reportEvent, reportHandledError } from "@resin/observer/error-reporting/core";
 import { type SafetyGateEvaluator, WorkflowReferenceScope } from "@resin/runtime";
 import { FOR_EACH_ARGUMENT, invalidForEachResult, planForEach, runForEach } from "../for-each.js";
@@ -37,6 +38,7 @@ import {
   failureReasonOfResult,
   invocationStatusFor,
 } from "./invocation-failure.js";
+import { isToolOfferedHere, unavailableHereMessage } from "./repository-scope.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
 import { isSystemMetaTool } from "./system-tools.js";
@@ -371,6 +373,9 @@ export function createInvokeToolHandler(
         }
         return;
       }
+      recordDiscoveryFunnelEvent(
+        outcome === "success" ? "invocation_succeeded" : "invocation_failed",
+      );
       if (!onInvocationRecorded) {
         return;
       }
@@ -454,6 +459,13 @@ export function createInvokeToolHandler(
         }
       }
     };
+    // A learned tool scoped to another repository, or unable to run from here, is refused like one
+    // that is not accessible: nothing ran, so no invocation is recorded, only the funnel's refusal.
+    if (!isMetaTool && !isToolOfferedHere(registry, resolvedTool, context)) {
+      recordDiscoveryFunnelEvent("unavailable_here");
+      const message = unavailableHereMessage(resolvedTool.exposedName || resolvedTool.name);
+      return { isError: true, content: [{ type: "text", text: message }] };
+    }
     // Composed calls carry argument envelopes ({value}, {reference}, {literal}, nested
     // composites). They are analyzed once here: the transcript records the envelope form
     // the caller sent, while validation and dispatch see the resolved values. A

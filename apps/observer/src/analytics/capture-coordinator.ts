@@ -32,6 +32,7 @@ import type { CloudUploadStatusRecorder } from "./cloud-upload-status.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
 import { MetadataEventProjector } from "./metadata-event-projector.js";
+import { RepositoryLocationAnnotator } from "./repository-location.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
 import {
   TrajectoryAlreadyFinalizedError,
@@ -415,6 +416,8 @@ export class TrajectoryCaptureCoordinator {
   private readonly workingDirectoryIdentifier = new WorkingDirectoryIdentifier({
     deviceKey: () => this.privateValueStore?.redactionKey?.(),
   });
+  /** Device-independent repository id and repository-relative directory of each located call. */
+  private readonly repositoryLocationAnnotator = new RepositoryLocationAnnotator();
   private readonly resolveSessionWorkingDirectory?: TrajectoryCaptureCoordinatorOptions["resolveSessionWorkingDirectory"];
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
@@ -956,6 +959,7 @@ export class TrajectoryCaptureCoordinator {
                   ),
                 );
                 this.workingDirectoryIdentifier.annotate(res.event, observed, sessionDirectory);
+                this.repositoryLocationAnnotator.annotate(res.event, observed, sessionDirectory);
                 emitter.ingest(observed);
                 ingestedEvents.push(this.metadataEventProjector.project(observed));
               } catch (err) {
@@ -1172,6 +1176,7 @@ export class TrajectoryCaptureCoordinator {
                   ),
                 );
                 this.workingDirectoryIdentifier.annotate(ev, observed, sessionDirectory);
+                this.repositoryLocationAnnotator.annotate(ev, observed, sessionDirectory);
                 validEvents.push(observed);
               }
             }

@@ -118,6 +118,12 @@ export interface HarnessInstallExtension {
   install(context: HarnessInstallContext): Promise<readonly ManagedBlockResult[]>;
   uninstall(context: HarnessInstallContext): Promise<readonly ManagedBlockResult[]>;
   verify(context: Omit<HarnessInstallContext, "dryRun">): Promise<boolean>;
+  /**
+   * Files this extension writes. The daemon fingerprints them (presence and mtime) next to the
+   * MCP config, so a foreign rewrite triggers a repair within seconds instead of at the next
+   * hourly check. Omit when the extension only writes files already fingerprinted.
+   */
+  watchPaths?(home: string, env: NodeJS.ProcessEnv): readonly string[];
 }
 
 /** A static instruction block installed alongside the MCP registration. */

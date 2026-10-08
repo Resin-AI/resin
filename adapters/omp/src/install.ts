@@ -4,6 +4,7 @@ import {
   type HarnessInstallExtension,
   applyManagedBlock,
 } from "@resin/harness-contracts";
+import { ompCommandSuggestExtension } from "./command-suggest.js";
 import { planOmpMcpConfig } from "./config-planner.js";
 import { OMP_TESTED_VERSIONS, probeOmpInstallation } from "./discovery.js";
 import {
@@ -75,5 +76,14 @@ export const ompInstallHarness: HarnessInstallDefinition = {
       uninstall: removeCatalogBlock,
       verify: async () => true,
     },
+    // Suggests the learned tool that already runs a shell command, as the agent is about to run it.
+    ompCommandSuggestExtension,
   ],
 };
+
+export {
+  OMP_COMMAND_SUGGEST_EXTENSION_FILENAME,
+  ompCommandSuggestExtension,
+  renderOmpCommandSuggestExtension,
+  resolveOmpCommandSuggestExtensionPath,
+} from "./command-suggest.js";

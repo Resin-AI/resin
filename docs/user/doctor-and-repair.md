@@ -21,7 +21,8 @@ Human output uses boxed sections. Typical states:
 | Cloud Authentication | `AUTHENTICATED`, `LOCAL ONLY (Cloud Unconfigured)` (derived from install journal), `NOT AUTHENTICATED` (reason). Authenticated rows may show `EXPIRED`. |
 | Production Safety Gate | `PASS (open)`, `BLOCKED (fail-closed)`, `OVERRIDE (unsafe dev mode)` |
 | Tools & MCP Catalog | `System Tools: 4` (`search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`). `Custom Tools` counts the learned tools in the latest catalog the MCP gateway served for the workspace of the current directory (from the local state store), with the time of that catalog; it reads `unknown (<reason>)`, never `0`, when no catalog has been served for that workspace or the store cannot be read. |
-| Agent Harness Connections | Installed/Not Installed and Configured (MCP Attached)/Not Configured |
+| Agent Harness Connections | Installed/Not Installed and Configured (MCP Attached)/Not Configured, or `Resin removed by you` after `resin uninstall --harness <id>` |
+| Running sessions | Harness sessions that started without Resin's MCP gateway, or run an older Resin, by harness and PID, with a restart hint. Read from the local process table on Linux, WSL and macOS; not checked on native Windows. |
 
 JSON mode:
 
@@ -75,7 +76,7 @@ Remediations that actually run:
 - Create missing directories (`config`, `data`, `logs`, `state`, `bin`, `run`, and `vault` if configured).
 - Remove a stale daemon lockfile when the service is not active.
 - Install the non-root user service if missing (with autostart) or start it if installed but inactive.
-- Reattach MCP entries for detected Claude Code, Codex CLI, and Oh My Pi installs.
+- Reattach MCP entries for detected Claude Code, Codex CLI, and Oh My Pi installs, except harnesses you removed Resin from with `resin uninstall --harness <id>`.
 - Generate or refresh the local production safety attestation under `~/.resin/`.
 
 `repair` does not vacuum SQLite, pick alternate gateway ports, restart workers, promote tools, or export a support bundle. Those flags do not exist.

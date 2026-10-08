@@ -21,6 +21,7 @@ import {
   executeRecordedWorkflow,
   recordedWorkflowInputSchema,
 } from "./recorded-workflow.js";
+import type { CallerRepository } from "./repository-location.js";
 
 export class RecordedWorkflowCompilationError extends Error {
   constructor(
@@ -205,6 +206,8 @@ export function instantiateRecordedWorkflow(
       reference: string,
       access?: { workspaceId?: string },
     ) => WorkflowJsonValue | Promise<WorkflowJsonValue>;
+    /** The caller's checkout; see `RecordedWorkflowExecutionOptions.repository`. */
+    repository?: { caller: CallerRepository | undefined };
   },
 ): {
   name: string;
@@ -227,6 +230,7 @@ export function instantiateRecordedWorkflow(
         adapters: host.adapters,
         ...(host.access ? { access: host.access } : {}),
         ...(host.resolvePrivate ? { resolvePrivate: host.resolvePrivate } : {}),
+        ...(host.repository ? { repository: host.repository } : {}),
         ...(invocation?.signal ? { signal: invocation.signal } : {}),
       });
     },

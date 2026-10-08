@@ -68,7 +68,7 @@ export interface StatusNotificationSnapshot {
   };
   harnesses: ReadonlyArray<{
     installed: boolean;
-    status: "attached" | "unconfigured" | "not_installed" | "drift" | "error";
+    status: "attached" | "unconfigured" | "not_installed" | "drift" | "error" | "disabled";
   }>;
 }
 

@@ -108,6 +108,30 @@ export const WINDOWS_PE_MACHINE = Object.freeze({ x64: 0x8664, arm64: 0xaa64 });
  * The launcher is one line that ends the batch itself (`call exit /b` keeps node's exit code),
  * so cmd.exe never reads further from a launcher file that an update replaced mid-run.
  */
+/**
+ * `bin/resin`. `resin suggest` runs once per shell command an agent is about to run (a harness
+ * hook), so it goes straight to the lean suggestion module instead of loading the whole CLI.
+ */
+export const RESIN_CLI_LAUNCHER = `#!/usr/bin/env node
+if (process.argv[2] === "suggest") {
+  const { runSuggestCli } = await import("../apps/gateway/dist/suggest/index.js");
+  process.exitCode = await runSuggestCli(process.argv.slice(3));
+} else {
+  const { main } = await import("../apps/cli/dist/index.js");
+  if (main instanceof Function) {
+    try {
+      const exitCode = await main(process.argv.slice(2));
+      if (Number.isFinite(exitCode) && exitCode !== 0) {
+        process.exit(exitCode);
+      }
+    } catch (err) {
+      process.stderr.write(\`Fatal error: \${err instanceof Error ? err.message : String(err)}\\n\`);
+      process.exit(1);
+    }
+  }
+}
+`;
+
 export function windowsCmdLauncher(entryName) {
   return `@node "%~dp0${entryName}" %* & call exit /b %%errorlevel%%\r\n`;
 }
@@ -1217,8 +1241,7 @@ export async function createPlatformReleaseTarballs(rootDir, outputDir, options 
     },
     {
       path: "resin/bin/resin",
-      content:
-        "#!/usr/bin/env node\nimport { main } from '../apps/cli/dist/index.js';\nif (main instanceof Function) {\n  try {\n    const exitCode = await main(process.argv.slice(2));\n    if (Number.isFinite(exitCode) && exitCode !== 0) {\n      process.exit(exitCode);\n    }\n  } catch (err) {\n    process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\\n`);\n    process.exit(1);\n  }\n}\n",
+      content: RESIN_CLI_LAUNCHER,
       mode: 0o755,
     },
     {

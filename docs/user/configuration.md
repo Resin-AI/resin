@@ -68,10 +68,19 @@ Cloud tokens are not copied into harness MCP configs, `.resin/project.json`, `.r
 | `RESIN_POSTHOG_HOST` | `string` | `https://resin.sh/ingest` | Error-report and usage-event endpoint. HTTPS, or HTTP on loopback only. |
 | `RESIN_POSTHOG_KEY` | `string` | built-in public project key | Overrides the PostHog project key (`phc_…`), e.g. for a private PostHog project. |
 | `RESIN_ENVIRONMENT` | `production`/`staging`/`development` | derived | Environment label attached to error reports and usage events. |
+| `RESIN_COMMAND_SUGGEST` | `0`/`off`/`false`/`no` | unset (on) | Turns off command-time learned-tool suggestions for processes that inherit it. |
 
 `--gateway-url` is a `resin init` flag, not an environment variable. Default when omitted: `http://127.0.0.1:9400/mcp/sse`.
 
 `--auto-approve` is a CLI flag (also `-y` / `--yes`), not `RESIN_AUTO_APPROVE`.
+
+### Command-time suggestions
+
+Claude Code and OMP ask `resin suggest` before each shell command whether a learned tool in that repository already runs it (see the [Harness Guide](harness-guide.md#command-time-suggestions)). The answer comes from `<state>/command-suggest/index.json`, which `resin mcp` rewrites whenever it lists a session's learned tools: per repository (keyed by a hash of its root commit IDs), each tool's name, input names and the command phrases it runs (`vitest`, `gh pr checks`). Per-session repeat counts are kept in `sessions.json` beside it under a hash of the session ID. The hook reads only these files, runs `git` to identify the repository, uses no network, and stores no command text.
+
+- `resin suggest --disable` turns suggestions off for this Resin home (writes `<state>/command-suggest/disabled`); `resin suggest --enable` turns them back on; `resin suggest --status` shows the setting.
+- `RESIN_COMMAND_SUGGEST=0` turns them off for one process tree.
+- `resin uninstall` removes the Claude Code hook and the OMP extension.
 
 ---
 

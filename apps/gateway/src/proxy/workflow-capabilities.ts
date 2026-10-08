@@ -1,3 +1,5 @@
+import { REPOSITORY_LOCATION_CAPABILITY } from "@resin/contracts";
+
 /**
  * What this device's recording check and runtime support, sent on every request that fetches
  * validation asks, the catalog, tool artifacts or an invocation, so the cloud can withhold what an
@@ -28,6 +30,11 @@
  *   invocation runs the program as recorded, filters inline, and reports each pipeline's status
  *   and the diagnostics its filters hid; replay confirmation replays each cut pipeline's
  *   marker-bracketed output through its own filter.
+ * - `repository-location-v1` (`REPOSITORY_LOCATION_CAPABILITY`): a step's
+ *   `WorkflowStep.location` runs in the caller's own checkout of the step's repository (with
+ *   `leadingCd`, without the program's recorded leading `cd`), and a plan whose location cannot
+ *   resolve for the caller is reported unavailable and never run. A device without it ignores the
+ *   field and runs the recorded program as recorded.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -40,4 +47,5 @@ export const WORKFLOW_CAPABILITIES = [
   "cross-harness-shell-heldout-v1",
   "display-filter-v1",
   "display-filter-v2",
+  REPOSITORY_LOCATION_CAPABILITY,
 ].join(",");

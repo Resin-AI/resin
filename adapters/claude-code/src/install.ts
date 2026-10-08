@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { type HarnessInstallDefinition, readHostPathEnv } from "@resin/harness-contracts";
+import { claudeCommandSuggestExtension } from "./command-suggest.js";
 import { planClaudeMcpConfig } from "./config-planner.js";
 import { CLAUDE_TESTED_VERSIONS, probeClaudeInstallation } from "./discovery.js";
 
@@ -74,4 +75,15 @@ export const claudeCodeInstallHarness: HarnessInstallDefinition = {
     markers: CLAUDE_GUIDANCE_MARKERS,
     body: CLAUDE_RESIN_GUIDANCE,
   },
+  installExtensions: [
+    // Suggests the learned tool that already runs a shell command, as the agent is about to run it.
+    claudeCommandSuggestExtension,
+  ],
 };
+
+export {
+  claudeCommandSuggestExtension,
+  editClaudeSettingsDocument,
+  renderClaudeCommandSuggestCommand,
+  resolveClaudeSettingsPath,
+} from "./command-suggest.js";

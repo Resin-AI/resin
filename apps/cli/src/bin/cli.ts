@@ -252,6 +252,7 @@ Commands:
   status       Display live status and health of the daemon, tools, and harnesses.
   service      Show, start, stop, or restart the Resin background service.
   mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
+  suggest      Command-time learned-tool suggestions (harness hook; --disable/--enable).
   privacy      Inspect and manage device and cloud privacy controls.
   feedback     Send a short message to the Resin team.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.
@@ -358,7 +359,9 @@ export async function main(
     });
     throw error;
   } finally {
-    if (reporter && commandPath !== "mcp") {
+    // `mcp` runs for a whole session and `suggest` once per shell command an agent runs: neither
+    // is a user command worth a usage event.
+    if (reporter && commandPath !== "mcp" && commandPath !== "suggest") {
       reporter.capture("cli_command_completed", {
         command: commandPath,
         exit_code: exitCode,
@@ -380,6 +383,17 @@ async function dispatch(argv: string[], options: MainOptions): Promise<number> {
       : { isTTY: options.stdout.isTTY, write: options.stdout.write };
   const stderr =
     options.stderr?.write === undefined ? process.stderr : { write: options.stderr.write };
+  if (command === "suggest") {
+    // Lazy dynamic import, like `mcp`: the hook path loads only the lean suggestion module. Packaged
+    // launchers route `resin suggest` there before the CLI loads at all.
+    const { runSuggestCli } = await import("@resin/gateway/suggest");
+    return runSuggestCli(args, {
+      stdin: options.stdin as NodeJS.ReadableStream | undefined,
+      stdout,
+      stderr,
+      env: options.env ?? process.env,
+    });
+  }
   if (command === "mcp") {
     // Lazy dynamic import: prevents eagerly loading @resin/gateway and node:sqlite on non-MCP CLI paths.
     const { mcpCommand } = await import("../commands/mcp.js");

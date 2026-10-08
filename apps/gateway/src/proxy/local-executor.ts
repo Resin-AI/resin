@@ -19,6 +19,7 @@ import {
   normalizeSha256,
   tokenizeProgram,
   validateRecordedWorkflow,
+  workflowLocationRepositories,
   workflowSinkStepIds,
 } from "@resin/contracts";
 import {
@@ -27,6 +28,7 @@ import {
   RESIN_INVOKE_TOOL_RUNTIME,
   resolvePrivateReference,
 } from "@resin/observer";
+import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import {
   type ArtifactCache,
   BUNDLE_FILE_ENTRYPOINT_JS,
@@ -49,6 +51,7 @@ import {
   ToolBundleLoader,
   type WorkerExecutionResult,
   WorkerProcess,
+  type WorkflowLocationAvailability,
   createInvocationGrant,
   encodeDeterministicTar,
   inspectArtifactImports,
@@ -56,6 +59,7 @@ import {
   resolveDenoExecutable,
   validateBundleEntryPath,
   verifyBundleSignature,
+  workflowLocationAvailability,
 } from "@resin/runtime";
 import {
   isDatedValue,
@@ -64,6 +68,7 @@ import {
 } from "../meta/dated-defaults.js";
 import { failedToolResult } from "../meta/invocation-failure.js";
 import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-values.js";
+import { type ToolProfile, recordedWorkStepCount } from "../meta/tool-profile.js";
 import {
   type CallToolResult,
   type JsonRpcParams,
@@ -74,6 +79,7 @@ import { computeManifestDigest, computeSha256 } from "../registry/validator.js";
 import { type WorkspaceContext, sessionWorkingDirectory } from "../workspace-resolver.js";
 import { CommandFailureDiagnostics } from "./command-failures.js";
 import type { ManagedToolAccess } from "./tool-access.js";
+import { callerRepository, toolRunnableHere } from "./tool-location.js";
 
 import {
   type OutputStepNumbers,
@@ -587,6 +593,8 @@ export class LocalArtifactExecutor {
   private managedToolAccess?: ManagedToolAccess;
   /** Resolved local summaries by artifact and owning workspace; both are immutable inputs. */
   private readonly recordedWorkflowSummaries = new Map<string, RecordedWorkflowSummary>();
+  /** Parsed recorded plans by artifact digest: an artifact's bytes never change under its digest. */
+  private readonly recordedPlans = new Map<string, RecordedWorkflow>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -680,13 +688,68 @@ export class LocalArtifactExecutor {
     return this.recordedWorkflowSummary(artifactDigest, context)?.defaults ?? new Map();
   }
 
-  private recordedWorkflowSummary(
+  /**
+   * Whether the recorded-workflow tool stored under `artifactDigest` can run for the caller
+   * `context` describes (see `workflowLocationAvailability`); undefined when the digest is not a
+   * readable recorded-workflow artifact.
+   */
+  recordedWorkflowAvailability(
     artifactDigest: string,
     context: WorkspaceContext,
-  ): RecordedWorkflowSummary | undefined {
+  ): WorkflowLocationAvailability | undefined {
+    const plan = this.recordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
     const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
-    const key = `${artifactDigest}\u0000${owner}`;
-    const cached = this.recordedWorkflowSummaries.get(key);
+    return toolRunnableHere(plan, context, {
+      resolvePrivate: this.ownedPrivateResolver(plan, owner),
+    });
+  }
+
+  /** Resolves a private value `plan` declares, only for the workspace that recorded it. */
+  private ownedPrivateResolver(
+    plan: RecordedWorkflow,
+    owner: string | undefined,
+  ): (reference: string) => unknown {
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    return (reference) => {
+      if (!declared.has(reference)) return undefined;
+      const recorded = store.origin?.(reference)?.workspaceId;
+      if (!isUsableWorkspaceId(recorded) || !isUsableWorkspaceId(owner) || recorded !== owner) {
+        return undefined;
+      }
+      try {
+        return resolvePrivateReference(store, reference);
+      } catch {
+        return undefined;
+      }
+    };
+  }
+
+  /**
+   * What this machine knows about a cached recorded workflow for discovery: how many recorded
+   * steps it replays (see `recordedWorkStepCount`), the repositories its located steps run in, and
+   * why it cannot run for this caller, if it cannot. Undefined for any other tool.
+   */
+  recordedWorkflowProfile(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): ToolProfile | undefined {
+    const plan = this.recordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
+    const availability = this.recordedWorkflowAvailability(artifactDigest, context);
+    return {
+      steps: recordedWorkStepCount(plan),
+      locatedRepositories: workflowLocationRepositories(plan),
+      ...(availability === undefined || availability.available
+        ? {}
+        : { unavailableReason: availability.reason }),
+    };
+  }
+
+  /** The validated recorded plan a cached artifact runs, or undefined for any other artifact. */
+  private recordedPlan(artifactDigest: string): RecordedWorkflow | undefined {
+    const cached = this.recordedPlans.get(artifactDigest);
     if (cached !== undefined) return cached;
     if (this.cache.getArtifactManifest(artifactDigest)?.runtime?.runtime !== "recorded-workflow") {
       return undefined;
@@ -696,14 +759,27 @@ export class LocalArtifactExecutor {
       .map((file) => path.join(artifactDir, file))
       .find(isRegularFileWithoutFollowingSymlink);
     if (entrypoint === undefined) return undefined;
-    let plan: RecordedWorkflow;
+    let plan: RecordedWorkflow | undefined;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(entrypoint, "utf8"));
-      if (!validateRecordedWorkflow(parsed).valid) return undefined;
-      plan = parsed as RecordedWorkflow;
+      if (validateRecordedWorkflow(parsed).valid) plan = parsed as RecordedWorkflow;
     } catch {
       return undefined;
     }
+    if (plan !== undefined) this.recordedPlans.set(artifactDigest, plan);
+    return plan;
+  }
+
+  private recordedWorkflowSummary(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): RecordedWorkflowSummary | undefined {
+    const owner = this.privateValueOwnerWorkspaceId ?? context.workspaceId;
+    const key = `${artifactDigest}\u0000${owner}`;
+    const cached = this.recordedWorkflowSummaries.get(key);
+    if (cached !== undefined) return cached;
+    const plan = this.recordedPlan(artifactDigest);
+    if (plan === undefined) return undefined;
     return this.summarizeRecordedPlan(plan, owner, key);
   }
 
@@ -1909,6 +1985,22 @@ export class LocalArtifactExecutor {
       return failedToolResult("validation_error", missingDatedInputsMessage(dated, missing));
     }
 
+    // A plan pinned to a place the caller's checkout does not have is not runnable here: refused
+    // with the reason, never run in the recorded directory or anywhere else.
+    const caller = callerRepository(context);
+    const availability = workflowLocationAvailability(
+      plan,
+      { repository: caller },
+      { resolvePrivate: this.ownedPrivateResolver(plan, owner) },
+    );
+    if (!availability.available) {
+      recordDiscoveryFunnelEvent("unavailable_here");
+      return failedToolResult(
+        "runtime_unavailable",
+        `This tool cannot run here: ${availability.reason}.`,
+      );
+    }
+
     // A plan that routes a step back through this host needs the dispatcher; a plan that only runs
     // programs of its own does not, so the refusal is per requirement rather than per plan.
     const requiredRuntimes = [...new Set(plan.steps.map((step) => step.callable.runtime))];
@@ -2014,6 +2106,7 @@ export class LocalArtifactExecutor {
     const callable = instantiateRecordedWorkflow(artifact, {
       adapters,
       access: { workspaceId: executingWorkspaceId },
+      repository: { caller },
       resolvePrivate: (reference: string, access?: { workspaceId?: string }) => {
         if (!declaredPrivateReferences.has(reference)) {
           throw new Error(

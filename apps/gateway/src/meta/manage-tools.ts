@@ -1,10 +1,12 @@
 import type { ProductionSafetyGateStatus } from "@resin/contracts";
+import { recordDiscoverySearch } from "@resin/observer/discovery-funnel";
 import type { SafetyGateEvaluator } from "@resin/runtime";
 import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import { isToolOfferedHere } from "./repository-scope.js";
 import { isToolInScope, noMatchingToolNote } from "./search-tools.js";
 
 export type ManageToolsAction =
@@ -214,7 +216,7 @@ export function createManageToolsHandler(
         // List all tools and their installed versions
         const grouped = new Map<string, typeof allInstalled>();
         for (const t of allInstalled) {
-          if (!isToolInScope(t, context)) continue;
+          if (!isToolInScope(t, context) || !isToolOfferedHere(registry, t, context)) continue;
           const list = grouped.get(t.toolId) ?? [];
           list.push(t);
           grouped.set(t.toolId, list);
@@ -292,6 +294,13 @@ export function createManageToolsHandler(
             excludeSet.has(toolId) ||
             (exposedName && excludeSet.has(exposedName))
           ) {
+            continue;
+          }
+          // Discovery offers a learned tool only in its repository, and only where it can run.
+          const offered = matchedTool ?? catalogEntry;
+          if (offered !== undefined && !isToolOfferedHere(registry, offered, context)) {
+            // Nor is it listed below as a disabled one.
+            seenToolIds.add(summary.toolId);
             continue;
           }
 
@@ -395,6 +404,9 @@ export function createManageToolsHandler(
         const total = summaries.length;
         const paginated = summaries.slice(offset, offset + limit);
         const hasMore = offset + limit < total;
+        // With a query this is the search path when search_tools is not listed: count it as one
+        // (never the query itself). A plain listing is not a search.
+        if (query) recordDiscoverySearch(total);
 
         return {
           content: [

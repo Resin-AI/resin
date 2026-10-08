@@ -22,6 +22,7 @@ import {
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
+  RESIN_REPOSITORY_METADATA_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
   RESIN_WORKING_DIRECTORY_METADATA_KEY,
   type RedactionMeta,
@@ -33,6 +34,7 @@ import {
   parseAssistantStopReason,
   readCodexCommandMetadata,
   readComputationEvidence,
+  readRepositoryLocationMetadata,
   readToolLinkEvidence,
   readWorkingDirectoryIdentity,
 } from "@resin/contracts";
@@ -945,6 +947,15 @@ export function projectEventToMetadataOnly(
     );
     if (workingDirectory !== undefined) {
       metadata[RESIN_WORKING_DIRECTORY_METADATA_KEY] = { ...workingDirectory };
+    }
+    // The repository leaves as the device-computed hash of its root commit ids and a bounded,
+    // normalized repository-relative directory (see repository-location.ts); anything else under
+    // the key is dropped.
+    const repository = readRepositoryLocationMetadata(
+      event.metadata?.[RESIN_REPOSITORY_METADATA_KEY],
+    );
+    if (repository !== undefined) {
+      metadata[RESIN_REPOSITORY_METADATA_KEY] = { ...repository };
     }
   }
 
