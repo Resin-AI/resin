@@ -29,6 +29,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./suggest": {
+      "types": "./dist/suggest/index.d.ts",
+      "import": "./dist/suggest/index.js",
+      "default": "./dist/suggest/index.js"
     }
   },
   "scripts": {

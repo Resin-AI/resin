@@ -638,6 +638,14 @@ export function programCommands(program: string, privateValues: readonly string[
   return commands;
 }
 
+/**
+ * Whether `program` is a CLI whose subcommands say what it does (`gh`, `git`, `pnpm`): a command
+ * phrase that is only its name ran a subcommand outside the known vocabulary, so it names no job.
+ */
+export function hasSubcommandVocabulary(program: string): boolean {
+  return Object.hasOwn(SUBCOMMANDS, program);
+}
+
 /** How many commands, at most, a summary names; a longer list stops being read. */
 export const LEARNED_COMMANDS_LIMIT = 12;
 
