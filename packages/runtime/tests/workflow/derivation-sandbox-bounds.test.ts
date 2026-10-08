@@ -49,13 +49,16 @@ describe("the derivation sandbox", { timeout: 60_000 }, () => {
   it("refuses to run once a private asset copy is altered", async () => {
     const options = { timeoutMs: 60_000, maxOutputBytes: 4096 };
     await expect(runSandboxed("{}\n", options)).resolves.toEqual({});
-    const copy = path.join(derivationSandboxDirectory()!, "pyodide.mjs");
-    const original = readFileSync(copy);
-    writeFileSync(copy, Buffer.concat([original, Buffer.from("\n// altered\n")]));
-    try {
-      await expect(runSandboxed("{}\n", options)).rejects.toThrow(/missing or altered/);
-    } finally {
-      writeFileSync(copy, original);
+    for (const file of ["pyodide.mjs", "python_stdlib.zip"]) {
+      const copy = path.join(derivationSandboxDirectory()!, file);
+      const original = readFileSync(copy);
+      writeFileSync(copy, Buffer.concat([original, Buffer.from("\n// altered\n")]));
+      try {
+        await expect(runSandboxed("{}\n", options)).rejects.toThrow(/missing or altered/);
+      } finally {
+        writeFileSync(copy, original);
+      }
+      await expect(runSandboxed("{}\n", options)).resolves.toEqual({});
     }
   });
 

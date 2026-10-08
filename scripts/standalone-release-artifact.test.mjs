@@ -148,6 +148,21 @@ describe("standalone platform release artifact", () => {
     });
     expect(help).toContain("Resin CLI");
     expect(help).toContain("upgrade");
+
+    // A derivation runs from the packaged runtime's own precompiled stdlib, outside the workspace.
+    const packagedSandbox = pathToFileURL(
+      path.join(installedRoot, "packages", "runtime", "dist", "workflow", "derivation-sandbox.js"),
+    ).href;
+    const derivation = execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const { runDerivation } = await import(${JSON.stringify(packagedSandbox)});\nconst result = await runDerivation('import json\\n{"sum": sum([19, 23])}\\n', { timeoutMs: 60_000, maxOutputBytes: 4096 });\nprocess.stdout.write(JSON.stringify(result));`,
+      ],
+      { cwd: outsideCwd, env, encoding: "utf8", timeout: 120_000 },
+    );
+    expect(JSON.parse(derivation)).toEqual({ sum: 42 });
   });
 
   it("reports the release version over IPC from a daemon started through the packaged entry", async () => {

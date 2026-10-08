@@ -694,6 +694,36 @@ export function isForbiddenReleasePath(filePath, _options = {}) {
   return false;
 }
 
+/**
+ * The runtime's precompiled Pyodide stdlib has no src/ counterpart; it is backed instead by the
+ * pin in src/workflow/derivation-assets.json. A recognized archive that does not match its pin
+ * throws, so no collector can silently publish a runtime without its stdlib.
+ */
+function isPinnedRuntimeStdlib(pkgDir, normalizedDist) {
+  if (normalizedDist !== "workflow/python_stdlib.zip") return false;
+  const metadataPath = path.join(pkgDir, "src", "workflow", "derivation-assets.json");
+  const manifestPath = path.join(pkgDir, "package.json");
+  if (!fs.existsSync(metadataPath) || !fs.existsSync(manifestPath)) return false;
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (manifest?.name !== "@resin/runtime") return false;
+  const archivePath = path.join(pkgDir, "dist", normalizedDist);
+  const { compiledStdlibSha256 } = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+  const actual = fs.existsSync(archivePath) ? fileSha256(archivePath) : "missing";
+  if (actual !== compiledStdlibSha256) {
+    const error = new Error(
+      `@resin/runtime dist/${normalizedDist} does not match compiledStdlibSha256 in src/workflow/derivation-assets.json (expected ${String(compiledStdlibSha256)}, found ${actual}); rebuild the runtime's precompiled stdlib before packaging.`,
+    );
+    error.code = "ERR_RUNTIME_STDLIB_INTEGRITY";
+    throw error;
+  }
+  return true;
+}
+
 export function isProductionDistFile(pkgDir, distRelPath) {
   if (!distRelPath || Object.prototype.toString.call(distRelPath) !== "[object String]")
     return false;
@@ -706,6 +736,8 @@ export function isProductionDistFile(pkgDir, distRelPath) {
   ) {
     return false;
   }
+
+  if (isPinnedRuntimeStdlib(pkgDir, normalizedDist)) return true;
 
   // 2. Generic source-backed invariant:
   // Every compiled file in dist/ must correspond to a real source file in src/
