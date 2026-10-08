@@ -57,16 +57,17 @@ export interface SearchToolsResultItem {
 }
 
 /**
- * A match that runs the same commands as the item it is listed under. A close contender (see
- * {@link CLOSE_MATCH_RATIO}) carries its purpose and input schema, so an agent can invoke the one
- * it picks without another lookup. The rest are listed by name: their purposes and ids cost about
- * 2.5K characters per search in measured runs, and get_tool_schema(name) gives both.
+ * A match that runs the same commands as the item it is listed under, with its purpose. A close
+ * contender (see {@link CLOSE_MATCH_RATIO}) also carries its id, score and input schema, so an
+ * agent can invoke the one it picks without another lookup. In measured runs, listing the rest by
+ * name alone sent agents through up to 8 get_tool_schema calls to tell them apart, so they keep
+ * their purpose.
  */
 export interface SimilarTool {
   name: string;
-  toolId?: string;
   /** The first sentence of what the tool does, at most {@link PURPOSE_MAX_LENGTH} characters. */
-  purpose?: string;
+  purpose: string;
+  toolId?: string;
   score?: number;
   inputSchema?: ToolParameterSchema | JsonRpcParams;
 }
@@ -1070,17 +1071,20 @@ export function createSearchToolsHandler(
                   score !== undefined &&
                   lead.score !== undefined &&
                   score >= CLOSE_MATCH_RATIO * lead.score;
-                if (!close) return { name: candidate.name };
                 // What the item would show, minus the program: its purpose sentence comes first.
                 const shown =
                   shownCatalog(candidate.description.catalog, candidate.description.local, {
                     recordedValues: false,
                     listInputs: false,
                   }) || `Runs ${candidate.commands.join(", ")}.`;
+                const purpose = purposeOf(
+                  registry.scrubLearnedToolText(candidate.tool, context, shown),
+                );
+                if (!close) return { name: candidate.name, purpose };
                 return {
                   toolId: candidate.tool.toolId,
                   name: candidate.name,
-                  purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
+                  purpose,
                   ...(score === undefined ? {} : { score }),
                   inputSchema: shownInputSchema(
                     registry.learnedToolInputSchema(
