@@ -38,11 +38,14 @@ import { runDerivation } from "./derivation-sandbox.js";
 import {
   type HiddenDiagnostics,
   type ObservedPipeline,
+  type ObservedRunReport,
+  RecordedCheckFailure,
   changesShellOptions,
   createInvocationOutputDirectory,
   displayFilterReport,
   failedPipelines,
   hiddenDiagnostics,
+  isCompletedCheckFailure,
   keepProgramOutput,
   observationNonce,
   observeDisplayFilters,
@@ -2023,7 +2026,7 @@ async function observeDisplayFilterRun(
         ...["stdout", "stderr"].filter((name) => names.includes(name)),
       ];
     }
-    const report = displayFilterReport({
+    const observedReport: ObservedRunReport = {
       stepId: step.id,
       exitCode: run.exitCode,
       ...(run.signal === undefined ? {} : { signal: run.signal }),
@@ -2034,8 +2037,13 @@ async function observeDisplayFilterRun(
       hidden,
       ...(directory === undefined ? {} : { directory }),
       files,
-    });
-    if (report.failed) throw new Error(report.text);
+    };
+    const report = displayFilterReport(observedReport);
+    if (report.failed) {
+      throw isCompletedCheckFailure(observedReport)
+        ? new RecordedCheckFailure(report.text)
+        : new Error(report.text);
+    }
     request.onDisplay?.(report.text);
     return run.value;
   } finally {

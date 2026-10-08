@@ -2064,7 +2064,16 @@ export class LocalArtifactExecutor {
             `${timedOut ? "Tool invocation timed out" : "Tool invocation was cancelled"}${detail.length > 0 ? ` (${detail})` : ""}: the step in flight was stopped and no later step ran.\n${report}`,
           );
         }
-        return failedToolResult("tool_error", report);
+        // Every step that failed ran to completion with a check reporting failure, and no step was
+        // skipped or turned off: the tool worked and its result is that failure.
+        const failedSteps = execution.steps.filter((outcome) => outcome.status === "failed");
+        const checkFailed =
+          failedSteps.length > 0 &&
+          failedSteps.every((outcome) => outcome.check === true) &&
+          !execution.steps.some(
+            (outcome) => outcome.status === "skipped" || outcome.status === "omitted",
+          );
+        return failedToolResult(checkFailed ? "check_failed" : "tool_error", report);
       }
       const result = execution.result ?? null;
       // Several returned outputs are labeled by the plan steps that produced them; the content

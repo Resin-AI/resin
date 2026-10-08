@@ -13851,7 +13851,8 @@ var INVOCATION_FAILURE_REASONS = [
   "runtime_unavailable",
   "timeout",
   "cancelled",
-  "capability_rejected"
+  "capability_rejected",
+  "check_failed"
 ];
 var InvocationFailureReasonSchema = external_exports.enum(INVOCATION_FAILURE_REASONS);
 var InvocationErrorDetailsSchema = external_exports.object({

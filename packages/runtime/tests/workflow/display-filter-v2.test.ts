@@ -16,6 +16,7 @@ import {
   DISPLAY_FILTER_REPORT_LIMIT,
   KEPT_INVOCATION_OUTPUTS,
   diagnosticKind,
+  isRecordedCheckFailure,
   observeDisplayFilters,
 } from "../../src/workflow/display-filter-observation.js";
 import {
@@ -445,6 +446,50 @@ describe.skipIf(process.platform === "win32")("invoking a version-2 display-filt
     // `|| true` consumes the status: no failure.
     const tested = String(await invoke("./fmt || true; ./lint | tail -n 1", "bash", workspace));
     expect(tested).toContain("  1 (./fmt): exit 1 (tested by && or ||, not a failure)\n");
+  });
+
+  it("classifies a check that ran to completion and failed apart from execution failures", async () => {
+    const workspace = await makeTools();
+    const thrown = async (source: string) =>
+      invoke(source, "bash", workspace).then(
+        (value) => {
+          throw new Error(`expected a failure, got ${String(value)}`);
+        },
+        (caught: unknown) => caught,
+      );
+    // Every command ran; the last one, a check, exited 1: the tool worked and reports the failure.
+    const check = await thrown("./lint && ./tests 2>&1 | tail -n 1");
+    expect(isRecordedCheckFailure(check)).toBe(true);
+    expect((check as Error).message).toMatch(
+      /^step 'run' failed: command 2 \(\.\/tests\) exited 1; the program exited 0\.\nCommands:\n {2}1 \(\.\/lint\): exit 0\n {2}2 \(\.\/tests\): exit 1 \(failed\); its output is shown filtered\n/,
+    );
+    // A command that did not run, or one that was not found, is not a completed check failure.
+    const skipped = await thrown("./fmt && ./lint | tail -n 1");
+    expect((skipped as Error).message).toContain("  2 (./lint): did not run");
+    expect(isRecordedCheckFailure(skipped)).toBe(false);
+    const missing = await thrown("./missing | tail -n 1");
+    expect((missing as Error).message).toContain("exited 127");
+    expect(isRecordedCheckFailure(missing)).toBe(false);
+
+    const adapters = new RuntimeAdapterRegistry();
+    adapters.register(createProcessAdapter({ cwd: workspace }));
+    const outcome = async (source: string) =>
+      (
+        await executeRecordedWorkflow(
+          {
+            schemaVersion: 1,
+            workflowId: "wf-display-filter-v2-check",
+            inputs: [],
+            steps: [filteredStep(source, "bash")],
+          },
+          { adapters, inputs: {}, timeoutMs: 10_000 },
+        )
+      ).steps[0];
+    expect(await outcome("./lint && ./tests 2>&1 | tail -n 1")).toMatchObject({
+      status: "failed",
+      check: true,
+    });
+    expect(await outcome("./fmt && ./lint | tail -n 1")).not.toHaveProperty("check");
   });
 
   it("fails on a command's failure its tail filter hides, showing the hidden failure line", async () => {

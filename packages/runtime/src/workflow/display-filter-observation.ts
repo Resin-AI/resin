@@ -407,6 +407,43 @@ export interface ObservedRunReport {
   files: readonly string[];
 }
 
+/** A status a command that ran to completion reports for itself: 1..125 (126/127 mean not runnable). */
+function isCheckStatus(status: number | undefined): boolean {
+  return status !== undefined && Number.isInteger(status) && status >= 1 && status <= 125;
+}
+
+/**
+ * Whether a failed run is a check failure: the program was not signalled, every pipeline ran,
+ * and each failed pipeline's own command exited with an ordinary non-zero status. A signal, a
+ * command that never ran, a missing or non-executable command, unobserved statuses, or a
+ * non-zero exit with no failed pipeline are execution failures instead.
+ */
+export function isCompletedCheckFailure(report: ObservedRunReport): boolean {
+  if (report.signal !== undefined || report.pipelines === undefined) return false;
+  if (report.failed.size === 0 || !report.pipelines.every(ran)) return false;
+  if (report.exitCode !== 0 && !isCheckStatus(report.exitCode)) return false;
+  return report.pipelines
+    .filter((pipeline) => report.failed.has(pipeline.number))
+    .every((pipeline) => isCheckStatus(pipeline.check ? pipeline.producer : pipeline.status));
+}
+
+const RECORDED_CHECK_FAILURE = "resinRecordedCheckFailure";
+
+/** A recorded step that ran to completion while a check it runs failed; its message is the report. */
+export class RecordedCheckFailure extends Error {
+  override readonly name = "RecordedCheckFailure";
+  readonly [RECORDED_CHECK_FAILURE] = true;
+}
+
+/** Whether an error is a `RecordedCheckFailure`, also across duplicated bundles of this module. */
+export function isRecordedCheckFailure(error: unknown): error is RecordedCheckFailure {
+  return (
+    error instanceof RecordedCheckFailure ||
+    (error instanceof Error &&
+      (error as unknown as Record<string, unknown>)[RECORDED_CHECK_FAILURE] === true)
+  );
+}
+
 function label(pipeline: { number: number; command?: string }): string {
   return `${pipeline.number}${pipeline.command === undefined ? "" : ` (${pipeline.command.slice(0, 60)})`}`;
 }

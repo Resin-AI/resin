@@ -34,6 +34,7 @@ import type {
   WorkflowValuePath,
   WorkflowValueTemplate,
 } from "@resin/contracts";
+import { isRecordedCheckFailure } from "./display-filter-observation.js";
 
 /** One call, with the callable the record names and the arguments resolved for it. */
 export interface RecordedCallRequest {
@@ -132,7 +133,13 @@ export type RecordedStepOutcome =
       /** What the caller sees in place of `result`, when the step reported one. */
       display?: string;
     }
-  | { stepId: string; status: "failed"; error: string }
+  | {
+      stepId: string;
+      status: "failed";
+      error: string;
+      /** The step ran to completion and a check it runs failed; set only for adapter-call failures. */
+      check?: true;
+    }
   | { stepId: string; status: "skipped"; reason: string }
   /** An optional step the caller turned off through its toggle input; never ran. */
   | { stepId: string; status: "omitted"; input: string };
@@ -889,7 +896,12 @@ export async function executeRecordedWorkflow(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       state.set(step.id, "failed");
-      outcomes.push({ stepId: step.id, status: "failed", error: message });
+      outcomes.push({
+        stepId: step.id,
+        status: "failed",
+        error: message,
+        ...(isRecordedCheckFailure(error) ? { check: true as const } : {}),
+      });
       if (step.failurePolicy.onError === "abort") aborted = true;
     }
   }
