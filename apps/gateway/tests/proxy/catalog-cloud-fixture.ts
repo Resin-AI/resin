@@ -3,6 +3,7 @@ import {
   type AccountToolAccessResponse,
   CATALOG_CAPABILITIES_HEADER,
   CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
+  CATALOG_TOOL_RECOMMENDATION_CAPABILITY,
   type CatalogSnapshotResponse,
   parseCatalogCapabilities,
 } from "@resin/protocol";
@@ -49,6 +50,7 @@ export function catalogSnapshot(version: string, tools: ToolManifest[]): Catalog
 export interface CatalogRequestRecord {
   workspaceId: string | null;
   currentVersion: string | null;
+  /** The `snapshot-unchanged-v1` token when the request advertised it, else null. */
   capabilities: string | null;
 }
 
@@ -58,6 +60,8 @@ export interface CatalogRequestRecord {
  */
 export class FakeCatalogCloud {
   readonly catalogRequests: CatalogRequestRecord[] = [];
+  /** Every raw catalog-capabilities header value, in request order. */
+  readonly capabilityHeaders: (string | null)[] = [];
   toolAccessRequests = 0;
   /** What the account tool-access read answers. */
   toolAccess: AccountToolAccessResponse["toolAccess"] = "allowed";
@@ -96,18 +100,32 @@ export class FakeCatalogCloud {
       const workspaceId = url.searchParams.get("workspaceId");
       const currentVersion = url.searchParams.get("currentVersion");
       const capabilities = headers.get(CATALOG_CAPABILITIES_HEADER);
-      this.catalogRequests.push({ workspaceId, currentVersion, capabilities });
+      const tokens = parseCatalogCapabilities(capabilities);
+      const accepts = tokens.has(CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY);
+      this.capabilityHeaders.push(capabilities);
+      this.catalogRequests.push({
+        workspaceId,
+        currentVersion,
+        capabilities: accepts ? CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY : null,
+      });
       if (this.catalogGate) await this.catalogGate;
       const snapshot = this.snapshots.get(workspaceId ?? "");
       if (!snapshot) return new Response(null, { status: 404, statusText: "Not Found" });
-      const accepts = parseCatalogCapabilities(capabilities).has(
-        CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
-      );
       if (accepts && currentVersion) {
         if (this.unchangedOverride) return Response.json(this.unchangedOverride(currentVersion));
         if (currentVersion === snapshot.snapshotVersion) {
           return Response.json({ unchanged: true, snapshotVersion: snapshot.snapshotVersion });
         }
+      }
+      // Like the cloud: a client that does not parse recommendations gets none, and a checksum
+      // over what it will parse.
+      if (!tokens.has(CATALOG_TOOL_RECOMMENDATION_CAPABILITY)) {
+        return Response.json(
+          catalogSnapshot(
+            snapshot.snapshotVersion,
+            snapshot.tools.map(({ recommendation: _recommendation, ...tool }) => tool),
+          ),
+        );
       }
       return Response.json(snapshot);
     }

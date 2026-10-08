@@ -14073,6 +14073,13 @@ var ToolLimitConfigSchema = external_exports.object({
   // 128MB
   maxConcurrentInvocations: external_exports.number().int().positive().default(4)
 });
+var ToolRecommendationSchema = external_exports.object({
+  automatic: external_exports.boolean(),
+  reason: external_exports.string().min(1).max(128),
+  invocations: external_exports.number().int().nonnegative(),
+  savedTokens: external_exports.number(),
+  savedCostUsd: external_exports.number().optional()
+}).passthrough();
 var ToolManifestSchema = external_exports.object({
   id: IdentifierSchema,
   name: external_exports.string().min(1).max(128),
@@ -14087,7 +14094,9 @@ var ToolManifestSchema = external_exports.object({
   digest: Sha256DigestSchema,
   metadata: external_exports.record(external_exports.unknown()).default({}),
   createdAt: ISOTimestampSchema,
-  updatedAt: ISOTimestampSchema.optional()
+  updatedAt: ISOTimestampSchema.optional(),
+  /** Catalog delivery metadata, not part of the manifest digest (see ToolRecommendationSchema). */
+  recommendation: ToolRecommendationSchema.optional()
 });
 
 // packages/contracts/dist/versions.js

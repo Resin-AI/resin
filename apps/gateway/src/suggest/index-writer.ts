@@ -24,11 +24,14 @@ export interface CommandSuggestIndexWriterOptions {
   readonly onError?: (error: unknown) => void;
 }
 
-/** The index entries for a listed catalog: learned tools that run at least one command. */
+/**
+ * The index entries for a listed catalog: learned tools that run at least one command, except
+ * those measured to cost more than running the command directly.
+ */
 export function suggestToolsFromCatalog(tools: readonly CatalogNoticeTool[]): SuggestTool[] {
   const result: SuggestTool[] = [];
   for (const tool of tools) {
-    if (tool._meta?.[RESIN_LEARNED_TOOL_META] !== true) continue;
+    if (tool._meta?.[RESIN_LEARNED_TOOL_META] !== true || tool.recommended === false) continue;
     const commands = tool.localCommands ?? [];
     if (commands.length === 0) continue;
     const required = new Set(tool.inputSchema.required ?? []);

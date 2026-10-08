@@ -16,6 +16,7 @@ import {
   CATALOG_CAPABILITIES_HEADER,
   CATALOG_CERTIFICATES_PATH,
   CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
+  CATALOG_TOOL_RECOMMENDATION_CAPABILITY,
   type CatalogSnapshotRequest,
   type CatalogSnapshotResponse,
   CatalogSnapshotResponseSchema,
@@ -514,9 +515,9 @@ export class CloudCatalogClient {
             headers["x-device-id"] = targetDeviceId;
           }
         }
-        if (advertiseUnchanged) {
-          headers[CATALOG_CAPABILITIES_HEADER] = CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY;
-        }
+        headers[CATALOG_CAPABILITIES_HEADER] = advertiseUnchanged
+          ? `${CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY},${CATALOG_TOOL_RECOMMENDATION_CAPABILITY}`
+          : CATALOG_TOOL_RECOMMENDATION_CAPABILITY;
         headers[WORKFLOW_CAPABILITIES_HEADER] = WORKFLOW_CAPABILITIES;
         return headers;
       };

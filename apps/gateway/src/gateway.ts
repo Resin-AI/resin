@@ -209,11 +209,14 @@ export interface ListedLearnedTool {
  * Result `_meta` describing a workspace's learned tools once its catalog is known: how many there
  * are, the commands their recorded programs run most widely, so search-listing instructions can
  * name them, and, for a catalog small enough to list directly, each tool's name and purpose.
- * Nothing while the catalog is unknown.
+ * Nothing while the catalog is unknown. A tool measured to cost more than doing the job directly
+ * is left out of all three: search still finds it and it still answers by name.
  */
 function learnedToolsMeta(tools: readonly CatalogNoticeTool[] | undefined) {
   if (tools === undefined) return {};
-  const learned = tools.filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true);
+  const learned = tools.filter(
+    (tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true && tool.recommended !== false,
+  );
   const commands = summarizeLearnedCommands(learned.map((tool) => tool.localCommands ?? []));
   const listing: ListedLearnedTool[] | undefined =
     learned.length > 0 && learned.length <= DIRECT_LISTING_MAX_TOOLS
@@ -504,13 +507,19 @@ export class LocalMcpGateway {
     return this.connections.get(connectionId);
   }
 
-  /** The learned tools a workspace lists, as the model sees them: names and descriptions only. */
+  /**
+   * The learned tools a workspace's instructions name, as the model sees them: names and
+   * descriptions only. A tool measured to cost more than doing the job directly is not named; the
+   * harness still lists it and it still answers by name.
+   */
   async listLearnedTools(
     context: McpConnection["workspaceContext"],
   ): Promise<Array<{ name: string; description?: string }>> {
-    const tools = await this.router.listTools(context);
+    const tools = await this.listCatalogTools(context);
     return tools
-      .filter((tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true)
+      .filter(
+        (tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true && tool.recommended !== false,
+      )
       .map((tool) =>
         tool.description === undefined
           ? { name: tool.name }
@@ -778,7 +787,9 @@ export class LocalMcpGateway {
   }
 
   /** The tools a connection's workspace lists, as tools/list returns them before conversion. */
-  private async listCatalogTools(context: McpConnection["workspaceContext"]) {
+  private async listCatalogTools(
+    context: McpConnection["workspaceContext"],
+  ): Promise<CatalogNoticeTool[]> {
     return await (this.router.listCatalogNoticeTools?.(context) ?? this.router.listTools(context));
   }
 

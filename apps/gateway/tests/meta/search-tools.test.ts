@@ -957,28 +957,43 @@ function workspaceTool(name: string): RecordedLuauTool | undefined {
   return [...luauTools, ...otherTools].find((each) => each.name === name);
 }
 
+/** What the cloud sends for a tool measured to cost more than doing the job directly. */
+const DEMOTED = {
+  automatic: false,
+  reason: "measured_net_cost",
+  invocations: 4,
+  savedTokens: -2480,
+  savedCostUsd: -0.0091,
+} as const;
+
 /** Searches the fixture workspace. The Luau tools alone are tagged `luau`. */
 async function searchLuau(
   params: Record<string, unknown>,
   privateValues: readonly string[] = [],
+  demoted: readonly string[] = [],
 ): Promise<SearchToolsResponse> {
   const registry = new ToolRegistry();
   const byDigest = new Map<string, RecordedLuauTool>();
+  const manifests: ToolManifest[] = [];
   for (const [index, tool] of [...luauTools, ...otherTools].entries()) {
     const artifactDigest = index.toString(16).padStart(64, "0");
     byDigest.set(artifactDigest, tool);
-    await registry.registerTool(
-      makeManifest({
-        id: `tool_${tool.name}`,
-        name: tool.name,
-        description: tool.catalog,
-        parameters: ToolParameterSchema.parse(tool.parameters),
-        metadata: { tags: luauTools.includes(tool) ? ["shell", "luau"] : ["shell"] },
-      }),
-      undefined,
-      { workspaceId: "ws-luau", artifactDigest },
-    );
+    const manifest = makeManifest({
+      id: `tool_${tool.name}`,
+      name: tool.name,
+      description: tool.catalog,
+      parameters: ToolParameterSchema.parse(tool.parameters),
+      metadata: { tags: luauTools.includes(tool) ? ["shell", "luau"] : ["shell"] },
+    });
+    manifests.push(manifest);
+    await registry.registerTool(manifest, undefined, { workspaceId: "ws-luau", artifactDigest });
   }
+  // As a catalog sync applies them: to tools already registered.
+  registry.applyToolRecommendations(
+    manifests.map((manifest) =>
+      demoted.includes(manifest.name) ? { ...manifest, recommendation: DEMOTED } : manifest,
+    ),
+  );
   const lookup = (tool: { artifactDigest?: string }) =>
     tool.artifactDigest === undefined ? undefined : byDigest.get(tool.artifactDigest);
   registry.setLocalToolCommands((tool) => lookup(tool)?.commands ?? []);
@@ -1006,28 +1021,10 @@ describe("search_tools over near-duplicate learned tools", () => {
         .sort(),
     );
     for (const similar of lead?.similar ?? []) {
-      expect(Object.keys(similar).sort()).toEqual([
-        "inputSchema",
-        "name",
-        "purpose",
-        "score",
-        "toolId",
-      ]);
+      // Compact: its inputs come from get_tool_schema(name), not from every search.
+      expect(Object.keys(similar).sort()).toEqual(["name", "purpose", "score", "toolId"]);
       expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
       expect(similar.purpose.length).toBeLessThanOrEqual(140);
-      // Invocable as listed: its whole schema, only the property descriptions left out.
-      const declared = workspaceTool(similar.name)?.parameters;
-      expect(similar.inputSchema).toEqual({
-        ...declared,
-        properties: Object.fromEntries(
-          Object.entries(declared?.properties ?? {}).map(([name, property]) => [
-            name,
-            Object.fromEntries(
-              Object.entries(property ?? {}).filter(([key]) => key !== "description"),
-            ),
-          ]),
-        ),
-      });
     }
     expect(lead?.similar?.[0]?.purpose).toMatch(
       /^Runs the \w+ test suite, then checks formatting and lints the Luau sources\.$/,
@@ -1039,6 +1036,38 @@ describe("search_tools over near-duplicate learned tools", () => {
     expect(new Set(groups).size).toBe(groups.length);
     expect(response.total).toBe(response.tools.length);
     expect(response.note).toContain("A tool under `similar` runs the same commands");
+    expect(response.note).toContain("get_tool_schema(name) gives its inputs");
+  });
+
+  it("lists a tool measured to cost more after every recommended match, marked", async () => {
+    const baseline = await searchLuau({ query, limit: 100 });
+    const baselineNames = baseline.tools.map((tool) => tool.name);
+    expect(baselineNames.length).toBeGreaterThan(1);
+    // The best match and every tool grouped under it, so no recommended member can lead.
+    const [best] = baseline.tools;
+    const demotedName = best?.name ?? "";
+    const demoted = [demotedName, ...(best?.similar ?? []).map((tool) => tool.name)];
+
+    const response = await searchLuau({ query, limit: 100 }, [], demoted);
+    const names = response.tools.map((tool) => tool.name);
+    // Still found, but last; the rest keep their order.
+    expect(names.at(-1)).toBe(demotedName);
+    expect(names.slice(0, -1)).toEqual(baselineNames.slice(1));
+    expect(response.tools.at(-1)?.recommended).toBe(false);
+    expect(response.tools.slice(0, -1).every((tool) => !("recommended" in tool))).toBe(true);
+  });
+
+  it("leads a group with its best recommended member when the best match is demoted", async () => {
+    const baseline = await searchLuau({ query, limit: 100 });
+    const [lead] = baseline.tools;
+    const runnerUp = lead?.similar?.[0]?.name;
+    expect(runnerUp).toBeDefined();
+
+    const response = await searchLuau({ query, limit: 100 }, [], [lead?.name ?? ""]);
+    const group = response.tools.find((tool) => tool.name === runnerUp);
+    expect(group).toBeDefined();
+    expect(group).not.toHaveProperty("recommended");
+    expect(group?.similar?.map((tool) => tool.name)).toContain(lead?.name);
   });
 
   it("serves every full item's whole input schema, without the sentences each input repeated", async () => {

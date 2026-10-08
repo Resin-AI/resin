@@ -1,10 +1,17 @@
-import { CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY, ValidationError } from "@resin/protocol";
+import type { ToolManifest } from "@resin/contracts";
+import {
+  CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY,
+  CATALOG_TOOL_RECOMMENDATION_CAPABILITY,
+  ValidationError,
+  parseCatalogCapabilities,
+} from "@resin/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudCatalogCache } from "../../src/proxy/cache.js";
-import { CloudCatalogClient } from "../../src/proxy/client.js";
+import { CloudCatalogClient, verifyCatalogSnapshot } from "../../src/proxy/client.js";
 import { CloudInvocationRouter } from "../../src/proxy/router.js";
 import { CloudCatalogSyncCoordinator } from "../../src/proxy/sync.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
+import { computeManifestDigest } from "../../src/registry/validator.js";
 import {
   FakeCatalogCloud,
   catalogSnapshot,
@@ -187,5 +194,67 @@ describe("Coordinator on an unchanged catalog", () => {
     expect(cache.getSnapshot(workspaceId)?.tools).toHaveLength(1);
     expect(registry.isToolActiveForWorkspace(TOOL_ONE, "1.0.0", workspaceId)).toBe(true);
     expect(errors[0]?.message).toContain("holds no snapshot");
+  });
+});
+
+describe("Catalog tool recommendation", () => {
+  const demoted = {
+    automatic: false,
+    reason: "measured_net_cost",
+    invocations: 4,
+    savedTokens: -2480,
+    savedCostUsd: -0.0091,
+  };
+  const withRecommendation = (tool: ToolManifest, recommendation = demoted): ToolManifest => ({
+    ...tool,
+    recommendation,
+  });
+  const registeredRecommendation = (registry: ToolRegistry) =>
+    registry.getAllRegisteredTools().find((tool) => tool.toolId === TOOL_ONE)?.manifest
+      .recommendation;
+
+  it("is advertised on every snapshot request and left out of the manifest digest", async () => {
+    const tool = catalogTool(TOOL_ONE, "one");
+    expect(computeManifestDigest(withRecommendation(tool))).toBe(tool.digest);
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [withRecommendation(tool)]));
+    const { client } = setup(cloud);
+
+    const snapshot = await client.fetchCatalogSnapshot();
+    await client.fetchCatalogSnapshotResult({ currentVersion: "v1", acceptUnchanged: true });
+
+    expect(snapshot.tools[0]?.recommendation).toEqual(demoted);
+    for (const header of cloud.capabilityHeaders) {
+      expect(parseCatalogCapabilities(header).has(CATALOG_TOOL_RECOMMENDATION_CAPABILITY)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("verifies a snapshot whose recommendation carries keys this client does not know", () => {
+    const tool = withRecommendation(catalogTool(TOOL_ONE, "one"), {
+      ...demoted,
+      measuredSince: "2026-10-01",
+    } as typeof demoted);
+    const verified = verifyCatalogSnapshot(catalogSnapshot("v1", [tool]));
+    expect(verified.tools[0]?.recommendation).toMatchObject({ measuredSince: "2026-10-01" });
+  });
+
+  it("reaches the registered tool, follows the cloud at the same version, and reverts", async () => {
+    const tool = catalogTool(TOOL_ONE, "one");
+    const cloud = new FakeCatalogCloud(catalogSnapshot("v1", [withRecommendation(tool)]));
+    const { registry, coordinator } = setup(cloud);
+
+    await coordinator.sync();
+    expect(registeredRecommendation(registry)).toEqual(demoted);
+
+    // Same tool version, new measurements: the cloud bumps the snapshot version only.
+    cloud.setSnapshot(catalogSnapshot("v2", [tool]));
+    await coordinator.sync();
+    expect(registry.isToolActiveForWorkspace(TOOL_ONE, "1.0.0", workspaceId)).toBe(true);
+    expect(registeredRecommendation(registry)).toBeUndefined();
+
+    cloud.setSnapshot(catalogSnapshot("v3", [withRecommendation(tool)]));
+    await coordinator.sync();
+    expect(registeredRecommendation(registry)).toEqual(demoted);
   });
 });

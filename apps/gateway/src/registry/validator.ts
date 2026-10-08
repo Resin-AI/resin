@@ -59,9 +59,10 @@ export function computeSha256(content: string): string {
 export function computeManifestDigest(
   manifest: ToolManifest | Record<string, JsonRpcParamValue>,
 ): string {
-  // Strip existing digest for deterministic computation
-  const { digest: _, ...rest } = manifest;
-  const parsed = ToolManifestSchema.omit({ digest: true }).safeParse(rest);
+  // Strip existing digest for deterministic computation, and the catalog's recommendation: it is
+  // delivery metadata that changes with measurements, not part of the tool the digest identifies.
+  const { digest: _, recommendation: _recommendation, ...rest } = manifest;
+  const parsed = ToolManifestSchema.omit({ digest: true, recommendation: true }).safeParse(rest);
   const normalized = parsed.success ? parsed.data : rest;
   return hashCanonicalContent(normalized);
 }

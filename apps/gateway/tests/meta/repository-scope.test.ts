@@ -25,6 +25,7 @@ import { recordedWorkStepCount } from "../../src/meta/tool-profile.js";
 import {
   type CallToolResult,
   type McpTool,
+  RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
@@ -33,6 +34,7 @@ import {
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
 import { type GatewayRouter, createRegistryGatewayRouter } from "../../src/router.js";
+import { suggestToolsFromCatalog } from "../../src/suggest/index-writer.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
 // Synthetic repositories: the identity of each is a fixed 64-hex id, keyed by checkout path. Two
@@ -457,5 +459,97 @@ describe("direct listing of a small per-repository catalog", () => {
     expect(initialize[RESIN_LEARNED_TOOL_COUNT_META]).toBe(DIRECT_LISTING_MAX_TOOLS + 1);
     expect(initialize[RESIN_LEARNED_TOOL_LISTING_META]).toBeUndefined();
     expect(list[RESIN_LEARNED_TOOL_LISTING_META]).toBeUndefined();
+  });
+});
+
+describe("a learned tool measured to cost more than doing the job directly", () => {
+  const caller = callerIn("/repos/alpha");
+  const demoted = {
+    automatic: false,
+    reason: "measured_net_cost",
+    invocations: 4,
+    savedTokens: -2480,
+    savedCostUsd: -0.0091,
+  };
+
+  async function catalogWithDemotedStyleCheck() {
+    const registry = await registryWith([
+      { id: "tool_style", name: "check_lua_style" },
+      { id: "tool_deploy", name: "deploy_place" },
+    ]);
+    registry.setLocalToolCommands((tool) =>
+      "toolId" in tool && tool.toolId === "tool_style" ? ["stylua"] : ["rojo"],
+    );
+    const style = registry.getAllRegisteredTools().find((tool) => tool.toolId === "tool_style");
+    if (!style) throw new Error("tool_style was not registered");
+    registry.applyToolRecommendations([{ ...style.manifest, recommendation: demoted }]);
+    return { registry, style };
+  }
+
+  it("keeps the recommendation on every registered version and reverts when it is gone", async () => {
+    const { registry, style } = await catalogWithDemotedStyleCheck();
+    const router = createRegistryGatewayRouter(registry);
+    const listed = await router.listCatalogNoticeTools(caller);
+    expect(listed.find((tool) => tool.name === "check_lua_style")?.recommended).toBe(false);
+    expect(listed.find((tool) => tool.name === "deploy_place")).not.toHaveProperty("recommended");
+    // Internal: never sent to a harness.
+    expect((await router.listTools(caller)).some((tool) => "recommended" in tool)).toBe(false);
+
+    const { recommendation: _recommendation, ...withoutRecommendation } = style.manifest;
+    registry.applyToolRecommendations([withoutRecommendation]);
+    expect(
+      (await router.listCatalogNoticeTools(caller)).find((tool) => tool.name === "check_lua_style"),
+    ).not.toHaveProperty("recommended");
+  });
+
+  it("is left out of the instructions' count, commands and direct listing, and of suggestions", async () => {
+    const { registry } = await catalogWithDemotedStyleCheck();
+    const registryRouter = createRegistryGatewayRouter(registry);
+    // The caller's repository, whatever workspace initialize resolves for the connection.
+    const router: GatewayRouter = {
+      listTools: () => registryRouter.listTools(caller),
+      listCatalogNoticeTools: () => registryRouter.listCatalogNoticeTools(caller),
+      callTool: async () => ({ content: [] }),
+    };
+    const gateway = new LocalMcpGateway({ router, enableRefreshCoordinator: false });
+    const connection = gateway.createConnection({ cwd: "/repos/alpha" });
+    const initialized = await gateway.handleMessage(connection, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "omp-coding-agent", version: "1" },
+        _meta: { [RESIN_SEARCH_LISTING_META]: true },
+      },
+    });
+    const meta = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) }).parse(initialized)
+      .result._meta;
+    expect(meta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
+    expect(meta[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual(["rojo"]);
+    expect(meta[RESIN_LEARNED_TOOL_LISTING_META]).toEqual([
+      { name: "deploy_place", description: expect.any(String) },
+    ]);
+    expect(await gateway.listLearnedTools(caller)).toEqual([
+      { name: "deploy_place", description: expect.any(String) },
+    ]);
+    expect(
+      suggestToolsFromCatalog(await registryRouter.listCatalogNoticeTools(caller)).map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(["deploy_place"]);
+  });
+
+  it("still answers get_tool_schema and invoke_tool by name", async () => {
+    const { registry } = await catalogWithDemotedStyleCheck();
+    const schema = await createGetToolSchemaHandler(registry)(caller, { name: "check_lua_style" });
+    expect(schema.isError).not.toBe(true);
+    const invoke = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+    const invoked = await createInvokeToolHandler(registry, { invoke })(caller, {
+      name: "check_lua_style",
+    });
+    expect(invoked.isError).not.toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });

@@ -162,6 +162,13 @@ export const CATALOG_CAPABILITIES_HEADER = "x-resin-catalog-capabilities";
 export const CATALOG_SNAPSHOT_UNCHANGED_CAPABILITY = "snapshot-unchanged-v1";
 
 /**
+ * Capability token: the client parses a tool manifest's optional `recommendation`. Clients without
+ * it strip the unknown key before checking the snapshot checksum, so the server must leave the field
+ * out (and out of the checksum) for them.
+ */
+export const CATALOG_TOOL_RECOMMENDATION_CAPABILITY = "tool-recommendation-v1";
+
+/**
  * Parses a {@link CATALOG_CAPABILITIES_HEADER} value into its normalised token set.
  */
 export function parseCatalogCapabilities(value: string | null | undefined): Set<string> {
