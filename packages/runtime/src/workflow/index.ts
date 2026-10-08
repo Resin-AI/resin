@@ -3,6 +3,7 @@ export * from "./binding-resolver.js";
 export * from "./compensation-manager.js";
 export * from "./workflow-executor.js";
 export * from "./recorded-workflow.js";
+export * from "./repository-location.js";
 export * from "./runtime-families.js";
 export * from "./program-runner.js";
 export * from "./shell-invocation.js";

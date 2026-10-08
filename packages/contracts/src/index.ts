@@ -57,6 +57,8 @@ export * from "./harness-introspection.js";
 export * from "./assistant-stop-reason.js";
 // Keyed, equality-only identity of the directory a recorded call ran in
 export * from "./working-directory.js";
+// Repository a recorded call ran in, and where a plan step runs in the caller's checkout
+export * from "./repository-location.js";
 // Legacy compatibility types and constants
 export interface ToolSpec {
   id: string;

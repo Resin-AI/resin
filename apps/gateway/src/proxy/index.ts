@@ -9,6 +9,7 @@ export * from "./router.js";
 export * from "./sync.js";
 export * from "./runtime.js";
 export * from "./local-executor.js";
+export * from "./tool-location.js";
 export * from "./validation-daemon-module.js";
 export * from "./validation-lease.js";
 export * from "./validation-worker.js";

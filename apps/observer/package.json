@@ -32,6 +32,11 @@
       "import": "./dist/recording.js",
       "default": "./dist/recording.js"
     },
+    "./repository-identity": {
+      "types": "./dist/repository-identity.d.ts",
+      "import": "./dist/repository-identity.js",
+      "default": "./dist/repository-identity.js"
+    },
     "./client": {
       "types": "./dist/client-api.d.ts",
       "import": "./dist/client-api.js",

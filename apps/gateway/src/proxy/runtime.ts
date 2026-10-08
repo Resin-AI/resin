@@ -293,7 +293,7 @@ export function recordedWorkflowRuntimeAdapters(
               const result = await recordedHarnessToolInvoker({
                 name: request.step.callable.name,
                 parameters: request.arguments as Record<string, unknown>,
-                cwd: cwd ?? process.cwd(),
+                cwd: request.workingDirectory ?? cwd ?? process.cwd(),
                 ...(host.signal ? { signal: host.signal } : {}),
               });
               if (result.isError) {
