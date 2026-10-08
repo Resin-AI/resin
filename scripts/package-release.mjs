@@ -562,14 +562,14 @@ export function createDeterministicTar(entries) {
 }
 
 export function gzipDeterministic(tarBuffer) {
-  return zlib.gzipSync(tarBuffer, { mtime: 0, level: 9 });
+  return zlib.gzipSync(tarBuffer, { mtime: 0, level: 6 });
 }
 
 const gzipAsync = promisify(zlib.gzip);
 
 /** {@link gzipDeterministic} on the libuv thread pool: the same bytes, without blocking. */
 export function gzipDeterministicAsync(tarBuffer) {
-  return gzipAsync(tarBuffer, { mtime: 0, level: 9 });
+  return gzipAsync(tarBuffer, { mtime: 0, level: 6 });
 }
 
 /**
