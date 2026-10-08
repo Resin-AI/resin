@@ -4,7 +4,7 @@
  * Resin V1.0.0 Release Packaging Tool
  *
  * Responsibilities:
- * 1. Builds all 15 monorepo workspace packages.
+ * 1. Builds all monorepo workspace packages.
  * 2. Generates reproducible, deterministic standalone platform release tarballs.
  * 3. Generates a signed release manifest with Ed25519 signatures and SHA-256 digests.
  * 4. Generates a CycloneDX 1.5 JSON SBOM.
@@ -594,8 +594,8 @@ async function mapWithConcurrency(items, limit, fn) {
 }
 
 export function buildWorkspacePackages(rootDir = process.cwd()) {
-  console.log("🔨 Building all 15 workspace packages...");
-  execSync("pnpm turbo run build", { cwd: rootDir, stdio: "inherit" });
+  console.log("🔨 Building all workspace packages...");
+  execSync("pnpm run build", { cwd: rootDir, stdio: "inherit" });
   console.log("✅ All workspace packages built successfully.");
 }
 export function assertInstallHelperTrustRoot(rootDir, keyPair) {

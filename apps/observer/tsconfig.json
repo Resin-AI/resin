@@ -26,6 +26,15 @@
     },
     {
       "path": "../../packages/windows-security"
-    }
+    },
+    { "path": "../../adapters/claude-code" },
+    { "path": "../../adapters/codex-cli" },
+    { "path": "../../adapters/copilot-cli" },
+    { "path": "../../adapters/cursor-cli" },
+    { "path": "../../adapters/grok-build" },
+    { "path": "../../adapters/muse-code" },
+    { "path": "../../adapters/omp" },
+    { "path": "../../adapters/opencode" },
+    { "path": "../../adapters/pi" }
   ]
 }

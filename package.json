@@ -9,7 +9,8 @@
     "pnpm": ">=10.0.0"
   },
   "scripts": {
-    "build": "turbo run build",
+    "build": "turbo run compile",
+    "compile": "tsc -b && node scripts/write-cli-bundled-release-trust.mjs",
     "test": "vitest run --exclude scripts/verify-release.test.mjs --exclude scripts/standalone-release-artifact.test.mjs --exclude apps/cli/tests/installer-e2e.test.ts --exclude apps/cli/tests/installer/npm-pack-offline-install.test.ts --exclude apps/cli/tests/installer/packaged-cli-production-http.test.ts --exclude packages/runtime/tests/workflow/derivation-steps.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-imports.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-host.test.ts --exclude packages/runtime/tests/workflow/derivation-sandbox-bounds.test.ts --exclude apps/gateway/tests/proxy/derivation-binding-replay.test.ts --exclude scripts/release-packaging-hygiene.test.mjs --exclude scripts/pack-public-packages.test.mjs",
     "test:sandbox": "vitest run packages/runtime/tests/workflow/derivation-steps.test.ts packages/runtime/tests/workflow/derivation-sandbox-imports.test.ts packages/runtime/tests/workflow/derivation-sandbox-host.test.ts packages/runtime/tests/workflow/derivation-sandbox-bounds.test.ts apps/gateway/tests/proxy/derivation-binding-replay.test.ts",
     "test:e2e": "vitest run --config vitest.packaged.config.ts --no-file-parallelism apps/cli/tests/installer-e2e.test.ts apps/cli/tests/installer/npm-pack-offline-install.test.ts apps/cli/tests/installer/packaged-cli-production-http.test.ts",
@@ -17,7 +18,7 @@
     "lint": "biome check . && oxlint .",
     "lint:fix": "biome check --write . && oxlint --fix .",
     "format": "biome format --write .",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run compile",
     "check": "pnpm run check:adrs && pnpm run check:boundaries && pnpm run check:secrets && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run test:sandbox && node scripts/build-install-helper.mjs --check",
     "check:all": "pnpm run check && pnpm run release:test && pnpm run test:e2e",
     "check:adrs": "node scripts/verify-adrs.mjs",

@@ -415,7 +415,7 @@ function tablePlan(store: InMemoryPrivateValueStore, body: string): RecordedWork
 }
 
 describe("derivation inputs established by one recording", { timeout: 60_000 }, () => {
-  it("confirms a derivation reading a recorded-default input seen only inside embedded code", async () => {
+  it("confirms embedded recorded-default bindings and replays omitted and overridden inputs", async () => {
     const store = new InMemoryPrivateValueStore();
     const plan = embeddedMerchantPlan(store);
     expect(validateRecordedWorkflow(plan).errors).toEqual([]);
@@ -427,12 +427,7 @@ describe("derivation inputs established by one recording", { timeout: 60_000 }, 
       [`${at.anchor}.embedded.${at.type}`]: true,
       [`${at.anchor}.embedded.${at.mcc}`]: true,
     });
-  });
-
-  it("runs a published derivation on the recorded merchant when the caller omits it", async () => {
-    const store = new InMemoryPrivateValueStore();
-    const plan = embeddedMerchantPlan(store);
-    const tool = publish(plan, await validate(plan, store), store);
+    const tool = publish(plan, answer, store);
     const recorded = await tool.invoke({});
     expect(recorded.status, recorded.error).toBe("completed");
     expect(JSON.stringify(recorded.result)).toContain("Crossfit_Hanna C 1426");

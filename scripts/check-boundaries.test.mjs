@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { describe, expect, it } from "vitest";
@@ -502,6 +504,67 @@ describe("check-boundaries", () => {
       // No public-to-private violation on private package
       expect(cloudViolations.filter((v) => v.rule === "public-to-private-dependency")).toEqual([]);
       expect(cloudViolations.filter((v) => v.rule === "no-public-to-private-import")).toEqual([]);
+    });
+  });
+
+  describe("root tsconfig project references", () => {
+    const emptyManifest = Object.fromEntries(REQUIRED_MANIFEST_ARRAYS.map((field) => [field, []]));
+
+    /** Build an isolated temp workspace and return root project-reference violations. */
+    function referenceViolations(rootTsconfig) {
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "resin-root-refs-"));
+      try {
+        for (const [dir, name] of [
+          ["packages/alpha", "@fixture/alpha"],
+          ["apps/beta", "@fixture/beta"],
+        ]) {
+          fs.mkdirSync(path.join(tmpRoot, dir), { recursive: true });
+          fs.writeFileSync(path.join(tmpRoot, dir, "package.json"), JSON.stringify({ name }));
+          fs.writeFileSync(path.join(tmpRoot, dir, "tsconfig.json"), "{}");
+        }
+        if (rootTsconfig !== undefined) {
+          fs.writeFileSync(path.join(tmpRoot, "tsconfig.json"), rootTsconfig);
+        }
+        return checkBoundaries(tmpRoot, { manifest: emptyManifest }).violations.filter(
+          (v) => v.rule === "root-project-references",
+        );
+      } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    }
+    const refs = (...paths) =>
+      JSON.stringify({ files: [], references: paths.map((p) => ({ path: p })) });
+
+    it("accepts a complete project list in any normalized form", () => {
+      expect(referenceViolations(refs("./packages/alpha/", "apps/beta/tsconfig.json"))).toEqual([]);
+    });
+
+    it("rejects a workspace project omitted from root references", () => {
+      const violations = referenceViolations(refs("./packages/alpha"));
+      expect(violations).toEqual([
+        expect.objectContaining({
+          file: "tsconfig.json",
+          message: expect.stringContaining("apps/beta"),
+        }),
+      ]);
+    });
+
+    it("rejects a reference outside the workspace project set", () => {
+      const violations = referenceViolations(
+        refs("./packages/alpha", "./apps/beta", "./tools/gamma"),
+      );
+      expect(violations).toEqual([
+        expect.objectContaining({
+          file: "tsconfig.json",
+          message: expect.stringContaining("./tools/gamma"),
+        }),
+      ]);
+    });
+
+    it("fails closed on a missing or malformed root tsconfig", () => {
+      expect(referenceViolations(undefined)).toHaveLength(1);
+      expect(referenceViolations("{ not json")).toHaveLength(1);
+      expect(referenceViolations(JSON.stringify({ files: [] }))).toHaveLength(1);
     });
   });
 
