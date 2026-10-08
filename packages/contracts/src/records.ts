@@ -109,6 +109,8 @@ export type InvocationResourceUsage = z.infer<typeof InvocationResourceUsageSche
  * - `timeout`: the call exceeded its deadline.
  * - `cancelled`: the caller cancelled the call.
  * - `capability_rejected`: a safety gate refused the call.
+ * - `check_failed`: the tool ran every step and every recorded command to completion, and a check
+ *   it runs (a command) exited non-zero; its result reports that failure. Not an execution failure.
  */
 export const INVOCATION_FAILURE_REASONS = [
   "tool_error",
@@ -118,6 +120,7 @@ export const INVOCATION_FAILURE_REASONS = [
   "timeout",
   "cancelled",
   "capability_rejected",
+  "check_failed",
 ] as const;
 
 export const InvocationFailureReasonSchema = z.enum(INVOCATION_FAILURE_REASONS);
