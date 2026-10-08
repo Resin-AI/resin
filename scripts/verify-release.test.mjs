@@ -81,10 +81,10 @@ const execFileAsync = promisify(execFile);
 describe("Release Packaging & Verification Suite", () => {
   const rootDir = process.cwd();
   let tempReleaseDir = "";
+  let packagedReleaseFixture;
 
   beforeAll(() => {
-    tempReleaseDir = path.join(os.tmpdir(), `test-release-${Date.now()}`);
-    fs.mkdirSync(tempReleaseDir, { recursive: true });
+    tempReleaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-release-"));
   });
 
   afterAll(() => {
@@ -92,6 +92,44 @@ describe("Release Packaging & Verification Suite", () => {
       fs.rmSync(tempReleaseDir, { recursive: true, force: true });
     }
   });
+
+  // Packages one real test-only release the first time a test needs it, so focused runs that never
+  // touch it skip the cost. Consumers treat `releaseDir` as read-only; tests that mutate release
+  // files copy it first. Scratch files written by other tests stay outside `releaseDir`.
+  const getPackagedRelease = () => {
+    packagedReleaseFixture ??= packageReleaseInChild();
+    return packagedReleaseFixture;
+  };
+
+  async function packageReleaseInChild() {
+    const releaseDir = path.join(tempReleaseDir, "packaged-release");
+    const resultPath = path.join(tempReleaseDir, "packaged-release-result.json");
+    const packageReleaseModule = path.join(rootDir, "scripts", "package-release.mjs");
+    const packageInChild = [
+      'import fs from "node:fs";',
+      'import { pathToFileURL } from "node:url";',
+      "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
+      "const { packageRelease } = await import(pathToFileURL(modulePath));",
+      "const packaged = await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
+      "const { success, packagesCount, assetsCount, trustedKeys, releaseIdentity } = packaged;",
+      "fs.writeFileSync(outputPath, JSON.stringify({ success, packagesCount, assetsCount, trustedKeys, releaseIdentity }));",
+    ].join("\n");
+    await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        packageInChild,
+        "resin-release-test-child",
+        packageReleaseModule,
+        rootDir,
+        releaseDir,
+        resultPath,
+      ],
+      { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
+    );
+    return { releaseDir, result: JSON.parse(fs.readFileSync(resultPath, "utf8")) };
+  }
 
   describe("Deterministic Tarball Generation", () => {
     it("generates identical tar bytes for identical inputs (reproducibility)", () => {
@@ -223,31 +261,8 @@ describe("Release Packaging & Verification Suite", () => {
     it("rejects asset mutation, changed commit binding, unknown key, missing signature, and stale evidence", async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-tamper-"));
       try {
-        const packagedPath = path.join(dir, "packaged.json");
-        const packageReleaseModule = path.join(rootDir, "scripts", "package-release.mjs");
-        const packageInChild = [
-          'import fs from "node:fs";',
-          'import { pathToFileURL } from "node:url";',
-          "const [, , modulePath, rootDir, distDir, outputPath] = process.argv;",
-          "const { packageRelease } = await import(pathToFileURL(modulePath));",
-          "const packaged = await packageRelease({ rootDir, distDir, skipBuild: true, testOnly: true });",
-          "fs.writeFileSync(outputPath, JSON.stringify({ trustedKeys: packaged.trustedKeys, releaseIdentity: packaged.releaseIdentity }));",
-        ].join("\n");
-        await execFileAsync(
-          process.execPath,
-          [
-            "--input-type=module",
-            "--eval",
-            packageInChild,
-            "resin-release-test-child",
-            packageReleaseModule,
-            rootDir,
-            dir,
-            packagedPath,
-          ],
-          { cwd: rootDir, maxBuffer: 20 * 1024 * 1024 },
-        );
-        const packaged = JSON.parse(fs.readFileSync(packagedPath, "utf8"));
+        const { releaseDir, result: packaged } = await getPackagedRelease();
+        await fs.promises.cp(releaseDir, dir, { recursive: true });
         const baseline = () =>
           verifyRelease({
             rootDir,
@@ -554,12 +569,7 @@ describe("Release Packaging & Verification Suite", () => {
 
   describe("Full End-to-End Package & Verify Cycle", () => {
     it("packages and validates full release in isolated target directory", async () => {
-      const result = await packageRelease({
-        rootDir,
-        distDir: tempReleaseDir,
-        skipBuild: true,
-        testOnly: true,
-      });
+      const { releaseDir, result } = await getPackagedRelease();
 
       expect(result.success).toBe(true);
       expect(result.packagesCount).toBe(loadBoundaryManifest(rootDir).publicReleasePackages.length);
@@ -567,7 +577,7 @@ describe("Release Packaging & Verification Suite", () => {
 
       const verifyResult = verifyRelease({
         rootDir,
-        releaseDir: tempReleaseDir,
+        releaseDir,
         allowTestEvidence: true,
         trustedKeys: result.trustedKeys,
         expectedCommitSha: result.releaseIdentity.commitSha,
@@ -678,8 +688,9 @@ describe("Release Packaging & Verification Suite", () => {
       expect(rollbackVerify.valid).toBe(true);
     });
 
-    it("enforces independent approval requirements for production promotion", () => {
-      const plan = createUploadPlan({ releaseDir: tempReleaseDir });
+    it("enforces independent approval requirements for production promotion", async () => {
+      const { releaseDir } = await getPackagedRelease();
+      const plan = createUploadPlan({ releaseDir });
 
       // Rejects promotion without verification receipt
       const noReceipt = validatePromotionApproval({ uploadPlan: plan });
@@ -1167,8 +1178,9 @@ describe("Release Packaging & Verification Suite", () => {
       const result2 = verifyReleasePayloadSignature(payload, [spoofedSigEntry2], [trustedKey]);
       expect(result2.valid).toBe(false);
     });
-    it("validates candidate upload plan targets version-qualified paths and immutable cache-control", () => {
-      const plan = createUploadPlan({ releaseDir: tempReleaseDir });
+    it("validates candidate upload plan targets version-qualified paths and immutable cache-control", async () => {
+      const { releaseDir } = await getPackagedRelease();
+      const plan = createUploadPlan({ releaseDir });
       expect(plan).toBeDefined();
       expect(plan.version).toBe(RELEASE_VERSION);
       expect(plan.immutableUploads.length).toBeGreaterThanOrEqual(11);
