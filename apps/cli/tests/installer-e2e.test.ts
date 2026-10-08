@@ -540,6 +540,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(ompJson.mcpServers.resin).toEqual({
       command: resinCommand,
       args: ["mcp"],
+      timeout: 615_000,
     });
     expect(ompContent).not.toContain(customGateway);
   });
@@ -600,7 +601,7 @@ describe("Resin Installer End-to-End & CLI Command Suite", () => {
     expect(
       JSON.parse((await bridge.readFile(path.join(home, ".omp", "agent", "mcp.json"))) ?? "{}")
         .mcpServers.resin,
-    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"] });
+    ).toEqual({ command: sourcePaths.resinCommand, args: ["mcp"], timeout: 615_000 });
     expect(sourcePaths).toEqual({
       daemonPath: "/work/resin/apps/gateway/dist/bin/daemon.js",
       mcpShimPath: "/work/resin/apps/gateway/dist/bin/mcp-shim.js",
