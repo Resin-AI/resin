@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
+  DIRECT_LISTING_MAX_TOOLS,
   LocalMcpGateway,
+  directListingGatewayInstructions,
   searchListingGatewayInstructions,
 } from "../src/gateway.js";
 import { MCP_ERROR_CODES } from "../src/protocol/errors.js";
@@ -17,6 +19,7 @@ import {
   type JsonRpcResponse,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
 } from "../src/protocol/types.js";
@@ -1458,27 +1461,123 @@ describe("search-only listing", () => {
     const client = createSurfaceClient({});
     try {
       client.send(initialize(1));
-      client.respond(initializeResult(1, 2));
+      client.respond(initializeResult(1, 12));
       const instructions = instructionsOf(client.received.at(-1));
-      expect(instructions).toBe(searchListingGatewayInstructions(2));
-      expect(instructions).toContain("Resin has 2 learned tools");
+      expect(instructions).toBe(searchListingGatewayInstructions(12));
+      expect(instructions).toContain("Resin has 12 learned tools");
       expect(instructions).toContain("search_tools(query=");
 
-      listWithLearned(client, 2, 2);
+      listWithLearned(client, 2, 12);
       const description = searchDescriptionOf(client, 2);
       const first = firstSentence(description);
-      expect(first).toMatch(/^Resin has 2 learned tools for this workspace/);
+      expect(first).toMatch(/^Resin has 12 learned tools for this workspace/);
       expect(first).toMatch(/search .*before running a multi-step job by hand/);
       expect(description.endsWith(SEARCH_DESCRIPTION)).toBe(true);
 
-      // One learned tool reads in the singular.
+      // A catalog small enough to list directly says so, in the singular for one tool.
       listWithLearned(client, 3, 1);
       expect(firstSentence(searchDescriptionOf(client, 3))).toMatch(
-        /^Resin has 1 learned tool for/,
+        /^Resin's 1 learned tool for this workspace is listed as a tool of its own/,
       );
     } finally {
       client.close();
     }
+  });
+
+  describe("direct listing of a small catalog", () => {
+    const listing = [
+      {
+        name: "build_site",
+        description: "Builds the site. Replaces 3 recorded steps. Inputs: mode.",
+      },
+      { name: "run_tests", description: "Runs the unit tests." },
+    ];
+    const initializeWithListing = (id: number, count: number): JsonRpcMessage => ({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        serverInfo: { name: "resin", version: "0.1.0" },
+        instructions: DEFAULT_GATEWAY_INSTRUCTIONS,
+        _meta: {
+          [RESIN_LEARNED_TOOL_COUNT_META]: count,
+          ...(count <= DIRECT_LISTING_MAX_TOOLS
+            ? { [RESIN_LEARNED_TOOL_LISTING_META]: listing.slice(0, count) }
+            : {}),
+        },
+      },
+    });
+
+    it("lists each learned tool as its own tool, named with its purpose in the instructions", () => {
+      const client = createSurfaceClient({});
+      try {
+        client.send(initialize(1));
+        client.respond(initializeWithListing(1, 2));
+        const instructions = instructionsOf(client.received.at(-1));
+        expect(instructions).toBe(directListingGatewayInstructions(listing));
+        expect(instructions).toContain("- build_site: Builds the site. Replaces 3 recorded steps.");
+        expect(instructions).toContain("- run_tests: Runs the unit tests.");
+        // The purpose line only: tools/list already carries the inputs in each schema.
+        expect(instructions).not.toContain("Inputs: mode");
+        expect(instructions).not.toContain("search_tools(query=");
+
+        expect(listWithLearned(client, 2, 2)).toEqual([
+          "search_tools",
+          "get_tool_schema",
+          "invoke_tool",
+          "manage_tools",
+          "build_site",
+          "run_tests",
+        ]);
+        expect(firstSentence(searchDescriptionOf(client, 2))).toMatch(
+          /^Resin's 2 learned tools for this workspace are listed as tools of their own/,
+        );
+      } finally {
+        client.close();
+      }
+    });
+
+    it(`lists up to ${DIRECT_LISTING_MAX_TOOLS} learned tools directly and more by search only`, () => {
+      const client = createSurfaceClient({});
+      try {
+        client.send(initialize(1));
+        client.respond(initializeResult(1));
+        expect(listWithLearned(client, 2, DIRECT_LISTING_MAX_TOOLS)).toContain("build_site");
+        expect(listWithLearned(client, 3, DIRECT_LISTING_MAX_TOOLS + 1)).toEqual([
+          "search_tools",
+          "get_tool_schema",
+          "invoke_tool",
+          "manage_tools",
+        ]);
+        expect(firstSentence(searchDescriptionOf(client, 3))).toMatch(
+          new RegExp(`^Resin has ${DIRECT_LISTING_MAX_TOOLS + 1} learned tools`),
+        );
+      } finally {
+        client.close();
+      }
+    });
+
+    it("keeps search instructions above the limit and while the catalog is unknown", () => {
+      const above = DIRECT_LISTING_MAX_TOOLS + 1;
+      for (const [count, expected] of [
+        [above, searchListingGatewayInstructions(above)],
+        [undefined, searchListingGatewayInstructions()],
+      ] as const) {
+        const client = createSurfaceClient({});
+        try {
+          client.send(initialize(1));
+          client.respond(
+            count === undefined ? initializeResult(1) : initializeWithListing(1, count),
+          );
+          expect(instructionsOf(client.received.at(-1))).toBe(expected);
+          // A tools/list without a known count lists no learned tool either.
+          expect(listWithLearned(client, 2)).not.toContain("build_site");
+        } finally {
+          client.close();
+        }
+      }
+    });
   });
 
   it("names the commands learned tools run in the instructions and search_tools' first sentence", () => {

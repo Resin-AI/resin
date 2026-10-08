@@ -37,6 +37,7 @@ import {
   failureReasonOfResult,
   invocationStatusFor,
 } from "./invocation-failure.js";
+import { isToolOfferedHere, unavailableHereMessage } from "./repository-scope.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
 import { isSystemMetaTool } from "./system-tools.js";
@@ -448,6 +449,13 @@ export function createInvokeToolHandler(
         }
       }
     };
+    // A learned tool scoped to another repository, or unable to run from here, is refused.
+    if (!isMetaTool && !isToolOfferedHere(registry, resolvedTool, context)) {
+      const message = unavailableHereMessage(resolvedTool.exposedName || resolvedTool.name);
+      const res: CallToolResult = { isError: true, content: [{ type: "text", text: message }] };
+      recordInvocation("tool_unavailable", res, message);
+      return res;
+    }
     // Composed calls carry argument envelopes ({value}, {reference}, {literal}, nested
     // composites). They are analyzed once here: the transcript records the envelope form
     // the caller sent, while validation and dispatch see the resolved values. A

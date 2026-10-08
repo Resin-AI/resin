@@ -39,6 +39,7 @@ import {
 } from "../meta/index.js";
 import type { LocalToolCommands } from "../meta/learned-commands.js";
 import { type LocalToolPrivateValues, scrubPrivateValues } from "../meta/private-values.js";
+import type { LocalToolProfile, ToolProfile } from "../meta/tool-profile.js";
 import {
   type CallToolResult,
   type JsonRpcParamValue,
@@ -463,6 +464,7 @@ export class ToolRegistry {
   private localToolDatedInputs?: LocalToolDatedInputs;
   private localToolPrivateValues?: LocalToolPrivateValues;
   private localToolRecordedDefaults?: LocalToolRecordedDefaults;
+  private localToolProfile?: LocalToolProfile;
   // Scope activations: scopeKey -> Map<toolId, version>
   // System scope
   private readonly systemActiveTools = new Map<string, string>();
@@ -713,6 +715,19 @@ export class ToolRegistry {
     context: WorkspaceContext,
   ): string[] {
     return this.localToolCommands?.(tool, context) ?? [];
+  }
+
+  /** Installs the local-only reader of what a learned tool's cached plan replays and where. */
+  setLocalToolProfile(reader: LocalToolProfile): void {
+    this.localToolProfile = reader;
+  }
+
+  /** A learned tool's local profile (see `ToolProfile`); undefined without a reader or a plan. */
+  learnedToolProfile(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+  ): ToolProfile | undefined {
+    return this.localToolProfile?.(tool, context);
   }
 
   /** Installs the local-only reader of a learned tool's dated recorded-default inputs. */

@@ -4,6 +4,8 @@ import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import { isToolOfferedHere } from "./repository-scope.js";
+import { multiStepBonus, replacesStepsHint } from "./tool-profile.js";
 
 export interface CapabilitySummary {
   types: string[];
@@ -34,6 +36,8 @@ export interface SearchToolsResultItem {
   isPinned: boolean;
   isDisabled: boolean;
   score?: number;
+  /** How much recorded work the tool replaces ("Replaces 4 recorded steps."), when more than one. */
+  replaces?: string;
 }
 
 export interface SearchToolsResponse {
@@ -387,6 +391,10 @@ interface SearchableTool {
   description: string;
   /** A learned tool's local recorded program, which the agent sees after the description. */
   recorded?: string;
+  /** The commands the tool's recorded programs run on this machine (`vitest`, `gh pr checks`). */
+  commands?: readonly string[];
+  /** Recorded steps the tool replays, when known: more recorded work ranks higher. */
+  steps?: number;
   isPinned: boolean;
 }
 
@@ -406,6 +414,10 @@ const UBIQUITOUS_MIN_TOOLS = 5;
 // A tool covering less than this share of the query weight the best tool covers is dropped as noise
 // (so its Lucene-style coverage-squared relevance stays above ~35% of the best).
 const RELATIVE_COVERAGE_FLOOR = 0.6;
+// Unless a query word names the tool or a command it runs, a tool must cover at least this share of
+// the query's subject, counting each subject word no tool contains as rarer than any that some tool
+// does: a question about one service's errors must not return every tool whose text says "errors".
+const ABSOLUTE_COVERAGE_FLOOR = 0.5;
 
 /**
  * Words a task description is phrased with rather than words naming what a tool does: function
@@ -468,28 +480,38 @@ function scoreToolsForQuery(
     const nameSequences = tool.names.map(searchTokens);
     const name = new Set(nameSequences.flat());
     const tags = new Set(tool.tags.flatMap(searchTokens));
+    const commands = (tool.commands ?? []).flatMap(searchTokens);
     const description = new Set([
       ...searchTokens(tool.description),
       ...searchTokens(tool.recorded ?? ""),
+      ...commands,
     ]);
     // The words that can make this tool match; the rest of its text only ranks it.
     const qualifying = new Set([
       ...name,
       ...tags,
+      ...commands,
       ...searchTokens(withoutRecordedValues(tool.description)),
       ...searchTokens(withoutRecordedValues(recordedPrograms(tool.recorded ?? ""))),
     ]);
-    return { nameSequences, name, tags, description, qualifying };
+    // Words naming the tool itself or a command it runs: one of them alone is a clear match.
+    const strong = new Set([...name, ...commands]);
+    return { nameSequences, name, tags, description, qualifying, strong };
   });
 
   const total = documents.length;
   const idf = new Map<string, number>();
   const informative = new Set<string>();
+  // Subject words no candidate contains weigh as more specific than any word one does.
+  let unknownSubjectWeight = 0;
   for (const token of queryTokens) {
     const frequency = documents.filter(
       (doc) => doc.name.has(token) || doc.tags.has(token) || doc.description.has(token),
     ).length;
     if (frequency === 0) {
+      if (total > 0 && !isGenericQueryWord(token)) {
+        unknownSubjectWeight += Math.log(1 + (total + 0.5) / 0.5);
+      }
       continue;
     }
     idf.set(token, Math.log(1 + (total - frequency + 0.5) / (frequency + 0.5)));
@@ -527,6 +549,7 @@ function scoreToolsForQuery(
     let subjectMatched = 0;
     let fieldWeighted = 0;
     let matchesInformative = false;
+    let matchesStrong = false;
     for (const [token, weight] of idf) {
       const fieldWeight = doc.name.has(token)
         ? NAME_WEIGHT
@@ -542,9 +565,12 @@ function scoreToolsForQuery(
       subjectMatched += isGenericQueryWord(token) ? 0 : weight;
       fieldWeighted += weight * fieldWeight;
       matchesInformative ||= informative.has(token) && doc.qualifying.has(token);
+      matchesStrong ||= informative.has(token) && doc.strong.has(token);
     }
     const coverage = queryWeight > 0 ? matchedWeight / queryWeight : 0;
     const subjectCoverage = subjectWeight > 0 ? subjectMatched / subjectWeight : 0;
+    const wholeSubject = subjectWeight + unknownSubjectWeight;
+    const absoluteCoverage = wholeSubject > 0 ? subjectMatched / wholeSubject : 0;
     const lexical =
       queryWeight > 0
         ? (LEXICAL_SCALE * fieldWeighted * coverage) / (NAME_WEIGHT * queryWeight)
@@ -562,23 +588,32 @@ function scoreToolsForQuery(
       subjectCoverage,
       alwaysMatches: exact || prefix,
       matchesInformative,
+      clearMatch: matchesStrong || absoluteCoverage >= ABSOLUTE_COVERAGE_FLOOR,
     };
   });
 
   const bestCoverage = Math.max(
     0,
-    ...scored.map((s) => (s?.matchesInformative ? s.subjectCoverage : 0)),
+    ...scored.map((s) => (s?.matchesInformative && s.clearMatch ? s.subjectCoverage : 0)),
   );
   return scored.map((s, index) => {
     if (!s) {
       return undefined;
     }
     const relevant =
-      s.matchesInformative && s.subjectCoverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
+      s.matchesInformative &&
+      s.clearMatch &&
+      s.subjectCoverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
     if (!s.alwaysMatches && !relevant) {
       return undefined;
     }
-    const score = s.bonus + s.lexical + (tools[index]?.isPinned ? PINNED_BONUS : 0);
+    const tool = tools[index];
+    const score =
+      s.bonus +
+      s.lexical +
+      (tool?.isPinned ? PINNED_BONUS : 0) +
+      // More recorded work replaced ranks higher among similarly relevant tools.
+      multiStepBonus(tool?.steps);
     return Math.round(score * 100) / 100;
   });
 }
@@ -680,9 +715,15 @@ export function createSearchToolsHandler(
       item: SearchToolsResultItem;
       registeredName: string;
       description: ToolDescriptionParts;
+      commands: string[];
+      steps: number | undefined;
     }[] = [];
 
     for (const { tool, isPinned, isDisabled } of candidateMap.values()) {
+      // A learned tool is offered only in its repository, and only where it can run.
+      if (!isToolOfferedHere(registry, tool, context)) {
+        continue;
+      }
       const tags = extractTags(tool);
       const capSummary = summarizeCapabilities(tool.manifest.capabilities);
 
@@ -705,9 +746,13 @@ export function createSearchToolsHandler(
       }
 
       const description = toolDescriptionParts(tool, context, describer);
+      const steps = tool.isSystem ? undefined : registry.learnedToolProfile(tool, context)?.steps;
+      const replaces = replacesStepsHint(steps);
       filtered.push({
         registeredName: tool.name,
         description,
+        commands: tool.isSystem ? [] : registry.learnedToolCommands(tool, context),
+        steps,
         item: {
           toolId: tool.toolId,
           name: tool.exposedName || tool.name,
@@ -721,6 +766,7 @@ export function createSearchToolsHandler(
           isPinned,
           isDisabled,
           score: undefined,
+          ...(replaces === undefined ? {} : { replaces }),
         },
       });
     }
@@ -728,21 +774,25 @@ export function createSearchToolsHandler(
     const scores = query
       ? scoreToolsForQuery(
           query,
-          filtered.map(({ item, registeredName, description }) => ({
+          filtered.map(({ item, registeredName, description, commands, steps }) => ({
             names: [item.name, registeredName],
             tags: item.tags,
             description: description.catalog,
             ...(description.local === undefined ? {} : { recorded: description.local }),
+            commands,
+            ...(steps === undefined ? {} : { steps }),
             isPinned: item.isPinned,
           })),
         )
       : [];
     const scoredTools = query
-      ? filtered.flatMap(({ item }, index) => {
+      ? filtered.flatMap(({ item, steps }, index) => {
           const score = scores[index];
-          return score === undefined ? [] : [{ item: { ...item, score }, score }];
+          return score === undefined
+            ? []
+            : [{ item: { ...item, score }, score, steps: steps ?? 1 }];
         })
-      : filtered.map(({ item }) => ({ item, score: 0 }));
+      : filtered.map(({ item, steps }) => ({ item, score: 0, steps: steps ?? 1 }));
 
     // Sort by score descending, then name ascending
     scoredTools.sort((a, b) => {
@@ -751,11 +801,12 @@ export function createSearchToolsHandler(
           return b.score - a.score;
         }
       } else {
-        // System tools first, then pinned, then alphabetical
+        // System tools first, then pinned, then those replacing more recorded work, then by name
         if (a.item.toolId.startsWith("sys_") && !b.item.toolId.startsWith("sys_")) return -1;
         if (!a.item.toolId.startsWith("sys_") && b.item.toolId.startsWith("sys_")) return 1;
         if (a.item.isPinned && !b.item.isPinned) return -1;
         if (!a.item.isPinned && b.item.isPinned) return 1;
+        if (a.steps !== b.steps) return b.steps - a.steps;
       }
       return a.item.name.localeCompare(b.item.name);
     });

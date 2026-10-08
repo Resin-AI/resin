@@ -1,7 +1,10 @@
 import { Transform } from "node:stream";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
+  DIRECT_LISTING_MAX_TOOLS,
   DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+  type ListedLearnedTool,
+  directListingGatewayInstructions,
   learnedToolCountSentence,
   searchListingGatewayInstructions,
 } from "../gateway.js";
@@ -13,6 +16,8 @@ import {
   type JsonRpcMessage,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_LISTING_META,
+  RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
 } from "../protocol/types.js";
 
@@ -31,6 +36,20 @@ function record(value: unknown): Record<string, unknown> | undefined {
 interface LearnedTools {
   count: number;
   commands: string[];
+  /** Each tool's name and purpose, reported only for a catalog small enough to list directly. */
+  listing?: ListedLearnedTool[];
+}
+
+function listedLearnedTools(value: unknown): ListedLearnedTool[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const listing = value.flatMap((entry): ListedLearnedTool[] => {
+    const tool = record(entry);
+    if (typeof tool?.name !== "string" || tool.name === "") return [];
+    return typeof tool.description === "string"
+      ? [{ name: tool.name, description: tool.description }]
+      : [{ name: tool.name }];
+  });
+  return listing.length === 0 ? undefined : listing;
 }
 
 /** The learned tools the gateway put in a result's `_meta`: only once the catalog is known. */
@@ -39,12 +58,24 @@ function learnedToolsOf(result: Record<string, unknown>): LearnedTools | undefin
   const count = meta?.[RESIN_LEARNED_TOOL_COUNT_META];
   if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return undefined;
   const commands = meta?.[RESIN_LEARNED_TOOL_COMMANDS_META];
+  const listing = listedLearnedTools(meta?.[RESIN_LEARNED_TOOL_LISTING_META]);
   return {
     count,
     commands: Array.isArray(commands)
       ? commands.filter((command): command is string => typeof command === "string")
       : [],
+    ...(listing === undefined ? {} : { listing }),
   };
+}
+
+/**
+ * Whether a search-listing connection lists the learned tools directly: the caller's catalog (which
+ * the gateway already scopes to its repository) has a few, at most {@link DIRECT_LISTING_MAX_TOOLS}.
+ * Each is then a tool of its own, which harnesses render with its name and one-line purpose every
+ * turn (OMP lists each MCP tool as its own entry in the prompt); above that, only search scales.
+ */
+function listsDirectly(learned: LearnedTools | undefined): boolean {
+  return learned !== undefined && learned.count > 0 && learned.count <= DIRECT_LISTING_MAX_TOOLS;
 }
 
 /**
@@ -55,7 +86,11 @@ function learnedToolsOf(result: Record<string, unknown>): LearnedTools | undefin
 function withLearnedTools(tool: unknown, learned: LearnedTools | undefined): unknown {
   const listed = record(tool);
   if (learned === undefined || !listed || !isSearch(listed.name)) return tool;
-  const sentence = learnedToolCountSentence(learned.count, learned.commands);
+  const sentence = learnedToolCountSentence(
+    learned.count,
+    learned.commands,
+    listsDirectly(learned),
+  );
   return {
     ...listed,
     description:
@@ -404,7 +439,9 @@ export function createToolSearchSurface(
           const initialized = "result" in message ? record(message.result) : undefined;
           if (initialized) learnedTools = learnedToolsOf(initialized) ?? learnedTools;
           const replacement = searchOnlyListing
-            ? searchListingGatewayInstructions(learnedTools?.count, learnedTools?.commands)
+            ? listsDirectly(learnedTools) && learnedTools?.listing !== undefined
+              ? directListingGatewayInstructions(learnedTools.listing)
+              : searchListingGatewayInstructions(learnedTools?.count, learnedTools?.commands)
             : searchEnabled
               ? undefined
               : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS;
@@ -432,6 +469,7 @@ export function createToolSearchSurface(
           const result = record(message.result);
           if (result && Array.isArray(result.tools)) {
             learnedTools = learnedToolsOf(result);
+            const direct = searchOnlyListing && listsDirectly(learnedTools);
             return {
               jsonrpc: "2.0",
               id: message.id,
@@ -439,11 +477,18 @@ export function createToolSearchSurface(
                 ...result,
                 tools: result.tools
                   .filter((tool) => {
-                    const name = record(tool)?.name;
+                    const listed = record(tool);
+                    const name = listed?.name;
                     if (typeof name !== "string") return false;
-                    // Search-only listing: the meta tools alone; learned tools are found by search
-                    // and still answer tools/call by name.
-                    if (searchOnlyListing) return META_TOOL_NAMES[name] === true;
+                    // Search-only listing: the meta tools, plus the learned tools themselves when the
+                    // caller's catalog is small enough to list directly. Unlisted learned tools are
+                    // found by search and still answer tools/call by name.
+                    if (searchOnlyListing) {
+                      return (
+                        META_TOOL_NAMES[name] === true ||
+                        (direct && record(listed?._meta)?.[RESIN_LEARNED_TOOL_META] === true)
+                      );
+                    }
                     return searchEnabled || !isSearch(name);
                   })
                   .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool)),
