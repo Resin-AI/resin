@@ -81,6 +81,8 @@ Turbo includes the root `tsconfig.base.json` in every task hash, so changing it 
 
 `pnpm run release:test:verify` builds one real test-only release on demand in a temporary directory. Tests share it read-only; the tamper test copies it before mutation. Filtered tests that do not need a release skip packaging. The fixture is deleted after each run.
 
+Release packaging uses deterministic gzip level 6 rather than maximum compression to reduce CPU time, accepting a small increase in archive size.
+
 `pnpm run test:e2e` runs through `vitest.packaged.config.ts`. Its global setup packs the npm bootstrap tarball once per run into a fresh temporary directory and deletes it when the run ends; nothing is cached between runs. Each suite installs into its own temporary directory.
 
 To run one packaged suite on its own, pass the same config:
