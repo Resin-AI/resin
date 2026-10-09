@@ -30,6 +30,18 @@ While the daemon captures your own sessions it also keeps small local counters p
 
 `npx resin init` writes the explicitly supplied `--gateway-url` into each configured harness. When that flag is omitted, the URL is `http://127.0.0.1:9400/mcp/sse`.
 
+## Request usage contract
+
+`@resin/contracts` distinguishes per-request usage (`usageScope: "request"` with a stable `requestId`) from cumulative meters. Records without a scope retain their legacy, source-specific meaning; they are not promoted to request evidence.
+
+Request tokens have four disjoint categories: uncached input, cache reads, cache writes, and output including billed reasoning. Reasoning is a subset of output, not an extra charge. Missing categories remain unknown. Complete request totals must equal the four-category sum.
+
+Provider field definitions differ: [Anthropic input excludes cache reads and writes](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), while [OpenAI input includes cached input](https://developers.openai.com/api/docs/guides/prompt-caching). Normalize those fields before using the request contract. Source-reported money and harness estimates do not establish provider billing.
+
+Invocation receipts identify tool executions, not model requests. Several executions can belong to one request. `benchmarkId` identifies measurement traffic separately from ordinary use; auxiliary request purposes and delegated-usage evidence retain their provenance without turning child aggregates into extra requests.
+
+Receivers must accept these optional fields before clients begin emitting them. An older strict receiver can reject an otherwise valid observation batch.
+
 ## 1. Claude Code CLI Integration
 
 ### Automated Registration

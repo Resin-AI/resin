@@ -13815,21 +13815,40 @@ var DeploymentRecordSchema = external_exports.object({
 init_zod();
 init_common();
 var ProviderUsageAvailabilitySchema = external_exports.enum(["complete", "partial", "unavailable"]);
+var ProviderUsageScopeSchema = external_exports.enum(["request", "cumulative"]);
+var ProviderUsageRequestIdSchema = external_exports.string().regex(/^[\x21-\x7E]{1,256}$/);
 var ProviderReportedUsageSchema = external_exports.object({
   provider: external_exports.string().min(1),
   model: external_exports.string().min(1).optional().nullable(),
   accountingVersion: external_exports.string().min(1),
   availability: ProviderUsageAvailabilitySchema,
+  usageScope: ProviderUsageScopeSchema.optional(),
+  requestId: ProviderUsageRequestIdSchema.optional(),
   inputTokens: external_exports.number().int().nonnegative().optional().nullable(),
   outputTokens: external_exports.number().int().nonnegative().optional().nullable(),
   reasoningTokens: external_exports.number().int().nonnegative().optional().nullable(),
   cachedInputTokens: external_exports.number().int().nonnegative().optional().nullable(),
+  cacheWriteTokens: external_exports.number().int().nonnegative().optional().nullable(),
   totalTokens: external_exports.number().int().nonnegative().optional().nullable(),
   costMicroUsd: external_exports.number().int().nonnegative().optional().nullable(),
   // Omission supports legacy records; unpriced means no usable monetary value, not free.
   costProvenance: external_exports.enum(["source_reported", "harness_estimate", "unpriced"]).optional(),
   durationMs: external_exports.number().int().nonnegative().optional().nullable()
 }).strict().superRefine((val, ctx) => {
+  if (val.usageScope === "request" && val.requestId === void 0) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "Request-scoped provider usage requires requestId",
+      path: ["requestId"]
+    });
+  }
+  if (val.requestId !== void 0 && val.usageScope !== "request") {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "requestId is only valid on request-scoped provider usage",
+      path: ["usageScope"]
+    });
+  }
   if (val.availability === "complete") {
     if (val.totalTokens === void 0 || val.totalTokens === null) {
       ctx.addIssue({
@@ -13838,12 +13857,39 @@ var ProviderReportedUsageSchema = external_exports.object({
         path: ["totalTokens"]
       });
     }
+    if (val.usageScope === "request") {
+      for (const field of REQUEST_CATEGORY_FIELDS) {
+        if (val[field] === void 0 || val[field] === null) {
+          ctx.addIssue({
+            code: external_exports.ZodIssueCode.custom,
+            message: `Complete request usage requires ${field}`,
+            path: [field]
+          });
+        }
+      }
+      const sum = requestCategorySum(val);
+      if (sum !== void 0 && val.totalTokens !== sum) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: "Complete request usage requires totalTokens to equal input + cache reads + cache writes + output",
+          path: ["totalTokens"]
+        });
+      }
+      if (val.reasoningTokens !== void 0 && val.reasoningTokens !== null && val.outputTokens !== void 0 && val.outputTokens !== null && val.reasoningTokens > val.outputTokens) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          message: "Complete request usage cannot report more reasoning than output tokens",
+          path: ["reasoningTokens"]
+        });
+      }
+    }
   } else if (val.availability === "unavailable") {
     const metricFields = [
       "inputTokens",
       "outputTokens",
       "reasoningTokens",
       "cachedInputTokens",
+      "cacheWriteTokens",
       "totalTokens",
       "costMicroUsd",
       "durationMs"
@@ -13859,6 +13905,22 @@ var ProviderReportedUsageSchema = external_exports.object({
     }
   }
 });
+var REQUEST_CATEGORY_FIELDS = [
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteTokens",
+  "outputTokens"
+];
+function requestCategorySum(usage) {
+  let sum = 0;
+  for (const field of REQUEST_CATEGORY_FIELDS) {
+    const value = usage[field];
+    if (value === void 0 || value === null)
+      return void 0;
+    sum += value;
+  }
+  return sum;
+}
 var BaseEventFields = {
   eventId: IdentifierSchema,
   schemaVersion: SchemaVersionSchema,
@@ -14039,6 +14101,38 @@ var NormalizedSessionEventSchema = external_exports.discriminatedUnion("type", [
 // packages/contracts/dist/records.js
 init_zod();
 init_common();
+
+// packages/contracts/dist/model-request-link.js
+init_zod();
+var ResinInvocationIdSchema = external_exports.string().regex(/^inv_[0-9a-f]{32}$/);
+var ResinBenchmarkIdSchema = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/);
+var ResinModelRequestPurposeSchema = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/);
+var TokenCountSchema = external_exports.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+var DELEGATED_MODEL_USAGE_VERSION = 1;
+var DelegatedModelUsageSchema = external_exports.object({
+  version: external_exports.literal(DELEGATED_MODEL_USAGE_VERSION),
+  inputTokens: TokenCountSchema.optional(),
+  cachedInputTokens: TokenCountSchema.optional(),
+  cacheWriteTokens: TokenCountSchema.optional(),
+  outputTokens: TokenCountSchema.optional(),
+  reasoningTokens: TokenCountSchema.optional(),
+  totalTokens: TokenCountSchema.optional(),
+  costMicroUsd: TokenCountSchema.optional(),
+  costProvenance: external_exports.enum(["source_reported", "harness_estimate", "unpriced"]).optional()
+}).strict();
+var RESIN_INVOCATION_RECEIPT_VERSION = 1;
+var ResinInvocationReceiptMetaSchema = external_exports.object({
+  version: external_exports.literal(RESIN_INVOCATION_RECEIPT_VERSION),
+  invocationId: ResinInvocationIdSchema,
+  benchmarkId: ResinBenchmarkIdSchema.optional()
+}).strict();
+var ResinInvocationReceiptTextSchema = external_exports.object({
+  resinInvocationId: ResinInvocationIdSchema,
+  benchmarkId: ResinBenchmarkIdSchema.optional()
+}).strict();
+var TextContentPartSchema = external_exports.object({ type: external_exports.literal("text"), text: external_exports.string() }).passthrough();
+var RecordedToolResultSchema = external_exports.object({ content: external_exports.array(external_exports.unknown()), _meta: external_exports.record(external_exports.unknown()).optional() }).passthrough();
+var MetadataRecordSchema = external_exports.record(external_exports.unknown());
 
 // packages/contracts/dist/tools.js
 init_zod();
@@ -14266,7 +14360,13 @@ var InvocationRecordSchema = external_exports.object({
   outputDigest: Sha256DigestSchema.optional(),
   errorDetails: InvocationErrorDetailsSchema.optional(),
   resourceUsage: InvocationResourceUsageSchema.optional(),
-  usageEstimate: InvocationUsageEstimateSchema.optional()
+  usageEstimate: InvocationUsageEstimateSchema.optional(),
+  /**
+   * The benchmark run the gateway recorded this invocation for, from the harness run's
+   * `RESIN_BENCHMARK_ID`. Absent for ordinary use; benchmark invocations stay out of ordinary
+   * savings and recommendation totals.
+   */
+  benchmarkId: ResinBenchmarkIdSchema.optional()
 });
 var AuditActorSchema = external_exports.object({
   type: external_exports.enum(["user", "daemon", "agent", "system", "policy_engine"]),
