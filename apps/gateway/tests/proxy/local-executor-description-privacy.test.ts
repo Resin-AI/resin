@@ -444,4 +444,41 @@ describe("learned tool descriptions never show a resolved private value", () => 
     expect(values).toEqual([privateDirectory]);
     expect(values).not.toContain(program);
   });
+
+  it("still scrubs a secret-bearing program's repeat and a protected token equal to shown text", async () => {
+    // Step 0's program carries a secret its projection redacted: the laundered repeat of that
+    // original is not its shown text, so it stays scrubbed whole, as does the redacted token. Step 1
+    // is shown as a program whose whole text equals step 0's protected token (the redaction missed
+    // it there): the token is still scrubbed out of it.
+    const original = `deploy --token '${ARG_SECRET}'`;
+    const sanitized = "deploy --token '[REDACTED_SECRET:0a1b2c3d]'";
+    own("private:deploy", original);
+    privateValues.set(
+      "private:demonstration",
+      { command: original, cwd: path.join(tempDir, "checkout") },
+      { workspaceId: context.workspaceId },
+    );
+    own("private:echo", ARG_SECRET);
+    const installed = await install(
+      { type: "object", properties: {}, additionalProperties: false },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_secret_repeat",
+        inputs: [],
+        privateReferences: ["private:deploy", "private:demonstration", "private:echo"],
+        steps: [
+          projectedStep("step0", "private:deploy", original, sanitized),
+          projectedStep("step1", "private:echo", ARG_SECRET, ARG_SECRET),
+        ],
+      },
+    );
+
+    const described = executor();
+    const description = described.describeRecordedWorkflow(installed.artifactDigest, context);
+    expectNoSecret(description);
+    expect(description).toContain(sanitized);
+    const values = described.recordedWorkflowPrivateValues(installed.artifactDigest, context);
+    expect(values).toContain(original);
+    expect(values).toContain(ARG_SECRET);
+  });
 });

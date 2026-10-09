@@ -124,6 +124,20 @@ describe("scrubbing private values from meta-tool text", () => {
     );
   });
 
+  it("treats only short ASCII letter values as words: digits and other scripts scrub anywhere", () => {
+    // Account ids, PINs, short passwords with a digit, and values in scripts written without
+    // spaces between words are not ordinary words, so gluing them to other text does not hide them.
+    const values = scrubbablePrivateValues(["482913771204", "hunter2", "张伟的密码"]);
+    expect(
+      scrubPrivateValues(
+        "accounts/acct_482913771204.json, notes/hunter2_old.md, 笔记/张伟的密码备份.md",
+        values,
+      ),
+    ).toBe(
+      `accounts/acct_${SCRUBBED_PRIVATE_VALUE}.json, notes/${SCRUBBED_PRIVATE_VALUE}_old.md, 笔记/${SCRUBBED_PRIVATE_VALUE}备份.md`,
+    );
+  });
+
   it("never rewrites a placeholder a longer value already left", () => {
     const values = scrubbablePrivateValues(["private", "token-long"]);
     expect(scrubPrivateValues("a token-long, <private:2> and private", values)).toBe(

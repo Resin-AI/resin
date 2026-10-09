@@ -24,23 +24,23 @@ export const SECRET_LIKE_PRIVATE_VALUE_CHARS = 16;
 
 /** A placeholder already in the text: `<private>` or the describer's `<private:N>`. */
 const PLACEHOLDER = /(<private(?::\d+)?>)/u;
-const WORD_CHARACTERS = /^[\p{L}\p{N}_]+$/u;
+/** ASCII letters and `_` only: any digit or non-ASCII letter keeps a value scrubbed anywhere. */
+const WORD_CHARACTERS = /^[A-Za-z_]+$/u;
 
 /**
  * Whether a value reads as an ordinary word, so it is scrubbed only where it stands as a whole word:
- * made only of letters, digits and `_`, shorter than {@link SECRET_LIKE_PRIVATE_VALUE_CHARS}, and not
- * a mix of letters and digits of 8 or more characters (a password-like token).
+ * made only of ASCII letters and `_`, and shorter than {@link SECRET_LIKE_PRIVATE_VALUE_CHARS}.
  *
  * Such values are mostly a harness tool's recorded arguments (`"play"`, `"server"`), which also
  * occur inside public tool and input names (`solo_playtest`, `{server_code}`); scrubbing them there
- * would mangle the names an agent must call. Any other value, including every value containing
- * `/`, `-`, `.` or another separator, is scrubbed wherever it appears, even inside a longer word.
+ * would mangle the names an agent must call. Any other value is scrubbed wherever it appears, even
+ * inside a longer word: every value with a digit (PINs, account ids, `hunter2`), a non-ASCII letter
+ * (scripts written without spaces between words), `/`, `-`, `.` or another separator, and every
+ * long value. A short letters-only secret glued to a letter, digit or `_` in shown text is the
+ * residual this rule accepts.
  */
 function isWordLikeValue(value: string): boolean {
-  if (value.length >= SECRET_LIKE_PRIVATE_VALUE_CHARS || !WORD_CHARACTERS.test(value)) {
-    return false;
-  }
-  return !(value.length >= 8 && /\p{L}/u.test(value) && /\p{N}/u.test(value));
+  return value.length < SECRET_LIKE_PRIVATE_VALUE_CHARS && WORD_CHARACTERS.test(value);
 }
 
 function escapeRegExp(value: string): string {
