@@ -1,0 +1,331 @@
+{
+  "source": "Learning recordings: bench-gen 20261009 variant L1 (tools/release.py, ops/logtool.py), as in apps/observer/tests/analytics/fixtures/printed-operands.json. Variants: hand-written in the tools' own output formats.",
+  "learned": {
+    "triage": [
+      {
+        "command": "python3 ops/logtool.py summary",
+        "output": "Log window: 2026-09-02T00:09:00Z .. 2026-09-05T23:59:30Z (4 files, 396 lines)\n\nservice           errors  warnings    info\ncheckout              38         4      63\nbilling               14         9      30\nauth                  10        11      38\ninventory              9        10      32\napi-gateway            7         3      39\nnotifications          7         8      64\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      },
+      {
+        "command": "python3 ops/logtool.py errors --service checkout",
+        "output": "Errors for service checkout (38 total)\n\ncode               count  first                 last\nCHK-PAY-504           29  2026-09-02T07:28:32Z  2026-09-05T13:50:46Z\nCHK-TAX-500            5  2026-09-03T14:57:50Z  2026-09-05T04:03:03Z\nCHK-CART-409           4  2026-09-03T23:41:23Z  2026-09-05T16:27:56Z\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      },
+      {
+        "command": "python3 ops/logtool.py explain --code CHK-PAY-504",
+        "output": "Runbook: runbooks/checkout.md\n\n## CHK-PAY-504 Payment provider timeout\n\nCause: the primary payment provider (stripe-us-primary) did not answer the authorization call within the 30 s gateway timeout.\n\nRemediation:\n1. Switch checkout to the secondary payment provider: set `PAYMENTS_PROVIDER=stripe-eu-backup` in the checkout deployment config and roll the checkout pods.\n2. Lower the authorization retry budget to 1 (`PAYMENTS_AUTH_RETRIES=1`) until the primary recovers.\n3. Check the provider status page and open a provider ticket if the degradation lasts over 15 minutes.\n4. After recovery, switch back to `stripe-us-primary` and reconcile authorizations stuck in `pending`.\n"
+      }
+    ],
+    "release": [
+      {
+        "command": "python3 tools/release.py status",
+        "output": "Release candidate: 2.14.0-rc.3 (build 8812, previous release 2.13.4)\n\nGate checks:\n  changelog         PASS\n  version-bump      PASS\n  migration-compat  FAIL\n  test-report       PASS\n  license-policy    FAIL\n\nResult: BLOCKED (2 of 5 checks failing)\nFailure details: release.py check <name>\n"
+      },
+      {
+        "command": "python3 tools/release.py check migration-compat",
+        "output": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 3 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0059_accounts_contact_email: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  0060_accounts_marketing_opt_in: ok\n  Inspect a migration: release.py migration show <id>\n"
+      },
+      {
+        "command": "python3 tools/release.py check license-policy",
+        "output": "FAIL license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n  fastgraph 3.1.0: license is not on the allowlist\n  Inspect a dependency: release.py license <dependency>\n"
+      },
+      {
+        "command": "python3 tools/release.py migration show 0059_accounts_contact_email",
+        "output": "Migration 0059_accounts_contact_email (db/migrations/0059_accounts_contact_email.sql)\n\n   1  -- 0059: contact e-mail model for accounts\n   2  BEGIN;\n   3  ALTER TABLE accounts ADD COLUMN email_verified_at timestamptz NULL;\n   4  UPDATE accounts SET email_verified_at = created_at WHERE email_confirmed;\n   5  ALTER TABLE accounts RENAME COLUMN email TO contact_email;\n   6  CREATE UNIQUE INDEX accounts_contact_email_key ON accounts (lower(contact_email));\n   7  COMMIT;\n\nBackward-incompatible statements:\n  line 5: ALTER TABLE accounts RENAME COLUMN email TO contact_email;\n           RENAME COLUMN: running readers still select the old column name\n"
+      },
+      {
+        "command": "python3 tools/release.py license fastgraph",
+        "output": "Package: fastgraph\nLocked version: 3.1.0 (deps/lock.json)\nLicense: AGPL-3.0-only (policy: NOT ALLOWED)\nOther known versions: 3.0.2: MIT\nNote: Upstream relicensed from MIT to AGPL-3.0-only starting with 3.1.0 (released 2026-08-14).\nRequired by: reporting-service -> graphkit 1.4.0 -> fastgraph\nAllowed licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0, PSF-2.0\n"
+      }
+    ]
+  },
+  "variants": [
+    {
+      "class": "several",
+      "tool": "triage",
+      "name": "summary-printed-twice",
+      "description": "The summary table is printed for two log windows; each has its own header and top row.",
+      "consumer": 1,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\n\nservice           errors  warnings    info\nbilling               41         6      60\nauth                   9         3      51\n\nPer-code breakdown: logtool.py errors --service <name>\n\nLog window: 2026-09-11T00:00:04Z .. 2026-09-14T23:59:51Z (4 files, 402 lines)\n\nservice           errors  warnings    info\npayments              33         2      48\nbilling               12         5      39\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "several",
+      "tool": "triage",
+      "name": "errors-upstream-table-above",
+      "description": "The errors output lists an upstream service's codes in a table above the service's own table.",
+      "consumer": 2,
+      "expected": "CHK-TAX-500",
+      "outcome": "failed",
+      "outputs": {
+        "1": "Errors for service checkout (29 total)\n\nUpstream (payments):\ncode               count  first                 last\nPAY-GW-502            30  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\n\ncode               count  first                 last\nCHK-TAX-500           22  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\nCHK-CART-409           7  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      }
+    },
+    {
+      "class": "several",
+      "tool": "release",
+      "name": "two-incompatible-migrations",
+      "description": "Two pending migrations are flagged NOT backward compatible.",
+      "consumer": 3,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "1": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 3 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0059_accounts_contact_email: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  0060_accounts_marketing_opt_in: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "several",
+      "tool": "release",
+      "name": "two-disallowed-dependencies",
+      "description": "The license check flags two dependencies.",
+      "consumer": 4,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "2": "FAIL license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n  fastgraph 3.1.0: license is not on the allowlist\n  tabulix 2.4.0: license is not on the allowlist\n  Inspect a dependency: release.py license <dependency>\n"
+      }
+    },
+    {
+      "class": "missing",
+      "tool": "triage",
+      "name": "summary-no-rows",
+      "description": "The log window holds no records: the summary prints its header and no rows.",
+      "consumer": 1,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:00:00Z .. 2026-09-18T23:59:59Z (0 files, 0 lines)\n\nservice           errors  warnings    info\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "missing",
+      "tool": "triage",
+      "name": "errors-no-rows",
+      "description": "The service logged no errors: the code table is empty, the runbook hint follows.",
+      "consumer": 2,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "1": "Errors for service checkout (0 total)\n\ncode               count  first                 last\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      }
+    },
+    {
+      "class": "missing",
+      "tool": "release",
+      "name": "all-migrations-compatible",
+      "description": "Every pending migration is compatible; no row is flagged.",
+      "consumer": 3,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "1": "PASS migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 3 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0059_accounts_contact_email: ok\n  0060_accounts_marketing_opt_in: ok\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "missing",
+      "tool": "release",
+      "name": "no-disallowed-dependency",
+      "description": "The license check passes and lists no dependency.",
+      "consumer": 4,
+      "expected": null,
+      "outcome": "failed",
+      "outputs": {
+        "2": "PASS license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n"
+      }
+    },
+    {
+      "class": "moved",
+      "tool": "triage",
+      "name": "summary-notes-above-rows-reordered",
+      "description": "Two note lines precede the table and a different service tops it.",
+      "consumer": 1,
+      "expected": "inventory",
+      "outcome": "correct",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\nSkipped 1 unreadable file: logs/2026-09-16.log\nClock skew corrected on 2 hosts\n\nservice           errors  warnings    info\ninventory             52         4      30\ncheckout              18         9      61\nauth                   2         1      40\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "moved",
+      "tool": "triage",
+      "name": "errors-warning-above-table",
+      "description": "A parser warning is printed between the title and the code table.",
+      "consumer": 2,
+      "expected": "CHK-TAX-500",
+      "outcome": "correct",
+      "outputs": {
+        "1": "Errors for service checkout (29 total)\n\nWARNING: 3 log lines could not be parsed\n\ncode               count  first                 last\nCHK-TAX-500           22  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\nCHK-CART-409           7  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      }
+    },
+    {
+      "class": "moved",
+      "tool": "triage",
+      "name": "summary-rule-under-header",
+      "description": "A dashed rule separates the header from the rows, so the top row moves one line down.",
+      "consumer": 1,
+      "expected": "billing",
+      "outcome": "failed",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\n\nservice           errors  warnings    info\n------------------------------------------\nbilling               41         6      60\nauth                   9         3      51\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "moved",
+      "tool": "release",
+      "name": "flagged-migration-last-extra-row",
+      "description": "The flagged migration is listed last, after an extra row the recording did not have.",
+      "consumer": 3,
+      "expected": "0059_accounts_contact_email",
+      "outcome": "correct",
+      "outputs": {
+        "1": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 4 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0060_accounts_marketing_opt_in: ok\n  0061_orders_archived_flag: ok\n  0059_accounts_contact_email: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "moved",
+      "tool": "release",
+      "name": "dependency-after-hint",
+      "description": "The flagged dependency is printed after the hint line and the scan summary moved to the end.",
+      "consumer": 4,
+      "expected": "graphql-tools",
+      "outcome": "correct",
+      "outputs": {
+        "2": "FAIL license-policy\n  Inspect a dependency: release.py license <dependency>\n  graphql-tools 9.0.1: license is not on the allowlist\n  Scanned 15 locked dependencies against release/policy.json.\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "triage",
+      "name": "service-name-with-digit",
+      "description": "The top service's name ends in a digit the learned name had no digit for.",
+      "consumer": 1,
+      "expected": "search-v2",
+      "outcome": "failed",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\n\nservice           errors  warnings    info\nsearch-v2             47         5      44\npayments              17         3      42\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "triage",
+      "name": "service-named-like-column",
+      "description": "The top service is named `info`, the same word as a column header.",
+      "consumer": 1,
+      "expected": "info",
+      "outcome": "correct",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\n\nservice           errors  warnings    info\ninfo                  47         5      44\npayments              17         3      42\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "triage",
+      "name": "service-named-like-marker",
+      "description": "The top service is named `warnings`, the same word as the header the row is found under.",
+      "consumer": 1,
+      "expected": "warnings",
+      "outcome": "failed",
+      "outputs": {
+        "0": "Log window: 2026-09-15T00:02:11Z .. 2026-09-18T23:58:40Z (4 files, 433 lines)\n\nservice           errors  warnings    info\nwarnings              47         5      44\npayments              17         3      42\n\nPer-code breakdown: logtool.py errors --service <name>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "triage",
+      "name": "code-with-underscore-suffix",
+      "description": "The top code continues past the recorded charset (`_RETRY`).",
+      "consumer": 2,
+      "expected": "CHK-PAY-504_RETRY",
+      "outcome": "failed",
+      "outputs": {
+        "1": "Errors for service checkout (29 total)\n\ncode               count  first                 last\nCHK-PAY-504_RETRY     22  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\nCHK-CART-409           7  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "triage",
+      "name": "code-header-capitalized",
+      "description": "The code table's header is capitalized, so it starts with an upper-case letter like the codes.",
+      "consumer": 2,
+      "expected": "CHK-TAX-500",
+      "outcome": "correct",
+      "outputs": {
+        "1": "Errors for service checkout (22 total)\n\nCode               count  first                 last\nCHK-TAX-500           22  2026-09-15T03:12:40Z  2026-09-18T21:07:02Z\n\nRunbook entry for a code: logtool.py explain --code <code>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "migration-name-with-hyphen",
+      "description": "The flagged migration's name holds a `-`, outside the recorded charset.",
+      "consumer": 3,
+      "expected": "0061_accounts-contact_email",
+      "outcome": "failed",
+      "outputs": {
+        "1": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 2 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0061_accounts-contact_email: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "label-repeated-in-note",
+      "description": "A note line repeats the `: NOT` label after another word.",
+      "consumer": 3,
+      "expected": "0059_accounts_contact_email",
+      "outcome": "failed",
+      "outputs": {
+        "1": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 2 pending migrations for rolling-deploy compatibility.\n  0058_orders_created_at_index: ok\n  0059_accounts_contact_email: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  note: NOT checked against the replica schema\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "migration-prefix-of-other-row",
+      "description": "The flagged migration's id is a prefix of another (compatible) row's id.",
+      "consumer": 3,
+      "expected": "0061_orders",
+      "outcome": "correct",
+      "outputs": {
+        "1": "FAIL migration-compat\n  Migrations through 0057 shipped in 2.13.4; checking 2 pending migrations for rolling-deploy compatibility.\n  0061_orders_archive: ok\n  0061_orders: NOT backward compatible (2.13.4 pods keep running during the rolling deploy)\n  Inspect a migration: release.py migration show <id>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "dependency-name-with-digit",
+      "description": "The flagged dependency's name holds a digit the learned name had none of.",
+      "consumer": 4,
+      "expected": "pdf2text",
+      "outcome": "failed",
+      "outputs": {
+        "2": "FAIL license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n  pdf2text 0.4.0: license is not on the allowlist\n  Inspect a dependency: release.py license <dependency>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "dependency-dotted-name",
+      "description": "The flagged dependency's name holds a `.`, outside the recorded charset.",
+      "consumer": 4,
+      "expected": "lodash.merge",
+      "outcome": "failed",
+      "outputs": {
+        "2": "FAIL license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n  lodash.merge 4.6.2: license is not on the allowlist\n  Inspect a dependency: release.py license <dependency>\n"
+      }
+    },
+    {
+      "class": "collision",
+      "tool": "release",
+      "name": "dependency-named-like-other-word",
+      "description": "The flagged dependency is named `policy`, a word another line holds inside `release/policy.json`.",
+      "consumer": 4,
+      "expected": "policy",
+      "outcome": "correct",
+      "outputs": {
+        "2": "FAIL license-policy\n  Scanned 14 locked dependencies against release/policy.json.\n  policy 2.0.0: license is not on the allowlist\n  Inspect a dependency: release.py license <dependency>\n"
+      }
+    }
+  ]
+}

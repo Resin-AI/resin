@@ -9,7 +9,13 @@
  *   - `{ only: { before, after, line? }, charset }` reads the one whole run of charset characters
  *     that `before` immediately precedes and `after` immediately follows — on the line `offset`
  *     lines below the only line holding the word `marker` when `line` is given, anywhere in the
- *     output otherwise. No such run, or several, reads no value: the locator never picks one.
+ *     output otherwise. On that line, a `before` starting with a line break reads from the line's
+ *     start. No such run, or several, reads no value: the locator never picks one.
+ *
+ * A run is a value only where it holds a letter or digit (a dashed rule is no value) and the text
+ * does not continue it past the locator's own texts: `pdf` in `pdf2text`, `contact_email` in
+ * `accounts-contact_email` or `lodash` in `lodash.merge` is part of a value the charset cannot
+ * hold. Such a cut run reads no value, and beside another run it makes the read ambiguous.
  *
  * The second form carries no top-level `before`, so a runtime that only knows the first form
  * refuses it as malformed rather than reading it as the first form. The locator text comes from
@@ -21,7 +27,10 @@ export type ExtractLocator =
   | { only: ExtractOnlyPlace; charset: string[] };
 
 export interface ExtractOnlyPlace {
-  /** Text immediately before the run; empty when any whole run qualifies. */
+  /**
+   * Text immediately before the run; empty when any whole run qualifies. On a `line`, a leading
+   * line break stands for the line's start.
+   */
   before: string;
   /** Text immediately after the run; empty when any whole run qualifies. */
   after: string;
@@ -81,8 +90,9 @@ function parseOnlyPlace(value: unknown): ExtractOnlyPlace | undefined {
   if (typeof marker !== "string" || !MARKER.test(marker)) return undefined;
   if (typeof offset !== "number" || !Number.isInteger(offset)) return undefined;
   if (offset < 1 || offset > MAX_MARKER_OFFSET) return undefined;
-  // A line-scoped locator reads inside one line, so its texts never cross a line break.
-  if (before.includes("\n") || after.includes("\n")) return undefined;
+  // A line-scoped locator reads inside one line: only a leading line break, standing for the
+  // line's start, may appear in its texts. Runtimes before that reading refuse it as malformed.
+  if (before.indexOf("\n", 1) >= 0 || after.includes("\n")) return undefined;
   return { before, after, line: { marker, offset } };
 }
 
@@ -130,18 +140,43 @@ export function holdsMarkerWord(text: string, word: string): boolean {
   return false;
 }
 
-/** The first-form read: the first charset run `before` immediately precedes. */
+/**
+ * Whether the character at `index` carries a value on past a run's edge, reading away from the
+ * run in `direction`: a letter, digit or `_`, or a punctuation mark with a letter or digit beyond
+ * it (`-` in `accounts-contact_email`, `.` in `lodash.merge`). A sentence's closing `.` or a
+ * label's `:` before a space does not.
+ */
+function continuesValue(text: string, index: number, direction: 1 | -1): boolean {
+  const char = text[index];
+  if (char === undefined) return false;
+  if (/[A-Za-z0-9_]/.test(char)) return true;
+  return PUNCTUATION.includes(char) && /[A-Za-z0-9]/.test(text[index + direction] ?? "");
+}
+
+/** A run with no letter or digit (`----`) is no value. */
+const HOLDS_VALUE = /[A-Za-z0-9]/;
+
+/**
+ * The first-form read: the first charset run `before` immediately precedes. An occurrence of
+ * `before` followed by no run, or by a run that is no value, is passed over; a run the text
+ * continues past is a value the charset cannot hold, so the read stops there with none.
+ */
 function firstRun(output: string, before: string, charset: readonly string[]): string | undefined {
-  const runAt = (start: number): string | undefined => {
+  const runAt = (start: number): { value: string } | "skip" | "cut" => {
     let end = start;
     while (end < output.length && charsetAccepts(charset, output[end] ?? "")) end += 1;
-    return end > start ? output.slice(start, end) : undefined;
+    const run = output.slice(start, end);
+    if (!HOLDS_VALUE.test(run)) return "skip";
+    if (continuesValue(output, end, 1)) return "cut";
+    if (before.length === 0 && continuesValue(output, start - 1, -1)) return "cut";
+    return { value: run };
   };
   if (before.length === 0) {
     for (let position = 0; position < output.length; position += 1) {
       if (position > 0 && charsetAccepts(charset, output[position - 1] ?? "")) continue;
       const run = runAt(position);
-      if (run !== undefined) return run;
+      if (run === "cut") return undefined;
+      if (run !== "skip") return run.value;
     }
     return undefined;
   }
@@ -150,26 +185,35 @@ function firstRun(output: string, before: string, charset: readonly string[]): s
     const index = output.indexOf(before, from);
     if (index < 0) return undefined;
     const run = runAt(index + before.length);
-    if (run !== undefined) return run;
+    if (run === "cut") return undefined;
+    if (run !== "skip") return run.value;
     from = index + 1;
   }
 }
 
-/** Whole charset runs in `scope` that `before` precedes and `after` follows; stops at two. */
+/**
+ * Charset runs in `scope` that `before` precedes and `after` follows, as their text or `null` for
+ * a run the text continues past (see `continuesValue`); stops at two.
+ */
 function wholeRuns(
   scope: string,
   before: string,
   after: string,
   charset: readonly string[],
-): string[] {
+): Array<string | null> {
   const accepts = (index: number) =>
     index >= 0 && index < scope.length && charsetAccepts(charset, scope[index] ?? "");
-  const runs: string[] = [];
+  const runs: Array<string | null> = [];
   const consider = (start: number, end: number) => {
     if (end <= start || accepts(start - 1) || accepts(end)) return;
     if (!scope.startsWith(before, start - before.length) || start < before.length) return;
     if (!scope.startsWith(after, end)) return;
-    runs.push(scope.slice(start, end));
+    const run = scope.slice(start, end);
+    if (!HOLDS_VALUE.test(run)) return;
+    const cut =
+      (before.length === 0 && continuesValue(scope, start - 1, -1)) ||
+      (after.length === 0 && continuesValue(scope, end, 1));
+    runs.push(cut ? null : run);
   };
   if (before.length > 0) {
     for (
@@ -220,12 +264,13 @@ export function searchPrintedValue(output: string, locator: ExtractLocator): Pri
     if (marked.length > 1) return { found: "several" };
     const target = marked.length === 1 ? lines[marked[0]! + line.offset] : undefined;
     if (target === undefined) return { found: "none" };
-    scope = target;
+    // The line break before the line lets a `before` starting with one read from its start.
+    scope = `\n${target}`;
   }
   const runs = wholeRuns(scope, before, after, locator.charset);
-  if (runs.length === 0) return { found: "none" };
   if (runs.length > 1) return { found: "several" };
-  return { found: "one", value: runs[0]! };
+  const value = runs[0];
+  return value === undefined || value === null ? { found: "none" } : { found: "one", value };
 }
 
 /** The value `locator` reads from `output`, or undefined when it reads none or several. */

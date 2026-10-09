@@ -83,6 +83,31 @@ describe("an operand printed in an earlier listing", () => {
     expect(replayed(FIXTURE.triage.L2!, "step1", FIXTURE.triage.L1!)).toBe("checkout");
   });
 
+  it("reads the top error code from the row under the code table's header, never the first capital", () => {
+    const learned = FIXTURE.triage.L1!;
+    const extract = deriveNativeCalls(calls(learned)).extracts.find(
+      (entry) => entry.stepId === "step2",
+    );
+    // `count` names the header (`code` is also in the runbook hint); the row starts with the code.
+    expect(extract?.locator).toEqual({
+      only: { before: "\n", after: "", line: { marker: "count", offset: 1 } },
+      charset: ["upper", "digit", "-"],
+    });
+    const errors = learned[1]!.output;
+    const variant = (output: string) =>
+      replayed(learned, "step2", [learned[0]!, { ...learned[1]!, output }, learned[2]!]);
+    // A warning line above the table: the first line starting with capitals is not the code.
+    expect(variant(errors.replace("\n\ncode", "\n\nWARNING: 3 lines skipped\n\ncode"))).toBe(
+      "CHK-PAY-504",
+    );
+    // No rows: the line under the header is blank, so nothing is read (not `R` of `Runbook`).
+    expect(variant(errors.replace(/\nCHK-[^\n]*/g, ""))).toBeUndefined();
+    // A second code table above makes the header ambiguous.
+    expect(
+      variant(errors.replace("\n\ncode", "\n\ncode  count\nPAY-GW-502  30\n\ncode")),
+    ).toBeUndefined();
+  });
+
   it("reads the flagged dependency and the incompatible migration wherever it is listed", () => {
     for (const variant of ["L1", "L2", "V1", "V2", "V3"]) {
       const steps = FIXTURE.release[variant]!;
