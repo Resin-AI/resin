@@ -183,7 +183,13 @@ When a tool's result is text, `invoke_tool` returns the text itself rather than 
 
 A learned tool with at least one text input also accepts `for_each`, both as a native tool argument and inside `invoke_tool`'s `arguments`: `{"for_each": {"<input>": ["v1", "v2"]}}` (one input, 2–20 text values). The whole tool runs once per value, in order, through the normal call path (policy checks, validation and one invocation record per run), and stops at the first failing run. The result has one `[<input>=<value>]` section per run and names the failed value and the values that were not run. A malformed `for_each`, or one that conflicts with a value given directly for the same input, is refused before anything runs.
 
-A step that recordings of the same job show is not always needed can be optional: it is skipped when its boolean input (default `true`) is `false`, later steps still run, and the combined output shows `--- step N/M skipped ---` for it.
+A step that recordings of the same job show is not always needed can be optional: it is skipped when its boolean input (default `true`) is `false`, later steps still run, and the combined output shows `--- step N/M skipped ---` for it. A check inside a recorded `&&` chain (such as `cargo clippy` in `cargo fmt --check && cargo clippy && cargo test`) can be optional in the same way, but only when it changes nothing and everything after it in the chain is also a check. Turning it off runs the rest of the chain as written.
+
+An option's value can be an optional input (`--subject {subject}` in `gh pr merge 18 --squash --subject …`). If you omit it, the option is left out of the command, so the command's own default applies, for example gh's default squash subject. The recorded value is not reused. The input's description says so.
+
+If a call leaves out a required input, nothing runs. The refusal names each missing input with its description and gives one complete call to repeat, with a placeholder for each missing value. The call is shown both as an OMP `write … to xd://mcp__resin_invoke_tool` and as plain `invoke_tool` arguments. `_meta.resinMissingInputs` lists the missing inputs.
+
+When a step fails, the steps after it do not run, since a later step such as a merge may depend on it. The exception is a plan whose recording itself carried on past that failure. The failure names the step and its error, which includes what the step printed. It then lists the output of every step that completed before it. A completed output longer than 2,000 characters (8,000 across all steps) is cut to its last part, and the full output is saved to a file named in the report.
 
 ---
 

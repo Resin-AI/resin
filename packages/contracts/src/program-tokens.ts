@@ -2518,6 +2518,192 @@ export function programTokenListFits(
   return true;
 }
 
+/**
+ * The device capability for omittable option inputs (`RecordedWorkflow.inputs[].
+ * omitOptionWhenAbsent`): a caller may omit an input bound to an option's value, and the option
+ * word and its value then leave the rendered command. A device without it would refuse the plan.
+ */
+export const OMITTABLE_OPTION_CAPABILITY = "omittable-option-v1" as const;
+
+/**
+ * The run of top-level shell tokens an omitted option input removes: `option` (the option word)
+ * through `token` (its value token), equal for an attached `--name=value`, with the hole's span.
+ */
+export interface ProgramOptionRun {
+  option: number;
+  token: number;
+  /** The value's span, for an attached `--name={x}` or a field `key={x}` value. */
+  span?: ProgramTokenSpan;
+}
+
+/** A long or short option word that takes its value as the next word: `--subject`, `-m`. */
+const SEPARATE_OPTION = /^(?:--[A-Za-z0-9][A-Za-z0-9_-]*|-[A-Za-z0-9])$/;
+/** The unquoted name of an attached long option, `--subject=`. */
+const ATTACHED_OPTION = /^--[A-Za-z0-9][A-Za-z0-9_-]*=/;
+/** The unquoted key of a field value, `title=` in `-f title=...`. */
+const FIELD_KEY = /^[A-Za-z_][A-Za-z0-9_.-]*=/;
+/** A redirection operator: it and its target word are no operand of the command. */
+const REDIRECTION_OPERATOR = /^[0-9]*[<>]/;
+/** Blanks between two words of one simple command. */
+const WORD_GAP = /^[ \t]+$/;
+
+/**
+ * Why a program hole cannot be an omittable option's value, or undefined when it can: removing
+ * tokens `option`..`token` (and the blanks before them) must remove exactly one option and its
+ * value from one simple command of a POSIX shell program, and change how nothing else is read.
+ *
+ * - Separate form (`option === token - 1`): a plain unquoted option word (`--subject`, `-m`) and
+ *   then, after blanks, the value token: bound whole (`--subject {x}`), its recorded value not
+ *   option-like; or bound from just after an unquoted `key=` to its end (`-f key={x}`).
+ * - Attached form (`option === token`): a token starting with an unquoted `--name=`, bound from
+ *   just after the `=` to its end (`--subject={x}`).
+ * - The option word is not the command word: a word of the same command comes before it, separated
+ *   by blanks only. No `--` comes before it in that command, and every word after the run up to
+ *   the command's end (an operator, a line break, a comment) is an option other than `--`, or one
+ *   word right after a plain option word (`--body B`), read as that option's value: no operand
+ *   follows whose position the removal could shift. Redirections are skipped.
+ * - No embedded program (a heredoc, a `-c` code string) is anchored inside the run.
+ */
+export function omittableOptionProblem(
+  source: string,
+  tokens: readonly ProgramToken[],
+  hole: { token: number; option: number; span?: ProgramTokenSpan; embedded?: number },
+): string | undefined {
+  if (hole.embedded !== undefined) return "an option value hole must be a top-level token";
+  const value = tokens[hole.token];
+  if (value === undefined) return `the program has no token ${hole.token}`;
+  if (source.slice(value.start, value.end) !== value.raw) {
+    return "the program token does not match its source";
+  }
+  if (
+    !value.bindable ||
+    (value.kind !== "word" && value.kind !== "string") ||
+    typeof value.value !== "string"
+  ) {
+    return "the option value is not a bindable shell word";
+  }
+  const decoded = value.value;
+  /** Whether the hole binds all of the decoded value after an unquoted `prefix`. */
+  const bindsRestAfter = (prefix: string | undefined): boolean =>
+    prefix !== undefined &&
+    value.raw.startsWith(prefix) &&
+    decoded.startsWith(prefix) &&
+    hole.span !== undefined &&
+    hole.span.start === prefix.length &&
+    hole.span.end === decoded.length &&
+    decoded.length > prefix.length;
+  if (hole.option === hole.token) {
+    if (!bindsRestAfter(ATTACHED_OPTION.exec(value.raw)?.[0])) {
+      return "an attached option's hole must bind its whole value after an unquoted --name=";
+    }
+  } else if (hole.option === hole.token - 1) {
+    const word = tokens[hole.option];
+    if (
+      word === undefined ||
+      word.kind !== "word" ||
+      !word.bindable ||
+      word.value !== word.raw ||
+      !SEPARATE_OPTION.test(word.raw) ||
+      source.slice(word.start, word.end) !== word.raw
+    ) {
+      return "the token before the value must be a plain option word (--name or -x)";
+    }
+    if (!WORD_GAP.test(source.slice(word.end, value.start))) {
+      return "the option word and its value must be separated by blanks only";
+    }
+    if (hole.span === undefined) {
+      if (decoded.startsWith("-")) return "the recorded option value looks like an option itself";
+    } else if (!bindsRestAfter(FIELD_KEY.exec(value.raw)?.[0])) {
+      return "a field value hole must bind its whole value after an unquoted key=";
+    }
+  } else {
+    return "the option must be the hole's own token or the token right before it";
+  }
+  const first = hole.option;
+  const before = tokens[first - 1];
+  if (
+    before === undefined ||
+    before.kind === "operator" ||
+    !WORD_GAP.test(source.slice(before.end, tokens[first]!.start))
+  ) {
+    return "the option must follow another word of its command, separated by blanks only";
+  }
+  // The words before it, back to the command's start: a `--` there makes the option an operand.
+  for (let index = first - 1; index >= 0; index -= 1) {
+    const token = tokens[index]!;
+    const next = tokens[index + 1]!;
+    if (source.slice(token.end, next.start).includes("\n")) break;
+    if (token.kind === "operator" && !REDIRECTION_OPERATOR.test(token.raw)) break;
+    if (token.kind === "word" && token.value === "--") {
+      return "the option comes after a -- separator, which makes it an operand";
+    }
+  }
+  // The words after it, to the command's end: options, each perhaps with its value word, so no
+  // operand follows whose position the removal could shift.
+  let valueMayFollow = false;
+  for (let index = hole.token + 1; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const gap = source.slice(tokens[index - 1]!.end, token.start);
+    if (gap.includes("\n") || gap.includes("#")) break;
+    if (token.kind === "operator") {
+      if (!REDIRECTION_OPERATOR.test(token.raw)) break;
+      index += 1;
+      valueMayFollow = false;
+      continue;
+    }
+    const text = typeof token.value === "string" ? token.value : undefined;
+    if ((token.kind !== "word" && token.kind !== "string") || text === undefined || text === "--") {
+      return "a word after the option is not an option, so removing the option could change how it is read";
+    }
+    if (text.startsWith("-")) {
+      valueMayFollow = token.kind === "word" && SEPARATE_OPTION.test(token.raw);
+      continue;
+    }
+    if (!valueMayFollow) {
+      return "an operand follows the option, so removing the option could change how it is read";
+    }
+    valueMayFollow = false;
+  }
+  let anchored: boolean;
+  try {
+    anchored = embeddedPrograms(source, { prose: true }).some(
+      (program) => program.anchor >= first && program.anchor <= hole.token,
+    );
+  } catch {
+    anchored = true;
+  }
+  if (anchored) return "an embedded program sits inside the option";
+  return undefined;
+}
+
+/**
+ * The option word a program token address belongs to when its value may be an omittable option's
+ * (see {@link omittableOptionProblem}): `{ option }` to put on the hole, or undefined when the site
+ * is no such value. A span starting right after an unquoted `--name=` is the attached form;
+ * anything else is the separate form, with the option word right before the token.
+ */
+export function omittableOptionSite(
+  source: string,
+  address: { token: number; span?: ProgramTokenSpan; embedded?: number; through?: number },
+): { option: number } | undefined {
+  if (address.embedded !== undefined || address.through !== undefined) return undefined;
+  let tokens: ProgramToken[];
+  try {
+    tokens = tokenizeProgram("shell", source);
+  } catch {
+    return undefined;
+  }
+  const raw = tokens[address.token]?.raw;
+  const attached =
+    address.span !== undefined &&
+    raw !== undefined &&
+    ATTACHED_OPTION.exec(raw)?.[0].length === address.span.start;
+  const option = attached ? address.token : address.token - 1;
+  return omittableOptionProblem(source, tokens, { ...address, option }) === undefined
+    ? { option }
+    : undefined;
+}
+
 /** A bare shell word: the rendering template for each list item. */
 const LIST_ITEM_TOKEN: ProgramToken = { kind: "word", start: 0, end: 0, raw: "", bindable: true };
 
@@ -2855,6 +3041,10 @@ export function projectedEmbeddedTokenIsBindable(
  *
  * `lists` replaces runs of top-level shell words with word lists ({@link renderProgramTokenList});
  * a run that is not a list run ({@link programTokenListFits}) or overlaps another binding is refused.
+ *
+ * `omissions` removes options whose omittable input the caller left out: each run's option word,
+ * value and the blanks before them. A run {@link omittableOptionProblem} refuses, or one that
+ * overlaps another binding, is refused.
  */
 export function applyProgramTokenValues(
   source: string,
@@ -2864,6 +3054,7 @@ export function applyProgramTokenValues(
   embedded?: EmbeddedProgramTokenValues,
   spans?: readonly ProgramTokenSpanValue[],
   lists?: readonly ProgramTokenListValue[],
+  omissions?: readonly ProgramOptionRun[],
 ): string {
   if (spans !== undefined && spans.length > 0) {
     const groups = new Map<string, ProgramTokenSpanValue[]>();
@@ -2903,7 +3094,16 @@ export function applyProgramTokenValues(
       if (target.has(index)) throw new Error("a token is bound both whole and by span");
       target.set(index, composeProgramTokenSpans(token.value, group));
     }
-    return applyProgramTokenValues(source, tokens, topLevel, language, nested, undefined, lists);
+    return applyProgramTokenValues(
+      source,
+      tokens,
+      topLevel,
+      language,
+      nested,
+      undefined,
+      lists,
+      omissions,
+    );
   }
   const replacements: Array<{ start: number; end: number; text: string }> = [];
   for (const [tokenIndex, value] of values) {
@@ -2938,6 +3138,21 @@ export function applyProgramTokenValues(
       start: first.start,
       end: last.end,
       text: renderProgramTokenList(list.items, list.optionItems === true),
+    });
+  }
+  for (const omission of omissions ?? []) {
+    if (language !== "shell") throw new Error("only a shell program omits an option");
+    const problem = omittableOptionProblem(source, tokens, omission);
+    if (problem !== undefined) {
+      throw new Error(
+        `the omitted option at token ${omission.option} cannot be removed: ${problem}`,
+      );
+    }
+    // The option word, its value and the blanks before them: the rest of the command stays as is.
+    replacements.push({
+      start: tokens[omission.option - 1]!.end,
+      end: tokens[omission.token]!.end,
+      text: "",
     });
   }
   if (embedded !== undefined && embedded.size > 0) {

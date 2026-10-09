@@ -205,6 +205,8 @@ describe("WorkflowValidationClient", () => {
       "display-filter-v1",
       "display-filter-v2",
       "repository-location-v1",
+      "omittable-option-v1",
+      "optional-check-segments-v1",
     ]);
     // An entry that is not a well-formed ask cannot be replayed; it is left out, not guessed at.
     expect(requests).toHaveLength(1);
@@ -308,6 +310,8 @@ describe("WorkflowValidationWorker", () => {
       "display-filter-v1",
       "display-filter-v2",
       "repository-location-v1",
+      "omittable-option-v1",
+      "optional-check-segments-v1",
     ]);
     expect(headerOf(post, "content-type")).toBe("application/json");
 

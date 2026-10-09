@@ -1,4 +1,8 @@
-import { REPOSITORY_LOCATION_CAPABILITY } from "@resin/contracts";
+import {
+  OMITTABLE_OPTION_CAPABILITY,
+  OPTIONAL_CHECK_SEGMENTS_CAPABILITY,
+  REPOSITORY_LOCATION_CAPABILITY,
+} from "@resin/contracts";
 
 /**
  * What this device's recording check and runtime support, sent on every request that fetches
@@ -35,6 +39,15 @@ import { REPOSITORY_LOCATION_CAPABILITY } from "@resin/contracts";
  *   `leadingCd`, without the program's recorded leading `cd`), and a plan whose location cannot
  *   resolve for the caller is reported unavailable and never run. A device without it ignores the
  *   field and runs the recorded program as recorded.
+ * - `omittable-option-v1` (`OMITTABLE_OPTION_CAPABILITY`): an input marked
+ *   `omitOptionWhenAbsent`, bound by program holes that name their option word (`hole.option`),
+ *   is optional, and omitting it removes the option word and its value from the command
+ *   (`omittableOptionProblem` says which sites qualify). A candidate may propose such an input
+ *   (`proposed.omitOptionWhenAbsent`), and the recording check binds the value the
+ *   demonstration ran there, or leaves it omitted when the demonstration ran without the option.
+ * - `optional-check-segments-v1` (`OPTIONAL_CHECK_SEGMENTS_CAPABILITY`): a segment step may be
+ *   optional when it is a check (`isCheckSegment`) followed in its chain only by checks or setup
+ *   (`optionalSegmentProblem`), as well as when it is a `mkdir -p` setup.
  */
 export const WORKFLOW_CAPABILITIES_HEADER = "x-resin-workflow-validation-capabilities";
 export const WORKFLOW_CAPABILITIES = [
@@ -48,4 +61,6 @@ export const WORKFLOW_CAPABILITIES = [
   "display-filter-v1",
   "display-filter-v2",
   REPOSITORY_LOCATION_CAPABILITY,
+  OMITTABLE_OPTION_CAPABILITY,
+  OPTIONAL_CHECK_SEGMENTS_CAPABILITY,
 ].join(",");
