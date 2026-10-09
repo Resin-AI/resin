@@ -18,6 +18,10 @@ import {
   resolvePrivateReference,
 } from "../../src/analytics/private-value-store.js";
 import { WorkflowCallRecorder } from "../../src/analytics/workflow-call-recorder.js";
+import {
+  RESIN_WORKFLOW_RESULT_METADATA_KEY,
+  readWorkflowResultCarrier,
+} from "../../src/analytics/workflow-carrier.js";
 import { recordCallsFromEvents } from "../../src/analytics/workflow-recipe.js";
 import { NormalizationPipeline } from "../../src/normalization/pipeline.js";
 
@@ -138,6 +142,17 @@ describe("values printed by an earlier command", () => {
       expect(locator).toBeDefined();
       expect(extractPrintedValue(COMMANDS[0]![1], locator!)).toBe(ID);
     }
+    // What each step's own output calls a value it ran with travels on its projected result, as a
+    // label only: `deployment dep-…` for `wait`, `promoted dep-…` for `promote`.
+    const labels = observed.flatMap((event) => {
+      const metadata = projectEventToMetadataOnly(event).metadata;
+      const carrier = readWorkflowResultCarrier(metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]);
+      return (carrier?.operandLabels ?? []).map((entry) => [entry.path, entry.label]);
+    });
+    expect(labels).toEqual([
+      [["tokens", 2], "deployment"],
+      [["tokens", 4], "promoted"],
+    ]);
 
     // `--app worker` was named by the request: it stays an input candidate, never an extract.
     const createCandidates = (workflow.candidates ?? []).filter(

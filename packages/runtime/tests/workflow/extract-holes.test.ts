@@ -46,7 +46,7 @@ const candidate: WorkflowBindingCandidate = {
   missing: "one recording does not establish the id was read from the output",
 };
 
-async function run(plan: RecordedWorkflow, printed: string) {
+async function run(plan: RecordedWorkflow, printed: string, locator = LOCATOR) {
   const received: string[] = [];
   const adapters = new RuntimeAdapterRegistry();
   adapters.register({
@@ -61,7 +61,7 @@ async function run(plan: RecordedWorkflow, printed: string) {
     adapters,
     resolvePrivate: (reference) => {
       if (reference !== "private:locator") throw new Error("unexpected reference");
-      return LOCATOR;
+      return locator;
     },
   });
   return { execution, received };
@@ -95,6 +95,40 @@ describe("extract holes", () => {
     const failed = execution.steps.find((entry) => entry.stepId === "wait");
     expect(failed?.status).toBe("failed");
     if (failed?.status === "failed") expect(failed.error).not.toContain("secret-output");
+  });
+
+  it("reads a row a locator singles out, and fails when the run prints none or several", async () => {
+    const plan = applyConfirmedWorkflowBinding(recorded(), candidate)!;
+    // The flagged row, wherever it is listed: the label after the value names it.
+    const flagged = JSON.stringify({
+      only: { before: "", after: ": NOT" },
+      charset: ["lower", "digit", "-"],
+    });
+    const listing = (rows: string[]) => `checking\n${rows.map((row) => `  ${row}\n`).join("")}`;
+    const one = await run(plan, listing(["dep-1: ok", "dep-2: NOT ready", "dep-3: ok"]), flagged);
+    expect(one.execution.status).toBe("completed");
+    expect(one.received[1]).toBe("./deployctl wait dep-2");
+
+    for (const rows of [
+      ["dep-1: ok", "dep-2: ok"],
+      ["dep-1: NOT ready", "dep-2: NOT ready"],
+    ]) {
+      const { execution, received } = await run(plan, listing(rows), flagged);
+      expect(execution.status).toBe("failed");
+      // The consuming step never runs on a value the run did not single out.
+      expect(received).toHaveLength(1);
+    }
+
+    // The first row under a header, the header named by a word no other line holds.
+    const firstRow = JSON.stringify({
+      only: { before: "", after: "", line: { marker: "warnings", offset: 1 } },
+      charset: ["lower", "-"],
+    });
+    const table =
+      "service  errors  warnings\nbilling      46         6\nauth          6         8\n";
+    expect((await run(plan, table, firstRow)).received[1]).toBe("./deployctl wait billing");
+    const twoHeaders = `${table}\nservice  errors  warnings\n`;
+    expect((await run(plan, twoHeaders, firstRow)).execution.status).toBe("failed");
   });
 
   it("feeds a printed value into the value part of an inline option, keeping its name", async () => {
