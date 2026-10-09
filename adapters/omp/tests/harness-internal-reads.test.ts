@@ -133,7 +133,7 @@ describe("OMP reads of harness-internal URIs", () => {
     }
   });
 
-  it("keeps ordinary file reads, device-surface reads and writes to internal URIs as they were", () => {
+  it("keeps ordinary file reads and writes to internal URIs, and drops another server's docs", () => {
     const decoder = new OmpRecordDecoder({ deviceSurfaceServers: () => ["fixture"] });
     const events = decodeAll(
       "session-unchanged",
@@ -145,15 +145,14 @@ describe("OMP reads of harness-internal URIs", () => {
       ],
       decoder,
     );
+    // A device-surface read is documentation; another server's is the harness's own paging.
     expect(calls(events).map((call) => [call.toolName, call.connection])).toEqual([
       ["read", undefined],
-      ["status", "fixture"],
       ["read", undefined],
       ["write", undefined],
     ]);
     expect(results(events).map((result) => result.callId)).toEqual([
       "call_file",
-      "call_device",
       "call_vault",
       "call_write",
     ]);

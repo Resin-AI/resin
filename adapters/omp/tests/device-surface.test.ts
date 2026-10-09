@@ -216,30 +216,44 @@ describe("reading the servers the harness is configured with", () => {
 });
 
 describe("Resin catalog discovery through the device surface", () => {
-  it.each(["marker-first", "assistant-first", "marker-only", "assistant-only"])(
-    "does not capture manage_tools documentation as executable work (%s)",
-    (order) => {
-      const marker = readMarker("docs", "xd://mcp__resin_manage_tools");
-      const assistant = assistantRead("docs", "xd://mcp__resin_manage_tools");
-      const prefix =
-        order === "marker-first"
-          ? [marker, assistant]
-          : order === "assistant-first"
-            ? [assistant, marker]
-            : order === "marker-only"
-              ? [marker]
-              : [assistant];
-      const { calls, discoveries, results } = decodeAll(
-        [...prefix, readResult("docs", "Tool documentation")],
-        ["resin"],
-      );
+  it.each(
+    ["manage_tools", "run_release_checks"].flatMap((tool) =>
+      ["marker-first", "assistant-first", "marker-only", "assistant-only"].map((order) => [
+        tool,
+        order,
+      ]),
+    ),
+  )("records a read of %s's device path as its documentation lookup (%s)", (tool, order) => {
+    // Production: `read xd://mcp__resin_run_release_checks` returned the tool's docs and schema.
+    const devicePath = `xd://mcp__resin_${tool}`;
+    const marker = readMarker("docs", devicePath);
+    const assistant = assistantRead("docs", devicePath);
+    const prefix =
+      order === "marker-first"
+        ? [marker, assistant]
+        : order === "assistant-first"
+          ? [assistant, marker]
+          : order === "marker-only"
+            ? [marker]
+            : [assistant];
+    const { calls, discoveries, results } = decodeAll(
+      [...prefix, readResult("docs", `# mcp__resin_${tool} — resin/${tool}\n## Schema`)],
+      ["resin"],
+    );
 
-      expect(calls).toEqual([]);
-      expect(discoveries).toHaveLength(1);
-      expect(discoveries[0]!.tools).toEqual([{ name: "manage_tools", provider: "resin" }]);
-      expect(results).toHaveLength(1);
-    },
-  );
+    // Schema overhead of using the tool, never an invocation of it.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      toolName: "get_tool_schema",
+      connection: "resin",
+      parameters: { name: tool },
+    });
+    expect(discoveries).toHaveLength(1);
+    expect(discoveries[0]!.tools).toEqual([{ name: tool, provider: "resin" }]);
+    expect(results.map((result) => [result.callId, result.toolName])).toEqual([
+      [calls[0]!.callId, "get_tool_schema"],
+    ]);
+  });
 
   it.each(["list_versions", "status"])(
     "records read-only manage_tools %s as discovery, not a workflow step",
@@ -286,8 +300,9 @@ describe("Resin catalog discovery through the device surface", () => {
   );
 
   it("preserves same-named tools on other servers, unknown arguments, and actual invocations", () => {
-    const { calls } = decodeAll(
+    const { calls, results } = decodeAll(
       [
+        // Another server's documentation is the harness's own paging: neither a call nor a result.
         assistantRead("other-read", "xd://mcp__other_manage_tools"),
         readResult("other-read", "{}"),
         assistantWrite("other-list", "xd://mcp__other_manage_tools", '{"action":"list_versions"}'),
@@ -305,10 +320,10 @@ describe("Resin catalog discovery through the device surface", () => {
     );
     expect(calls.map((call) => [call.toolName, call.connection])).toEqual([
       ["manage_tools", "other"],
-      ["manage_tools", "other"],
       ["manage_tools", "resin"],
       ["invoke_tool", "resin"],
     ]);
+    expect(results.map((result) => result.callId)).not.toContain("other-read");
   });
 });
 
@@ -344,21 +359,33 @@ describe("capturing a call made through the device surface", () => {
     expect(discoveries[0]!.tools).toEqual([{ name: "deep_tool_name", provider: "alpha" }]);
   });
 
-  it("records a callable that takes no arguments, reached by reading its device path", () => {
-    const { calls, discoveries, results } = decodeAll([
-      readMarker("call_5", "xd://mcp__alpha_beta_run"),
-      assistantRead("call_5", "xd://mcp__alpha_beta_run"),
-      readResult("call_5", '{"rows":[]}'),
-    ]);
+  it("records no call for a read of another server's path, which is the harness's documentation", () => {
+    for (const devicePath of ["xd://mcp__alpha_beta_run", "xd://mcp__unconfigured_run"]) {
+      const { calls, discoveries, results } = decodeAll([
+        readMarker("call_5", devicePath),
+        assistantRead("call_5", devicePath),
+        readResult("call_5", "# docs\n## Schema"),
+      ]);
+      expect([calls, discoveries, results], devicePath).toEqual([[], [], []]);
+    }
+  });
 
+  it("still invokes a learned tool written to, with no arguments", () => {
+    const { calls, results } = decodeAll(
+      [
+        startMarker("call_8", "xd://mcp__resin_run_release_checks"),
+        assistantWrite("call_8", "xd://mcp__resin_run_release_checks", "{}"),
+        toolResult("call_8", "checks passed"),
+      ],
+      ["resin"],
+    );
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.toolName).toBe("run");
-    expect(calls[0]!.connection).toBe("alpha_beta");
-    // The transport's envelope is not an argument of the callable it reached.
-    expect(calls[0]!.parameters).toEqual({});
-    expect(discoveries[0]!.tools).toEqual([{ name: "run", provider: "alpha_beta" }]);
-    expect(results[0]!.toolName).toBe("run");
-    expect(results[0]!.result).toEqual({ rows: [] });
+    expect(calls[0]).toMatchObject({
+      toolName: "run_release_checks",
+      connection: "resin",
+      parameters: {},
+    });
+    expect(results[0]!.toolName).toBe("run_release_checks");
   });
 
   it("leaves a path no configured server owns opaque, with no connection", () => {

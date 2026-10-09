@@ -922,4 +922,41 @@ describe("workflow sink steps", () => {
     };
     expect(workflowSinkStepIds(consumed)).toEqual(["calculate", "upload"]);
   });
+
+  it("also returns each output `returns` names, though a later step reads it", () => {
+    // The triage shape: the agent read the error counts, then explained the code it picked.
+    const read = fourCallWorkflow();
+    read.returns = ["calculate", "write"];
+    expect(validateRecordedWorkflow(read)).toEqual({ valid: true, errors: [] });
+    expect(workflowSinkStepIds(read)).toEqual(["calculate", "write", "upload"]);
+    // Naming a step no later step reads changes nothing.
+    read.returns = ["upload"];
+    expect(workflowSinkStepIds(read)).toEqual(["upload"]);
+  });
+
+  it("refuses a `returns` naming no recorded step, one twice, a derivation or a non-final segment", () => {
+    const workflow = fourCallWorkflow();
+    workflow.returns = ["fetch", "fetch", "missing"];
+    expect(validateRecordedWorkflow(workflow).errors).toEqual(
+      expect.arrayContaining([
+        "returns names step fetch twice",
+        "returns names unknown step missing",
+      ]),
+    );
+    expect(validateRecordedWorkflow({ ...fourCallWorkflow(), returns: "fetch" }).errors).toContain(
+      "returns must be an array of step ids when present",
+    );
+    const derived = fourCallWorkflow();
+    derived.steps[0]!.origin = "derivation";
+    derived.returns = ["fetch"];
+    expect(validateRecordedWorkflow(derived).errors).toContain(
+      "returns names derivation step fetch, which no recording read",
+    );
+    const segmented = fourCallWorkflow();
+    segmented.steps[0]!.segment = { index: 0, count: 2, version: 1 };
+    segmented.returns = ["fetch"];
+    expect(validateRecordedWorkflow(segmented).errors).toContain(
+      "returns names step fetch, a non-final segment of a chain whose output the recording read as a whole",
+    );
+  });
 });
