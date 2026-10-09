@@ -490,6 +490,15 @@ export type RecordedWorkflow = {
     list?: WorkflowListInput;
   }>;
   steps: WorkflowStep[];
+  /**
+   * Steps whose results the workflow returns although a later step reads them (see
+   * {@link workflowSinkStepIds}): what the recording's agent read in its own turn before using a
+   * value from it, such as the error counts a later `explain --code {code}` step picks its code
+   * from. Each names a recorded step, at most once, and never a derivation (no recording read it)
+   * nor a non-final `&&` segment (the recording read only the chain's output). Absent: a step a
+   * later step reads is not returned. A runtime that predates the field returns the sinks alone.
+   */
+  returns?: string[];
   /** Private resources the workflow needs locally, addressed by reference only. */
   privateReferences?: string[];
   /**
@@ -927,8 +936,9 @@ function validateDemonstration(
 
 /**
  * The steps whose results a recorded workflow returns, in recorded order: those no later step
- * consumes through a bound result, a declared dependency or Python setup. A chain returns its final
- * result; a run of independent steps returns every step's output.
+ * consumes through a bound result, a declared dependency or Python setup, and those its `returns`
+ * names although a later step consumes them. A chain returns its final result, plus every earlier
+ * output its recording read; a run of independent steps returns every step's output.
  */
 export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
   const consumed = new Set<string>();
@@ -967,7 +977,10 @@ export function workflowSinkStepIds(workflow: RecordedWorkflow): string[] {
       if (producer !== undefined) consumed.add(producer);
     }
   }
-  return workflow.steps.filter((step) => !consumed.has(step.id)).map((step) => step.id);
+  const returned = new Set(workflow.returns ?? []);
+  return workflow.steps
+    .filter((step) => !consumed.has(step.id) || returned.has(step.id))
+    .map((step) => step.id);
 }
 
 /**
@@ -1141,6 +1154,44 @@ function isSegmentAddress(value: unknown): boolean {
     (value.index as number) >= 0 &&
     (value.index as number) < (value.count as number)
   );
+}
+
+/**
+ * `returns` (see {@link RecordedWorkflow.returns}): an array naming recorded steps of the plan, each
+ * at most once, none a derivation or a non-final `&&` segment.
+ */
+function validateWorkflowReturns(workflow: Record<string, unknown>, errors: string[]): void {
+  if (workflow.returns === undefined) return;
+  if (!Array.isArray(workflow.returns)) {
+    errors.push("returns must be an array of step ids when present");
+    return;
+  }
+  const steps = Array.isArray(workflow.steps) ? workflow.steps.filter(isPlainObject) : [];
+  const seen = new Set<string>();
+  for (const entry of workflow.returns) {
+    const step =
+      typeof entry === "string" ? steps.find((candidate) => candidate.id === entry) : undefined;
+    if (step === undefined) {
+      errors.push(`returns names unknown step ${String(entry)}`);
+      continue;
+    }
+    if (seen.has(entry as string)) errors.push(`returns names step ${String(entry)} twice`);
+    seen.add(entry as string);
+    if (step.origin === "derivation") {
+      errors.push(`returns names derivation step ${String(entry)}, which no recording read`);
+    }
+    const segment = isPlainObject(step.segment) ? step.segment : undefined;
+    if (
+      segment !== undefined &&
+      typeof segment.index === "number" &&
+      typeof segment.count === "number" &&
+      segment.index < segment.count - 1
+    ) {
+      errors.push(
+        `returns names step ${String(entry)}, a non-final segment of a chain whose output the recording read as a whole`,
+      );
+    }
+  }
 }
 
 function validateWorkflowSegments(workflow: Record<string, unknown>, errors: string[]): void {
@@ -2323,6 +2374,7 @@ export function validateRecordedWorkflow(value: unknown): {
   }
   validateWorkflowOptionalSteps(value, errors);
   validateWorkflowSegments(value, errors);
+  validateWorkflowReturns(value, errors);
   validateWorkflowDisplayFilters(value, errors);
   // A derivation was never executed by the recording, so no demonstration can have observed it.
   for (const label of ["baseline", "heldOut"] as const) {

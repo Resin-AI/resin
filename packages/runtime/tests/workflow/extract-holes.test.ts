@@ -76,6 +76,17 @@ describe("extract holes", () => {
     expect(received[1]).toBe("./deployctl wait dep-1a2b3c");
   });
 
+  it("returns the producer's output too when the plan says its recording read it", async () => {
+    const plan = applyConfirmedWorkflowBinding(recorded(), candidate)!;
+    // Bound into `wait`, `create` is no longer returned on its own.
+    expect((await run(plan, "created deployment dep-1a2b3c\n")).execution.result).toBe("ok");
+    const { execution } = await run(
+      { ...plan, returns: ["create"] },
+      "created deployment dep-1a2b3c\n",
+    );
+    expect(execution.result).toEqual(["created deployment dep-1a2b3c\n", "ok"]);
+  });
+
   it("fails the consuming step without the output text when nothing matches", async () => {
     const plan = applyConfirmedWorkflowBinding(recorded(), candidate)!;
     const { execution, received } = await run(plan, "secret-output-without-marker\n");
