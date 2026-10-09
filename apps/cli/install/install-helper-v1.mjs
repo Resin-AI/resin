@@ -5855,6 +5855,7 @@ Resin may have learned tools from earlier work in your projects. They are not li
 
 - Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
     claudeCodeInstallHarness = {
@@ -6906,6 +6907,7 @@ Resin may have learned tools from earlier runs in this workspace. They are not l
 
 - Search only when the next command you are about to run is one of those commands, with that command line as the query. With an \`exec\` tool (Code Mode), do it in that \`exec\` call: \`text(JSON.stringify(await tools.mcp__resin__search_tools({query: "<the command line>"})))\`. Without \`exec\`, Resin's tools are deferred: call \`tool_search\` with \`resin search_tools\` to load them, then call \`mcp__resin__search_tools\` with \`{"query": "<the command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`mcp__resin__invoke_tool({name: "<name>", parameters: {...}})\` with parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. Omitted inputs reuse the recorded values. Run several at once with \`Promise.all\` in \`exec\`.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
 `;
@@ -7168,6 +7170,7 @@ Resin may have learned tools from earlier work in this workspace. They are not i
 
 - Search only when the next command you are about to run is one of those commands: call \`resin-search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`resin-invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`resin-get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
 `;
@@ -7565,6 +7568,7 @@ Resin may have learned tools from earlier work in your projects. They are not li
 
 - Search only when the next command you are about to run is one of those commands: call the \`resin\` server's \`search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`
     };
@@ -7764,6 +7768,7 @@ Resin may have learned tools from earlier work in this workspace. Grok runs MCP 
 
 - Search only when the next command you are about to run is one of those commands: call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`resin__invoke_tool\` (via \`use_tool\`) with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`resin__get_tool_schema\` first. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
     grokBuildInstallHarness = {
@@ -7988,6 +7993,7 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 
 - Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
 `;
@@ -8419,6 +8425,7 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 
 - Search only when the next command you are about to run is one of those commands: write \`{"query": "<that command line>"}\` to \`xd://mcp__resin_search_tools\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: write \`{"name": "<name>", "parameters": {...}}\` to \`xd://mcp__resin_invoke_tool\` with parameters from its \`inputSchema\`, without reading \`xd://mcp__resin_get_tool_schema\` first. Omitted inputs reuse the recorded values.
+- A listed tool's summary already gives its inputs (or \`{}\`): write those arguments to its \`xd://\` path directly, without reading its docs first.
 - Invoke a tool you already found or that is listed without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
     OMP_CATALOG_MARKERS = {
@@ -8951,6 +8958,7 @@ Resin may have learned tools from earlier work in this workspace. They are not l
 
 - Search only when the next command you are about to run is one of those commands: call \`resin_search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`resin_invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`resin_get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
 `;
@@ -9404,6 +9412,7 @@ Resin may have learned tools from earlier work in this workspace. They are not i
 
 - Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
 - A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. Omitted inputs reuse the recorded values.
+- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
 - Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
 - Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
     PI_CONTEXT_FILE_NAMES = [

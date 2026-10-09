@@ -243,8 +243,9 @@ export const RESIN_LEARNED_TOOL_COMMANDS_META = "resin/learnedToolCommands";
 /**
  * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META} on `initialize`, set only when the
  * caller's catalog is small enough to list directly (see `DIRECT_LISTING_MAX_TOOLS`): each learned
- * tool's name and one-line purpose, as `tools/list` lists it. A search-listing shim then lists the
- * learned tools as tools of their own and names them in its instructions instead of only search.
+ * tool's name, call signature (`{}` or `{name: type, optional?: type}`) and one-line purpose. A
+ * search-listing shim then lists the learned tools as tools of their own and names them in its
+ * instructions instead of only search.
  */
 export const RESIN_LEARNED_TOOL_LISTING_META = "resin/learnedToolListing";
 

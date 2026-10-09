@@ -97,17 +97,25 @@ export interface CatalogNoticeTool extends McpTool {
    * no automatic surface (instructions, command suggestions, direct listing) names it.
    */
   recommended?: false;
+  /** A learned tool's purpose and call signature, for a direct listing's instructions. */
+  listing?: ListedCall;
 }
 
 /** Internal metadata must never reach a harness: no unsupported output contract, no local detail. */
 export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
   return tools.map((tool) => {
-    if (!("catalogOutputSchema" in tool) && !("localCommands" in tool) && !("recommended" in tool))
+    if (
+      !("catalogOutputSchema" in tool) &&
+      !("localCommands" in tool) &&
+      !("recommended" in tool) &&
+      !("listing" in tool)
+    )
       return tool;
     const {
       catalogOutputSchema: _catalogOutputSchema,
       localCommands: _localCommands,
       recommended: _recommended,
+      listing: _listing,
       ...nativeTool
     } = tool;
     return nativeTool;
@@ -196,15 +204,113 @@ function toMcpInputSchema(rawSchema?: JsonRpcParams | ToolParameterSchema): McpT
 const LISTED_PURPOSE_CHARS = 160;
 
 /**
- * A listed learned tool's description: the first sentence of its catalog description, a hint of
- * how much recorded work it replaces when that is more than one step, and the names of its inputs.
- * The full description, recorded steps and input docs come from get_tool_schema.
+ * Longest run of inputs a listed tool's signature names. Harnesses show only the start of a tool's
+ * description (OMP about 200 characters), so the signature leads it and stays within that; inputs
+ * past this are counted, never cut mid-name.
  */
-export function listedPurpose(
-  description: string,
-  inputs: readonly string[],
-  hint?: string,
-): string {
+const LISTED_SIGNATURE_CHARS = 120;
+
+/** One input as a listed tool's signature names it: its name, JSON type and whether it is optional. */
+interface SignatureInput {
+  name: string;
+  type: string;
+  optional: boolean;
+}
+
+/** A listed learned tool's purpose and its call signature (`{}` with no inputs). */
+export interface ListedCall {
+  purpose: string;
+  signature: string;
+}
+
+function schemaType(property: unknown): string {
+  if (!isParamsObject(property)) return "any";
+  const { type } = property;
+  if (type === "array") {
+    const items = isParamsObject(property.items) ? property.items.type : undefined;
+    return typeof items === "string" ? `${items}[]` : "array";
+  }
+  if (typeof type === "string") return type;
+  if (Array.isArray(type) && type.every((entry) => typeof entry === "string"))
+    return type.join("|");
+  return "any";
+}
+
+/**
+ * The inputs an agent passes a listed tool, from its served schema, required ones first; `for_each`
+ * is left to its docs.
+ */
+function signatureInputs(schema: McpToolInput): SignatureInput[] {
+  const required = new Set(schema.required ?? []);
+  return Object.entries(schema.properties ?? {})
+    .filter(([name]) => name !== FOR_EACH_ARGUMENT)
+    .map(([name, property]) => ({
+      name,
+      type: schemaType(property),
+      optional: !required.has(name),
+    }))
+    .sort((a, b) => Number(a.optional) - Number(b.optional));
+}
+
+/**
+ * How many of `inputs`, rendered by `render` and joined by ", ", fit {@link LISTED_SIGNATURE_CHARS}:
+ * always at least one, so a signature never cuts a name.
+ */
+function shownInputCount(
+  inputs: readonly SignatureInput[],
+  render: (input: SignatureInput) => string,
+): number {
+  let length = 0;
+  let count = 0;
+  for (const input of inputs) {
+    length += (count === 0 ? 0 : 2) + render(input).length;
+    if (count > 0 && length > LISTED_SIGNATURE_CHARS) break;
+    count += 1;
+  }
+  return count;
+}
+
+/** A listed tool's call signature as a direct listing names it: `{}` or `{mode: string, paths?: string[]}`. */
+export function listedSignature(schema: McpToolInput): string {
+  const inputs = signatureInputs(schema);
+  const render = (input: SignatureInput) =>
+    `${input.name}${input.optional ? "?" : ""}: ${input.type}`;
+  const count = shownInputCount(inputs, render);
+  const more = inputs.length - count;
+  return `{${inputs.slice(0, count).map(render).join(", ")}${more === 0 ? "" : `, +${more} more`}}`;
+}
+
+/**
+ * How a listed tool is called, leading its description so a harness that shows only the start of
+ * it still shows what to pass: `{}` for a tool without inputs, else each input's name and type,
+ * required ones first.
+ */
+function listedCallSentence(schema: McpToolInput): string {
+  const inputs = signatureInputs(schema);
+  if (inputs.length === 0) return "Call with {} (no inputs).";
+  const render = (input: SignatureInput) => `${input.name} (${input.type})`;
+  const shown = inputs.slice(0, shownInputCount(inputs, render));
+  const required = shown.filter((input) => !input.optional).map(render);
+  const optional = shown.filter((input) => input.optional).map(render);
+  const groups = [
+    ...(required.length === 0 ? [] : [`Inputs: ${required.join(", ")}`]),
+    ...(optional.length === 0
+      ? []
+      : [`${required.length === 0 ? "Optional inputs" : "optional"}: ${optional.join(", ")}`]),
+  ];
+  const more = inputs.length - shown.length;
+  const list = `${groups.join("; ")}${more === 0 ? "" : `, +${more} more`}`;
+  return inputs.some((input) => input.optional)
+    ? `${list}; omitted ones reuse recorded values.`
+    : `${list}.`;
+}
+
+/**
+ * A listed learned tool's purpose: the first sentence of its catalog description and a hint of how
+ * much recorded work it replaces when that is more than one step. The full description, recorded
+ * steps and input docs come from get_tool_schema.
+ */
+export function listedPurpose(description: string, hint?: string): string {
   const line = description.trim().split("\n")[0]!.trim();
   const sentence = /^.*?[.!?](?=\s+[A-Z`]|$)/.exec(line)?.[0] ?? line;
   const cut =
@@ -212,9 +318,13 @@ export function listedPurpose(
       ? `${sentence.slice(0, LISTED_PURPOSE_CHARS - 1).trimEnd()}…`
       : sentence;
   const ended = (text: string) => `${text}${/[.!?…]$/.test(text) ? "" : "."}`;
-  const purpose = hint === undefined ? cut : `${ended(cut)} ${hint}`;
-  if (inputs.length === 0) return purpose;
-  return `${ended(purpose)} Inputs: ${inputs.join(", ")}.`;
+  return hint === undefined ? cut : `${ended(cut)} ${hint}`;
+}
+
+/** A listed learned tool's description: how to call it (see {@link listedCallSentence}), then its purpose. */
+export function listedDescription(schema: McpToolInput, purpose: string): string {
+  const call = listedCallSentence(schema);
+  return purpose === "" ? call : `${call} ${purpose}`;
 }
 
 /**
@@ -319,7 +429,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
   async listCatalogNoticeTools(context: WorkspaceContext): Promise<CatalogNoticeTool[]> {
     const snapshot = await this.registry.resolveCatalog(context.workspaceId, context.sessionId);
     const mcpTools: CatalogNoticeTool[] = [];
-    // A tool learned for this workspace is listed by its one-line purpose and input names, and
+    // A tool learned for this workspace is listed by how to call it and its one-line purpose, and
     // marked so a facade that hides the rest of the catalog still offers it by name. Every listed
     // tool is re-sent with each request, so its recorded steps, input docs and `for_each` usage are
     // left to get_tool_schema.
@@ -332,19 +442,20 @@ export class RegistryGatewayRouter implements GatewayRouter {
           _meta: undefined,
           localCommands: [],
           recommended: true,
+          listing: undefined,
         };
       }
       const hint = replacesStepsHint(this.registry.learnedToolProfile(tool, context)?.steps);
+      const served = this.registry.learnedToolInputSchema(tool, context, schema);
+      const scrub = (text: string) => this.registry.scrubLearnedToolText(tool, context, text);
+      const purpose = scrub(listedPurpose(catalog, hint));
       return {
-        description: this.registry.scrubLearnedToolText(
-          tool,
-          context,
-          listedPurpose(catalog, Object.keys(schema.properties ?? {}), hint),
-        ),
-        inputSchema: listedInputSchema(this.registry.learnedToolInputSchema(tool, context, schema)),
+        description: scrub(listedDescription(served, purpose)),
+        inputSchema: listedInputSchema(served),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
         localCommands: this.registry.learnedToolCommands(tool, context),
         recommended: isAutomaticallyRecommended(tool),
+        listing: { purpose, signature: scrub(listedSignature(served)) },
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;
@@ -352,7 +463,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
       for (const entry of Object.values(record.entries)) {
         // A learned tool is listed only where it was learned and can run (see repository-scope).
         if (!isToolOfferedHere(this.registry, entry, context)) continue;
-        const { description, inputSchema, _meta, localCommands, recommended } = listed(
+        const { description, inputSchema, _meta, localCommands, recommended, listing } = listed(
           entry,
           entry.description || entry.manifest?.description || `Tool ${entry.name}`,
         );
@@ -365,6 +476,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           ...(_meta === undefined ? {} : { _meta }),
           ...(localCommands.length === 0 ? {} : { localCommands }),
           ...(recommended ? {} : { recommended: false as const }),
+          ...(listing === undefined ? {} : { listing }),
         });
       }
     } else {
@@ -376,7 +488,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         );
         if (tool) {
           if (!isToolOfferedHere(this.registry, tool, context)) continue;
-          const { description, inputSchema, _meta, localCommands, recommended } = listed(
+          const { description, inputSchema, _meta, localCommands, recommended, listing } = listed(
             tool,
             tool.description || tool.manifest?.description || `Tool ${tool.name}`,
           );
@@ -389,6 +501,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
             ...(_meta === undefined ? {} : { _meta }),
             ...(localCommands.length === 0 ? {} : { localCommands }),
             ...(recommended ? {} : { recommended: false as const }),
+            ...(listing === undefined ? {} : { listing }),
           });
         }
       }

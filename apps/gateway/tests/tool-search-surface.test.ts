@@ -1505,9 +1505,10 @@ describe("search-only listing", () => {
     const listing = [
       {
         name: "build_site",
-        description: "Builds the site. Replaces 3 recorded steps. Inputs: mode.",
+        signature: "{mode?: string}",
+        description: "Builds the site. Replaces 3 recorded steps.",
       },
-      { name: "run_tests", description: "Runs the unit tests." },
+      { name: "run_tests", signature: "{}", description: "Runs the unit tests." },
     ];
     const initializeWithListing = (id: number, count: number): JsonRpcMessage => ({
       jsonrpc: "2.0",
@@ -1526,17 +1527,18 @@ describe("search-only listing", () => {
       },
     });
 
-    it("lists each learned tool as its own tool, named with its purpose in the instructions", () => {
+    it("lists each learned tool as its own tool, named with its signature and purpose in the instructions", () => {
       const client = createSurfaceClient({});
       try {
         client.send(initialize(1));
         client.respond(initializeWithListing(1, 2));
         const instructions = instructionsOf(client.received.at(-1));
         expect(instructions).toBe(directListingGatewayInstructions(listing));
-        expect(instructions).toContain("- build_site: Builds the site. Replaces 3 recorded steps.");
-        expect(instructions).toContain("- run_tests: Runs the unit tests.");
-        // The purpose line only: tools/list already carries the inputs in each schema.
-        expect(instructions).not.toContain("Inputs: mode");
+        // What to pass each tool is in its line, so the agent calls it without reading its docs.
+        expect(instructions).toContain(
+          "- build_site({mode?: string}): Builds the site. Replaces 3 recorded steps.",
+        );
+        expect(instructions).toContain("- run_tests({}): Runs the unit tests.");
         expect(instructions).not.toContain("search_tools(query=");
 
         expect(listWithLearned(client, 2, 2)).toEqual([

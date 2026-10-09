@@ -194,15 +194,18 @@ export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
 
 /**
  * The most learned tools a caller's catalog may have and still be listed directly to a
- * search-listing client: each as a tool of its own, named with its one-line purpose in the
- * instructions. Ten one-line entries cost less context than the search round trip they replace,
- * and an agent that sees a tool's name at every turn calls it; above this, only search scales.
+ * search-listing client: each as a tool of its own, named with its call signature and one-line
+ * purpose in the instructions. Ten one-line entries cost less context than the search round trip
+ * they replace, and an agent that sees a tool's name at every turn calls it; above this, only
+ * search scales.
  */
 export const DIRECT_LISTING_MAX_TOOLS = 10;
 
-/** A learned tool as a direct listing names it: its name and one-line purpose. */
+/** A learned tool as a direct listing names it: its name, call signature and one-line purpose. */
 export interface ListedLearnedTool {
   name: string;
+  /** The arguments to call it with: `{}` without inputs, else `{name: type, optional?: type}`. */
+  signature?: string;
   description?: string;
 }
 
@@ -222,11 +225,15 @@ function learnedToolsMeta(tools: readonly CatalogNoticeTool[] | undefined) {
   const commands = summarizeLearnedCommands(learned.map((tool) => tool.localCommands ?? []));
   const listing: ListedLearnedTool[] | undefined =
     learned.length > 0 && learned.length <= DIRECT_LISTING_MAX_TOOLS
-      ? learned.map((tool) =>
-          tool.description === undefined
+      ? learned.map((tool): ListedLearnedTool => {
+          if (tool.listing !== undefined) {
+            const { purpose, signature } = tool.listing;
+            return { name: tool.name, signature, description: purpose };
+          }
+          return tool.description === undefined
             ? { name: tool.name }
-            : { name: tool.name, description: tool.description },
-        )
+            : { name: tool.name, description: tool.description };
+        })
       : undefined;
   return {
     _meta: {
@@ -246,7 +253,7 @@ const GATEWAY_USE_RULES =
   "Use a tool only for exactly the user's task, honoring their tool choices; check its errors and effects, and never enable, pin, disable or roll back tools.";
 
 /**
- * How learned tools are used. Their listing names each one's purpose and inputs only. With the
+ * How learned tools are used. Their listing names each one's inputs and purpose only. With the
  * discovery route after it, this first line stays within the 250 characters Codex keeps of a
  * deferred tool source's summary.
  */
@@ -304,26 +311,23 @@ export function learnedToolCountSentence(
 /** The longest purpose a direct listing's instructions give one tool. */
 const DIRECT_LISTING_PURPOSE_CHARS = 140;
 
-/** A listed purpose cut to its first sentence, without the input names tools/list adds after it. */
-function listingPurpose(description: string | undefined): string {
-  const line = (description ?? "").trim().split("\n")[0]?.trim() ?? "";
-  const purpose = line.replace(/\s+Inputs: .*$/u, "").trim();
-  return purpose.length > DIRECT_LISTING_PURPOSE_CHARS
-    ? `${purpose.slice(0, DIRECT_LISTING_PURPOSE_CHARS - 1).trimEnd()}…`
-    : purpose;
-}
-
 /**
  * Initialization instructions for a search-listing connection whose catalog is small enough to
- * list directly (see {@link DIRECT_LISTING_MAX_TOOLS}): each learned tool by name and one-line
- * purpose. The same tools are listed as MCP tools of their own, so the agent calls one by name.
+ * list directly (see {@link DIRECT_LISTING_MAX_TOOLS}): each learned tool by name, call signature
+ * and one-line purpose. The same tools are listed as MCP tools of their own, so the agent calls one
+ * by name with the arguments its signature shows, without a documentation read first.
  */
 export function directListingGatewayInstructions(tools: readonly ListedLearnedTool[]): string {
   const lines = tools.map((tool) => {
-    const purpose = listingPurpose(tool.description);
-    return purpose === "" ? `- ${tool.name}` : `- ${tool.name}: ${purpose}`;
+    const line = (tool.description ?? "").trim().split("\n")[0]?.trim() ?? "";
+    const purpose =
+      line.length > DIRECT_LISTING_PURPOSE_CHARS
+        ? `${line.slice(0, DIRECT_LISTING_PURPOSE_CHARS - 1).trimEnd()}…`
+        : line;
+    const call = tool.signature === undefined ? tool.name : `${tool.name}(${tool.signature})`;
+    return purpose === "" ? `- ${call}` : `- ${call}: ${purpose}`;
   });
-  return `Resin has ${tools.length} learned tool${tools.length === 1 ? "" : "s"} for this workspace, each listed as a tool of its own; call one directly when it is your next step (omitted inputs reuse recorded values):\n${lines.join("\n")}\n${GATEWAY_USE_RULES}`;
+  return `Resin has ${tools.length} learned tool${tools.length === 1 ? "" : "s"} for this workspace, each listed as a tool of its own; call one directly when it is your next step with the arguments shown, without reading its docs first (omitted \`?\` inputs reuse recorded values):\n${lines.join("\n")}\n${GATEWAY_USE_RULES}`;
 }
 
 /**

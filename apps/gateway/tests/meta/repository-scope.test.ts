@@ -373,15 +373,15 @@ describe("ranking by recorded work", () => {
     expect(first?.name).toBe("deploy_quick");
   });
 
-  it("puts the hint in the listed purpose, before the inputs", async () => {
+  it("puts the hint in the listed purpose", async () => {
     const registry = await registryWith(twins, profiles);
     const tools = await createRegistryGatewayRouter(registry).listCatalogNoticeTools(
       callerIn("/repos/alpha"),
     );
-    expect(tools.find((tool) => tool.name === "deploy_full")?.description).toBe(
+    expect(tools.find((tool) => tool.name === "deploy_full")?.listing?.purpose).toBe(
       "Deploys the application to staging. Replaces 6 recorded steps.",
     );
-    expect(tools.find((tool) => tool.name === "deploy_quick")?.description).toBe(
+    expect(tools.find((tool) => tool.name === "deploy_quick")?.listing?.purpose).toBe(
       "Deploys the application to staging.",
     );
   });
@@ -529,7 +529,7 @@ describe("a learned tool measured to cost more than doing the job directly", () 
     expect(meta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
     expect(meta[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual(["rojo"]);
     expect(meta[RESIN_LEARNED_TOOL_LISTING_META]).toEqual([
-      { name: "deploy_place", description: expect.any(String) },
+      { name: "deploy_place", signature: expect.any(String), description: expect.any(String) },
     ]);
     expect(await gateway.listLearnedTools(caller)).toEqual([
       { name: "deploy_place", description: expect.any(String) },
