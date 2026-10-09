@@ -112,6 +112,13 @@ The Local MCP Gateway is the single point of contact for all AI coding harnesses
 - Maintains in-memory routing tables for instant, sub-100ms canaries and rollbacks.
 - Adds less than 2ms ($p50$) routing latency overhead ([ADR 0009](../adr/0009-nfr-and-performance-targets.md)).
 
+**Release switching for stdio sessions.** A harness starts `<RESIN_HOME>/bin/resin mcp` once per session. In the installed layout that process is the MCP supervisor (`@resin/gateway/mcp-supervisor`): it keeps the harness's stdio and runs the active release's gateway as a child, forwarding newline-delimited JSON-RPC both ways. When the active-release pointer moves, it starts the new release's gateway, replays the session's `initialize` request (not answered to the client) and `notifications/initialized`, routes new requests to it, lets the old gateway answer what it accepted (by request id) and then stops it, and sends `notifications/tools/list_changed`. Requests the client is still owed when a gateway stops are answered with a JSON-RPC error; a new gateway that fails to start is discarded and the old one kept. The supervisor loads only node builtins, because it outlives the release it was loaded from, and its contract with later releases is versioned and only ever extended:
+- *Pointer, format 1*: `<RESIN_HOME>/current` links to `versions/v<version>`, else `current-version` holds the version (both written by activation).
+- *Child launch, protocol 1*: `<node> <RESIN_HOME>/versions/v<version>/bin/resin mcp <harness args>` in the harness's working directory and environment plus `RESIN_MCP_SUPERVISOR=1`; the child speaks MCP on its stdio and exits when stdin closes. Every later release must keep honouring protocol 1.
+- *Registration, schema 1*: `<RESIN_HOME>/run/mcp-supervisors/<pid>.json` lists the supervisor's gateway PIDs, so `resin status` does not ask for a restart of sessions that switch by themselves.
+
+Sessions started by a release without the supervisor, or with `RESIN_MCP_HOTSWAP=0`, run the gateway in process and keep their release until the harness restarts them.
+
 ### 2. Observer & Sanitizer (`@resin/observer`)
 The Observer passively monitors tool executions, transcript interactions, and performance metrics:
 - Records raw execution traces into local SQLite ([ADR 0005](../adr/0005-privacy-data-boundaries.md)). Raw session transcripts remain strictly local.
