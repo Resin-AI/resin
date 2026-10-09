@@ -177,6 +177,34 @@ export function workflowLocationAvailability(
 }
 
 /**
+ * The repository a legacy plan (no located step) works in, read from the directories its steps
+ * pin: an absolute leading `cd`, or a recorded absolute working-directory argument (literal or
+ * a private value `resolvePrivate` resolves here). Defined only when the plan pins at least one
+ * directory and every pinned directory exists and lies in a checkout of one same repository;
+ * undefined for a plan that pins none (repo-agnostic), has a located step, or whose directories
+ * are missing, outside git or in different repositories (left to
+ * {@link workflowLocationAvailability}). Discovery offers such a plan only in that repository.
+ */
+export function workflowPinnedRepository(
+  plan: Pick<RecordedWorkflow, "steps">,
+  options: WorkflowLocationAvailabilityOptions = {},
+): string | undefined {
+  if (plan.steps.some((step) => step.location !== undefined)) return undefined;
+  const identify = options.identify ?? repositoryIdentity;
+  const homeDir = options.homeDir ?? os.homedir();
+  let repository: string | undefined;
+  for (const step of plan.steps) {
+    for (const directory of pinnedDirectories(step, options, homeDir)) {
+      if (!isDirectory(directory)) return undefined;
+      const id = identify(directory)?.id;
+      if (id === undefined || (repository !== undefined && id !== repository)) return undefined;
+      repository = id;
+    }
+  }
+  return repository;
+}
+
+/**
  * The call a located step makes in `directory`: every recorded working-directory argument names
  * `directory`, and with `leadingCd` the program loses the `cd` it began with. The returned step is
  * a copy when its recorded program source changed; the plan itself is never modified.

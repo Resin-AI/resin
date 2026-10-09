@@ -14,6 +14,11 @@ export interface ToolProfile {
   steps?: number;
   /** Repository ids the plan's repository-located steps run in. */
   locatedRepositories?: readonly string[];
+  /**
+   * The repository a legacy plan (no located step) works in, when every directory it pins lies in
+   * a checkout of that one repository (see `workflowPinnedRepository`).
+   */
+  pinnedRepository?: string;
   /** Why the tool cannot run for this caller (a recorded directory that is gone, say). */
   unavailableReason?: string;
 }
