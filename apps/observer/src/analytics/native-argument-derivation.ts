@@ -1130,8 +1130,9 @@ type PrintedKind = "number" | "minted" | "word";
  * (`0059_accounts_contact_email: NOT backward compatible`), by its position at a line start
  * (`\n  fastgraph`), or on the line a marker word on a line above names (`warnings`, one line
  * above `checkout  38 …`). A word is read only by its position or a marker. These texts hold no
- * digit: a count, version or date printed around a value changes with it. A minted identifier
- * finally falls back to the first run after its line start.
+ * digit: a count, version or date printed around a value changes with it. A minted identifier no
+ * locator singles out stays an input: reading the first of several rows that start the same way
+ * would guess, and another run's output can put a different line first.
  */
 function locatePrinted(
   output: string,
@@ -1169,20 +1170,16 @@ function locatePrinted(
     ...positional.filter((before) => !/\d/.test(before)).map((before) => ({ before, after: "" })),
   ];
   for (const only of places) if (reads({ only, charset })) return { only, charset };
-  const marked = markedLocator(output, position, value, charset);
-  if (marked !== undefined) return marked;
-  if (kind === "minted") {
-    for (const before of positional) if (reads({ before, charset })) return { before, charset };
-  }
-  return undefined;
+  return markedLocator(output, position, value, charset);
 }
 
 /**
- * A locator reading the value at `position` as the only whole run on its line, that line named as
- * the first row under a header: the nearest non-blank line above it, opening its block (the output
- * or a blank line comes before it, so it is no earlier row), holding no digit (a header or a label,
- * not a row of measured values), and holding a marker word no other line holds. A row further down
- * is chosen by more than its place under the header, so it is not read this way.
+ * A locator reading the value at `position` as the only whole run on its line, or the run its
+ * line starts with, that line named as the first row under a header: the nearest non-blank line
+ * above it, opening its block (the output or a blank line comes before it, so it is no earlier
+ * row), holding no digit (a header or a label, not a row of measured values), and holding a
+ * marker word no other line holds. A row further down is chosen by more than its place under the
+ * header, so it is not read this way.
  */
 function markedLocator(
   output: string,
@@ -1204,13 +1201,18 @@ function markedLocator(
   const markerText = lines[markerLine];
   if (markerText === undefined || !markerText.trim() || /\d/.test(markerText)) return undefined;
   if (markerLine > 0 && lines[markerLine - 1]!.trim()) return undefined;
-  const befores = beforeTexts(lines[valueLine]!, position - lineStart).filter(
+  const valueText = lines[valueLine]!;
+  const indent = valueText.slice(0, position - lineStart);
+  const befores = beforeTexts(valueText, position - lineStart).filter(
     (before) => !/\d/.test(before),
   );
+  // A value starting its row (`CHK-PAY-504     29  2026-09-02T07:28:32Z …`) is read from the line
+  // start when other runs share its line.
+  const lineStartBefores = indent.trim() === "" ? [`\n${indent}`] : [];
   // A marker another line also holds reads several lines, so the locator check refuses it.
   for (const marker of new Set(markerText.match(MARKER_WORD) ?? [])) {
     if (marker === value) continue;
-    for (const before of new Set(["", ...befores])) {
+    for (const before of new Set(["", ...lineStartBefores, ...befores])) {
       const locator = { only: { before, after: "", line: { marker, offset } }, charset };
       if (extractPrintedValue(output, locator) === value) return locator;
     }

@@ -36,6 +36,21 @@ describe("extractPrintedValue", () => {
     expect(extractPrintedValue("!!!", { before: "", charset: ["digit"] })).toBe(undefined);
   });
 
+  it("reads no value where the text continues the run past its charset", () => {
+    // `pdf` in `pdf2text`, `CHK-PAY-504` in `CHK-PAY-504_RETRY`: values the charset cannot hold.
+    expect(extractPrintedValue("pkg pdf2text\n", { before: "pkg ", charset: ["lower"] })).toBe(
+      undefined,
+    );
+    const codes = { before: "\n", charset: ["upper", "digit", "-"] };
+    expect(extractPrintedValue("title\nCHK-PAY-504_RETRY 22\n", codes)).toBe(undefined);
+    // A header starting with a capital is cut too, so the read stops rather than read `C`.
+    expect(extractPrintedValue("title\nCode  count\nCHK-PAY-504  22\n", codes)).toBe(undefined);
+    // A label's `:` before a space ends a value; a dashed rule is no value and is passed over.
+    expect(extractPrintedValue("title\nCHK-PAY-504: 22\n", codes)).toBe("CHK-PAY-504");
+    expect(extractPrintedValue("title\n-----\nCHK-PAY-504\n", codes)).toBe("CHK-PAY-504");
+    expect(extractPrintedValue("v1.2.3", { before: "", charset: ["digit", "."] })).toBe(undefined);
+  });
+
   it("parses only well-shaped locators", () => {
     expect(parseExtractLocator('{"before":"a ","charset":["lower","-"]}')).toEqual({
       before: "a ",
@@ -86,6 +101,49 @@ describe("exactly-one locators", () => {
     expect(searchPrintedValue("service  errors  warnings", locator)).toEqual({ found: "none" });
   });
 
+  it("reads a marked row from its line start, where other runs share the line", () => {
+    const locator = {
+      only: { before: "\n", after: "", line: { marker: "count", offset: 1 } },
+      charset: ["upper", "digit", "-"],
+    };
+    const table = (rows: string) =>
+      `Errors for service checkout\n\ncode     count  first\n${rows}\nRunbook: explain --code <code>\n`;
+    expect(extractPrintedValue(table("CHK-PAY-504   29  2026-09-02T07:28:32Z"), locator)).toBe(
+      "CHK-PAY-504",
+    );
+    // Without the line-start anchor the count beside the code is a second run.
+    const anywhere = { ...locator, only: { ...locator.only, before: "" } };
+    expect(searchPrintedValue(table("CHK-PAY-504   29"), anywhere)).toEqual({ found: "several" });
+    expect(searchPrintedValue(table(""), locator)).toEqual({ found: "none" });
+    expect(searchPrintedValue(table("-----------   --"), locator)).toEqual({ found: "none" });
+  });
+
+  it("reads no value from a cut run, and counts one beside a whole run as ambiguous", () => {
+    const flagged = { only: { before: "", after: ": NOT" }, charset: ["lower", "digit", "_"] };
+    const check = (rows: string[]) =>
+      `FAIL migration-compat\n${rows.map((r) => `  ${r}\n`).join("")}`;
+    // `contact_email` is the tail of `0061_accounts-contact_email`, not a value of its own.
+    expect(searchPrintedValue(check(["0061_accounts-contact_email: NOT"]), flagged)).toEqual({
+      found: "none",
+    });
+    expect(
+      searchPrintedValue(
+        check(["0059_accounts: NOT", "0061_accounts-contact_email: NOT"]),
+        flagged,
+      ),
+    ).toEqual({ found: "several" });
+    const rows = {
+      only: { before: "", after: "", line: { marker: "warnings", offset: 1 } },
+      charset: ["lower", "-", "_"],
+    };
+    const summary = (row: string) => `service  errors  warnings\n${row}\n`;
+    expect(searchPrintedValue(summary("search-v2     47    5"), rows)).toEqual({ found: "none" });
+    expect(searchPrintedValue(summary("lodash.merge  47    5"), rows)).toEqual({
+      found: "several",
+    });
+    expect(searchPrintedValue(summary("--------------------"), rows)).toEqual({ found: "none" });
+  });
+
   it("parses only well-shaped exactly-one locators", () => {
     const parse = (value: unknown) => parseExtractLocator(JSON.stringify(value));
     const only = { before: "", after: ": NOT", line: { marker: "warnings", offset: 1 } };
@@ -97,6 +155,13 @@ describe("exactly-one locators", () => {
     expect(at({ marker: "w4", offset: 1 })).toBe(undefined);
     expect(at({ marker: "warnings", offset: 0 })).toBe(undefined);
     expect(parse({ only: { ...only, before: "a\nb" }, charset: ["lower"] })).toBe(undefined);
+    // On a line, a leading line break stands for the line start; any other break is refused.
+    expect(parse({ only: { ...only, before: "\n  " }, charset: ["lower"] })).toEqual({
+      only: { ...only, before: "\n  " },
+      charset: ["lower"],
+    });
+    expect(parse({ only: { ...only, before: "\n\n" }, charset: ["lower"] })).toBe(undefined);
+    expect(parse({ only: { ...only, after: "\n" }, charset: ["lower"] })).toBe(undefined);
   });
 });
 

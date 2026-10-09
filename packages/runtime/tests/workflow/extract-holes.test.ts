@@ -131,6 +131,24 @@ describe("extract holes", () => {
     expect((await run(plan, twoHeaders, firstRow)).execution.status).toBe("failed");
   });
 
+  it("reads a row's leading value from its line start, and never runs on a cut or rule run", async () => {
+    const plan = applyConfirmedWorkflowBinding(recorded(), candidate)!;
+    const leading = JSON.stringify({
+      only: { before: "\n", after: "", line: { marker: "count", offset: 1 } },
+      charset: ["lower", "digit", "-"],
+    });
+    const table = (row: string) => `code      count  first\n${row}\n`;
+    const read = await run(plan, table("dep-2a   29  2026-09-02"), leading);
+    expect(read.execution.status).toBe("completed");
+    expect(read.received[1]).toBe("./deployctl wait dep-2a");
+    // `dep-2a_retry` continues past the charset; a dashed rule holds no value.
+    for (const row of ["dep-2a_retry   29", "-----------   --"]) {
+      const { execution, received } = await run(plan, table(row), leading);
+      expect(execution.status).toBe("failed");
+      expect(received).toHaveLength(1);
+    }
+  });
+
   it("feeds a printed value into the value part of an inline option, keeping its name", async () => {
     const base = recorded();
     const command = "./deployctl wait --id=dep-9e983a";
