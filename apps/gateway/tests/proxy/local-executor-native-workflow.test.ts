@@ -465,6 +465,100 @@ describe("recorded workflows of ordinary calls", () => {
     expect(JSON.stringify(steps)).not.toMatch(/canary/u);
   });
 
+  it("labels every step a plan runs, MCP calls included, without a recorded argument", async () => {
+    // Shaped like lint_lua_source_2: a lint command, then a Studio playtest running recorded code.
+    const privateValues = new InMemoryPrivateValueStore();
+    const context = resolveWorkspaceContext({ cwd: workspaceDir });
+    privateValues.set("private:code", 'print("canaryservercode")', {
+      workspaceId: context.workspaceId,
+    });
+    const step = (id: string, callable: Record<string, unknown>, args: unknown[]) => ({
+      id,
+      callId: `call_${id}`,
+      callable,
+      arguments: args,
+      dependsOn: [],
+      failurePolicy: { onError: "abort" as const, policy: "default" as const },
+      observed: { outcome: "succeeded" as const },
+    });
+    const studio = (id: string, name: string, args: unknown[]) =>
+      step(id, { runtime: RESIN_TOOL_PROTOCOL_RUNTIME, name, connection: "robloxstudio" }, args);
+    const installed = await installPlan(
+      {
+        id: "tool_lint_then_playtest",
+        name: "lint_lua_source_2",
+        version: "1.0.0",
+        description: "Runs stylua and selene.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        runtime: {
+          runtime: "recorded-workflow",
+          memoryLimitMb: 64,
+          timeoutMs: 10_000,
+          cpuLimitPercent: 100,
+          maxOutputSizeBytes: 65_536,
+        },
+        capabilities: { command: { allowShellExecution: true } },
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "lint_lua_source_2",
+        inputs: [],
+        privateReferences: ["private:code"],
+        steps: [
+          step(
+            "step0",
+            {
+              runtime: RESIN_PROCESS_RUNTIME,
+              name: "bash",
+              program: { kind: "shell", source: "", argument: "command" },
+            },
+            [
+              {
+                name: "command",
+                source: {
+                  kind: "template",
+                  template: { type: "literal", value: "stylua src && selene src | tail -3" },
+                },
+              },
+            ],
+          ),
+          studio("step1", "solo_playtest", [
+            { name: "action", source: { kind: "literal", value: "start" } },
+          ]),
+          studio("step2", "eval_server_runtime", [
+            {
+              name: "code",
+              source: {
+                kind: "template",
+                template: { type: "private", reference: "private:code" },
+              },
+            },
+          ]),
+          studio("step3", "solo_playtest", [
+            { name: "action", source: { kind: "literal", value: "stop" } },
+          ]),
+        ],
+      },
+    );
+    const executor = new LocalArtifactExecutor({
+      cache,
+      workspaceRoot: workspaceDir,
+      development: true,
+      allowDevKeys: true,
+      privateValueStore: privateValues,
+    });
+
+    const profile = executor.recordedWorkflowProfile(installed.artifactDigest, context);
+    expect(profile?.runs).toEqual([
+      "stylua",
+      "selene",
+      "robloxstudio.solo_playtest",
+      "robloxstudio.eval_server_runtime",
+      "robloxstudio.solo_playtest",
+    ]);
+    expect(JSON.stringify(profile)).not.toMatch(/canary|start|stop|tail/u);
+  });
+
   it("describes a harness tool step by its tool and the arguments a caller sees", async () => {
     // A job that writes a file and then validates it: the write is the first step the tool covers,
     // so the description shows it, with `{input}` where a caller's value goes — whether the input

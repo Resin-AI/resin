@@ -22,6 +22,7 @@ import { type ListingToolDefinition, listingTextTokens, listingToolTokens } from
 import { summarizeLearnedCommands } from "./meta/learned-commands.js";
 import { RESIN_LEARNED_TOOL_META } from "./protocol/types.js";
 import type { CatalogNoticeTool } from "./router.js";
+import { withStepRuns } from "./step-runs.js";
 
 /**
  * The most a search-listing surface may cost: at most this many learned tools listed directly,
@@ -34,12 +35,17 @@ import type { CatalogNoticeTool } from "./router.js";
  */
 export const LISTING_CAP = { maxTools: 8, maxTokens: 1_500 } as const;
 
-/** A learned tool as a direct listing names it: its name, call signature and one-line purpose. */
+/**
+ * A learned tool as a direct listing names it: its name, call signature, one-line purpose and what
+ * each recorded step runs (see `ToolProfile.runs`).
+ */
 export interface ListedLearnedTool {
   name: string;
   /** The arguments to call it with: `{}` without inputs, else `{name: type, optional?: type}`. */
   signature?: string;
   description?: string;
+  /** Step labels; its instruction line adds `Runs: …` when the purpose leaves one unnamed. */
+  runs?: string[];
 }
 
 /** A workspace's learned tools as the gateway reports them to a search-listing connection. */
@@ -147,10 +153,12 @@ export function searchListingInstructions(learned: LearnedToolListing | undefine
   if (learned.listing.length > 0) {
     const lines = learned.listing.map((tool) => {
       const line = (tool.description ?? "").trim().split("\n")[0]?.trim() ?? "";
-      const purpose =
+      const cut =
         line.length > DIRECT_LISTING_PURPOSE_CHARS
           ? `${line.slice(0, DIRECT_LISTING_PURPOSE_CHARS - 1).trimEnd()}…`
           : line;
+      // Cut first, so a step the cut drops from the purpose is still named.
+      const purpose = withStepRuns(cut, tool.runs);
       const call = tool.signature === undefined ? tool.name : `${tool.name}(${tool.signature})`;
       return purpose === "" ? `- ${call}` : `- ${call}: ${purpose}`;
     });
@@ -228,8 +236,13 @@ function listingOrder(a: CatalogNoticeTool, b: CatalogNoticeTool): number {
 
 function listedLearnedTool(tool: CatalogNoticeTool): ListedLearnedTool {
   if (tool.listing !== undefined) {
-    const { purpose, signature } = tool.listing;
-    return { name: tool.name, signature, description: purpose };
+    const { purpose, signature, runs } = tool.listing;
+    return {
+      name: tool.name,
+      signature,
+      description: purpose,
+      ...(runs === undefined ? {} : { runs: [...runs] }),
+    };
   }
   return tool.description === undefined
     ? { name: tool.name }

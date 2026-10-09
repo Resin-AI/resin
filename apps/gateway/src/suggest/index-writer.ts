@@ -37,6 +37,7 @@ export function suggestToolsFromCatalog(tools: readonly CatalogNoticeTool[]): Su
     const commands = tool.localCommands ?? [];
     const required = new Set(tool.inputSchema.required ?? []);
     const purpose = oneLinePurpose(tool.listing?.purpose);
+    const runs = tool.listing?.runs;
     result.push({
       name: tool.name,
       commands: [...commands],
@@ -54,6 +55,7 @@ export function suggestToolsFromCatalog(tools: readonly CatalogNoticeTool[]): Su
               ...(step.writes === true ? { writes: true as const } : {}),
             })),
           }),
+      ...(runs === undefined || runs.length === 0 ? {} : { runs: [...runs] }),
     });
   }
   return result.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

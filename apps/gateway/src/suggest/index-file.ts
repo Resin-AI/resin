@@ -41,6 +41,11 @@ export interface SuggestTool {
   readonly purpose?: string;
   /** What each recorded step runs, when this machine knows its plan. */
   readonly steps?: readonly SuggestStep[];
+  /**
+   * What each recorded step runs, in plan order (see `ToolProfile.runs`): a suggestion naming the
+   * tool adds `Runs: …` when its text leaves one unnamed.
+   */
+  readonly runs?: readonly string[];
 }
 
 /** Longest purpose kept in the index. */
@@ -148,6 +153,12 @@ function parseTool(value: unknown): SuggestTool | undefined {
   const purpose = "purpose" in value && typeof value.purpose === "string" ? value.purpose : "";
   const shownPurpose = oneLinePurpose(purpose);
   const steps = "steps" in value && Array.isArray(value.steps) ? value.steps : undefined;
+  const runs =
+    "runs" in value && Array.isArray(value.runs)
+      ? value.runs
+          .slice(0, MAX_STEPS)
+          .filter((label): label is string => typeof label === "string" && label.length > 0)
+      : [];
   const parsedSteps = steps?.slice(0, MAX_STEPS).flatMap((step) => {
     const parsed = parseStep(step);
     return parsed === undefined ? [] : [parsed];
@@ -158,6 +169,7 @@ function parseTool(value: unknown): SuggestTool | undefined {
     inputs: parsedInputs,
     ...(shownPurpose === undefined ? {} : { purpose: shownPurpose }),
     ...(parsedSteps === undefined ? {} : { steps: parsedSteps }),
+    ...(runs.length === 0 ? {} : { runs }),
   };
 }
 

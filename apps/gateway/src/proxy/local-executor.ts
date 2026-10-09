@@ -49,6 +49,7 @@ import {
   RESIN_HARNESS_TOOL_RUNTIME,
   RESIN_PROCESS_RUNTIME,
   RESIN_PROGRAM_RUNTIME,
+  RESIN_TOOL_PROTOCOL_RUNTIME,
   type RecordedStepOutcome,
   type RecordedWorkflowExecution,
   type RuntimeAdapter,
@@ -79,7 +80,7 @@ import {
 import { failedToolResult } from "../meta/invocation-failure.js";
 import { missingInputsResult, missingRequiredInputs } from "../meta/missing-inputs.js";
 import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-values.js";
-import { type ToolProfile, recordedWorkStepCount } from "../meta/tool-profile.js";
+import { DIRECTORY_CHANGE, type ToolProfile, recordedWorkStepCount } from "../meta/tool-profile.js";
 import {
   type CallToolResult,
   type JsonRpcParams,
@@ -138,6 +139,8 @@ interface RecordedWorkflowSummary {
   defaults: ReadonlyMap<string, string>;
   /** What each recorded step runs (see `SuggestStep`), in plan order. */
   steps: SuggestStep[];
+  /** Each recorded step's label (see `ToolProfile.runs`), in plan order. */
+  runs: string[];
 }
 
 /** Where one private value sits in a recorded text resolved on this machine. */
@@ -937,6 +940,7 @@ export class LocalArtifactExecutor {
         : undefined;
     return {
       steps: recordedWorkStepCount(plan),
+      runs: this.recordedWorkflowSummary(artifactDigest, context)?.runs ?? [],
       locatedRepositories,
       ...(pinnedRepository === undefined ? {} : { pinnedRepository }),
       ...(availability === undefined || availability.available
@@ -1376,14 +1380,22 @@ export class LocalArtifactExecutor {
     const dated = new Map<string, string>();
     const commands: string[] = [];
     const stepInfo: SuggestStep[] = [];
+    const runs: string[] = [];
     for (const [index, step] of plan.steps.entries()) {
       // Per-step detail for command suggestions, read like `commands` (projected text only).
       const stepCommands: string[] = [];
       let writes = false;
       const stepProgram = step.callable.program;
+      // The step's label for `ToolProfile.runs`: names only, never a recorded argument.
+      let label: string | undefined;
       if (step.origin === "derivation") {
         // Model-written code computing values; it runs in the sandbox and writes nothing.
       } else if (stepProgram === undefined) {
+        label =
+          step.callable.runtime === RESIN_TOOL_PROTOCOL_RUNTIME &&
+          step.callable.connection !== undefined
+            ? `${step.callable.connection}.${step.callable.name}`
+            : step.callable.name;
         writes = !READ_ONLY_HARNESS_TOOLS.has(step.callable.name.toLowerCase());
       } else if (stepProgram.kind === "shell") {
         const stepSource = step.arguments.find(
@@ -1396,10 +1408,14 @@ export class LocalArtifactExecutor {
         } else {
           writes = true;
         }
+        // A program naming no command Resin can read is still a step: it runs as `shell`.
+        if (stepCommands.length === 0 && !DIRECTORY_CHANGE.test(projected ?? "")) label = "shell";
       } else {
         // A patch edits a file; a script in another language is opaque.
         writes = true;
+        label = stepProgram.kind;
       }
+      runs.push(...stepCommands, ...(label === undefined ? [] : [label]));
       stepInfo.push({
         commands: stepCommands,
         ...(step.optional === undefined ? {} : { optional: step.optional.input }),
@@ -1583,6 +1599,7 @@ export class LocalArtifactExecutor {
         defaults,
         privateValues: scrubValues,
         steps: stepInfo,
+        runs,
       };
     }
     // An input bound in several places is dated if any of its recorded values is.
@@ -1609,6 +1626,7 @@ export class LocalArtifactExecutor {
       defaults,
       privateValues: scrubValues,
       steps: stepInfo,
+      runs,
     };
     this.recordedWorkflowSummaries.set(key, summary);
     return summary;

@@ -75,6 +75,7 @@ import {
 } from "./registry/index.js";
 import { isAutomaticallyRecommended, recommendedOpportunities } from "./registry/recommendation.js";
 import type { CatalogEntry, RegistryTool } from "./registry/types.js";
+import { withStepRuns } from "./step-runs.js";
 import type { SuggestStep } from "./suggest/index-file.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
 
@@ -239,10 +240,15 @@ interface SignatureInput {
   optional: boolean;
 }
 
-/** A listed learned tool's purpose and its call signature (`{}` with no inputs). */
+/**
+ * A listed learned tool's purpose, its call signature (`{}` with no inputs) and what each recorded
+ * step runs (see `ToolProfile.runs`), from which every surface showing the purpose adds a
+ * `Runs: …` clause when the purpose leaves a step unnamed (see `withStepRuns`).
+ */
 export interface ListedCall {
   purpose: string;
   signature: string;
+  runs?: readonly string[];
 }
 
 function schemaType(property: unknown): string {
@@ -465,22 +471,28 @@ export class RegistryGatewayRouter implements GatewayRouter {
       if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
         return { description: catalog, inputSchema: schema };
       }
-      const steps = this.registry.learnedToolProfile(tool, context)?.steps;
+      const profile = this.registry.learnedToolProfile(tool, context);
+      const steps = profile?.steps;
       const avoidableRequests = recommendedOpportunities(tool)?.avoidableRequests;
       const served = this.registry.learnedToolInputSchema(tool, context, schema);
       const scrub = (text: string) => this.registry.scrubLearnedToolText(tool, context, text);
       const purpose = scrub(listedPurpose(catalog, replacesStepsHint(steps)));
+      const runs = profile?.runs?.map(scrub);
       const localCommands = this.registry.learnedToolCommands(tool, context);
       const localSteps = this.registry.learnedToolSteps(tool, context);
       return {
-        description: scrub(listedDescription(served, purpose)),
+        description: scrub(listedDescription(served, withStepRuns(purpose, runs))),
         inputSchema: listedInputSchema(served),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
         ...(localCommands.length === 0
           ? {}
           : { localCommands, ...(localSteps === undefined ? {} : { localSteps }) }),
         ...(isAutomaticallyRecommended(tool) ? {} : { recommended: false as const }),
-        listing: { purpose, signature: scrub(listedSignature(served)) },
+        listing: {
+          purpose,
+          signature: scrub(listedSignature(served)),
+          ...(runs === undefined || runs.length === 0 ? {} : { runs }),
+        },
         toolId: tool.toolId,
         ...(isToolScopedHere(this.registry, tool, context) ? { scopedHere: true as const } : {}),
         ...(tool.isPinned === true ? { pinned: true as const } : {}),

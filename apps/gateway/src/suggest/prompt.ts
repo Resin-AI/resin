@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { withStepRuns } from "../step-runs.js";
 import {
   type CommandSuggestPathOptions,
   type SuggestTool,
@@ -159,7 +160,8 @@ export function renderPromptBlock(
   const shown: string[] = [];
   let length = header.length;
   for (const [index, tool] of tools.slice(0, MAX_PROMPT_TOOLS).entries()) {
-    const purpose = shortPurpose(tool.purpose);
+    // Cut first, so a step the cut drops from the purpose is still named.
+    const purpose = withStepRuns(shortPurpose(tool.purpose), tool.runs);
     const line = `- ${callExample(tool)}${purpose.length === 0 ? "" : ` — ${purpose}`}`;
     const left = tools.length - index - 1;
     // Room for this line and, if anything is left after it, the "+N more" note.

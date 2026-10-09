@@ -5,6 +5,7 @@ import { isAutomaticallyRecommended } from "../registry/recommendation.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
+import { withStepRuns } from "../step-runs.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { isToolOfferedHere } from "./repository-scope.js";
 import { multiStepBonus, replacesStepsHint } from "./tool-profile.js";
@@ -170,13 +171,18 @@ function joinDescription({ catalog, local }: ToolDescriptionParts): string {
   return local ? (catalog ? `${catalog}\n\n${local}` : local) : catalog;
 }
 
-/** The description an agent sees: the catalog's, followed by any local detail. */
+/**
+ * The description an agent sees: the catalog's, with a `Runs: …` clause when it leaves one of
+ * `runs` (see `ToolProfile.runs`) unnamed, followed by any local detail.
+ */
 export function describeToolLocally(
   tool: Pick<RegistryTool, "artifactDigest" | "description" | "manifest">,
   context: WorkspaceContext,
   describer?: LocalToolDescriber,
+  runs?: readonly string[],
 ): string {
-  return joinDescription(toolDescriptionParts(tool, context, describer));
+  const parts = toolDescriptionParts(tool, context, describer);
+  return joinDescription({ ...parts, catalog: withStepRuns(parts.catalog, runs) });
 }
 
 /**
@@ -837,6 +843,8 @@ interface SearchCandidate {
   /** The commands a learned tool's recorded programs run; tools running the same set share an item. */
   commands: string[];
   steps: number | undefined;
+  /** What each recorded step runs (see `ToolProfile.runs`), for the `Runs: …` clause. */
+  runs: readonly string[] | undefined;
   /** False when measurements showed the tool costing more than doing the job directly. */
   recommended: boolean;
 }
@@ -968,6 +976,7 @@ export function createSearchToolsHandler(
         }
       }
 
+      const profile = tool.isSystem ? undefined : registry.learnedToolProfile(tool, context);
       filtered.push({
         tool,
         name: tool.exposedName || tool.name,
@@ -976,7 +985,8 @@ export function createSearchToolsHandler(
         tags,
         description: toolDescriptionParts(tool, context, describer),
         commands: tool.isSystem ? [] : registry.learnedToolCommands(tool, context),
-        steps: tool.isSystem ? undefined : registry.learnedToolProfile(tool, context)?.steps,
+        steps: profile?.steps,
+        runs: profile?.runs,
         recommended: isAutomaticallyRecommended(tool),
       });
     }
@@ -1046,10 +1056,13 @@ export function createSearchToolsHandler(
     const total = groups.length;
     const omissions: Omissions = { recordedValues: false, listInputs: false };
     const tools = groups.slice(offset, offset + limit).map(({ lead, similar }) => {
-      const { tool, name, isPinned, isDisabled, description, steps } = lead.candidate;
+      const { tool, name, isPinned, isDisabled, description, steps, runs } = lead.candidate;
       const status = isDisabled ? "disabled" : tool.status || "active";
       const scope = tool.scope ?? "workspace";
-      const catalog = shownCatalog(description.catalog, description.local, omissions);
+      const catalog = withStepRuns(
+        shownCatalog(description.catalog, description.local, omissions),
+        runs,
+      );
       const replaces = replacesStepsHint(steps);
       const item: SearchToolsResultItem = {
         toolId: tool.toolId,
@@ -1083,7 +1096,12 @@ export function createSearchToolsHandler(
                 return {
                   toolId: candidate.tool.toolId,
                   name: candidate.name,
-                  purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
+                  purpose: withStepRuns(
+                    purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
+                    candidate.runs?.map((label) =>
+                      registry.scrubLearnedToolText(candidate.tool, context, label),
+                    ),
+                  ),
                   ...(score === undefined ? {} : { score }),
                   ...(candidate.recommended ? {} : { recommended: false as const }),
                   inputSchema: shownInputSchema(

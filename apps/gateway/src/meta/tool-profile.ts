@@ -12,6 +12,11 @@ import type { WorkspaceContext } from "../workspace-resolver.js";
 export interface ToolProfile {
   /** Recorded steps the tool replays (see {@link recordedWorkStepCount}); unknown when absent. */
   steps?: number;
+  /**
+   * What each recorded step runs, in plan order, as `step-runs` labels: a shell step's command
+   * names, `<server>.<tool>` for an MCP call, a harness tool's name. Never a recorded argument.
+   */
+  runs?: readonly string[];
   /** Repository ids the plan's repository-located steps run in. */
   locatedRepositories?: readonly string[];
   /**
@@ -30,7 +35,7 @@ export type LocalToolProfile = (
 ) => ToolProfile | undefined;
 
 /** A step that only changes directory: setup for the next command, not work of its own. */
-const DIRECTORY_CHANGE = /^\s*(?:cd|pushd|popd)(?:\s+[^\s;&|]+)?\s*$/u;
+export const DIRECTORY_CHANGE = /^\s*(?:cd|pushd|popd)(?:\s+[^\s;&|]+)?\s*$/u;
 
 /**
  * The recorded steps a plan replays: every recorded (not derived) step, except one that only
