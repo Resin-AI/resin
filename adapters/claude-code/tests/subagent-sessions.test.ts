@@ -155,6 +155,13 @@ describe("recorded Claude Code parent and subagent transcripts", () => {
       );
     expect(usageOf(after)).toEqual(usageOf(before));
     expect(callIds(after)).toEqual(callIds(before));
+    // Claude's `usage`/`totalTokens` here describe only the child's last request (its context
+    // size), not what the child spent, so they are not reported as delegated usage either.
+    const spawnResult = after.find(
+      (event) => event.type === "tool_result" && event.toolCallId === SPAWN_CALL,
+    );
+    expect(spawnResult).toBeDefined();
+    expect(spawnResult?.metadata?.delegatedModelUsage).toBeUndefined();
   });
 
   it("links a subagent spawned by another subagent to that subagent, not the root session", async () => {

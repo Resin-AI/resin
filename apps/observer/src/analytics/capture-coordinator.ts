@@ -402,12 +402,12 @@ export class TrajectoryCaptureCoordinator {
   private toolLinkEvidenceRecorder: ToolLinkEvidenceRecorder;
   private workflowCallRecorder: WorkflowCallRecorder;
   /**
-   * Per session (least recently used first), the calls dropped as harness introspection, so their
-   * results and edits drop too, and the calls kept, so their results never fall back to text.
+   * Per session (least recently used first), distinguish excluded introspection, accounting-only
+   * discovery, and ordinary calls so results inherit the call's eligibility across batches.
    */
   private readonly harnessIntrospectionCalls = new Map<
     string,
-    { dropped: Set<string>; seen: Set<string> }
+    { dropped: Set<string>; accountingOnly: Set<string>; seen: Set<string> }
   >();
   private readonly metadataEventProjector = new MetadataEventProjector(() =>
     this.privateValueStore?.redactionKey?.(),
@@ -541,18 +541,17 @@ export class TrajectoryCaptureCoordinator {
   }
 
   /**
-   * Whether an event belongs to a program that introspects Resin or the agent harness (see
-   * `isHarnessIntrospectionProgram`). Such a call, the result answering it and anything it produced
-   * never reach a recorder, the local sink or the cloud: a tool learned from them describes the
-   * observer, not the user's work. Classification reads the local original, never a redacted view.
+   * Keep Resin discovery available to request accounting, but never to learning recorders.
+   * Genuine harness introspection remains excluded from every sink. Classification reads the
+   * local original, never a redacted view; an incoming accounting-only flag cannot bypass it.
    *
-   * A result or edit whose call this process never saw (capture resumed after a restart) cannot be
-   * paired, so it is dropped when its own text names Resin's tool namespace or harness home state.
+   * A resumed result can recover discovery eligibility from its normalized tool identity. Other
+   * unpaired results still use the existing harness-state exclusion, not guessed associations.
    */
-  private isHarnessIntrospection(event: NormalizedSessionEvent): boolean {
+  private prepareCaptureEvent(event: NormalizedSessionEvent): NormalizedSessionEvent | null {
     let calls = this.harnessIntrospectionCalls.get(event.sessionId);
     if (calls === undefined) {
-      calls = { dropped: new Set(), seen: new Set() };
+      calls = { dropped: new Set(), accountingOnly: new Set(), seen: new Set() };
       // Least recently used session state goes first, like the recorders' per-session state.
       if (this.harnessIntrospectionCalls.size >= MAX_HARNESS_INTROSPECTION_SESSIONS) {
         const oldest = this.harnessIntrospectionCalls.keys().next().value;
@@ -570,17 +569,27 @@ export class TrajectoryCaptureCoordinator {
         original.type === "tool_result" ? original.callId : original.producedByCallId,
         codex?.kind === "result" ? codex.association?.callId : undefined,
       ].filter((callId): callId is string => callId !== undefined);
-      if (callIds.some((callId) => calls.dropped.has(callId))) return true;
-      if (callIds.some((callId) => calls.seen.has(callId))) return false;
+      if (callIds.some((callId) => calls.dropped.has(callId))) return null;
+      if (callIds.some((callId) => calls.accountingOnly.has(callId))) {
+        return original.type === "tool_result" ? this.asAccountingOnly(event) : null;
+      }
+      if (callIds.some((callId) => calls.seen.has(callId))) return event;
+      if (
+        original.type === "tool_result" &&
+        original.toolName !== undefined &&
+        isResinDiscoveryToolCall(original.toolName)
+      ) {
+        return this.asAccountingOnly(event);
+      }
       const text =
         original.type === "file_edit"
           ? `${original.filePath}\n${original.patch ?? ""}`
           : typeof original.result === "string"
             ? original.result
             : JSON.stringify(original.result ?? null);
-      return referencesHarnessState(text);
+      return referencesHarnessState(text) ? null : event;
     }
-    if (original.type !== "tool_call" && original.type !== "command_exec") return false;
+    if (original.type !== "tool_call" && original.type !== "command_exec") return event;
 
     // A PowerShell or cmd program Codex recorded running on Windows is read in its own grammar; a
     // PowerShell tool whose edition is unknown is read in the wider PowerShell 7 grammar.
@@ -600,15 +609,17 @@ export class TrajectoryCaptureCoordinator {
     const language =
       typeof parameters?.language === "string" ? parameters.language.trim().toLowerCase() : "";
     const introspects =
-      (original.type === "tool_call" &&
-        isResinDiscoveryToolCall(original.toolName, original.connection)) ||
-      (command !== null
+      command !== null
         ? isHarnessIntrospectionProgram(command, commandLanguage)
         : typeof parameters?.code === "string" &&
           isHarnessIntrospectionProgram(
             parameters.code,
             language === "py" || language === "python" ? "python" : "javascript",
-          ));
+          );
+    const accountingOnly =
+      event.metadata?.resinAccountingOnly === true ||
+      (original.type === "tool_call" &&
+        isResinDiscoveryToolCall(original.toolName, original.connection));
     const codex =
       original.type === "command_exec" ? readCodexCommandMetadata(original.metadata) : undefined;
     const callIds =
@@ -617,7 +628,7 @@ export class TrajectoryCaptureCoordinator {
         : codex?.kind === "command"
           ? [codex.nativeId, ...(codex.association ? [codex.association.callId] : [])]
           : [];
-    const record = introspects ? calls.dropped : calls.seen;
+    const record = introspects ? calls.dropped : accountingOnly ? calls.accountingOnly : calls.seen;
     for (const callId of callIds) {
       record.add(callId);
       if (record.size > MAX_HARNESS_INTROSPECTION_CALLS) {
@@ -625,7 +636,13 @@ export class TrajectoryCaptureCoordinator {
         if (oldest !== undefined) record.delete(oldest);
       }
     }
-    return introspects;
+    return introspects ? null : accountingOnly ? this.asAccountingOnly(event) : event;
+  }
+
+  private asAccountingOnly(event: NormalizedSessionEvent): NormalizedSessionEvent {
+    return event.metadata?.resinAccountingOnly === true
+      ? event
+      : { ...event, metadata: { ...event.metadata, resinAccountingOnly: true } };
   }
 
   /**
@@ -947,19 +964,23 @@ export class TrajectoryCaptureCoordinator {
             if (res.status === "dead_letter" || (res.status === "success" && res.isDuplicate)) {
               continue;
             }
-            if (res.event && !this.isHarnessIntrospection(res.event)) {
+            const event = res.event ? this.prepareCaptureEvent(res.event) : null;
+            if (event) {
               try {
                 // Bounded source evidence is produced after normalized ids/dedup and before both
                 // the local sink and cloud projection, so the two surfaces carry identical carriers.
-                const observed = this.computationEvidenceRecorder.observe(
-                  this.toolLinkEvidenceRecorder.observe(
-                    this.workflowCallRecorder.observe(res.event, {
-                      workspaceId: session.workspaceId,
-                    }),
-                  ),
-                );
-                this.workingDirectoryIdentifier.annotate(res.event, observed, sessionDirectory);
-                this.repositoryLocationAnnotator.annotate(res.event, observed, sessionDirectory);
+                const observed =
+                  event.metadata?.resinAccountingOnly === true
+                    ? event
+                    : this.computationEvidenceRecorder.observe(
+                        this.toolLinkEvidenceRecorder.observe(
+                          this.workflowCallRecorder.observe(event, {
+                            workspaceId: session.workspaceId,
+                          }),
+                        ),
+                      );
+                this.workingDirectoryIdentifier.annotate(event, observed, sessionDirectory);
+                this.repositoryLocationAnnotator.annotate(event, observed, sessionDirectory);
                 emitter.ingest(observed);
                 ingestedEvents.push(this.metadataEventProjector.project(observed));
               } catch (err) {
@@ -1148,9 +1169,9 @@ export class TrajectoryCaptureCoordinator {
               continue;
             }
             if (res.status === "success" && res.event) {
-              const ev = res.event;
+              const ev = this.prepareCaptureEvent(res.event);
               // A dropped event never becomes the tail a later synthetic event continues from.
-              if (this.isHarnessIntrospection(ev)) continue;
+              if (!ev) continue;
               const seq = ev.causalRef?.causalSequence ?? 0;
               const stepIndex = ev.causalRef?.stepIndex ?? 0;
               if (
@@ -1168,13 +1189,16 @@ export class TrajectoryCaptureCoordinator {
               if (!res.isDuplicate) {
                 // Same post-dedup hook as the attributed path: local sink and cloud batch project
                 // the identical carrier-bearing event.
-                const observed = this.computationEvidenceRecorder.observe(
-                  this.toolLinkEvidenceRecorder.observe(
-                    this.workflowCallRecorder.observe(ev, {
-                      workspaceId: session.workspaceId,
-                    }),
-                  ),
-                );
+                const observed =
+                  ev.metadata?.resinAccountingOnly === true
+                    ? ev
+                    : this.computationEvidenceRecorder.observe(
+                        this.toolLinkEvidenceRecorder.observe(
+                          this.workflowCallRecorder.observe(ev, {
+                            workspaceId: session.workspaceId,
+                          }),
+                        ),
+                      );
                 this.workingDirectoryIdentifier.annotate(ev, observed, sessionDirectory);
                 this.repositoryLocationAnnotator.annotate(ev, observed, sessionDirectory);
                 validEvents.push(observed);

@@ -5,6 +5,7 @@ import {
   IdentifierSchema,
   type InvocationRecord,
   type NormalizedSessionEvent,
+  ResinModelRequestPurposeSchema,
   Sha256DigestSchema,
 } from "@resin/contracts";
 import type { AuditRepository } from "@resin/db";
@@ -107,31 +108,150 @@ export const ProviderUsageAvailabilitySchema = z.enum(["complete", "partial", "u
 export type ProviderUsageAvailability = z.infer<typeof ProviderUsageAvailabilitySchema>;
 
 /**
- * Provider-reported usage metrics for a single model execution.
+ * How a trajectory's usage categories were aggregated.
+ * - request: every usage record was request-scoped, deduplicated by request identity; inputTokens is
+ *   uncached input, cache reads and writes are separate, output includes reasoning, and a complete
+ *   total is their sum.
+ * - legacy: at least one record predates request scoping (or is cumulative); categories keep each
+ *   source's own meaning and no normalized total is implied. Absent means legacy.
+ */
+export const TrajectoryUsageSemanticsSchema = z.enum(["legacy", "request"]);
+export type TrajectoryUsageSemantics = z.infer<typeof TrajectoryUsageSemanticsSchema>;
+
+const TokenCountSchema = z.number().int().nonnegative();
+const CostProvenanceSchema = z.enum(["source_reported", "harness_estimate", "unpriced"]);
+
+/**
+ * One provider/model's share of a request-semantics trajectory, summed with the same rules as the
+ * trajectory itself: a category is null unless every request of this model reported it, the total
+ * is null unless every request is complete, and cost is null unless every request reported one on
+ * a single basis.
+ */
+export const TrajectoryModelUsageSchema = z
+  .object({
+    provider: z.string().min(1),
+    model: z.string().min(1).nullable(),
+    requestCount: z.number().int().positive(),
+    availability: ProviderUsageAvailabilitySchema,
+    inputTokens: TokenCountSchema.nullable(),
+    cachedInputTokens: TokenCountSchema.nullable(),
+    cacheWriteTokens: TokenCountSchema.nullable(),
+    outputTokens: TokenCountSchema.nullable(),
+    reasoningTokens: TokenCountSchema.nullable(),
+    totalTokens: TokenCountSchema.nullable(),
+    costMicroUsd: TokenCountSchema.nullable(),
+    durationMs: TokenCountSchema.nullable(),
+    /** Distinct cost bases the requests stated, sorted. */
+    costProvenances: z.array(CostProvenanceSchema),
+    /** Distinct auxiliary purposes of its requests, sorted; empty when all were conversation turns. */
+    purposes: z.array(ResinModelRequestPurposeSchema),
+  })
+  .strict();
+export type TrajectoryModelUsage = z.infer<typeof TrajectoryModelUsageSchema>;
+
+/** Fields a request-semantics total sums from its models when every request has a model entry. */
+const MODEL_SUMMED_FIELDS = [
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteTokens",
+  "outputTokens",
+  "reasoningTokens",
+  "totalTokens",
+  "durationMs",
+] as const;
+
+/**
+ * Provider-reported usage metrics aggregated over a trajectory's model executions.
  * Explicit input/output/reasoning/cache components are recorded.
  * Unsupported provider fields remain null/undefined and are NEVER synthesized or inferred.
+ *
+ * Under request semantics every distinct request counts once whatever its provider or model,
+ * `models` breaks the totals down by provider/model, and the totals follow the cloud request
+ * summarizer: a category is null unless every request reported it (a linked request that never
+ * reported usage leaves all of them null), the total is null unless every request is complete, and
+ * cost is null unless every request reported one on a single basis (`costProvenances`).
  */
 export const TrajectoryUsageSchema = z
   .object({
     availability: ProviderUsageAvailabilitySchema,
-    inputTokens: z.number().int().nonnegative().nullish(),
-    outputTokens: z.number().int().nonnegative().nullish(),
-    reasoningTokens: z.number().int().nonnegative().nullish(),
-    cachedInputTokens: z.number().int().nonnegative().nullish(),
-    totalTokens: z.number().int().nonnegative().nullish(),
-    costMicroUsd: z.number().int().nonnegative().nullish(),
-    durationMs: z.number().int().nonnegative().nullish(),
+    usageSemantics: TrajectoryUsageSemanticsSchema.optional(),
+    /** Distinct model requests observed (with or without usage); request semantics only. */
+    requestCount: z.number().int().nonnegative().nullish(),
+    inputTokens: TokenCountSchema.nullish(),
+    outputTokens: TokenCountSchema.nullish(),
+    reasoningTokens: TokenCountSchema.nullish(),
+    cachedInputTokens: TokenCountSchema.nullish(),
+    cacheWriteTokens: TokenCountSchema.nullish(),
+    totalTokens: TokenCountSchema.nullish(),
+    costMicroUsd: TokenCountSchema.nullish(),
+    durationMs: TokenCountSchema.nullish(),
+    /** Distinct cost bases the requests stated, sorted; request semantics only. */
+    costProvenances: z.array(CostProvenanceSchema).optional(),
+    /** Per provider/model breakdown, sorted by provider then model; request semantics only. */
+    models: z.array(TrajectoryModelUsageSchema).optional(),
   })
   .strict()
   .superRefine((val, ctx) => {
-    if (val.availability === "complete") {
-      if (val.totalTokens === undefined || val.totalTokens === null) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Complete provider usage requires totalTokens to be present",
-          path: ["totalTokens"],
-        });
+    const issue = (message: string, path: string) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: [path] });
+    if (val.usageSemantics !== "request") {
+      if (val.models !== undefined) issue("models require request semantics", "models");
+      if (val.costProvenances !== undefined) {
+        issue("costProvenances require request semantics", "costProvenances");
       }
+    } else if (val.models !== undefined) {
+      const requestCount = val.requestCount ?? 0;
+      const modelRequests = val.models.reduce((total, model) => total + model.requestCount, 0);
+      if (modelRequests > requestCount) {
+        issue("models cannot hold more requests than requestCount", "models");
+      }
+      for (const field of MODEL_SUMMED_FIELDS) {
+        const total = val[field];
+        if (total === undefined || total === null) continue;
+        const parts = val.models.map((model) => model[field]);
+        if (
+          modelRequests !== requestCount ||
+          parts.some((part) => part === null) ||
+          parts.reduce<number>((sum, part) => sum + (part ?? 0), 0) !== total
+        ) {
+          issue(`${field} must equal the sum of every request's models`, field);
+        }
+      }
+      if (val.costMicroUsd !== undefined && val.costMicroUsd !== null) {
+        const parts = val.models.map((model) => model.costMicroUsd);
+        if (
+          val.costProvenances?.length !== 1 ||
+          parts.some((part) => part === null) ||
+          parts.reduce<number>((sum, part) => sum + (part ?? 0), 0) !== val.costMicroUsd
+        ) {
+          issue("costMicroUsd must sum every model's cost on one cost basis", "costMicroUsd");
+        }
+      }
+    }
+    if (val.availability !== "complete") return;
+    if (val.totalTokens === undefined || val.totalTokens === null) {
+      issue("Complete provider usage requires totalTokens to be present", "totalTokens");
+      return;
+    }
+    if (val.usageSemantics !== "request") return;
+    let sum = 0;
+    for (const value of [
+      val.inputTokens,
+      val.cachedInputTokens,
+      val.cacheWriteTokens,
+      val.outputTokens,
+    ]) {
+      if (value === undefined || value === null) {
+        issue("Complete request usage requires every token category", "usageSemantics");
+        return;
+      }
+      sum += value;
+    }
+    if (sum !== val.totalTokens) {
+      issue(
+        "Complete request usage requires totalTokens to equal input + cache reads + cache writes + output",
+        "totalTokens",
+      );
     }
   });
 export type TrajectoryUsage = z.infer<typeof TrajectoryUsageSchema>;

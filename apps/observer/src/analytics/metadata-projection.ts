@@ -35,6 +35,7 @@ import {
   readCodexCommandMetadata,
   readComputationEvidence,
   readRepositoryLocationMetadata,
+  readRequestLinkMetadata,
   readToolLinkEvidence,
   readWorkingDirectoryIdentity,
 } from "@resin/contracts";
@@ -821,6 +822,9 @@ export function projectEventToMetadataOnly(
     rawSessionKind === "user" || rawSessionKind === "agent" ? rawSessionKind : undefined;
 
   const metadata: Record<string, unknown> = { scenarioId };
+  // A strict suppression-only signal: discovery remains available to request accounting, not learning.
+  const accountingOnly = event.metadata?.resinAccountingOnly === true;
+  if (accountingOnly) metadata.resinAccountingOnly = true;
   if (
     event.type === "tool_call" ||
     event.type === "tool_result" ||
@@ -855,6 +859,10 @@ export function projectEventToMetadataOnly(
     metadata.sessionKind = sessionKind;
   }
   Object.assign(metadata, projectSessionAttribution(event.metadata));
+  // Opaque model-request, task and Resin invocation identifiers let the cloud join a tool call and its
+  // result to the request that issued it, the user task it served and the invocation the gateway
+  // recorded. Each is re-validated against its schema; anything malformed is dropped.
+  Object.assign(metadata, readRequestLinkMetadata(event.metadata));
   // A source-observed successful assistant stop is bounded completion evidence, not arbitrary
   // metadata. It survives only on assistant messages and only for the shared allowlist; tool-use,
   // truncation, errors and unknown values are deliberately omitted.
@@ -871,9 +879,9 @@ export function projectEventToMetadataOnly(
   // re-read (canonical bytes, pinned limits, digest re-verification, cross-reference walk) and then
   // copied through by value: idempotent under repeated projection, and no raw source, identifier,
   // literal value or local state can ride along because the reader rejects anything else.
-  const computationEvidence = readComputationEvidence(
-    event.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY],
-  );
+  const computationEvidence = accountingOnly
+    ? undefined
+    : readComputationEvidence(event.metadata?.[RESIN_COMPUTATION_EVIDENCE_KEY]);
   if (computationEvidence !== undefined) {
     metadata[RESIN_COMPUTATION_EVIDENCE_KEY] = JSON.parse(
       JSON.stringify(computationEvidence),
@@ -884,7 +892,9 @@ export function projectEventToMetadataOnly(
   // (canonical bytes, strict schema, structural carrier checks) and copied through by value, so
   // repeated projection is idempotent and no raw path, repository, issue identifier or value can
   // ride along: the reader rejects anything that is not the frozen carrier vocabulary.
-  const toolLinkEvidence = readToolLinkEvidence(event.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY]);
+  const toolLinkEvidence = accountingOnly
+    ? undefined
+    : readToolLinkEvidence(event.metadata?.[RESIN_TOOL_LINK_EVIDENCE_KEY]);
   if (toolLinkEvidence !== undefined) {
     metadata[RESIN_TOOL_LINK_EVIDENCE_KEY] = JSON.parse(JSON.stringify(toolLinkEvidence)) as Record<
       string,
@@ -896,24 +906,26 @@ export function projectEventToMetadataOnly(
   // re-read through the strict reader (frozen carrier vocabulary only) and copied by
   // value; literal argument values ride along because they are what the workflow is
   // made of, while private leaves were already replaced by local `private:` references.
-  const workflowCall = readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
+  const workflowCall = accountingOnly
+    ? undefined
+    : readWorkflowCallCarrier(event.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]);
   if (workflowCall !== undefined) {
     metadata[RESIN_WORKFLOW_CALL_METADATA_KEY] = JSON.parse(JSON.stringify(workflowCall)) as Record<
       string,
       unknown
     >;
   }
-  const workflowResult = readWorkflowResultCarrier(
-    event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY],
-  );
+  const workflowResult = accountingOnly
+    ? undefined
+    : readWorkflowResultCarrier(event.metadata?.[RESIN_WORKFLOW_RESULT_METADATA_KEY]);
   if (workflowResult !== undefined) {
     metadata[RESIN_WORKFLOW_RESULT_METADATA_KEY] = workflowResult;
   }
   // A dialect a later record proved for a call is re-read through the same carrier vocabulary as
   // the call's own carrier (its scrubbed program view, template and suggestions) and copied by value.
-  const dialectUpgrade = readWorkflowDialectUpgrade(
-    event.metadata?.[RESIN_WORKFLOW_DIALECT_METADATA_KEY],
-  );
+  const dialectUpgrade = accountingOnly
+    ? undefined
+    : readWorkflowDialectUpgrade(event.metadata?.[RESIN_WORKFLOW_DIALECT_METADATA_KEY]);
   if (dialectUpgrade !== undefined) {
     metadata[RESIN_WORKFLOW_DIALECT_METADATA_KEY] = JSON.parse(
       JSON.stringify(dialectUpgrade),
@@ -922,10 +934,9 @@ export function projectEventToMetadataOnly(
 
   // Deterministic command sequence evidence is strictly derived from actual pre-redaction command_exec
   // or known shell tool_call events. Preexisting inbound metadata is never trusted and discarded.
-  const derivedCommandSequence = projectDeterministicCommandSequenceFromEvent(
-    event,
-    options.commitmentKey,
-  );
+  const derivedCommandSequence = accountingOnly
+    ? null
+    : projectDeterministicCommandSequenceFromEvent(event, options.commitmentKey);
   if (derivedCommandSequence !== null) {
     metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY] = derivedCommandSequence;
   }

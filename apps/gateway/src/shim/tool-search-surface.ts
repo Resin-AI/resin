@@ -15,6 +15,7 @@ import {
   InitializeParamsSchema,
   type JsonRpcId,
   type JsonRpcMessage,
+  RESIN_BENCHMARK_ID_META,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_LISTING_META,
@@ -304,6 +305,11 @@ export interface ToolSearchSurfaceOptions {
    * search_tools, and can still call them by name.
    */
   fullCatalog?: boolean;
+  /**
+   * The run's validated `RESIN_BENCHMARK_ID`, sent to the gateway on `initialize` so it marks the
+   * invocations it records for this client.
+   */
+  benchmarkId?: string;
 }
 
 const META_TOOL_NAMES: Record<string, true> = {
@@ -372,17 +378,17 @@ export function createToolSearchSurface(
           searchEnabled = enableSearch || searchOnlyListing || codexClient;
         }
         initializeIds.add(message.id);
-        if (searchOnlyListing) {
+        const meta = {
           // Tells the gateway to keep the per-tool catalog out of the harness's own prompt files.
+          ...(searchOnlyListing ? { [RESIN_SEARCH_LISTING_META]: true } : {}),
+          ...(options.benchmarkId === undefined
+            ? {}
+            : { [RESIN_BENCHMARK_ID_META]: options.benchmarkId }),
+        };
+        if (Object.keys(meta).length > 0) {
           // Initialize params never reach the model.
           const params = record(message.params) ?? {};
-          return {
-            ...message,
-            params: {
-              ...params,
-              _meta: { ...record(params._meta), [RESIN_SEARCH_LISTING_META]: true },
-            },
-          };
+          return { ...message, params: { ...params, _meta: { ...record(params._meta), ...meta } } };
         }
       }
       if (

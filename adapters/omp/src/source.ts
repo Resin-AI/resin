@@ -10,6 +10,12 @@ import type {
   SessionEventSource,
   SourceCursor,
 } from "@resin/harness-contracts";
+import {
+  OmpRequestLinkPrimer,
+  type OmpRequestLinkResume,
+  RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY,
+} from "./decoder.js";
+import { readConfiguredOmpServers } from "./device-surface.js";
 
 export interface OmpEventSourceOptions {
   pollIntervalMs?: number;
@@ -417,6 +423,10 @@ export class OmpSessionEventSource implements SessionEventSource {
    * calls were executed, and are recorded, by the parent. Null when the file is not a fork.
    */
   private forkedAt: number | null | undefined;
+  /** Whether the request links of a skipped prefix have been recovered (once per source). */
+  private requestLinksPrimed = false;
+  /** Recovered prefix links, handed to the decoder on the next record this source emits. */
+  private pendingRequestLinks: OmpRequestLinkResume | undefined;
 
   constructor(
     session: HarnessSession,
@@ -496,8 +506,20 @@ export class OmpSessionEventSource implements SessionEventSource {
       this.currentCursor.line = 1;
       this.currentCursor.sequence = 0;
       this.forkedAt = undefined;
+      this.pendingRequestLinks = undefined;
     }
     if (this.forkedAt === undefined) this.forkedAt = await readOmpForkStart(filePath);
+    // A source resuming mid-file (a persisted cursor after a restart) recovers, once, the request
+    // links of the prefix it skips, so later events keep their task and their calls' requests.
+    if (!this.requestLinksPrimed) {
+      this.requestLinksPrimed = true;
+      if (this.currentCursor.offset > 0) {
+        this.pendingRequestLinks = await this.readPrefixRequestLinks(
+          filePath,
+          this.currentCursor.offset,
+        );
+      }
+    }
 
     if (stat.size - this.currentCursor.offset <= 0) {
       return [];
@@ -602,10 +624,80 @@ export class OmpSessionEventSource implements SessionEventSource {
         transcriptPath: filePath,
         lineNumber: this.currentCursor.line,
         byteOffset: this.currentCursor.offset,
+        ...(this.pendingRequestLinks === undefined
+          ? {}
+          : { [RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY]: this.pendingRequestLinks }),
       },
     };
+    this.pendingRequestLinks = undefined;
     await populateOmpProgramObservation(record, parsedPayload, filePath);
     return record;
+  }
+
+  /**
+   * The request links the transcript's first `endOffset` bytes leave, read in bounded chunks and
+   * decoded once for their links only. Lines this source would skip (inherited fork entries) are
+   * skipped here too. Unreadable prefixes yield nothing, as a fresh decoder would know.
+   */
+  private async readPrefixRequestLinks(
+    filePath: string,
+    endOffset: number,
+  ): Promise<OmpRequestLinkResume | undefined> {
+    // Resolved like the capture decoder (`ompHarness.createDecoder`): device paths against the
+    // servers OMP itself is configured with, so call identities match what the live decoder recorded.
+    const primer = new OmpRequestLinkPrimer(this.session.sessionId, {
+      deviceSurfaceServers: () => readConfiguredOmpServers().map((server) => server.name),
+    });
+    let fd: fsp.FileHandle;
+    try {
+      fd = await fsp.open(filePath, "r");
+    } catch {
+      return undefined;
+    }
+    try {
+      let position = 0;
+      let pending = Buffer.alloc(0);
+      while (position < endOffset) {
+        const buffer = Buffer.allocUnsafe(Math.min(OMP_READ_CHUNK_BYTES, endOffset - position));
+        const { bytesRead } = await fd.read(buffer, 0, buffer.length, position);
+        if (bytesRead === 0) break;
+        position += bytesRead;
+        pending =
+          pending.length === 0
+            ? buffer.subarray(0, bytesRead)
+            : Buffer.concat([pending, buffer.subarray(0, bytesRead)]);
+        let newline = pending.indexOf(0x0a);
+        while (newline !== -1) {
+          this.primeLine(primer, pending.toString("utf8", 0, newline));
+          pending = pending.subarray(newline + 1);
+          newline = pending.indexOf(0x0a);
+        }
+      }
+    } finally {
+      await fd.close();
+    }
+    const snapshot = primer.snapshot();
+    const empty =
+      snapshot.taskId === undefined &&
+      snapshot.calls.length === 0 &&
+      snapshot.announced.length === 0 &&
+      snapshot.names.length === 0 &&
+      snapshot.surfaces.length === 0;
+    return empty ? undefined : snapshot;
+  }
+
+  private primeLine(primer: OmpRequestLinkPrimer, line: string): void {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (parsed instanceof Object && !Array.isArray(parsed) && !this.isInheritedPayload(parsed)) {
+      primer.observe(parsed);
+    }
   }
 
   /** A copied parent entry: a non-header record timestamped before this fork began. */
@@ -617,6 +709,11 @@ export class OmpSessionEventSource implements SessionEventSource {
     } catch {
       return false;
     }
+    return this.isInheritedPayload(parsed);
+  }
+
+  private isInheritedPayload(parsed: unknown): boolean {
+    if (this.forkedAt === null || this.forkedAt === undefined) return false;
     if (!(parsed instanceof Object) || Array.isArray(parsed)) return false;
     const entry = parsed as { type?: unknown; timestamp?: unknown };
     if (entry.type === "session" || entry.type === "title") return false;

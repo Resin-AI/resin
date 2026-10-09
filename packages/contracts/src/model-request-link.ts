@@ -15,8 +15,10 @@ import { ProviderUsageRequestIdSchema } from "./events.js";
  *   count like any other; their provider and model may differ from the session's.
  * - `taskId`: the source's own id for the preceding user prompt record, on that prompt and on every
  *   later event of the session until the next prompt. Unknown (absent) rather than guessed.
- * - `resinInvocationId` / `resinInvocationIds` and `benchmarkId`: copied from a validated Resin
- *   invocation receipt on the result of a Resin tool call.
+ * - `resinInvocationId` / `resinInvocationIds`: copied from a validated Resin invocation receipt
+ *   on the result of a Resin tool call.
+ * - `benchmarkId`: an explicit benchmark run classification on any task event, independent of
+ *   invocation receipts. It does not authorize a request or establish task/invocation identity.
  * - `delegatedModelUsage`: on the result of a tool call that started subagents, the aggregate usage
  *   the harness reported for them, as evidence of usage counted in other sessions.
  */
@@ -29,7 +31,7 @@ export const RESIN_TASK_ID_METADATA_KEY = "taskId" as const;
 export const RESIN_INVOCATION_ID_METADATA_KEY = "resinInvocationId" as const;
 /** Metadata key: the Resin invocations, in order, of a tool result that reports several runs. */
 export const RESIN_INVOCATION_IDS_METADATA_KEY = "resinInvocationIds" as const;
-/** Metadata key: the benchmark run the gateway that recorded the invocation belonged to. */
+/** Metadata key: the explicitly labeled benchmark run an event belongs to, without requiring a receipt. */
 export const RESIN_BENCHMARK_ID_METADATA_KEY = "benchmarkId" as const;
 /**
  * Metadata key: why the harness made an auxiliary model request outside the conversation (for
@@ -274,6 +276,8 @@ export function readRequestLinkMetadata(value: unknown): RequestLinkMetadata {
   if (purpose.success) link.modelRequestPurpose = purpose.data;
   const taskId = ResinTaskIdSchema.safeParse(metadata[RESIN_TASK_ID_METADATA_KEY]);
   if (taskId.success) link.taskId = taskId.data;
+  const benchmarkId = ResinBenchmarkIdSchema.safeParse(metadata[RESIN_BENCHMARK_ID_METADATA_KEY]);
+  if (benchmarkId.success) link.benchmarkId = benchmarkId.data;
   const delegated = DelegatedModelUsageSchema.safeParse(
     metadata[RESIN_DELEGATED_MODEL_USAGE_METADATA_KEY],
   );
@@ -290,8 +294,6 @@ export function readRequestLinkMetadata(value: unknown): RequestLinkMetadata {
   if (invocationId.success !== invocationIds.success) {
     if (invocationId.success) link.resinInvocationId = invocationId.data;
     if (invocationIds.success) link.resinInvocationIds = [...invocationIds.data];
-    const benchmarkId = ResinBenchmarkIdSchema.safeParse(metadata[RESIN_BENCHMARK_ID_METADATA_KEY]);
-    if (benchmarkId.success) link.benchmarkId = benchmarkId.data;
   }
   return link;
 }

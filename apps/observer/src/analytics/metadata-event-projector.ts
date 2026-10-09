@@ -84,6 +84,7 @@ export class MetadataEventProjector {
     delete projected.redaction.redactedAt;
     const metadata = projected.metadata ?? {};
     projected.metadata = metadata;
+    if (metadata.resinAccountingOnly === true) return projected;
     const sourceExecution = isSourceExecution(event);
     if (!sourceExecution) delete metadata[RESIN_COMMAND_SEQUENCE_METADATA_KEY];
 

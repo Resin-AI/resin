@@ -21,6 +21,7 @@ import { reportHandledError } from "@resin/observer/error-reporting/core";
 import type { McpServerDescriptor } from "@resin/runtime";
 import { LocalMcpGateway } from "../gateway.js";
 import { createInvocationRecorder, createSystemMetaTools } from "../meta/index.js";
+import { benchmarkIdOf } from "../meta/invocation-receipt.js";
 import type { ReconcileOutcome } from "../project/lock-manager.js";
 import { LocalArtifactTrustConfigurationError } from "../proxy/local-artifact-trust.js";
 import { type ProductionProxyRuntime, createProductionProxyRuntime } from "../proxy/runtime.js";
@@ -38,6 +39,12 @@ export interface McpStdioShimOptions {
   fullCatalog?: boolean;
   cwd?: string;
   harnessId?: string;
+  /**
+   * The benchmark run this shim's harness belongs to; defaults to this process's
+   * `RESIN_BENCHMARK_ID`. The shim runs inside the harness's run, unlike a shared daemon, so it
+   * forwards the id to the gateway on `initialize`. An invalid id is dropped.
+   */
+  benchmarkId?: string;
   maxStartupAttempts?: number;
   startupTimeoutMs?: number;
   stdin?: NodeJS.ReadableStream;
@@ -325,6 +332,7 @@ export class McpStdioShim {
     this.surface = createToolSearchSurface(this.stdout, {
       enableSearch: this.options.enableToolSearch === true,
       fullCatalog: this.options.fullCatalog === true,
+      benchmarkId: benchmarkIdOf(this.options.benchmarkId ?? process.env.RESIN_BENCHMARK_ID),
     });
     // `pipe()` forwards no errors: every stream in the chain needs its own listener, or a write
     // after the harness closed stdout (EPIPE) is an uncaught exception that kills the process.

@@ -113,9 +113,14 @@ export interface SemanticOperation {
  */
 export interface EpisodeMetrics {
   stepCount: number;
-  /** Provider total per assistant turn, cache reads included. */
+  /** Provider totals once per model request, cache reads and writes included. */
   totalTokens: number;
   cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  /** Distinct identified model requests in the episode, with or without usage. */
+  requestCount?: number;
+  /** False when some model execution reported no usage or total: `totalTokens` is a lower bound. */
+  tokensComplete?: boolean;
   retryCount: number;
   /** Complete captured spend (including harness estimates); null when accounting is unknown. */
   estimatedCostUsd: number | null;

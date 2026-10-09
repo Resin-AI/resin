@@ -24,6 +24,7 @@ interface InvocationRecordRow {
   error_details_json: string | null;
   resource_usage_json: string | null;
   usage_estimate_json: string | null;
+  benchmark_id: string | null;
 }
 
 function invocationFromRow(row: InvocationRecordRow): InvocationRecord {
@@ -43,6 +44,7 @@ function invocationFromRow(row: InvocationRecordRow): InvocationRecord {
     errorDetails: row.error_details_json ? JSON.parse(row.error_details_json) : undefined,
     resourceUsage: row.resource_usage_json ? JSON.parse(row.resource_usage_json) : undefined,
     usageEstimate: row.usage_estimate_json ? JSON.parse(row.usage_estimate_json) : undefined,
+    benchmarkId: row.benchmark_id ?? undefined,
   });
 }
 
@@ -65,8 +67,8 @@ export class AuditRepository {
       `INSERT INTO invocation_records (
         invocation_id, session_id, workspace_id, tool_id, tool_version,
         started_at, completed_at, duration_ms, execution_duration_ms, status, input_digest, output_digest,
-        error_details_json, resource_usage_json, usage_estimate_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        error_details_json, resource_usage_json, usage_estimate_json, benchmark_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(invocation_id) DO UPDATE SET
         session_id = excluded.session_id,
         workspace_id = excluded.workspace_id,
@@ -81,7 +83,8 @@ export class AuditRepository {
         output_digest = excluded.output_digest,
         error_details_json = excluded.error_details_json,
         resource_usage_json = excluded.resource_usage_json,
-        usage_estimate_json = excluded.usage_estimate_json;`,
+        usage_estimate_json = excluded.usage_estimate_json,
+        benchmark_id = excluded.benchmark_id;`,
       [
         validated.invocationId,
         validated.sessionId,
@@ -98,6 +101,7 @@ export class AuditRepository {
         validated.errorDetails ? canonicalJson(validated.errorDetails) : null,
         validated.resourceUsage ? canonicalJson(validated.resourceUsage) : null,
         validated.usageEstimate ? canonicalJson(validated.usageEstimate) : null,
+        validated.benchmarkId ?? null,
       ],
     );
   }

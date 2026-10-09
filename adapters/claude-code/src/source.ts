@@ -12,6 +12,11 @@ import {
   computeConfigHash,
   defaultFsBridge,
 } from "@resin/harness-contracts";
+import {
+  CLAUDE_REQUEST_LINK_RESUME_KEY,
+  ClaudeRequestLinkPrimer,
+  type ClaudeRequestLinkResume,
+} from "./decoder.js";
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -50,6 +55,10 @@ export class ClaudeSessionEventSource implements SessionEventSource {
   private currentByteOffset = 0;
   private currentLineNumber = 0;
   private currentSequence = 0;
+  /** Whether the first read has run: a source resuming mid-file primes link state once, then. */
+  private primed = false;
+  /** Primed link state, held until the first record after the resume carries it. */
+  private pendingLinkResume: ClaudeRequestLinkResume | undefined;
 
   constructor(
     session: HarnessSession,
@@ -197,7 +206,13 @@ export class ClaudeSessionEventSource implements SessionEventSource {
           this.currentByteOffset = 0;
           this.currentLineNumber = 1;
           this.currentSequence = 0;
+          this.pendingLinkResume = undefined;
+        } else if (!this.primed && this.currentByteOffset > 0) {
+          // Resuming mid-file: recover the task and call links the transcript before the cursor
+          // established, which a fresh decoder would otherwise lose until the next prompt.
+          this.pendingLinkResume = await this.primeRequestLinks(transcript, this.currentByteOffset);
         }
+        this.primed = true;
 
         // Read bounded chunks from the cursor and stop once maxRecords complete lines are
         // collected, so large transcripts are never loaded (or re-read) whole per call.
@@ -242,6 +257,42 @@ export class ClaudeSessionEventSource implements SessionEventSource {
     return records;
   }
 
+  /**
+   * Decodes link state from every complete line in `[0, end)` in bounded chunks. Nothing is emitted
+   * and the prefix is never read again.
+   */
+  private async primeRequestLinks(
+    transcript: TranscriptReader,
+    end: number,
+  ): Promise<ClaudeRequestLinkResume | undefined> {
+    const primer = new ClaudeRequestLinkPrimer(this.sessionId);
+    let sequence = 0;
+    let pending = Buffer.alloc(0);
+    let position = 0;
+    while (position < end) {
+      const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, end - position));
+      const bytesRead = await transcript.read(chunk, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      pending =
+        pending.length === 0
+          ? chunk.subarray(0, bytesRead)
+          : Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+
+      let newline = pending.indexOf(0x0a);
+      while (newline !== -1) {
+        const line = pending.toString("utf8", 0, newline);
+        pending = pending.subarray(newline + 1);
+        newline = pending.indexOf(0x0a);
+        if (line.trim().length === 0) continue;
+        sequence++;
+        primer.observe(parseTranscriptLine(line), sequence);
+      }
+    }
+    const resume = primer.snapshot();
+    return resume.taskId === undefined && resume.calls.length === 0 ? undefined : resume;
+  }
+
   private toRecord(line: string): RawHarnessRecord {
     const lineHash = computeConfigHash(line);
     const recordTime = new Date().toISOString();
@@ -255,13 +306,8 @@ export class ClaudeSessionEventSource implements SessionEventSource {
     };
     this.cursor = cursor;
 
-    const rawPayload = (() => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return { text: line };
-      }
-    })();
+    const linkResume = this.pendingLinkResume;
+    this.pendingLinkResume = undefined;
 
     return {
       recordId: `${this.sessionId}-rec-${this.currentSequence}`,
@@ -270,11 +316,12 @@ export class ClaudeSessionEventSource implements SessionEventSource {
       sequenceNumber: this.currentSequence,
       timestamp: recordTime,
       recordType: "transcript_line",
-      rawPayload,
+      rawPayload: parseTranscriptLine(line),
       cursor,
       metadata: {
         transcriptPath: this.transcriptPath,
         line: this.currentLineNumber,
+        ...(linkResume === undefined ? {} : { [CLAUDE_REQUEST_LINK_RESUME_KEY]: linkResume }),
       },
     };
   }
@@ -324,5 +371,14 @@ export class ClaudeSessionEventSource implements SessionEventSource {
         // Prevent listener crashes from propagating
       }
     }
+  }
+}
+
+/** A transcript line's payload: its JSON value, or the raw text of a line that is not JSON. */
+function parseTranscriptLine(line: string): unknown {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return { text: line };
   }
 }

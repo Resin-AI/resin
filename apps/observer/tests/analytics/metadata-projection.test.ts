@@ -16,11 +16,13 @@ import {
   type NormalizedUnknownPassthroughEvent,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   RESIN_CODEX_COMMAND_METADATA_KEY,
+  RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMMAND_TEXT_METADATA_KEY,
   nowIso,
   readCodexCommandMetadata,
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
+import { MetadataEventProjector } from "../../src/analytics/metadata-event-projector.js";
 import {
   RESIN_PARAMETER_SHAPE_KEY,
   extractParameterShape,
@@ -28,6 +30,11 @@ import {
   projectToolParameters,
   tryPreserveSafeParameterShapeEnvelope,
 } from "../../src/analytics/metadata-projection.js";
+import { InMemoryPrivateValueStore } from "../../src/analytics/private-value-store.js";
+import {
+  RESIN_WORKFLOW_CALL_METADATA_KEY,
+  WorkflowCallRecorder,
+} from "../../src/analytics/workflow-call-recorder.js";
 
 function createBaseHeaders(seq = 1) {
   return {
@@ -64,6 +71,52 @@ function createBaseHeaders(seq = 1) {
 }
 
 describe("projectEventToMetadataOnly", () => {
+  it.each([true, false, "true"])(
+    "preserves only the strict accounting-only signal (%s), suppressing learning but not usage",
+    (flag) => {
+      const recorder = new WorkflowCallRecorder({ privateValues: new InMemoryPrivateValueStore() });
+      const learned = recorder.observe(
+        {
+          ...createBaseHeaders(1),
+          type: "tool_call",
+          callId: "call-accounting-projection",
+          toolName: "bash",
+          parameters: { command: "printf 'ok'" },
+        },
+        { workspaceId: "ws_projection" },
+      );
+      expect(learned.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
+      const original = {
+        ...learned,
+        metadata: {
+          ...learned.metadata,
+          resinAccountingOnly: flag,
+          modelRequestId: "request-projection",
+          taskId: "task-projection",
+        },
+      };
+      for (const projected of [
+        projectEventToMetadataOnly(original),
+        new MetadataEventProjector().project(original),
+      ]) {
+        expect(projected.eventId).toBe(original.eventId);
+        expect(projected.providerUsage).toEqual(original.providerUsage);
+        expect(projected.metadata).toMatchObject({
+          modelRequestId: "request-projection",
+          taskId: "task-projection",
+        });
+        if (flag === true) {
+          expect(projected.metadata?.resinAccountingOnly).toBe(true);
+          expect(projected.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeUndefined();
+          expect(projected.metadata?.[RESIN_COMMAND_SEQUENCE_METADATA_KEY]).toBeUndefined();
+        } else {
+          expect(projected.metadata?.resinAccountingOnly).toBeUndefined();
+          expect(projected.metadata?.[RESIN_WORKFLOW_CALL_METADATA_KEY]).toBeDefined();
+        }
+      }
+    },
+  );
+
   it("projects message event: strips content and contentParts while preserving role, model, usage, causal headers", () => {
     const original: NormalizedMessageEvent = {
       ...createBaseHeaders(1),

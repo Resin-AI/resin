@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { parseResinInvocationReceiptText } from "@resin/contracts";
 import { RESIN_TOOL_CALL_TIMEOUT_MS } from "@resin/harness-contracts";
 import { McpConnection, type McpConnectionOptions } from "./connection.js";
 import { summarizeLearnedCommands } from "./meta/learned-commands.js";
@@ -960,6 +961,7 @@ export class LocalMcpGateway {
         signal,
         onProgress,
         timeoutMs: this.toolCallTimeoutMs,
+        ...(connection.benchmarkId === undefined ? {} : { benchmarkId: connection.benchmarkId }),
       }),
     );
     return this.withReleaseNotice(connection, result);
@@ -975,7 +977,21 @@ export class LocalMcpGateway {
     }
     if (!notice || this.deliveredReleaseNotices.get(connection) === notice) return result;
     this.deliveredReleaseNotices.set(connection, notice);
-    return { ...result, content: [...result.content, { type: "text", text: notice }] };
+    // Invocation receipts stay the trailing parts, where transcript readers look for them.
+    let at = result.content.length;
+    while (at > 0) {
+      const part = result.content[at - 1]!;
+      if (part.type !== "text" || parseResinInvocationReceiptText(part.text) === undefined) break;
+      at--;
+    }
+    return {
+      ...result,
+      content: [
+        ...result.content.slice(0, at),
+        { type: "text", text: notice },
+        ...result.content.slice(at),
+      ],
+    };
   }
 
   /**

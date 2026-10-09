@@ -1,6 +1,7 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ProviderReportedUsageSchema } from "@resin/contracts";
 import type { IntermediateSessionEvent, RawHarnessRecord } from "@resin/harness-contracts";
 import { describe, expect, it } from "vitest";
 import { OmpRecordDecoder } from "../src/decoder.js";
@@ -49,6 +50,13 @@ const RECORDINGS: Record<string, Recording> = {
 interface Decoded {
   records: RawHarnessRecord[];
   events: IntermediateSessionEvent[];
+}
+
+/** The fields of a recorded session line the request-link test reads. */
+interface SessionLine {
+  type?: string;
+  id?: string;
+  message?: { role?: string; responseId?: string | null };
 }
 
 async function decode(version: string, relative: string): Promise<Decoded> {
@@ -182,5 +190,48 @@ describe.each(OMP_TESTED_VERSIONS)("recorded OMP %s sessions", (version) => {
     const [result] = toolEvents(events, "tool_result");
     expect(result?.toolName).toBe("bash");
     expect(result?.isError).toBe(true);
+  });
+
+  it("records each assistant response as one request and links its calls, results and task", async () => {
+    const { events } = await decode(version, `${MAIN}.jsonl`);
+    const transcript = path.join(RECORDED, version, "sessions", `${MAIN}.jsonl`);
+    const lines: SessionLine[] = (await fsp.readFile(transcript, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const requestIds = lines
+      .filter((line) => line.type === "message" && line.message?.role === "assistant")
+      .map((line) => line.message?.responseId ?? line.id);
+    const promptIds = lines
+      .filter((line) => line.type === "message" && line.message?.role === "user")
+      .map((line) => line.id);
+    expect(promptIds).toHaveLength(1);
+
+    const responses = events.flatMap((event) =>
+      event.type === "message" && event.role === "assistant" ? [event] : [],
+    );
+    expect(responses.map((event) => event.providerUsage?.requestId)).toEqual(requestIds);
+    for (const response of responses) {
+      expect(response.providerUsage).toMatchObject({
+        usageScope: "request",
+        availability: "complete",
+      });
+      expect(ProviderReportedUsageSchema.safeParse(response.providerUsage).success).toBe(true);
+      expect(response.metadata?.modelRequestId).toBe(response.providerUsage?.requestId);
+    }
+    const toolCalls = toolEvents(events, "tool_call");
+    const toolResults = toolEvents(events, "tool_result");
+    const callRequests = new Map(
+      toolCalls.map((call) => [call.callId, call.metadata?.modelRequestId]),
+    );
+    for (const request of callRequests.values()) expect(requestIds).toContain(request);
+    for (const result of toolResults) {
+      if (callRequests.has(result.callId)) {
+        expect(result.metadata?.modelRequestId).toBe(callRequests.get(result.callId));
+      }
+    }
+    for (const event of [...responses, ...toolCalls, ...toolResults]) {
+      expect(event.metadata?.taskId).toBe(promptIds[0]);
+    }
   });
 });

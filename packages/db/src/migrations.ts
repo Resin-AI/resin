@@ -522,6 +522,14 @@ ALTER TABLE invocation_records ADD COLUMN execution_duration_ms INTEGER;
 `;
 
 /**
+ * Migration 008: Add benchmark_id to invocation_records: the benchmark run the gateway recorded
+ * the invocation for, so benchmark calls stay out of ordinary totals. NULL for ordinary use.
+ */
+export const MIGRATION_008_SQL = `
+ALTER TABLE invocation_records ADD COLUMN benchmark_id TEXT;
+`;
+
+/**
  * Registry of built-in migrations for local state store.
  */
 export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
@@ -566,6 +574,12 @@ export const BUILT_IN_MIGRATIONS: readonly Migration[] = [
     name: "007_add_invocation_records_execution_duration",
     sql: MIGRATION_007_SQL,
     checksum: hashCanonicalContent(MIGRATION_007_SQL),
+  },
+  {
+    version: 8,
+    name: "008_add_invocation_records_benchmark_id",
+    sql: MIGRATION_008_SQL,
+    checksum: hashCanonicalContent(MIGRATION_008_SQL),
   },
 ];
 

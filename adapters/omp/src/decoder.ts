@@ -1,9 +1,26 @@
 import {
+  DELEGATED_MODEL_USAGE_VERSION,
+  DelegatedModelUsageSchema,
   type DiscoveredToolEntry,
   type FileDiffStats,
   type MessageContentPart,
   type ProviderReportedUsage,
   ProviderReportedUsageSchema,
+  ProviderUsageRequestIdSchema,
+  RESIN_BENCHMARK_ID_METADATA_KEY,
+  RESIN_DELEGATED_MODEL_USAGE_METADATA_KEY,
+  RESIN_INVOCATION_IDS_METADATA_KEY,
+  RESIN_INVOCATION_ID_METADATA_KEY,
+  RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+  RESIN_MODEL_REQUEST_PURPOSE_METADATA_KEY,
+  RESIN_TASK_ID_METADATA_KEY,
+  type RequestLinkMetadata,
+  type ResinInvocationReceipt,
+  ResinModelRequestPurposeSchema,
+  ResinTaskIdSchema,
+  isResinGatewayToolCall,
+  readResinInvocationReceipts,
+  resinInvocationReceiptMetadata,
 } from "@resin/contracts";
 import type {
   DecoderMetadataRecord,
@@ -27,6 +44,7 @@ import type {
   RecordDecoderContext,
 } from "@resin/harness-contracts";
 import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
+import { z } from "zod";
 import {
   OMP_ASYNC_RESULT_CUSTOM_TYPE,
   type OmpJobCompletion,
@@ -41,6 +59,7 @@ import {
   OMP_DEVICE_SURFACE_READ_TOOL,
   OMP_DEVICE_SURFACE_WRITE_TOOL,
   type OmpDeviceSurfaceCall,
+  ompMcpToolName,
   resolveOmpDeviceSurfaceCall,
 } from "./device-surface.js";
 import { getOmpSessionExitReason } from "./session-exit.js";
@@ -52,6 +71,53 @@ export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
 /** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
 export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
+
+/**
+ * Local-only handoff from the event source to the decoder: the request links and call state of the
+ * transcript prefix a resumed source skipped, for calls whose result had not been seen yet. Set by
+ * the source on the first record after a mid-file resume, consumed (and removed) by the decoder; it
+ * never reaches event metadata.
+ */
+export const RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY = "__resinLocalOmpRequestLinkResumeV1";
+
+/** Most entries of each kind a resume handoff carries: the most recent, which can still get results. */
+const MAX_RESUMED_CALL_LINKS = 4096;
+
+const ResumedCallKeySchema = z.string().min(1).max(256);
+
+const OmpRequestLinkResumeSchema = z
+  .object({
+    version: z.literal(1),
+    taskId: ResinTaskIdSchema.optional(),
+    /** `[raw call id, issuing request id]`, oldest first. */
+    calls: z
+      .array(z.tuple([ResumedCallKeySchema, ProviderUsageRequestIdSchema]))
+      .max(MAX_RESUMED_CALL_LINKS),
+    /**
+     * `[raw call id, announcing record kind]`: an execution marker written after the cursor for a
+     * call the prefix already announced is the same call, not a new one.
+     */
+    announced: z
+      .array(z.tuple([ResumedCallKeySchema, z.enum(["assistant_message", "execution_record"])]))
+      .max(MAX_RESUMED_CALL_LINKS),
+    /** `[call id (raw or normalized), recorded tool name]`, so the result names its call's tool. */
+    names: z
+      .array(z.tuple([ResumedCallKeySchema, z.string().min(1).max(256)]))
+      .max(2 * MAX_RESUMED_CALL_LINKS),
+    /** `[call id, device-surface identity]` of calls made through `xd://` paths. */
+    surfaces: z
+      .array(
+        z.tuple([
+          ResumedCallKeySchema,
+          z
+            .object({ connection: z.string().min(1).max(256), tool: z.string().min(1).max(256) })
+            .strict(),
+        ]),
+      )
+      .max(MAX_RESUMED_CALL_LINKS),
+  })
+  .strict();
+export type OmpRequestLinkResume = z.infer<typeof OmpRequestLinkResumeSchema>;
 
 /**
  * URI schemes OMP's `read` tool resolves against the harness's own session or installation rather
@@ -813,6 +879,214 @@ function buildProviderUsage(
   return parsed.success ? parsed.data : undefined;
 }
 
+/** Request-link metadata only the decoder sets; a record's own metadata never supplies it. */
+const REQUEST_LINK_METADATA_KEYS = [
+  RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+  RESIN_MODEL_REQUEST_PURPOSE_METADATA_KEY,
+  RESIN_TASK_ID_METADATA_KEY,
+  RESIN_INVOCATION_ID_METADATA_KEY,
+  RESIN_INVOCATION_IDS_METADATA_KEY,
+  RESIN_BENCHMARK_ID_METADATA_KEY,
+  RESIN_DELEGATED_MODEL_USAGE_METADATA_KEY,
+] as const;
+
+/**
+ * The model request an assistant record answers: the provider's response id when OMP recorded one,
+ * otherwise the session record's own id. Undefined when the record carries neither (a stream
+ * `message_end`), so its usage stays a legacy record.
+ */
+function ompModelRequestId(obj: OmpTranscriptPayload): string | undefined {
+  for (const candidate of [obj.responseId, obj.id]) {
+    const parsed = ProviderUsageRequestIdSchema.safeParse(asString(candidate));
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
+
+/**
+ * Request-scoped usage of one assistant response from OMP's native `Usage`. OMP reports `input`
+ * uncached, `output` including reasoning, and cache reads and writes apart, so they map onto the
+ * request categories directly. Its `totalTokens` also counts provider orchestration tokens, so the
+ * record is complete only when all four categories are known, no orchestration was counted,
+ * reasoning fits in output and any source total equals their sum. Otherwise every reported value,
+ * the source total included, is kept as partial.
+ */
+function buildOmpRequestUsage(
+  rawUsage: OmpTranscriptPayload,
+  rawPayload: OmpTranscriptPayload,
+  requestId: string,
+  fallbackModel?: string,
+): ProviderReportedUsage | undefined {
+  const inputTokens = parseNonNegativeInt(rawUsage.input);
+  const cachedInputTokens = parseNonNegativeInt(rawUsage.cacheRead);
+  const cacheWriteTokens = parseNonNegativeInt(rawUsage.cacheWrite);
+  const outputTokens = parseNonNegativeInt(rawUsage.output);
+  const reasoningTokens = parseNonNegativeInt(rawUsage.reasoningTokens);
+  const sourceTotal = parseNonNegativeInt(rawUsage.totalTokens);
+  const { costMicroUsd, costProvenance, durationMs } = extractCostAndDuration(rawUsage, rawPayload);
+  const reported = [
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteTokens,
+    outputTokens,
+    reasoningTokens,
+    sourceTotal,
+    costMicroUsd,
+    durationMs,
+  ];
+  if (reported.every((value) => value === undefined)) return undefined;
+
+  const orchestration = asObject(rawUsage.orchestration);
+  const orchestrated =
+    orchestration !== undefined &&
+    Object.values(orchestration).some((value) => parseNonNegativeInt(value) !== 0);
+  const categorySum =
+    inputTokens !== undefined &&
+    cachedInputTokens !== undefined &&
+    cacheWriteTokens !== undefined &&
+    outputTokens !== undefined
+      ? inputTokens + cachedInputTokens + cacheWriteTokens + outputTokens
+      : undefined;
+  const complete =
+    categorySum !== undefined &&
+    !orchestrated &&
+    (reasoningTokens === undefined ||
+      (outputTokens !== undefined && reasoningTokens <= outputTokens)) &&
+    (sourceTotal === undefined || sourceTotal === categorySum);
+  const totalTokens = complete ? categorySum : sourceTotal;
+
+  const { provider, model } = extractProviderAndModel(
+    rawUsage,
+    rawPayload,
+    OMP_PROVIDER,
+    fallbackModel,
+  );
+  const usage: ProviderReportedUsage = {
+    provider,
+    accountingVersion: extractAccountingVersion(rawUsage, rawPayload),
+    availability: complete ? "complete" : "partial",
+    usageScope: "request",
+    requestId,
+    costProvenance,
+  };
+  if (model) usage.model = model;
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  if (cachedInputTokens !== undefined) usage.cachedInputTokens = cachedInputTokens;
+  if (cacheWriteTokens !== undefined) usage.cacheWriteTokens = cacheWriteTokens;
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+  if (reasoningTokens !== undefined) usage.reasoningTokens = reasoningTokens;
+  if (totalTokens !== undefined) usage.totalTokens = totalTokens;
+  if (costMicroUsd !== undefined) usage.costMicroUsd = costMicroUsd;
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+
+  const parsed = ProviderReportedUsageSchema.safeParse(usage);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * The source's own id of a genuine user prompt, or undefined for a prompt without one. A user-role
+ * record carrying only tool results is not a prompt: `null`.
+ */
+function ompPromptTaskId(obj: OmpTranscriptPayload): string | undefined | null {
+  const parts = asArray(obj.content) ?? asArray(obj.parts);
+  const toolResultsOnly =
+    parts !== undefined &&
+    parts.length > 0 &&
+    parts.every((part) => {
+      const type = asString(asObject(part)?.type)?.toLowerCase();
+      return type === "tool_result" || type === "toolresult";
+    });
+  if (toolResultsOnly) return null;
+  const parsed = ResinTaskIdSchema.safeParse(asString(obj.id));
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * The Resin invocations a Resin tool result reports. OMP keeps the MCP server's own content parts
+ * and `_meta` in the result's `details` (under `details.xdev.inner` through the device surface)
+ * beside display content that joins the text parts; without them the recorded content is read.
+ */
+function recordedResinInvocationReceipts(
+  toolResultObj: OmpTranscriptPayload,
+): ResinInvocationReceipt[] {
+  const details = asObject(toolResultObj.details);
+  const mcpDetails = asObject(asObject(details?.xdev)?.inner) ?? details;
+  const rawContent = asArray(mcpDetails?.rawContent);
+  if (rawContent !== undefined) {
+    const meta = asObject(mcpDetails?.mcpMeta);
+    return readResinInvocationReceipts(
+      meta === undefined ? { content: rawContent } : { content: rawContent, _meta: meta },
+    );
+  }
+  return readResinInvocationReceipts(
+    toolResultObj.result ?? toolResultObj.output ?? toolResultObj.content,
+  );
+}
+
+/** Whether `details` is OMP's record of a `resin` MCP server result (pi-coding-agent MCPToolDetails). */
+function isRecordedResinMcpDetails(details: OmpTranscriptPayload | undefined): boolean {
+  return (
+    details !== undefined &&
+    asString(details.serverName) === "resin" &&
+    asString(details.mcpToolName) !== undefined &&
+    asArray(details.rawContent) !== undefined
+  );
+}
+
+/**
+ * Whether OMP's own transport record proves a tool result came from the `resin` MCP server,
+ * independent of the configuration read at capture time (which can change between a session and its
+ * capture). OMP records `details = {serverName, mcpToolName, rawContent, mcpMeta}` on a direct MCP
+ * tool named `mcp__resin_<tool>`, and the same under `details.xdev.inner` on a device-surface `write`
+ * whose `details.xdev` executed `xd://mcp__resin_<tool>`. Each name must agree with the recorded tool,
+ * so neither tool output nor a record's copied metadata can supply this proof.
+ */
+function isRecordedResinMcpResult(toolResultObj: OmpTranscriptPayload): boolean {
+  const recordedToolName = asString(toolResultObj.toolName);
+  const details = asObject(toolResultObj.details);
+  if (recordedToolName === undefined || details === undefined) return false;
+  if (isRecordedResinMcpDetails(details)) {
+    return recordedToolName === ompMcpToolName("resin", String(details.mcpToolName));
+  }
+  const xdev = asObject(details.xdev);
+  const inner = asObject(xdev?.inner);
+  return (
+    recordedToolName === OMP_DEVICE_SURFACE_WRITE_TOOL &&
+    asString(xdev?.mode) === "execute" &&
+    isRecordedResinMcpDetails(inner) &&
+    asString(xdev?.tool) === ompMcpToolName("resin", String(inner?.mcpToolName))
+  );
+}
+
+/**
+ * The usage OMP reports in a `task` result for the subagents it ran (`details.usage`, OMP's own
+ * `Usage`). It is kept as evidence of usage counted in the subagents' own sessions, never as a
+ * request of this session. Values OMP did not report stay absent.
+ */
+function ompDelegatedModelUsage(details: OmpTranscriptPayload | undefined): RequestLinkMetadata {
+  const usage = asObject(details?.usage);
+  if (usage === undefined) return {};
+  const costUsd = parseCostUsd(asObject(usage.cost)?.total);
+  const costMicroUsd = costUsd === undefined ? undefined : Math.round(costUsd * 1_000_000);
+  const candidate = {
+    version: DELEGATED_MODEL_USAGE_VERSION,
+    inputTokens: parseNonNegativeInt(usage.input),
+    cachedInputTokens: parseNonNegativeInt(usage.cacheRead),
+    cacheWriteTokens: parseNonNegativeInt(usage.cacheWrite),
+    outputTokens: parseNonNegativeInt(usage.output),
+    reasoningTokens: parseNonNegativeInt(usage.reasoningTokens),
+    totalTokens: parseNonNegativeInt(usage.totalTokens),
+    costMicroUsd,
+    costProvenance: costMicroUsd === undefined ? undefined : ("harness_estimate" as const),
+  };
+  const reported = Object.fromEntries(
+    Object.entries(candidate).filter(([, value]) => value !== undefined),
+  );
+  if (Object.keys(reported).length === 1) return {};
+  const parsed = DelegatedModelUsageSchema.safeParse(reported);
+  return parsed.success ? { [RESIN_DELEGATED_MODEL_USAGE_METADATA_KEY]: parsed.data } : {};
+}
+
 /**
  * Bounded session-scoped cache that maps (sessionId, callId) -> value without
  * key concatenation or prefix ambiguity, with global capacity bounding and FIFO eviction.
@@ -880,6 +1154,14 @@ class BoundedSessionCallMap<T> {
     }
     this.entryCount -= calls.size;
     this.sessions.delete(sessionId);
+  }
+
+  /** A session's entries, oldest first. */
+  entries(sessionId: string): Array<[string, T]> {
+    return [...(this.sessions.get(sessionId)?.entries() ?? [])].map(([callId, entry]) => [
+      callId,
+      entry.value,
+    ]);
   }
 
   get size(): number {
@@ -968,9 +1250,23 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
    * reports it first; a job never seen completing leaves its call without a result, as a call
    * still running is. A relaunch under a reused job id replaces the earlier entry.
    */
-  private readonly backgroundJobs = new BoundedSessionCallMap<{ callId: string; toolName: string }>(
+  private readonly backgroundJobs = new BoundedSessionCallMap<{
+    callId: string;
+    toolName: string;
+    modelRequestId: string | undefined;
+  }>(OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES);
+  /**
+   * The model request that issued each assistant-embedded call, keyed by raw call id, so the call's
+   * result carries it. Kept until the session ends, as a result may be recorded more than once.
+   */
+  private readonly callModelRequests = new BoundedSessionCallMap<string>(
     OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
   );
+  /** The id of each session's latest user prompt, under {@link CURRENT_TASK_KEY}. */
+  private readonly sessionTasks = new BoundedSessionCallMap<string>(
+    OmpRecordDecoder.MAX_CALL_CACHE_ENTRIES,
+  );
+  private static readonly CURRENT_TASK_KEY = "currentTask";
   private readonly deviceSurfaceServers?: () => readonly string[];
 
   constructor(options: OmpRecordDecoderOptions = {}) {
@@ -1020,6 +1316,54 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.harnessInternalReads.clearSession(sessionId);
     this.heldJobJoinCalls.clearSession(sessionId);
     this.backgroundJobs.clearSession(sessionId);
+    this.callModelRequests.clearSession(sessionId);
+    this.sessionTasks.clearSession(sessionId);
+  }
+
+  /**
+   * The links and call state this decoder holds for a session's calls whose result is not among
+   * `answeredCallIds`: the current task, each call's issuing request, which record announced it,
+   * the tool name it was recorded under and its device-surface identity. Most recent entries only.
+   */
+  requestLinkResume(sessionId: string, answeredCallIds: ReadonlySet<string>): OmpRequestLinkResume {
+    const unanswered = <T>(entries: Array<[string, T]>): Array<[string, T]> =>
+      entries
+        .filter(([callId]) => !answeredCallIds.has(normalizeCallId(callId, callId)))
+        .slice(-MAX_RESUMED_CALL_LINKS);
+    const taskId = this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY);
+    const resume: OmpRequestLinkResume = {
+      version: 1,
+      calls: unanswered(this.callModelRequests.entries(sessionId)),
+      announced: unanswered(this.announcedToolCalls.entries(sessionId)),
+      names: unanswered(this.callToolNames.entries(sessionId)),
+      surfaces: unanswered(this.deviceSurfaceResultCalls.entries(sessionId)).map(
+        ([callId, identity]) => [callId, { connection: identity.connection, tool: identity.tool }],
+      ),
+    };
+    if (taskId !== undefined) resume.taskId = taskId;
+    return resume;
+  }
+
+  /**
+   * Installs state a resumed source recovered from the prefix it skipped, without replacing any this
+   * decoder already holds: a decoder that read the prefix itself knows at least as much.
+   */
+  private resumeRequestLinks(sessionId: string, resume: OmpRequestLinkResume): void {
+    if (
+      resume.taskId !== undefined &&
+      this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY) === undefined
+    ) {
+      this.sessionTasks.set(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY, resume.taskId);
+    }
+    const install = <T>(map: BoundedSessionCallMap<T>, entries: Array<[string, T]>): void => {
+      for (const [callId, value] of entries) {
+        if (map.get(sessionId, callId) === undefined) map.set(sessionId, callId, value);
+      }
+    };
+    install(this.callModelRequests, resume.calls);
+    install(this.announcedToolCalls, resume.announced);
+    install(this.callToolNames, resume.names);
+    install(this.deviceSurfaceResultCalls, resume.surfaces);
   }
 
   /**
@@ -1103,14 +1447,19 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       const launch = this.backgroundJobs.getAndClear(sessionId, completion.jobId);
       if (launch === undefined) continue;
       const exitedZero = completion.statusStated && !completion.failed;
+      // The result belongs to the launching call, so it carries that call's model request.
+      const launchMetadata =
+        launch.modelRequestId === undefined
+          ? unproven
+          : { ...unproven, [RESIN_MODEL_REQUEST_ID_METADATA_KEY]: launch.modelRequestId };
       joined.push({
         sessionId,
         timestamp,
         schemaVersion: "1.0.0",
         causalRef: { ...causalRef, stepIndex: firstStep + joined.length },
         metadata: exitedZero
-          ? { ...unproven, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
-          : { ...unproven },
+          ? { ...launchMetadata, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
+          : { ...launchMetadata },
         type: "tool_result",
         toolName: launch.toolName,
         callId: launch.callId,
@@ -1442,6 +1791,16 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     // Only the decoder's own argument cache may create this private handoff.
     delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
     delete metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
+    for (const key of REQUEST_LINK_METADATA_KEYS) delete metadata[key];
+    // A source resumed mid-file hands over the request links of the prefix it skipped.
+    const resume = OmpRequestLinkResumeSchema.safeParse(
+      metadata[RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY],
+    );
+    delete metadata[RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY];
+    if (resume.success) this.resumeRequestLinks(sessionId, resume.data);
+    // Every event belongs to the task of the session's latest prompt; a prompt replaces it below.
+    const taskId = this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY);
+    if (taskId !== undefined) metadata[RESIN_TASK_ID_METADATA_KEY] = taskId;
 
     const rawRole = asString(obj.role)?.toLowerCase();
     const rawType = String(
@@ -1886,6 +2245,27 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       rawEventType: rawType || "unknown",
       rawPayload: obj,
     };
+    // OMP's `model_usage` records a model request made outside the conversation (the auto-thinking
+    // judge, cache warming, TTSR, advisors). It stays a passthrough record but is a real request:
+    // keyed by its record id, it carries its own provider, model and usage and the purpose OMP gave
+    // it. A record OMP wrote without a usable purpose is still auxiliary.
+    if (rawType === "model_usage") {
+      const requestId = ProviderUsageRequestIdSchema.safeParse(asString(obj.id));
+      if (requestId.success) {
+        const purpose = ResinModelRequestPurposeSchema.safeParse(asString(obj.purpose));
+        metadata[RESIN_MODEL_REQUEST_ID_METADATA_KEY] = requestId.data;
+        metadata[RESIN_MODEL_REQUEST_PURPOSE_METADATA_KEY] = purpose.success
+          ? purpose.data
+          : "auxiliary";
+        const rawUsage = asObject(obj.usage);
+        const usage =
+          rawUsage === undefined
+            ? undefined
+            : buildOmpRequestUsage(rawUsage, obj, requestId.data, asString(obj.model));
+        if (usage !== undefined) fallback.providerUsage = usage;
+      }
+      return fallback;
+    }
     // An auto-delivered background-job notice is also the result of each held bash launch it
     // reports finished; the notice itself passes through as it did.
     if (customType === OMP_ASYNC_RESULT_CUSTOM_TYPE) {
@@ -1921,6 +2301,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     obj: OmpTranscriptPayload,
     recordMetadata?: OmpTranscriptPayload,
     fallbackModel?: string,
+    requestId?: string,
   ): ProviderReportedUsage | undefined {
     const rawUsage = findRawUsage(obj, asObject(recordMetadata));
     if (!rawUsage) {
@@ -1928,6 +2309,15 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         return buildProviderUsage({}, obj, OMP_PROVIDER, fallbackModel, OMP_ACCOUNTING_VERSION);
       }
       return undefined;
+    }
+    // A model response's own OMP `Usage` measures exactly that request; any other shape keeps the
+    // legacy record, whose categories' meaning the source did not state.
+    if (
+      requestId !== undefined &&
+      rawUsage !== obj &&
+      ["input", "output", "cacheRead", "cacheWrite"].some((key) => rawUsage[key] !== undefined)
+    ) {
+      return buildOmpRequestUsage(rawUsage, obj, requestId, fallbackModel);
     }
     return buildProviderUsage(rawUsage, obj, OMP_PROVIDER, fallbackModel, OMP_ACCOUNTING_VERSION);
   }
@@ -2024,6 +2414,25 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     if (embeddedCalls) {
       this.cacheAssistantToolCalls(embeddedCalls, sessionId);
     }
+    // Every event of one assistant response, its calls' results included, names its request.
+    const modelRequestId = role === "assistant" ? ompModelRequestId(obj) : undefined;
+    if (modelRequestId !== undefined) {
+      metadata[RESIN_MODEL_REQUEST_ID_METADATA_KEY] = modelRequestId;
+      for (const call of embeddedCalls ?? []) {
+        this.callModelRequests.set(sessionId, call.rawCallId, modelRequestId);
+      }
+    }
+    // A genuine prompt starts a new task; one without an id leaves the task unknown.
+    const promptTaskId = role === "user" ? ompPromptTaskId(obj) : null;
+    if (promptTaskId !== null) {
+      if (promptTaskId === undefined) {
+        this.sessionTasks.getAndClear(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY);
+        delete metadata[RESIN_TASK_ID_METADATA_KEY];
+      } else {
+        this.sessionTasks.set(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY, promptTaskId);
+        metadata[RESIN_TASK_ID_METADATA_KEY] = promptTaskId;
+      }
+    }
 
     let content = "";
     let contentParts: MessageContentPart[] | undefined;
@@ -2055,7 +2464,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
 
     const model = asString(obj.model) ?? asString(obj.modelId) ?? asString(obj.model_id);
     const stopReason = asString(obj.stopReason) ?? asString(obj.stop_reason);
-    const providerUsage = this.extractProviderUsage(obj, metadata, model);
+    const providerUsage = this.extractProviderUsage(obj, metadata, model, modelRequestId);
     if (stopReason) {
       metadata.stopReason = stopReason;
     }
@@ -2110,7 +2519,13 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       asNumber(obj.tokenCount) ?? asNumber(obj.token_count) ?? asNumber(obj.tokens);
     const durationMs = asNumber(obj.durationMs) ?? asNumber(obj.duration_ms);
 
-    const providerUsage = this.extractProviderUsage(obj, metadata, model);
+    // Reasoning recorded as an assistant response belongs to that response's request.
+    const modelRequestId =
+      asString(obj.role)?.toLowerCase() === "assistant" ? ompModelRequestId(obj) : undefined;
+    if (modelRequestId !== undefined) {
+      metadata[RESIN_MODEL_REQUEST_ID_METADATA_KEY] = modelRequestId;
+    }
+    const providerUsage = this.extractProviderUsage(obj, metadata, model, modelRequestId);
 
     const evt: IntermediateModelReasoningEvent = {
       sessionId,
@@ -2394,9 +2809,30 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       toolName === "eval" && lateName === "eval" ? boundedNativeArguments(lateArgs) : undefined;
     // Only the decoder proves a completed run; a key a record carried itself is dropped.
     const { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: _forged, ...unproven } = metadata;
+    // A result names the request that issued its call, when the decoder saw that request.
+    const modelRequestId = this.callModelRequests.get(sessionId, rawCallId ?? callId);
+    const linked: OmpTranscriptPayload =
+      modelRequestId === undefined
+        ? unproven
+        : { ...unproven, [RESIN_MODEL_REQUEST_ID_METADATA_KEY]: modelRequestId };
+    // Only a Resin gateway call's result is read for the Resin invocations it ran: one the configured
+    // servers resolve to `resin`, or one whose own recorded MCP transport names the `resin` server.
+    const receipts =
+      isResinGatewayToolCall(toolName, (resultSurface ?? pendingSurface)?.connection) ||
+      isRecordedResinMcpResult(toolResultObj)
+        ? resinInvocationReceiptMetadata(recordedResinInvocationReceipts(toolResultObj))
+        : {};
+    // A subagent task's own requests are counted in the subagents' sessions; its reported
+    // aggregate stays on the result as evidence only.
+    const delegated = toolName === "task" ? ompDelegatedModelUsage(details) : {};
     const resultMetadata = completedBash
-      ? { ...unproven, [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed" }
-      : unproven;
+      ? {
+          ...linked,
+          ...receipts,
+          ...delegated,
+          [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "omp-bash-completed",
+        }
+      : { ...linked, ...receipts, ...delegated };
     const eventMetadata =
       nativeArguments === undefined
         ? resultMetadata
@@ -2439,7 +2875,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
               timestamp,
               schemaVersion: "1.0.0",
               causalRef,
-              metadata: eventMetadata,
+              metadata: linked,
               type: "tool_call",
               toolName: OMP_DEVICE_SURFACE_WRITE_TOOL,
               callId,
@@ -2457,8 +2893,8 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
               causalRef,
               metadata:
                 heldCall.intent !== undefined && unproven.intent === undefined
-                  ? { ...unproven, intent: heldCall.intent }
-                  : unproven,
+                  ? { ...linked, intent: heldCall.intent }
+                  : linked,
               type: "tool_call",
               toolName,
               callId,
@@ -2498,7 +2934,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       ? undefined
       : ompBackgroundLaunchJobId(toolName, details, isError);
     if (launchedJobId !== undefined) {
-      this.backgroundJobs.set(sessionId, launchedJobId, { callId, toolName });
+      this.backgroundJobs.set(sessionId, launchedJobId, { callId, toolName, modelRequestId });
     }
     const call = lateCall ?? joinCall;
     const own: IntermediateSessionEvent[] = [
@@ -2872,5 +3308,51 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       evt.providerUsage = providerUsage;
     }
     return evt;
+  }
+}
+
+/**
+ * Recovers the request links and call state a transcript prefix leaves, for a source resuming
+ * mid-file with a new decoder. The prefix is decoded once by a throwaway decoder, configured like the
+ * live one and whose events are discarded, so the task, call links and announcements follow exactly
+ * the rules of a decoder that read the whole file, and nothing is emitted, counted or uploaded twice.
+ */
+export class OmpRequestLinkPrimer {
+  private readonly decoder: OmpRecordDecoder;
+  private readonly answeredCallIds = new Set<string>();
+  private sequence = 0;
+
+  constructor(
+    private readonly sessionId: string,
+    options: OmpRecordDecoderOptions = {},
+  ) {
+    this.decoder = new OmpRecordDecoder(options);
+  }
+
+  /** Decodes one prefix record (a parsed transcript line) for its links only. */
+  observe(payload: unknown): void {
+    this.sequence += 1;
+    // No record timestamp: the decoder then takes the payload's own, as the source would.
+    const decoded = this.decoder.decode({
+      recordId: `${this.sessionId}-prime-${this.sequence}`,
+      sessionId: this.sessionId,
+      harnessId: "omp",
+      sequenceNumber: this.sequence,
+      timestamp: "",
+      recordType: "transcript_line",
+      rawPayload: payload,
+      cursor: { offset: 0, line: this.sequence, sequence: this.sequence, timestamp: "" },
+      metadata: {},
+    });
+    for (const event of decoded === null ? [] : Array.isArray(decoded) ? decoded : [decoded]) {
+      if (event.type === "tool_result" && event.callId !== undefined) {
+        this.answeredCallIds.add(event.callId);
+      }
+    }
+  }
+
+  /** The links to hand to the decoder that continues after the prefix. */
+  snapshot(): OmpRequestLinkResume {
+    return this.decoder.requestLinkResume(this.sessionId, this.answeredCallIds);
   }
 }

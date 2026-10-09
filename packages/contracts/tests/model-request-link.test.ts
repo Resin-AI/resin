@@ -123,6 +123,29 @@ describe("request link metadata", () => {
     ).toEqual({});
   });
 
+  it("keeps standalone benchmark classification without inventing task or invocation links", () => {
+    expect(readRequestLinkMetadata({ benchmarkId: "goalC:first-1" })).toEqual({
+      benchmarkId: "goalC:first-1",
+    });
+    expect(
+      readRequestLinkMetadata({
+        benchmarkId: "bench-1",
+        resinInvocationId: FIRST,
+        resinInvocationIds: [FIRST, SECOND],
+      }),
+    ).toEqual({ benchmarkId: "bench-1" });
+    expect(
+      readRequestLinkMetadata({ benchmarkId: "bench-1", resinInvocationId: "inv_bad" }),
+    ).toEqual({ benchmarkId: "bench-1" });
+  });
+
+  it.each(["", "-bad", "two words", "a".repeat(65), "/private/path", 123, null])(
+    "drops an invalid standalone benchmark marker %s",
+    (benchmarkId) => {
+      expect(readRequestLinkMetadata({ benchmarkId })).toEqual({});
+    },
+  );
+
   it("keeps an auxiliary request purpose and delegated usage evidence only when valid", () => {
     const delegated = {
       version: 1,
