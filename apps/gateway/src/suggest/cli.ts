@@ -1,19 +1,27 @@
 /**
  * `resin suggest`: the harness hook entry for command-time suggestions, and the user switch.
  *
- *   resin suggest --harness claude-code   Claude Code PreToolUse hook (payload on stdin)
- *   resin suggest --harness omp           Resin's OMP extension (request on stdin)
+ *   resin suggest --harness claude-code            Claude Code PreToolUse hook (payload on stdin)
+ *   resin suggest --harness omp                    Resin's OMP extension (request on stdin)
+ *   resin suggest --prompt --harness claude-code   Claude Code UserPromptSubmit hook
+ *   resin suggest --prompt --harness omp           the OMP extension's before_agent_start handler
  *   resin suggest --disable | --enable    turn suggestions off or back on
  *   resin suggest --status                print whether suggestions are on
  *
  * Packaged launchers run this module directly, without loading the rest of the CLI, so a hook
  * adds tens of milliseconds to a command, not the CLI's start-up time. In hook mode it always
  * exits 0 and prints nothing unless it has a suggestion: Claude Code treats exit code 2 as a
- * block, and a suggestion must never stop or change a command.
+ * block, and a suggestion must never stop or change a command or a prompt.
  */
 import { withResolvers } from "../utils/deferred.js";
 import { countSuggestionShown } from "./funnel.js";
-import { parseHookInput, renderHookOutput } from "./hook-io.js";
+import {
+  parseHookInput,
+  parsePromptInput,
+  renderHookOutput,
+  renderPromptOutput,
+} from "./hook-io.js";
+import { suggestForPrompt } from "./prompt.js";
 import { isSuggestHarness } from "./render.js";
 import {
   type SuggestOptions,
@@ -41,6 +49,10 @@ const DEFAULT_STDIN_TIMEOUT_MS = 2_000;
 const USAGE = `Usage:
   resin suggest --harness <claude-code|omp>   Read a pending shell command on stdin and print a
                                               learned-tool suggestion (used by harness hooks)
+  resin suggest --prompt --harness <claude-code|omp>
+                                              Read a submitted prompt on stdin and print this
+                                              repository's learned tools, relevant ones first
+                                              (used by harness hooks; the prompt stays local)
   resin suggest --disable                     Turn command-time suggestions off
   resin suggest --enable                      Turn them back on
   resin suggest --status                      Show whether they are on
@@ -134,6 +146,19 @@ export async function runSuggestCli(
       io.stdin ?? process.stdin,
       io.stdinTimeoutMs ?? DEFAULT_STDIN_TIMEOUT_MS,
     );
+    if (argv.includes("--prompt")) {
+      const request = text === undefined ? undefined : parsePromptInput(harness, text);
+      const block = request === undefined ? undefined : suggestForPrompt(request, options);
+      if (block !== undefined) {
+        stdout.write(renderPromptOutput(harness, block.text));
+        countSuggestionShown({
+          harness,
+          kind: "prompt",
+          ...(options.resinHome === undefined ? {} : { resinHome: options.resinHome }),
+        });
+      }
+      return 0;
+    }
     const request = text === undefined ? undefined : parseHookInput(harness, text);
     const suggestion = request === undefined ? undefined : suggestForCommand(request, options);
     if (suggestion !== undefined) {
@@ -144,7 +169,7 @@ export async function runSuggestCli(
       });
     }
   } catch {
-    // A hook never fails the command it observes.
+    // A hook never fails the command or prompt it observes.
   }
   return 0;
 }

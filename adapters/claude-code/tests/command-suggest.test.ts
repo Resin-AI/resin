@@ -51,7 +51,7 @@ describe("Claude Code command-suggest hook installer", () => {
     expect(claudeCodeInstallHarness.installExtensions).toContain(claudeCommandSuggestExtension);
   });
 
-  it("creates settings with one PreToolUse Bash hook running resin suggest", async () => {
+  it("creates settings with one PreToolUse Bash hook and one UserPromptSubmit hook", async () => {
     const { home, env, settingsPath } = tempHome();
     const [result] = await installClaudeCommandSuggest({ home, env, fsBridge });
     expect(result).toEqual({ path: settingsPath, action: "created" });
@@ -65,6 +65,17 @@ describe("Claude Code command-suggest hook installer", () => {
               {
                 type: "command",
                 command: `'${path.join(home, ".resin", "bin", "resin")}' suggest --harness claude-code`,
+                timeout: 5,
+              },
+            ],
+          },
+        ],
+        UserPromptSubmit: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: `'${path.join(home, ".resin", "bin", "resin")}' suggest --prompt --harness claude-code`,
                 timeout: 5,
               },
             ],
@@ -159,11 +170,71 @@ describe("Claude Code command-suggest hook installer", () => {
         ],
       },
     };
-    const next = editClaudeSettingsDocument(doc, current, true);
+    const next = editClaudeSettingsDocument(
+      doc,
+      { command: current, prompt: current.replace("suggest", "suggest --prompt") },
+      true,
+    );
     expect(next.hooks?.PreToolUse).toEqual([
       { matcher: "Bash", hooks: [{ type: "command", command: "keep-me" }] },
       { matcher: "Bash", hooks: [{ type: "command", command: current, timeout: 5 }] },
     ]);
+  });
+
+  it("adds the prompt hook to an install that predates it, keeping the user's prompt hooks", async () => {
+    const { home, env, settingsPath } = tempHome();
+    const resin = `'${path.join(home, ".resin", "bin", "resin")}'`;
+    const older = {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              { type: "command", command: `${resin} suggest --harness claude-code`, timeout: 5 },
+            ],
+          },
+        ],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "/usr/local/bin/log-prompt" }] }],
+      },
+    };
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(older));
+    // Harness health repairs what verify reports as stale.
+    expect(await verifyClaudeCommandSuggest({ home, env, fsBridge })).toBe(false);
+    expect((await installClaudeCommandSuggest({ home, env, fsBridge }))[0]?.action).toBe("updated");
+    expect(backups(settingsPath)).toHaveLength(1);
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    expect(settings.hooks.PreToolUse).toEqual(older.hooks.PreToolUse);
+    expect(settings.hooks.UserPromptSubmit).toEqual([
+      { hooks: [{ type: "command", command: "/usr/local/bin/log-prompt" }] },
+      {
+        hooks: [
+          {
+            type: "command",
+            command: `${resin} suggest --prompt --harness claude-code`,
+            timeout: 5,
+          },
+        ],
+      },
+    ]);
+    expect(await verifyClaudeCommandSuggest({ home, env, fsBridge })).toBe(true);
+    expect((await installClaudeCommandSuggest({ home, env, fsBridge }))[0]?.action).toBe(
+      "unchanged",
+    );
+
+    // A duplicated prompt hook is not verified, and reinstalling leaves one.
+    settings.hooks.UserPromptSubmit.push(settings.hooks.UserPromptSubmit[1]);
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+    expect(await verifyClaudeCommandSuggest({ home, env, fsBridge })).toBe(false);
+    await installClaudeCommandSuggest({ home, env, fsBridge });
+    expect(await verifyClaudeCommandSuggest({ home, env, fsBridge })).toBe(true);
+
+    await uninstallClaudeCommandSuggest({ home, env, fsBridge });
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "/usr/local/bin/log-prompt" }] }],
+      },
+    });
   });
 
   it("refuses to rewrite settings it cannot parse", async () => {

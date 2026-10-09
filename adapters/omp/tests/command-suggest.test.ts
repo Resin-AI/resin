@@ -7,6 +7,7 @@ import { NodeConfigFsBridge } from "@resin/harness-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OMP_COMMAND_SUGGEST_EXTENSION_MARKER,
+  OMP_PROMPT_SUGGEST_MESSAGE_TYPE,
   installOmpCommandSuggest,
   ompCommandSuggestExtension,
   resolveOmpCommandSuggestExtensionPath,
@@ -53,6 +54,7 @@ describe("OMP command-suggest extension installer", () => {
     expect(content.startsWith(OMP_COMMAND_SUGGEST_EXTENSION_MARKER)).toBe(true);
     expect(content).toContain(JSON.stringify(path.join(home, ".resin", "bin", "resin")));
     expect(content).toContain('["suggest","--harness","omp"]');
+    expect(content).toContain('pi.on("before_agent_start"');
     expect(await verifyOmpCommandSuggest({ home, env, fsBridge })).toBe(true);
 
     expect((await installOmpCommandSuggest({ home, env, fsBridge }))[0]?.action).toBe("unchanged");
@@ -121,6 +123,81 @@ function git(cwd: string, ...args: string[]): void {
     },
   });
 }
+
+describe.skipIf(process.platform === "win32")(
+  "OMP extension before_agent_start (temp HOME, fake resin launcher)",
+  () => {
+    /** A `<resin home>/bin/resin` that records its arguments and stdin and answers `answer`. */
+    function fakeResin(home: string, answer: string): { resinHome: string; log: string } {
+      const resinHome = path.join(home, ".resin");
+      const log = path.join(home, "calls.log");
+      const reply = path.join(home, "reply.txt");
+      fs.mkdirSync(path.join(resinHome, "bin"), { recursive: true });
+      fs.writeFileSync(reply, `${answer}\n`);
+      fs.writeFileSync(
+        path.join(resinHome, "bin", "resin"),
+        [
+          "#!/bin/sh",
+          `echo "$*" >> '${log}'`,
+          `cat >> '${log}'`,
+          `echo >> '${log}'`,
+          `cat '${reply}'`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      return { resinHome, log };
+    }
+
+    it("asks resin suggest --prompt with the prompt, cwd and session, and returns a shown message", async () => {
+      const home = tempDir("resin-omp-prompt-");
+      const { resinHome, log } = fakeResin(
+        home,
+        JSON.stringify({ additionalContext: "Resin learned tools for this repository: …" }),
+      );
+      const env = { RESIN_HOME: resinHome };
+      await installOmpCommandSuggest({ home, env, fsBridge });
+      const handlers = await loadExtension(resolveOmpCommandSuggestExtensionPath(home, env));
+      const beforeAgentStart = handlers.get("before_agent_start");
+      expect(beforeAgentStart).toBeDefined();
+      const ctx = { cwd: home, sessionManager: { getSessionId: () => "omp-session" } };
+      const result = await beforeAgentStart?.(
+        { type: "before_agent_start", prompt: "build the plugin", systemPrompt: [] },
+        ctx,
+      );
+      expect(result).toEqual({
+        message: {
+          customType: OMP_PROMPT_SUGGEST_MESSAGE_TYPE,
+          content: "Resin learned tools for this repository: …",
+          display: true,
+        },
+      });
+      const calls = fs.readFileSync(log, "utf8");
+      expect(calls).toContain("suggest --harness omp --prompt");
+      expect(JSON.parse(calls.split("\n")[1] ?? "")).toEqual({
+        prompt: "build the plugin",
+        cwd: home,
+        sessionId: "omp-session",
+      });
+    });
+
+    it("returns nothing when resin prints nothing or garbage, or the event is malformed", async () => {
+      const home = tempDir("resin-omp-prompt-");
+      const { resinHome } = fakeResin(home, "not json");
+      const env = { RESIN_HOME: resinHome };
+      await installOmpCommandSuggest({ home, env, fsBridge });
+      const handlers = await loadExtension(resolveOmpCommandSuggestExtensionPath(home, env));
+      const beforeAgentStart = handlers.get("before_agent_start");
+      expect(
+        await beforeAgentStart?.({ type: "before_agent_start", prompt: "x" }, { cwd: home }),
+      ).toBeUndefined();
+      expect(await beforeAgentStart?.({ type: "before_agent_start" }, { cwd: home })).toBe(
+        undefined,
+      );
+      expect(await beforeAgentStart?.(null, null)).toBeUndefined();
+    });
+  },
+);
 
 /** The parts of the built `@resin/gateway/suggest` this smoke test drives. */
 interface BuiltSuggestModule {
@@ -198,9 +275,8 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(builtSuggest))(
       );
       const elapsedMs = performance.now() - started;
       expect(result).toEqual({
-        additionalContext: expect.stringMatching(
-          /^Resin: learned tool run_vitest_tests covers this command \(`vitest`\); instead of running it by hand, write \{"name":"run_vitest_tests","parameters":\{"test_file":"…"\}\} to xd:\/\/mcp__resin_invoke_tool/u,
-        ),
+        additionalContext:
+          'Resin, next time: learned tool run_vitest_tests runs `vitest`; write {"name":"run_vitest_tests","parameters":{"test_file":"…"}} to xd://mcp__resin_invoke_tool.',
       });
       expect(elapsedMs).toBeLessThan(1_000);
 
@@ -210,6 +286,27 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(builtSuggest))(
       ]) {
         expect(await toolCall?.(event, ctx)).toBeUndefined();
       }
+      // At a prompt, the repository's tools are listed once per session, before the work starts.
+      const beforeAgentStart = handlers.get("before_agent_start");
+      const first = await beforeAgentStart?.(
+        { type: "before_agent_start", prompt: "the vitest suite fails", systemPrompt: [] },
+        { cwd: repo, sessionManager: { getSessionId: () => "smoke-session" } },
+      );
+      expect(first).toEqual({
+        message: {
+          customType: OMP_PROMPT_SUGGEST_MESSAGE_TYPE,
+          content: expect.stringContaining(
+            '- {"name":"run_vitest_tests","parameters":{"test_file":"…"}}',
+          ),
+          display: true,
+        },
+      });
+      expect(
+        await beforeAgentStart?.(
+          { type: "before_agent_start", prompt: "thanks", systemPrompt: [] },
+          { cwd: repo, sessionManager: { getSessionId: () => "smoke-session" } },
+        ),
+      ).toBeUndefined();
       // Outside the repository nothing is suggested.
       expect(
         await toolCall?.(

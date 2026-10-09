@@ -5374,9 +5374,18 @@ function renderClaudeCommandSuggestCommand(launch, platform = process.platform) 
   const word = (value) => /^[A-Za-z0-9_-]+$/u.test(value) ? value : shellQuote(value, platform);
   return [shellQuote(launch.command, platform), ...launch.args.map(word)].join(" ");
 }
-function resinHookCommand(hook) {
+function promptSuggestLaunch(launch) {
+  const at = launch.args.lastIndexOf("suggest");
+  if (at < 0)
+    return { command: launch.command, args: [...launch.args, "--prompt"] };
+  return {
+    command: launch.command,
+    args: [...launch.args.slice(0, at + 1), "--prompt", ...launch.args.slice(at + 1)]
+  };
+}
+function resinHookCommand(hook, spec) {
   const parsed = HookCommandSchema.safeParse(hook);
-  return parsed.success && RESIN_SUGGEST_COMMAND.test(parsed.data.command) ? parsed.data.command : void 0;
+  return parsed.success && spec.pattern.test(parsed.data.command) ? parsed.data.command : void 0;
 }
 function parseSettings(content, filePath) {
   if (content === null || content.trim().length === 0)
@@ -5395,14 +5404,13 @@ function parseSettings(content, filePath) {
   }
   return raw;
 }
-function editClaudeSettingsDocument(doc, command, install) {
-  const hooks = { ...doc.hooks };
-  const existing = hooks[CLAUDE_COMMAND_SUGGEST_EVENT];
+function editHookEvent(hooks, spec, command, install) {
+  const existing = hooks[spec.event];
   if (existing !== void 0 && !Array.isArray(existing)) {
     if (install) {
-      throw new Error(`Claude Code settings hooks.${CLAUDE_COMMAND_SUGGEST_EVENT} is not a list; refusing to rewrite it`);
+      throw new Error(`Claude Code settings hooks.${spec.event} is not a list; refusing to rewrite it`);
     }
-    return doc;
+    return;
   }
   const groups = [];
   for (const group of existing ?? []) {
@@ -5411,7 +5419,7 @@ function editClaudeSettingsDocument(doc, command, install) {
       groups.push(group);
       continue;
     }
-    const kept = parsed.data.hooks.filter((hook) => resinHookCommand(hook) === void 0);
+    const kept = parsed.data.hooks.filter((hook) => resinHookCommand(hook, spec) === void 0);
     if (kept.length === parsed.data.hooks.length)
       groups.push(group);
     else if (kept.length > 0)
@@ -5419,21 +5427,30 @@ function editClaudeSettingsDocument(doc, command, install) {
   }
   if (install) {
     groups.push({
-      matcher: CLAUDE_COMMAND_SUGGEST_MATCHER,
+      ...spec.matcher === void 0 ? {} : { matcher: spec.matcher },
       hooks: [{ type: "command", command, timeout: CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS }]
     });
   }
   if (groups.length > 0)
-    hooks[CLAUDE_COMMAND_SUGGEST_EVENT] = groups;
+    hooks[spec.event] = groups;
   else
-    delete hooks[CLAUDE_COMMAND_SUGGEST_EVENT];
+    delete hooks[spec.event];
+}
+function editClaudeSettingsDocument(doc, commands, install) {
+  const hooks = { ...doc.hooks };
+  editHookEvent(hooks, COMMAND_HOOK, commands.command, install);
+  editHookEvent(hooks, PROMPT_HOOK, commands.prompt, install);
   const next = { ...doc, hooks };
   if (Object.keys(hooks).length === 0)
     delete next.hooks;
   return next;
 }
-function expectedCommand(context) {
-  return renderClaudeCommandSuggestCommand(resolveResinSuggestLaunch(context.home, context.env, "claude-code"));
+function expectedCommands(context) {
+  const launch = resolveResinSuggestLaunch(context.home, context.env, "claude-code");
+  return {
+    command: renderClaudeCommandSuggestCommand(launch),
+    prompt: renderClaudeCommandSuggestCommand(promptSuggestLaunch(launch))
+  };
 }
 function claudeSettingsBackupPath(settingsPath, now = Date.now()) {
   return `${settingsPath}.resin-backup.${now}.bak`;
@@ -5444,7 +5461,7 @@ async function syncSettings(context, install) {
   if (current === null && !install)
     return { path: settingsPath, action: "unchanged" };
   const doc = parseSettings(current, settingsPath);
-  const next = editClaudeSettingsDocument(doc, expectedCommand(context), install);
+  const next = editClaudeSettingsDocument(doc, expectedCommands(context), install);
   if (JSON.stringify(next) === JSON.stringify(doc) && current !== null) {
     return { path: settingsPath, action: "unchanged" };
   }
@@ -5473,16 +5490,8 @@ async function installClaudeCommandSuggest(context) {
 async function uninstallClaudeCommandSuggest(context) {
   return [await syncSettings(context, false)];
 }
-async function verifyClaudeCommandSuggest(context) {
-  const settingsPath = resolveClaudeSettingsPath(context.home, context.env);
-  let doc;
-  try {
-    doc = parseSettings(await context.fsBridge.readFile(settingsPath), settingsPath);
-  } catch {
-    return false;
-  }
-  const command = expectedCommand(context);
-  const groups = doc.hooks?.[CLAUDE_COMMAND_SUGGEST_EVENT];
+function hasExactlyOne(doc, spec, command) {
+  const groups = doc.hooks?.[spec.event];
   if (!Array.isArray(groups))
     return false;
   let found = 0;
@@ -5491,18 +5500,28 @@ async function verifyClaudeCommandSuggest(context) {
     if (!parsed.success)
       continue;
     for (const hook of parsed.data.hooks) {
-      const hookCommand = resinHookCommand(hook);
+      const hookCommand = resinHookCommand(hook, spec);
       if (hookCommand === void 0)
         continue;
-      if (parsed.data.matcher !== CLAUDE_COMMAND_SUGGEST_MATCHER || hookCommand !== command) {
+      if (parsed.data.matcher !== spec.matcher || hookCommand !== command)
         return false;
-      }
       found += 1;
     }
   }
   return found === 1;
 }
-var CLAUDE_COMMAND_SUGGEST_EVENT, CLAUDE_COMMAND_SUGGEST_MATCHER, CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS, RESIN_SUGGEST_COMMAND, ClaudeSettingsSchema, HookGroupSchema, HookCommandSchema, claudeCommandSuggestExtension;
+async function verifyClaudeCommandSuggest(context) {
+  const settingsPath = resolveClaudeSettingsPath(context.home, context.env);
+  let doc;
+  try {
+    doc = parseSettings(await context.fsBridge.readFile(settingsPath), settingsPath);
+  } catch {
+    return false;
+  }
+  const commands = expectedCommands(context);
+  return hasExactlyOne(doc, COMMAND_HOOK, commands.command) && hasExactlyOne(doc, PROMPT_HOOK, commands.prompt);
+}
+var CLAUDE_COMMAND_SUGGEST_EVENT, CLAUDE_COMMAND_SUGGEST_MATCHER, CLAUDE_PROMPT_SUGGEST_EVENT, CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS, RESIN_SUGGEST_COMMAND, RESIN_PROMPT_SUGGEST_COMMAND, ClaudeSettingsSchema, HookGroupSchema, HookCommandSchema, COMMAND_HOOK, PROMPT_HOOK, claudeCommandSuggestExtension;
 var init_command_suggest = __esm({
   "adapters/claude-code/dist/command-suggest.js"() {
     "use strict";
@@ -5510,11 +5529,22 @@ var init_command_suggest = __esm({
     init_zod();
     CLAUDE_COMMAND_SUGGEST_EVENT = "PreToolUse";
     CLAUDE_COMMAND_SUGGEST_MATCHER = "Bash";
+    CLAUDE_PROMPT_SUGGEST_EVENT = "UserPromptSubmit";
     CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS = 5;
     RESIN_SUGGEST_COMMAND = /resin(?:\.mjs)?['"]?\s+suggest\s+--harness\s+claude-code\s*$/u;
+    RESIN_PROMPT_SUGGEST_COMMAND = /resin(?:\.mjs)?['"]?\s+suggest\s+--prompt\s+--harness\s+claude-code\s*$/u;
     ClaudeSettingsSchema = external_exports.object({ hooks: external_exports.record(external_exports.unknown()).optional() }).passthrough();
     HookGroupSchema = external_exports.object({ matcher: external_exports.string().optional(), hooks: external_exports.array(external_exports.unknown()) }).passthrough();
     HookCommandSchema = external_exports.object({ command: external_exports.string() }).passthrough();
+    COMMAND_HOOK = {
+      event: CLAUDE_COMMAND_SUGGEST_EVENT,
+      matcher: CLAUDE_COMMAND_SUGGEST_MATCHER,
+      pattern: RESIN_SUGGEST_COMMAND
+    };
+    PROMPT_HOOK = {
+      event: CLAUDE_PROMPT_SUGGEST_EVENT,
+      pattern: RESIN_PROMPT_SUGGEST_COMMAND
+    };
     claudeCommandSuggestExtension = {
       name: "command suggestions",
       install: installClaudeCommandSuggest,
@@ -8449,10 +8479,12 @@ import * as path from "node:path";
 
 const RESIN_COMMAND: string = ${JSON.stringify(launch.command)};
 const RESIN_ARGS: string[] = ${JSON.stringify(launch.args)};
+const PROMPT_ARGS: string[] = [...RESIN_ARGS, "--prompt"];
+const MESSAGE_TYPE = ${JSON.stringify(OMP_PROMPT_SUGGEST_MESSAGE_TYPE)};
 const TIMEOUT_MS = ${OMP_COMMAND_SUGGEST_TIMEOUT_MS};
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
-function askResin(request: { command: string; cwd: string; sessionId?: string }): Promise<string | undefined> {
+function askResin(args: string[], request: object): Promise<string | undefined> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: string | undefined) => {
@@ -8463,7 +8495,7 @@ function askResin(request: { command: string; cwd: string; sessionId?: string })
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(RESIN_COMMAND, RESIN_ARGS, { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+      child = spawn(RESIN_COMMAND, args, { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     } catch {
       resolve(undefined);
       return;
@@ -8513,7 +8545,31 @@ function sessionIdOf(ctx: unknown): string | undefined {
   }
 }
 
+function cwdOf(ctx: unknown): string {
+  return ctx !== null && typeof ctx === "object" && "cwd" in ctx && typeof ctx.cwd === "string"
+    ? ctx.cwd
+    : process.cwd();
+}
+
 export default function resinCommandSuggest(pi: { on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void }): void {
+  pi.on("before_agent_start", async (event: unknown, ctx: unknown) => {
+    try {
+      if (event === null || typeof event !== "object" || !("prompt" in event)) return undefined;
+      const prompt = event.prompt;
+      if (typeof prompt !== "string") return undefined;
+      const sessionId = sessionIdOf(ctx);
+      const block = await askResin(PROMPT_ARGS, {
+        prompt,
+        cwd: cwdOf(ctx),
+        ...(sessionId === undefined ? {} : { sessionId }),
+      });
+      return block === undefined
+        ? undefined
+        : { message: { customType: MESSAGE_TYPE, content: block, display: true } };
+    } catch {
+      return undefined;
+    }
+  });
   pi.on("tool_call", async (event: unknown, ctx: unknown) => {
     try {
       if (event === null || typeof event !== "object") return undefined;
@@ -8522,14 +8578,11 @@ export default function resinCommandSuggest(pi: { on(event: string, handler: (ev
       if (input === null || typeof input !== "object" || !("command" in input)) return undefined;
       const command = input.command;
       if (typeof command !== "string" || command.trim().length === 0) return undefined;
-      const base =
-        ctx !== null && typeof ctx === "object" && "cwd" in ctx && typeof ctx.cwd === "string"
-          ? ctx.cwd
-          : process.cwd();
+      const base = cwdOf(ctx);
       const requested = "cwd" in input && typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : undefined;
       const cwd = requested === undefined ? base : path.resolve(base, requested);
       const sessionId = sessionIdOf(ctx);
-      const line = await askResin({ command, cwd, ...(sessionId === undefined ? {} : { sessionId }) });
+      const line = await askResin(RESIN_ARGS, { command, cwd, ...(sessionId === undefined ? {} : { sessionId }) });
       return line === undefined ? undefined : { additionalContext: line };
     } catch {
       return undefined;
@@ -8582,7 +8635,7 @@ async function verifyOmpCommandSuggest(context) {
   const filePath = resolveOmpCommandSuggestExtensionPath(context.home, context.env);
   return await context.fsBridge.readFile(filePath) === expectedExtension(context);
 }
-var OMP_COMMAND_SUGGEST_EXTENSION_FILENAME, OMP_COMMAND_SUGGEST_EXTENSION_MARKER, OMP_COMMAND_SUGGEST_TIMEOUT_MS, ompCommandSuggestExtension;
+var OMP_COMMAND_SUGGEST_EXTENSION_FILENAME, OMP_COMMAND_SUGGEST_EXTENSION_MARKER, OMP_COMMAND_SUGGEST_TIMEOUT_MS, OMP_PROMPT_SUGGEST_MESSAGE_TYPE, ompCommandSuggestExtension;
 var init_command_suggest2 = __esm({
   "adapters/omp/dist/command-suggest.js"() {
     "use strict";
@@ -8591,6 +8644,7 @@ var init_command_suggest2 = __esm({
     OMP_COMMAND_SUGGEST_EXTENSION_FILENAME = "resin-command-suggest.ts";
     OMP_COMMAND_SUGGEST_EXTENSION_MARKER = "// @resin-managed-omp-extension command-suggest";
     OMP_COMMAND_SUGGEST_TIMEOUT_MS = 1e3;
+    OMP_PROMPT_SUGGEST_MESSAGE_TYPE = "resin-learned-tools";
     ompCommandSuggestExtension = {
       name: "command suggestions",
       install: installOmpCommandSuggest,

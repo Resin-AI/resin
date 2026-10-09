@@ -9,9 +9,11 @@ import {
 } from "@resin/harness-contracts";
 import { z } from "zod";
 
-/** Claude Code's hook event Resin registers for, and the tool it matches. */
+/** Claude Code's hook event Resin registers for command-time suggestions, and the tool it matches. */
 export const CLAUDE_COMMAND_SUGGEST_EVENT = "PreToolUse";
 export const CLAUDE_COMMAND_SUGGEST_MATCHER = "Bash";
+/** Claude Code's hook event Resin registers for prompt-time suggestions (it takes no matcher). */
+export const CLAUDE_PROMPT_SUGGEST_EVENT = "UserPromptSubmit";
 /** Seconds Claude Code waits for the hook; `resin suggest` answers in well under one. */
 export const CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS = 5;
 
@@ -38,11 +40,24 @@ export function renderClaudeCommandSuggestCommand(
   return [shellQuote(launch.command, platform), ...launch.args.map(word)].join(" ");
 }
 
+/** `launch` (`… suggest --harness claude-code`) in prompt mode: `… suggest --prompt --harness …`. */
+export function promptSuggestLaunch(launch: ResinMcpLaunch): ResinMcpLaunch {
+  const at = launch.args.lastIndexOf("suggest");
+  if (at < 0) return { command: launch.command, args: [...launch.args, "--prompt"] };
+  return {
+    command: launch.command,
+    args: [...launch.args.slice(0, at + 1), "--prompt", ...launch.args.slice(at + 1)],
+  };
+}
+
 /**
  * Resin's hook commands, whichever Resin home or launcher they name: a `resin`/`resin.mjs` entry
- * run as `suggest --harness claude-code`.
+ * run as `suggest --harness claude-code` (command time) or `suggest --prompt --harness
+ * claude-code` (prompt time).
  */
 const RESIN_SUGGEST_COMMAND = /resin(?:\.mjs)?['"]?\s+suggest\s+--harness\s+claude-code\s*$/u;
+const RESIN_PROMPT_SUGGEST_COMMAND =
+  /resin(?:\.mjs)?['"]?\s+suggest\s+--prompt\s+--harness\s+claude-code\s*$/u;
 
 /** User settings: only `hooks` is read; every other key is carried through unchanged. */
 const ClaudeSettingsSchema = z.object({ hooks: z.record(z.unknown()).optional() }).passthrough();
@@ -54,12 +69,35 @@ const HookGroupSchema = z
 type HookGroup = z.infer<typeof HookGroupSchema>;
 const HookCommandSchema = z.object({ command: z.string() }).passthrough();
 
-/** The hook's command when it is one of Resin's suggestion hooks. */
-function resinHookCommand(hook: unknown): string | undefined {
+/** One hook Resin registers: the event, its matcher (if any), and how Resin's command looks. */
+interface ResinHookSpec {
+  readonly event: string;
+  readonly matcher?: string;
+  readonly pattern: RegExp;
+}
+
+const COMMAND_HOOK: ResinHookSpec = {
+  event: CLAUDE_COMMAND_SUGGEST_EVENT,
+  matcher: CLAUDE_COMMAND_SUGGEST_MATCHER,
+  pattern: RESIN_SUGGEST_COMMAND,
+};
+const PROMPT_HOOK: ResinHookSpec = {
+  event: CLAUDE_PROMPT_SUGGEST_EVENT,
+  pattern: RESIN_PROMPT_SUGGEST_COMMAND,
+};
+
+/** The commands Resin's hooks run. */
+export interface ClaudeSuggestCommands {
+  /** `… suggest --harness claude-code`, the PreToolUse Bash hook. */
+  readonly command: string;
+  /** `… suggest --prompt --harness claude-code`, the UserPromptSubmit hook. */
+  readonly prompt: string;
+}
+
+/** The hook's command when it is one of Resin's hooks of `spec`'s kind. */
+function resinHookCommand(hook: unknown, spec: ResinHookSpec): string | undefined {
   const parsed = HookCommandSchema.safeParse(hook);
-  return parsed.success && RESIN_SUGGEST_COMMAND.test(parsed.data.command)
-    ? parsed.data.command
-    : undefined;
+  return parsed.success && spec.pattern.test(parsed.data.command) ? parsed.data.command : undefined;
 }
 
 function parseSettings(content: string | null, filePath: string): ClaudeSettings {
@@ -83,25 +121,25 @@ function parseSettings(content: string | null, filePath: string): ClaudeSettings
 }
 
 /**
- * The settings document with Resin's PreToolUse Bash hook present exactly once (`install`) or with
- * every Resin suggestion hook removed. Every other setting, hook and matcher group is preserved in
- * order; a group left empty by the removal is dropped, as is a `hooks` object left empty.
+ * `hooks` with Resin's hook of `spec`'s kind present exactly once (`install`, running `command`)
+ * or removed. Every other hook and matcher group is kept in order; a group left empty by the
+ * removal is dropped, as is an event left with no group. A value that is not a list is left alone
+ * on removal and refused on install.
  */
-export function editClaudeSettingsDocument(
-  doc: ClaudeSettings,
+function editHookEvent(
+  hooks: Record<string, unknown>,
+  spec: ResinHookSpec,
   command: string,
   install: boolean,
-): ClaudeSettings {
-  const hooks: Record<string, unknown> = { ...doc.hooks };
-  const existing = hooks[CLAUDE_COMMAND_SUGGEST_EVENT];
-  // A non-array value is not a shape Resin understands; leave it for the user.
+): void {
+  const existing = hooks[spec.event];
   if (existing !== undefined && !Array.isArray(existing)) {
     if (install) {
       throw new Error(
-        `Claude Code settings hooks.${CLAUDE_COMMAND_SUGGEST_EVENT} is not a list; refusing to rewrite it`,
+        `Claude Code settings hooks.${spec.event} is not a list; refusing to rewrite it`,
       );
     }
-    return doc;
+    return;
   }
   const groups: unknown[] = [];
   for (const group of existing ?? []) {
@@ -110,28 +148,48 @@ export function editClaudeSettingsDocument(
       groups.push(group);
       continue;
     }
-    const kept = parsed.data.hooks.filter((hook) => resinHookCommand(hook) === undefined);
+    const kept = parsed.data.hooks.filter((hook) => resinHookCommand(hook, spec) === undefined);
     if (kept.length === parsed.data.hooks.length) groups.push(group);
     // SAFETY: validated above; spreading the original keeps the group's key order.
     else if (kept.length > 0) groups.push({ ...(group as HookGroup), hooks: kept });
   }
   if (install) {
     groups.push({
-      matcher: CLAUDE_COMMAND_SUGGEST_MATCHER,
+      ...(spec.matcher === undefined ? {} : { matcher: spec.matcher }),
       hooks: [{ type: "command", command, timeout: CLAUDE_COMMAND_SUGGEST_TIMEOUT_SECONDS }],
     });
   }
-  if (groups.length > 0) hooks[CLAUDE_COMMAND_SUGGEST_EVENT] = groups;
-  else delete hooks[CLAUDE_COMMAND_SUGGEST_EVENT];
+  if (groups.length > 0) hooks[spec.event] = groups;
+  else delete hooks[spec.event];
+}
+
+/**
+ * The settings document with Resin's two hooks present exactly once each (`install`): the
+ * PreToolUse Bash hook (command-time suggestions) and the UserPromptSubmit hook (prompt-time
+ * suggestions); or with every Resin suggestion hook removed. Hooks are additive: every other
+ * setting, hook and matcher group is preserved in order.
+ */
+export function editClaudeSettingsDocument(
+  doc: ClaudeSettings,
+  commands: ClaudeSuggestCommands,
+  install: boolean,
+): ClaudeSettings {
+  const hooks: Record<string, unknown> = { ...doc.hooks };
+  editHookEvent(hooks, COMMAND_HOOK, commands.command, install);
+  editHookEvent(hooks, PROMPT_HOOK, commands.prompt, install);
   const next: ClaudeSettings = { ...doc, hooks };
   if (Object.keys(hooks).length === 0) delete next.hooks;
   return next;
 }
 
-function expectedCommand(context: Pick<HarnessInstallContext, "home" | "env">): string {
-  return renderClaudeCommandSuggestCommand(
-    resolveResinSuggestLaunch(context.home, context.env, "claude-code"),
-  );
+function expectedCommands(
+  context: Pick<HarnessInstallContext, "home" | "env">,
+): ClaudeSuggestCommands {
+  const launch = resolveResinSuggestLaunch(context.home, context.env, "claude-code");
+  return {
+    command: renderClaudeCommandSuggestCommand(launch),
+    prompt: renderClaudeCommandSuggestCommand(promptSuggestLaunch(launch)),
+  };
 }
 
 /** Backup written next to settings before Resin changes them. */
@@ -147,13 +205,13 @@ async function syncSettings(
   const current = await context.fsBridge.readFile(settingsPath);
   if (current === null && !install) return { path: settingsPath, action: "unchanged" };
   const doc = parseSettings(current, settingsPath);
-  const next = editClaudeSettingsDocument(doc, expectedCommand(context), install);
+  const next = editClaudeSettingsDocument(doc, expectedCommands(context), install);
   if (JSON.stringify(next) === JSON.stringify(doc) && current !== null) {
     return { path: settingsPath, action: "unchanged" };
   }
   const action = current === null ? "created" : install ? "updated" : "removed";
-  // Settings that held nothing but Resin's hook go away with it, so uninstall leaves no file (and
-  // no directory) Resin created behind.
+  // Settings that held nothing but Resin's hooks go away with them, so uninstall leaves no file
+  // (and no directory) Resin created behind.
   if (!install && Object.keys(next).length === 0) {
     if (context.dryRun !== true) await context.fsBridge.unlink(settingsPath);
     return { path: settingsPath, action };
@@ -172,21 +230,42 @@ async function syncSettings(
   return { path: settingsPath, action };
 }
 
-/** Registers `resin suggest --harness claude-code` as a PreToolUse hook for Bash. */
+/**
+ * Registers `resin suggest --harness claude-code` as a PreToolUse hook for Bash and
+ * `resin suggest --prompt --harness claude-code` as a UserPromptSubmit hook.
+ */
 export async function installClaudeCommandSuggest(
   context: HarnessInstallContext,
 ): Promise<ManagedBlockResult[]> {
   return [await syncSettings(context, true)];
 }
 
-/** Removes Resin's suggestion hook; every other setting stays as it was. */
+/** Removes Resin's suggestion hooks; every other setting stays as it was. */
 export async function uninstallClaudeCommandSuggest(
   context: HarnessInstallContext,
 ): Promise<ManagedBlockResult[]> {
   return [await syncSettings(context, false)];
 }
 
-/** True when settings run this Resin's suggestion hook for Bash exactly once. */
+/** Whether `doc` runs exactly one Resin hook of `spec`'s kind, this Resin's, under its matcher. */
+function hasExactlyOne(doc: ClaudeSettings, spec: ResinHookSpec, command: string): boolean {
+  const groups = doc.hooks?.[spec.event];
+  if (!Array.isArray(groups)) return false;
+  let found = 0;
+  for (const group of groups) {
+    const parsed = HookGroupSchema.safeParse(group);
+    if (!parsed.success) continue;
+    for (const hook of parsed.data.hooks) {
+      const hookCommand = resinHookCommand(hook, spec);
+      if (hookCommand === undefined) continue;
+      if (parsed.data.matcher !== spec.matcher || hookCommand !== command) return false;
+      found += 1;
+    }
+  }
+  return found === 1;
+}
+
+/** True when settings run each of this Resin's suggestion hooks exactly once. */
 export async function verifyClaudeCommandSuggest(
   context: Omit<HarnessInstallContext, "dryRun">,
 ): Promise<boolean> {
@@ -197,26 +276,17 @@ export async function verifyClaudeCommandSuggest(
   } catch {
     return false;
   }
-  const command = expectedCommand(context);
-  const groups = doc.hooks?.[CLAUDE_COMMAND_SUGGEST_EVENT];
-  if (!Array.isArray(groups)) return false;
-  let found = 0;
-  for (const group of groups) {
-    const parsed = HookGroupSchema.safeParse(group);
-    if (!parsed.success) continue;
-    for (const hook of parsed.data.hooks) {
-      const hookCommand = resinHookCommand(hook);
-      if (hookCommand === undefined) continue;
-      if (parsed.data.matcher !== CLAUDE_COMMAND_SUGGEST_MATCHER || hookCommand !== command) {
-        return false;
-      }
-      found += 1;
-    }
-  }
-  return found === 1;
+  const commands = expectedCommands(context);
+  return (
+    hasExactlyOne(doc, COMMAND_HOOK, commands.command) &&
+    hasExactlyOne(doc, PROMPT_HOOK, commands.prompt)
+  );
 }
 
-/** Resin's Claude Code hook that suggests learned tools as the agent is about to run a command. */
+/**
+ * Resin's Claude Code hooks that suggest learned tools when the user submits a prompt and after
+ * a command a learned tool is a close fit for.
+ */
 export const claudeCommandSuggestExtension: HarnessInstallExtension = {
   name: "command suggestions",
   install: installClaudeCommandSuggest,
