@@ -14138,6 +14138,32 @@ var MetadataRecordSchema = external_exports.record(external_exports.unknown());
 // packages/contracts/dist/tools.js
 init_zod();
 init_common();
+
+// packages/contracts/dist/repository-location.js
+init_zod();
+var MAX_REPOSITORY_PATH_LENGTH = 1024;
+var REPOSITORY_ID = /^[0-9a-f]{64}$/;
+function isRepositoryId(value) {
+  return typeof value === "string" && REPOSITORY_ID.test(value);
+}
+function isRepositoryRelativePath(value) {
+  if (typeof value !== "string")
+    return false;
+  if (value.length === 0)
+    return true;
+  if (value.length > MAX_REPOSITORY_PATH_LENGTH)
+    return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(value))
+    return false;
+  return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+var RepositoryLocationMetadataSchema = external_exports.object({
+  id: external_exports.string().refine(isRepositoryId),
+  path: external_exports.string().refine(isRepositoryRelativePath),
+  leadingCd: external_exports.literal(true).optional()
+}).strict();
+
+// packages/contracts/dist/tools.js
 var ToolScopeSchema = external_exports.enum(["workspace", "user", "global", "session"]);
 var ToolParameterSchema = external_exports.object({
   type: external_exports.literal("object").default("object"),
@@ -14167,6 +14193,13 @@ var ToolLimitConfigSchema = external_exports.object({
   maxMemoryBytes: external_exports.number().int().positive().default(134217728),
   // 128MB
   maxConcurrentInvocations: external_exports.number().int().positive().default(4)
+});
+var RepositoryIdSchema = external_exports.string().refine(isRepositoryId);
+var ToolOpportunitiesSchema = external_exports.object({
+  runs: external_exports.number().int().nonnegative(),
+  avoidableRequests: external_exports.number().int().nonnegative(),
+  sessions: external_exports.number().int().nonnegative(),
+  repositories: external_exports.array(RepositoryIdSchema).max(64)
 });
 var ToolRecommendationSchema = external_exports.object({
   automatic: external_exports.boolean(),

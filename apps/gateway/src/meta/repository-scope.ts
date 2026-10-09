@@ -5,8 +5,9 @@
  * location (an MCP query, a `gh` call taking `--repo` as an input) is offered everywhere, unless
  * it is an older tool whose plan pins its directories (an absolute leading `cd`, a recorded
  * `cwd`/`workdir`) inside one repository: that tool is offered only there. Any tool this machine
- * knows cannot run here is not offered. Only a tool scoped to the caller's repository is listed
- * (see {@link isToolScopedHere}); the others are found by search or called by name.
+ * knows cannot run here is not offered. Only a tool scoped to the caller's repository, or an
+ * unscoped one the cloud observed in it, is listed (see {@link isToolScopedHere}); the others are
+ * found by search or called by name.
  *
  * The scope comes from three places, merged: the catalog's `manifest.metadata.repositories` (the
  * repositories the tool's source recordings ran in), the repositories the cached plan's
@@ -17,6 +18,7 @@
  */
 
 import { callerRepository } from "../proxy/tool-location.js";
+import { recommendedOpportunities } from "../registry/recommendation.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { RegistryTool } from "../registry/types.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
@@ -118,16 +120,24 @@ export function isToolOfferedHere(
 
 /**
  * Whether a learned tool belongs to the caller's workspace: scoped to the repository the caller
- * works in and runnable there. Only these are listed and counted automatically; a tool declaring no
- * repository is offered (searchable and invocable by name) but never listed, because nothing ties
- * it to the work at hand and every listed tool costs context on every request.
+ * works in and runnable there. Only these are listed and counted automatically. A tool declaring no
+ * repository is offered (searchable and invocable by name) but listed only where the cloud
+ * observed work it would have shortened (its recommendation's `opportunities.repositories`): MCP
+ * calls carry no repository, so a tool made of them is otherwise unscoped, and every listed tool
+ * costs context on every request.
  */
 export function isToolScopedHere(
   registry: Pick<ToolRegistry, "learnedToolProfile">,
   tool: Pick<RegistryTool, "artifactDigest" | "manifest" | "isSystem" | "scope">,
   context: WorkspaceContext,
 ): boolean {
-  return isLearnedTool(tool) && repositoryStanding(registry, tool, context) === "here";
+  if (!isLearnedTool(tool)) return false;
+  const standing = repositoryStanding(registry, tool, context);
+  if (standing !== "unscoped") return standing === "here";
+  const observedIn = recommendedOpportunities(tool)?.repositories ?? [];
+  if (observedIn.length === 0) return false;
+  const caller = callerRepositoryId(context);
+  return caller !== undefined && observedIn.includes(caller);
 }
 
 /** What a caller is told when it names a tool that exists but is not offered where it works. */

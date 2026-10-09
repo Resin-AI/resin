@@ -11,11 +11,12 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { LocalMcpGateway } from "../../src/gateway.js";
-import { LISTING_CAP } from "../../src/listing-surface.js";
+import { LISTING_CAP, learnedToolListing } from "../../src/listing-surface.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import {
   isToolOfferedHere,
+  isToolScopedHere,
   toolInRepository,
   toolRepositories,
 } from "../../src/meta/repository-scope.js";
@@ -43,7 +44,10 @@ import {
   type GatewayRouter,
   createRegistryGatewayRouter,
 } from "../../src/router.js";
-import { createToolSearchSurface } from "../../src/shim/tool-search-surface.js";
+import {
+  type ServedListingSurface,
+  createToolSearchSurface,
+} from "../../src/shim/tool-search-surface.js";
 import { suggestToolsFromCatalog } from "../../src/suggest/index-writer.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
@@ -416,6 +420,13 @@ describe("ranking by recorded work", () => {
 
 const ResultMetaSchema = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) });
 
+/** The names a gateway result's `_meta` lists directly, in listing order. */
+const listingNamesOf = (meta: Record<string, unknown>) =>
+  z
+    .array(z.object({ name: z.string() }))
+    .parse(meta[RESIN_LEARNED_TOOL_LISTING_META] ?? [])
+    .map((tool) => tool.name);
+
 /**
  * Initializes a search-listing connection to `router` and lists its tools, both through the stdio
  * shim's surface: the gateway's `_meta` and what the harness was served.
@@ -424,7 +435,12 @@ async function serveSearchListing(router: GatewayRouter, cwd = "/repos/alpha") {
   const gateway = new LocalMcpGateway({ router, enableRefreshCoordinator: false });
   const connection = gateway.createConnection({ cwd });
   const output = new PassThrough();
-  const surface = createToolSearchSurface(output, {});
+  let footprint: ServedListingSurface | undefined;
+  const surface = createToolSearchSurface(output, {
+    onServed: (served) => {
+      footprint = served;
+    },
+  });
   const received: JsonRpcMessage[] = [];
   const decoder = new McpFrameDecoder();
   output.on("data", (chunk: Buffer) => received.push(...decoder.push(chunk)));
@@ -478,6 +494,8 @@ async function serveSearchListing(router: GatewayRouter, cwd = "/repos/alpha") {
     tokens:
       listingTextTokens(instructions) +
       served.reduce((sum, tool) => sum + listingToolTokens(tool), 0),
+    /** What the shim reported serving: the listing footprint's tool ids and cap flag. */
+    footprint,
   };
 }
 
@@ -566,6 +584,94 @@ describe("direct listing of a per-repository catalog", () => {
     expect(served.tools.map((tool) => tool.name)).toContain("search_tools");
     expect(served.tokens).toBeLessThanOrEqual(LISTING_CAP.maxTokens);
   });
+
+  /** A learned tool whose served definition costs exactly `tokens`, padded in its description. */
+  const sizedTool = (
+    name: string,
+    tokens: number,
+    extra: Partial<CatalogNoticeTool> = {},
+  ): CatalogNoticeTool => {
+    const inputSchema = { type: "object", properties: {} };
+    let description = `Runs ${name}.`;
+    while (listingToolTokens({ name, description, inputSchema }) < tokens) description += " x";
+    if (listingToolTokens({ name, description, inputSchema }) !== tokens) description += "y";
+    expect(listingToolTokens({ name, description, inputSchema })).toBe(tokens);
+    return {
+      name,
+      description,
+      inputSchema,
+      _meta: { [RESIN_LEARNED_TOOL_META]: true },
+      localCommands: [`run_${name}`],
+      listing: { purpose: `Runs ${name}.`, signature: "{}" },
+      toolId: `id_${name}`,
+      scopedHere: true,
+      ...extra,
+    };
+  };
+  const listedNames = (tools: CatalogNoticeTool[]) =>
+    learnedToolListing([...META_TOOLS, ...tools]).listing.map((tool) => tool.name);
+
+  it("orders by the model requests the cloud observed a tool saving before recorded steps", () => {
+    const tools = [
+      learnedTool(0, { steps: 9 }),
+      learnedTool(1, { steps: 2, avoidableRequests: 3 }),
+      learnedTool(2, { steps: 5, avoidableRequests: 1 }),
+      learnedTool(3, { steps: 1, pinned: true }),
+    ];
+    expect(listedNames(tools)).toEqual(["learned_3", "learned_1", "learned_2", "learned_0"]);
+  });
+
+  it("skips a tool that does not fit and lists a later one that does", async () => {
+    const tools = [
+      sizedTool("big_first", 900, { steps: 10 }),
+      sizedTool("big_second", 400, { steps: 8 }),
+      sizedTool("small_last", 60, { steps: 1 }),
+    ];
+    expect(listedNames(tools)).toEqual(["big_first", "small_last"]);
+    const served = await serveSearchListing(routerOf(tools));
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(3);
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual(["run_big_second"]);
+    expect(served.tools.map((tool) => tool.name)).toEqual([
+      "search_tools",
+      "invoke_tool",
+      "big_first",
+      "small_last",
+    ]);
+    expect(served.instructions).toContain("1 more learned tool, not listed");
+    expect(served.footprint?.listedToolIds).toEqual(["id_big_first", "id_small_last"]);
+    expect(served.footprint?.capped).toBe(true);
+    expect(served.tokens).toBeLessThanOrEqual(LISTING_CAP.maxTokens);
+  });
+
+  it("lists all of the A-D fixture, C and D first by observed requests, within the cap", async () => {
+    // D is unscoped by its own record; its observed opportunities in the caller's repository make
+    // it scopedHere (see the registry tests below), which is all the listing reads.
+    const tools = [
+      sizedTool("tool_a", 330, { steps: 10 }),
+      sizedTool("tool_b", 200, { steps: 7 }),
+      sizedTool("tool_c", 71, { steps: 2, avoidableRequests: 3 }),
+      sizedTool("tool_d", 160, { steps: 2, avoidableRequests: 1 }),
+    ];
+    const served = await serveSearchListing(routerOf(tools));
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(4);
+    expect(listingNamesOf(served.initializeMeta)).toEqual(["tool_c", "tool_d", "tool_a", "tool_b"]);
+    // tools/list keeps catalog order; search_tools is dropped with nothing left out.
+    expect(served.tools.map((tool) => tool.name)).toEqual([
+      "invoke_tool",
+      "tool_a",
+      "tool_b",
+      "tool_c",
+      "tool_d",
+    ]);
+    expect(served.footprint?.listedToolIds).toEqual([
+      "id_tool_a",
+      "id_tool_b",
+      "id_tool_c",
+      "id_tool_d",
+    ]);
+    expect(served.footprint?.capped).toBe(false);
+    expect(served.tokens).toBe(958);
+  });
 });
 
 describe("a learned tool that declares no repository", () => {
@@ -623,6 +729,114 @@ describe("a learned tool that declares no repository", () => {
       "old_report",
       "old_report",
     ]);
+  });
+});
+
+describe("a learned tool that declares no repository, observed saving work", () => {
+  const observedIn = (repositories: unknown, avoidableRequests = 3) => ({
+    automatic: true,
+    reason: "expected_net_value",
+    tasks: 0,
+    invocations: 0,
+    savedTokens: 0,
+    opportunities: { runs: 2, avoidableRequests, sessions: 5, repositories },
+  });
+
+  async function catalogObserving(recommendation: Record<string, unknown> | undefined) {
+    const registry = await registryWith(
+      [
+        { id: "tool_alpha", name: "alpha_tests", repositories: [ALPHA] },
+        { id: "tool_logs", name: "evaluate_code_and_get_logs" },
+      ],
+      { tool_alpha: { steps: 4 }, tool_logs: { steps: 2, locatedRepositories: [] } },
+    );
+    const logs = registry.getAllRegisteredTools().find((tool) => tool.toolId === "tool_logs");
+    if (!logs) throw new Error("tool_logs was not registered");
+    if (recommendation !== undefined) {
+      registry.applyToolRecommendations([
+        { ...logs.manifest, recommendation: recommendation as ToolManifest["recommendation"] },
+      ]);
+    }
+    const invoke = vi.fn(async (request: { name: string }) => ({
+      content: [{ type: "text" as const, text: `ran ${request.name}` }],
+    }));
+    const serveIn = async (directory: string) => {
+      const caller = callerIn(directory);
+      const registryRouter = createRegistryGatewayRouter(registry, { invoke });
+      return await serveSearchListing(
+        {
+          listTools: () => registryRouter.listTools(caller),
+          listCatalogNoticeTools: () => registryRouter.listCatalogNoticeTools(caller),
+          callTool: (_context, name, args, options) =>
+            registryRouter.callTool(caller, name, args, options),
+        },
+        directory,
+      );
+    };
+    return { registry, logs, invoke, serveIn };
+  }
+
+  it("is listed, first, and counted in the footprint in a repository it was observed in", async () => {
+    const { serveIn } = await catalogObserving(observedIn([ALPHA]));
+    const served = await serveIn("/repos/alpha");
+    expect(served.listMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(2);
+    expect(listingNamesOf(served.listMeta)).toEqual(["evaluate_code_and_get_logs", "alpha_tests"]);
+    expect(served.tools.map((tool) => tool.name).sort()).toEqual([
+      "alpha_tests",
+      "evaluate_code_and_get_logs",
+      "invoke_tool",
+    ]);
+    expect(served.footprint?.listedToolIds.slice().sort()).toEqual(["tool_alpha", "tool_logs"]);
+    expect(served.footprint?.capped).toBe(false);
+  });
+
+  it("is not listed in another repository, but stays searchable and invocable there", async () => {
+    const { registry, invoke, serveIn } = await catalogObserving(observedIn([BETA]));
+    const served = await serveIn("/repos/alpha");
+    expect(served.listMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
+    expect(listingNamesOf(served.listMeta)).toEqual(["alpha_tests"]);
+    expect(served.footprint?.listedToolIds).toEqual(["tool_alpha"]);
+    expect(await listed(registry, "/repos/alpha")).toContain("evaluate_code_and_get_logs");
+    const viaInvoke = await served.gateway.handleMessage(served.connection, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "invoke_tool", arguments: { name: "evaluate_code_and_get_logs" } },
+    });
+    expect(viaInvoke).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("ran evaluate_code_and_get_logs") }] },
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not scoped by observations while demoted, and a repo-scoped tool keeps its own scope", async () => {
+    const { registry, logs } = await catalogObserving({
+      ...observedIn([ALPHA]),
+      automatic: false,
+      reason: "measured_net_cost",
+    });
+    expect(isToolScopedHere(registry, logs, callerIn("/repos/alpha"))).toBe(false);
+    const alpha = registry.getAllRegisteredTools().find((tool) => tool.toolId === "tool_alpha");
+    if (!alpha) throw new Error("tool_alpha was not registered");
+    registry.applyToolRecommendations([
+      { ...alpha.manifest, recommendation: observedIn([BETA]) as ToolManifest["recommendation"] },
+    ]);
+    expect(isToolScopedHere(registry, alpha, callerIn("/repos/alpha"))).toBe(true);
+    expect(isToolScopedHere(registry, alpha, callerIn("/repos/beta"))).toBe(false);
+    expect(isToolOfferedHere(registry, alpha, callerIn("/repos/beta"))).toBe(false);
+  });
+
+  it.each([
+    ["a malformed repository id", observedIn(["not-a-repository", ALPHA])],
+    ["a negative count", observedIn([ALPHA], -1)],
+    ["a non-object", { ...observedIn([ALPHA]), opportunities: "many" }],
+  ])("is ignored with %s, and the catalog lists as without it", async (_case, recommendation) => {
+    const baseline = await (await catalogObserving(undefined)).serveIn("/repos/alpha");
+    const served = await (await catalogObserving(recommendation)).serveIn("/repos/alpha");
+    expect(listingNamesOf(served.listMeta)).toEqual(["alpha_tests"]);
+    expect(served.listMeta).toEqual(baseline.listMeta);
+    expect(served.tools).toEqual(baseline.tools);
+    expect(served.instructions).toBe(baseline.instructions);
   });
 });
 

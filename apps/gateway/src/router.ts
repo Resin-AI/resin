@@ -73,7 +73,7 @@ import {
   createEvolvedToolHandler,
   extractToolRepo,
 } from "./registry/index.js";
-import { isAutomaticallyRecommended } from "./registry/recommendation.js";
+import { isAutomaticallyRecommended, recommendedOpportunities } from "./registry/recommendation.js";
 import type { CatalogEntry, RegistryTool } from "./registry/types.js";
 import type { SuggestStep } from "./suggest/index-file.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
@@ -117,6 +117,11 @@ export interface CatalogNoticeTool extends McpTool {
   pinned?: true;
   /** Recorded steps a learned tool replays, when this machine knows its plan. */
   steps?: number;
+  /**
+   * Model requests the cloud observed this recommended tool would have saved in the workspace
+   * (its recommendation's `opportunities.avoidableRequests`): ranks it in a direct listing.
+   */
+  avoidableRequests?: number;
 }
 
 /** Internal metadata must never reach a harness: no unsupported output contract, no local detail. */
@@ -132,6 +137,7 @@ export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
       scopedHere: _scopedHere,
       pinned: _pinned,
       steps: _steps,
+      avoidableRequests: _avoidableRequests,
       ...nativeTool
     } = tool;
     return nativeTool;
@@ -460,6 +466,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         return { description: catalog, inputSchema: schema };
       }
       const steps = this.registry.learnedToolProfile(tool, context)?.steps;
+      const avoidableRequests = recommendedOpportunities(tool)?.avoidableRequests;
       const served = this.registry.learnedToolInputSchema(tool, context, schema);
       const scrub = (text: string) => this.registry.scrubLearnedToolText(tool, context, text);
       const purpose = scrub(listedPurpose(catalog, replacesStepsHint(steps)));
@@ -478,6 +485,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         ...(isToolScopedHere(this.registry, tool, context) ? { scopedHere: true as const } : {}),
         ...(tool.isPinned === true ? { pinned: true as const } : {}),
         ...(steps === undefined ? {} : { steps }),
+        ...(avoidableRequests === undefined ? {} : { avoidableRequests }),
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;
