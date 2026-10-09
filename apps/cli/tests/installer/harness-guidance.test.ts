@@ -32,14 +32,6 @@ describe("harness guidance text", () => {
       expect(body).toContain("may have learned tools");
     });
 
-    it("points at the search_tools description for the learned-tool count", () => {
-      expect(body).toMatch(/description says how many learned tools/);
-    });
-
-    it("tells the agent not to search when there are none", () => {
-      expect(body).toMatch(/there are none, do the task directly/);
-    });
-
     it("runs a found tool directly instead of via get_tool_schema", () => {
       expect(body).not.toMatch(/get_tool_schema[^\n]*(to see|shows) its commands/);
       for (const line of body.split("\n")) {

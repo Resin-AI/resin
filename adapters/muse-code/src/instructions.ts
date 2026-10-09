@@ -14,9 +14,8 @@ export const MUSE_RESIN_GUIDANCE = `# Resin learned tools
 
 Resin may have learned tools from earlier work in this workspace. They are not listed: the \`resin\` server lists only \`mcp__resin__search_tools\`, \`mcp__resin__get_tool_schema\`, \`mcp__resin__invoke_tool\` and \`mcp__resin__manage_tools\`. The \`mcp__resin__search_tools\` description says how many learned tools this workspace has and names the commands they run.
 
-- If it says there are none, do the task directly: there is nothing to search for, and tools Resin learns from this work reach later sessions.
-- Otherwise, before running one of those commands or another multi-step job by hand, call \`mcp__resin__search_tools\` with \`{"query": "<the job or command line you are about to run>"}\`, unless an earlier search already found a tool for it: invoke that one directly, and search again only if invoke_tool rejects it.
-- A result that does your task is the procedure an earlier run already worked out: its description lists the recorded steps and its \`inputSchema\` the inputs, so run it directly with your task's values through \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, instead of re-reading docs or \`--help\` to rediscover those steps. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- Its output is the commands' current output: use it instead of running those commands yourself.
-- If its output does not answer your question (it keeps a value fixed that your task needs changed, such as a period, granularity or filter), do the rest yourself with your usual tools.
+- Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
+- A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
+- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
+- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
 `;

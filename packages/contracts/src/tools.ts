@@ -69,7 +69,8 @@ export type ToolLimitConfig = z.infer<typeof ToolLimitConfigSchema>;
  * The cloud's measured recommendation for a learned tool, across all its versions. Absent means
  * the tool is recommended. `automatic: false` means repeated measured invocations cost more than
  * doing the job directly, so the client stops offering the tool on its own (instructions, command
- * suggestions, direct listings) and ranks it last in search; it stays invocable by name.
+ * suggestions, direct listings, query searches): a search returns it only when the query names it
+ * (its exact or leading name), an empty-query listing still lists it, and it stays invocable by name.
  *
  * Passthrough: the catalog snapshot checksum is computed over the parsed tools, so keys a newer
  * cloud adds here must survive parsing or every snapshot carrying them would fail verification.

@@ -245,6 +245,35 @@ describe.skipIf(process.platform === "win32")("display-filter steps in the gatew
     });
   });
 
+  it("says in the tool's description what an invocation returns, per display-filter version", async () => {
+    const described = async (program: string, version: number) => {
+      const installed = await installPlan(cache, program, version);
+      return new LocalArtifactExecutor({
+        cache,
+        workspaceRoot: workspaceDir,
+        development: true,
+        allowDevKeys: true,
+        resinHome,
+        privateValueStore: new InMemoryPrivateValueStore(),
+      }).describeRecordedWorkflow(installed.artifactDigest, context);
+    };
+    expect(await described("./emit && ./args a | tail -1", 1)).toBe(
+      "Recorded on this machine:\nStep 1 runs this recorded shell program:\n./emit && ./args a | tail -1\n" +
+        "When invoked, it runs without the final `| tail -1`, so the full output comes back and the command's own exit status decides success; `./args` runs only if `./emit` succeeds.",
+    );
+    // An agent read `&& … | tail -3` as a tool that stops early and hides findings, and ran the
+    // commands itself. A filtered pipeline's `&&` tests its filter, so it names no waiting command.
+    expect(await described("./emit 2>&1 | grep -E 'a|c' && ./fail && ./emit | tail -n 3", 2)).toBe(
+      "Recorded on this machine:\nStep 1 runs this recorded shell program:\n./emit 2>&1 | grep -E 'a|c' && ./fail && ./emit | tail -n 3\n" +
+        "When invoked, it runs as recorded: command 3 (`./emit`) runs only if `./fail` succeeds. Its output adds the error, warning and failure lines `grep -E 'a|c'` and `tail -n 3` hid, with the unfiltered output kept in files; if a command fails, the call fails listing each command's exit status.",
+    );
+    // What that sentence promises is what the run reports.
+    const { result, text } = await invoke("./fail 2>&1 | tail -1 && ./fail && ./emit", 2, {});
+    expect(result.isError).toBe(true);
+    expect(text).toContain("3 (./emit): did not run");
+    expect(text).toContain("2 (./fail): exit 1 (failed)");
+  });
+
   it("binds a later step to what the display-filter step printed, never to its report", async () => {
     const first = "./emit | tail -1; ./emit 2>&1 | grep -E 'a|c' && echo ok";
     const second = "./args VALUE";

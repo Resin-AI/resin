@@ -69,7 +69,7 @@ const SEARCH_TOOLS_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.SEARCH_TOOLS,
   version: "1.0.0",
   description:
-    "Read-only live lookup of tools available in the caller's scope, including new tools absent from a stale initial native catalog. Use query=<task> when a matching tool may exist (an empty query lists every tool), then call invoke_tool with a result's toolId: each result includes its inputSchema. A tool found earlier needs no new search unless invoke_tool rejects it. Honors user tool restrictions; supports tags, capabilities, scope, summaries, and pagination. Does not refresh the native catalog.",
+    "Read-only live lookup of tools available in the caller's scope, including new tools absent from a stale initial native catalog. Use query=<the command line or job you are about to run> (an empty query lists every tool). Every result, including each under `similar`, carries its inputSchema: call invoke_tool with its name and parameters directly, never get_tool_schema first. A tool found earlier needs no new search unless invoke_tool rejects it. Honors user tool restrictions; supports tags, capabilities, scope, summaries, and pagination. Does not refresh the native catalog.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -137,7 +137,7 @@ const GET_TOOL_SCHEMA_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.GET_TOOL_SCHEMA,
   version: "1.0.0",
   description:
-    "Inspects a tool in the current live registry, including tools missing from a cached native catalog. search_tools results already include inputSchema; use this for a tool found with manage_tools action=list_versions, or for its output schema, capabilities and limits. Returns parameter and output schemas, capabilities, limits, provenance, and status without leaking source code or secrets.",
+    "Inspects a tool in the current live registry, including tools missing from a cached native catalog. Not needed before invoking a search_tools result: every result, including each under `similar`, carries its inputSchema. Use this for a tool found with manage_tools action=list_versions, or for its output schema, capabilities and limits. Returns parameter and output schemas, capabilities, limits, provenance, and status without leaking source code or secrets.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {
@@ -185,7 +185,7 @@ const INVOKE_TOOL_RAW: ToolManifest = {
   name: SYSTEM_META_TOOL_NAMES.INVOKE_TOOL,
   version: "1.0.0",
   description:
-    "Invokes an active tool from the current live registry, even if it was added after the client's initial tools/list. Use a toolId and inputSchema from search_tools (or manage_tools action=list_versions plus get_tool_schema when search is unavailable). Preserves parameter validation, caller context, capability checks, execution limits, timeouts, and cancellation; does not refresh the native catalog.",
+    "Invokes an active tool from the current live registry, even if it was added after the client's initial tools/list. Pass a search_tools result's name and parameters matching its inputSchema directly (or use manage_tools action=list_versions plus get_tool_schema when search is unavailable). Preserves parameter validation, caller context, capability checks, execution limits, timeouts, and cancellation; does not refresh the native catalog.",
   parameters: ToolParameterSchema.parse({
     type: "object",
     properties: {

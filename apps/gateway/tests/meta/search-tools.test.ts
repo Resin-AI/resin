@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import {
+  INVOKE_RESULT_NOTE,
   NO_MATCHING_TOOL_NOTE,
   type SearchToolsResponse,
   createSearchToolsHandler,
@@ -647,10 +648,10 @@ describe("search_tools over a small catalog of learned AWS tools", () => {
       note: NO_MATCHING_TOOL_NOTE,
     });
 
-    // With results, the note only says once what the items no longer repeat.
+    // With results, the note says how to invoke them, then once what the items no longer repeat.
     for (const query of ["aws cost", "", "   "]) {
       expect((await searchAwsResponse(query)).note).toBe(
-        "Omitted inputs reuse their recorded values.",
+        `${INVOKE_RESULT_NOTE} Omitted inputs reuse their recorded values.`,
       );
     }
   });
@@ -1020,24 +1021,21 @@ describe("search_tools over near-duplicate learned tools", () => {
         .map((tool) => tool.name)
         .sort(),
     );
-    for (const [index, similar] of (lead?.similar ?? []).entries()) {
-      // The two closest contenders carry their schema too, so picking one needs no lookup; the
-      // rest (here exact duplicates tying the item) keep a name and purpose to tell them apart.
-      const close = index < 2 && (similar.score ?? 0) >= 0.9 * (lead?.score ?? 0);
-      expect(Object.keys(similar).sort()).toEqual(
-        close ? ["inputSchema", "name", "purpose", "score", "toolId"] : ["name", "purpose"],
-      );
+    for (const similar of lead?.similar ?? []) {
+      // Every tool under `similar` carries what invoke_tool needs, so picking one needs no lookup.
+      expect(Object.keys(similar).sort()).toEqual([
+        "inputSchema",
+        "name",
+        "purpose",
+        "score",
+        "toolId",
+      ]);
       expect(similar.purpose.length).toBeLessThanOrEqual(140);
-      if (close) {
-        expect(Object.keys(similar.inputSchema?.properties ?? {}).sort()).toEqual(
-          Object.keys(
-            workspaceTool(similar.name)?.parameters.properties ?? { missing: true },
-          ).sort(),
-        );
-        expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
-      }
+      expect(Object.keys(similar.inputSchema.properties ?? {}).sort()).toEqual(
+        Object.keys(workspaceTool(similar.name)?.parameters.properties ?? { missing: true }).sort(),
+      );
+      expect(similar.score).toBeLessThanOrEqual(lead?.score ?? 0);
     }
-    expect(lead?.similar?.filter((tool) => tool.inputSchema !== undefined)).toHaveLength(2);
     expect(lead?.similar?.[0]?.purpose).toMatch(
       /^Runs the \w+ test suite, then checks formatting and lints the Luau sources\.$/,
     );
@@ -1047,23 +1045,47 @@ describe("search_tools over near-duplicate learned tools", () => {
     );
     expect(new Set(groups).size).toBe(groups.length);
     expect(response.total).toBe(response.tools.length);
+    expect(response.note).toContain(INVOKE_RESULT_NOTE);
     expect(response.note).toContain("A tool under `similar` runs the same commands");
-    expect(response.note).toContain("with the inputs get_tool_schema(name) gives");
+    expect(response.note).not.toContain("get_tool_schema(name)");
   });
 
-  it("keeps a tool measured to cost more at its rank, leading its group, and marks it", async () => {
+  it("returns a tool measured to cost more only for a query naming it", async () => {
     const baseline = await searchLuau({ query, limit: 100 });
     const [best] = baseline.tools;
     expect(best?.similar?.length).toBeGreaterThan(0);
+    const demoted = best?.name ?? "";
+    const names = (response: SearchToolsResponse) =>
+      response.tools.flatMap((tool) => [
+        tool.name,
+        ...(tool.similar ?? []).map(({ name }) => name),
+      ]);
 
-    const response = await searchLuau({ query, limit: 100 }, [], [best?.name ?? ""]);
-    // A search asks for the job explicitly: the best match stays first with its full schema.
-    expect(response.tools.map((tool) => tool.name)).toEqual(
-      baseline.tools.map((tool) => tool.name),
+    // A query about the job no longer offers it, not even under `similar`; its group stays,
+    // led by the next tool running the same commands.
+    const response = await searchLuau({ query, limit: 100 }, [], [demoted]);
+    expect(names(response)).not.toContain(demoted);
+    expect(names(response).sort()).toEqual(
+      names(baseline)
+        .filter((name) => name !== demoted)
+        .sort(),
     );
-    expect(response.tools[0]?.inputSchema).toEqual(best?.inputSchema);
-    expect(response.tools[0]?.recommended).toBe(false);
-    expect(response.tools.slice(1).every((tool) => !("recommended" in tool))).toBe(true);
+    expect(response.total).toBe(baseline.total);
+    expect(response.tools[0]?.name).toBe(best?.similar?.[0]?.name);
+    expect(response.tools.every((tool) => !("recommended" in tool))).toBe(true);
+
+    // Asked for by name it is returned, marked, with its full schema.
+    const named = await searchLuau({ query: demoted, limit: 100 }, [], [demoted]);
+    expect(named.tools[0]?.name).toBe(demoted);
+    expect(named.tools[0]?.recommended).toBe(false);
+    expect(named.tools[0]?.inputSchema).toEqual(best?.inputSchema);
+
+    // An empty-query listing still lists it.
+    const listed = await searchLuau({ tags: ["luau"], limit: 100 }, [], [demoted]);
+    const entry = listed.tools
+      .flatMap((tool) => [tool, ...(tool.similar ?? [])])
+      .find((tool) => tool.name === demoted);
+    expect(entry?.recommended).toBe(false);
   });
 
   it("serves every full item's whole input schema, without the sentences each input repeated", async () => {
@@ -1158,7 +1180,7 @@ describe("search_tools over near-duplicate learned tools", () => {
 
     expect(response.tools.map((tool) => tool.name)).toEqual(["describe_alpha", "describe_beta"]);
     expect(response.tools.every((tool) => tool.similar === undefined)).toBe(true);
-    // Nothing was shortened, so there is nothing to note.
-    expect(response).not.toHaveProperty("note");
+    // Nothing was shortened, so the note only says how to invoke them.
+    expect(response.note).toBe(INVOKE_RESULT_NOTE);
   });
 });

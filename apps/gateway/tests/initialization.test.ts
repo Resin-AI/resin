@@ -90,7 +90,9 @@ describe("MCP Initialization & Capability Negotiation", () => {
       // Codex's deferred tool-source context can retain only the first 250 characters.
       const sourceSummary = resp.result.instructions?.split("\n", 1)[0] ?? "";
       expect(sourceSummary.length).toBeLessThanOrEqual(250);
-      expect(sourceSummary).toMatch(/search_tools.*get_tool_schema.*invoke_tool/);
+      // A search result is invoked directly, with no get_tool_schema call in between.
+      expect(sourceSummary).toMatch(/search_tools.*invoke_tool/);
+      expect(sourceSummary).not.toContain("get_tool_schema");
       expect(sourceSummary).toContain("manage_tools");
       expect(sourceSummary).toContain("list_versions");
       expect(sourceSummary).toContain("scope=workspace");

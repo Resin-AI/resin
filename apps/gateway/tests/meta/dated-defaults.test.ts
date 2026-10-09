@@ -20,7 +20,11 @@ import {
   withRecordedDefaults,
 } from "../../src/meta/dated-defaults.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
-import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
+import {
+  INVOKE_RESULT_NOTE,
+  type SearchToolsResponse,
+  createSearchToolsHandler,
+} from "../../src/meta/search-tools.js";
 import type { CallToolResult } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
@@ -204,7 +208,7 @@ describe("serving a learned tool with a dated recorded default", () => {
     expect(tool).toBeDefined();
     // A search says once, in its note, what omitting an input does.
     expectDatedRequired(tool?.inputSchema as never, "AWS CLI profile name.");
-    expect(response.note).toBe("Omitted inputs reuse their recorded values.");
+    expect(response.note).toBe(`${INVOKE_RESULT_NOTE} Omitted inputs reuse their recorded values.`);
   });
 
   it("lists the dated input as required in get_tool_schema", async () => {
