@@ -66,6 +66,7 @@ import {
   validateBundleEntryPath,
   verifyBundleSignature,
   workflowLocationAvailability,
+  workflowPinnedRepository,
 } from "@resin/runtime";
 import {
   isDatedValue,
@@ -671,6 +672,11 @@ export class LocalArtifactExecutor {
   private readonly recordedWorkflowSummaries = new Map<string, RecordedWorkflowSummary>();
   /** Parsed recorded plans by artifact digest: an artifact's bytes never change under its digest. */
   private readonly recordedPlans = new Map<string, RecordedWorkflow>();
+  /**
+   * The repository each legacy plan pins (see `workflowPinnedRepository`) by artifact digest, null
+   * for none: caller-independent, so read once per plan and never again on a discovery path.
+   */
+  private readonly pinnedRepositories = new Map<string, string | null>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -803,6 +809,34 @@ export class LocalArtifactExecutor {
   }
 
   /**
+   * The repository a cached legacy plan works in (see `workflowPinnedRepository`), read once per
+   * artifact. A private working directory the plan declares resolves here whichever workspace
+   * recorded it: only the repository id derived from it is kept, and only to narrow where the
+   * tool is offered, so no value reaches a caller or a run it does not own.
+   */
+  private recordedPinnedRepository(
+    artifactDigest: string,
+    plan: RecordedWorkflow,
+  ): string | undefined {
+    const cached = this.pinnedRepositories.get(artifactDigest);
+    if (cached !== undefined) return cached ?? undefined;
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    const repository = workflowPinnedRepository(plan, {
+      resolvePrivate: (reference) => {
+        if (!declared.has(reference)) return undefined;
+        try {
+          return resolvePrivateReference(store, reference);
+        } catch {
+          return undefined;
+        }
+      },
+    });
+    this.pinnedRepositories.set(artifactDigest, repository ?? null);
+    return repository;
+  }
+
+  /**
    * What this machine knows about a cached recorded workflow for discovery: how many recorded
    * steps it replays (see `recordedWorkStepCount`), the repositories its located steps run in, and
    * why it cannot run for this caller, if it cannot. Undefined for any other tool.
@@ -814,9 +848,15 @@ export class LocalArtifactExecutor {
     const plan = this.recordedPlan(artifactDigest);
     if (plan === undefined) return undefined;
     const availability = this.recordedWorkflowAvailability(artifactDigest, context);
+    const locatedRepositories = workflowLocationRepositories(plan);
+    const pinnedRepository =
+      locatedRepositories.length === 0
+        ? this.recordedPinnedRepository(artifactDigest, plan)
+        : undefined;
     return {
       steps: recordedWorkStepCount(plan),
-      locatedRepositories: workflowLocationRepositories(plan),
+      locatedRepositories,
+      ...(pinnedRepository === undefined ? {} : { pinnedRepository }),
       ...(availability === undefined || availability.available
         ? {}
         : { unavailableReason: availability.reason }),

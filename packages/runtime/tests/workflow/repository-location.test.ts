@@ -18,7 +18,10 @@ import {
   RuntimeAdapterRegistry,
   executeRecordedWorkflow,
 } from "../../src/workflow/recorded-workflow.js";
-import { workflowLocationAvailability } from "../../src/workflow/repository-location.js";
+import {
+  workflowLocationAvailability,
+  workflowPinnedRepository,
+} from "../../src/workflow/repository-location.js";
 import { RESIN_PROCESS_RUNTIME } from "../../src/workflow/runtime-families.js";
 
 const scratch: string[] = [];
@@ -367,5 +370,58 @@ describe("plans without a location", () => {
     expect(
       workflowLocationAvailability(plan(shellStep("ls", "ls")), { repository: undefined }),
     ).toEqual({ available: true });
+  });
+});
+
+describe("the repository a legacy plan pins", () => {
+  it("is the one repository every pinned directory lies in, in any checkout", () => {
+    const pinned = makeRepository("lambda");
+    const id = repositoryIdentity(pinned)?.id;
+    expect(id).toBeDefined();
+    expect(workflowPinnedRepository(plan(shellStep("t", `cd ${pinned}/pkg && pwd`)))).toBe(id);
+    const viaPrivateCwd = plan(
+      shellStep("t", "pwd", {
+        arguments: [{ name: "cwd", source: { kind: "private", reference: "ref:scope:cwd" } }],
+      }),
+    );
+    expect(
+      workflowPinnedRepository(viaPrivateCwd, { resolvePrivate: () => `${pinned}/pkg/app` }),
+    ).toBe(id);
+    expect(
+      workflowPinnedRepository(
+        plan(
+          shellStep("a", `cd ${pinned} && ls`),
+          shellStep("b", `cd ${addWorktree(pinned)} && ls`),
+        ),
+      ),
+    ).toBe(id);
+  });
+
+  it("is undefined without a pinned directory, or with one missing, outside git or elsewhere", () => {
+    const first = makeRepository("mu");
+    const second = makeRepository("nu");
+    expect(workflowPinnedRepository(plan(shellStep("ls", "ls")))).toBeUndefined();
+    expect(
+      workflowPinnedRepository(plan(shellStep("t", "cd /synthetic/deleted-scratch/wt && ls"))),
+    ).toBeUndefined();
+    expect(workflowPinnedRepository(plan(shellStep("t", `cd ${tempDir("bare")} && ls`)))).toBe(
+      undefined,
+    );
+    expect(
+      workflowPinnedRepository(
+        plan(shellStep("a", `cd ${first} && ls`), shellStep("b", `cd ${second} && ls`)),
+      ),
+    ).toBeUndefined();
+    // A plan with a located step is scoped by its location instead.
+    expect(
+      workflowPinnedRepository(
+        plan(
+          shellStep("a", `cd ${first} && ls`),
+          shellStep("b", "ls", {
+            location: { base: "repository", repository: "a".repeat(64), path: "" },
+          }),
+        ),
+      ),
+    ).toBeUndefined();
   });
 });
