@@ -1153,19 +1153,44 @@ export class LocalArtifactExecutor {
     const scrubbed = [...declared]
       .filter((reference) => !programSources.has(reference))
       .map(resolveOwnedValue);
+    // A redaction-replaced token is always scrubbed, whatever shown text it equals.
+    const protectedValues = new Set<string>();
     for (const template of projectedPrograms) {
       const original = resolveOwned(template.sourceReference!);
       if (original === undefined || (template.protectedTokens ?? []).length === 0) continue;
       try {
         const tokens = tokenizeProgram(template.language, original);
         for (const index of template.protectedTokens ?? []) {
-          scrubbed.push(tokens[index]?.raw, tokens[index]?.value);
+          for (const value of [tokens[index]?.raw, tokens[index]?.value]) {
+            scrubbed.push(value);
+            if (typeof value === "string") protectedValues.add(value);
+          }
         }
       } catch {
         // An original that no longer tokenizes has no protected token to find; it is scrubbed whole.
       }
     }
-    const scrubValues = scrubbablePrivateValues(scrubbed);
+    // A recording's laundered arguments repeat the program they ran, so a resolved private value
+    // can be the whole text of a program the plan shows by design (its sanitized source). Scrubbing
+    // that copy blanked the program in the description, and every catalog sentence quoting it. Such
+    // a value is not scrubbed as a whole; a secret inside the program differs from the sanitized
+    // source, and a protected token is scrubbed even if it equals one.
+    const shownPrograms = new Set<string>();
+    const collectShownPrograms = (template: WorkflowValueTemplate): void => {
+      if (template.type === "text") template.parts.forEach(collectShownPrograms);
+      if (template.type !== "program") return;
+      const shown = projectedTemplateText(template);
+      if (shown !== undefined) shownPrograms.add(shown);
+      collectShownPrograms(template.source);
+    };
+    for (const step of plan.steps) {
+      for (const argument of step.arguments) {
+        if (argument.source.kind === "template") collectShownPrograms(argument.source.template);
+      }
+    }
+    const scrubValues = scrubbablePrivateValues(scrubbed).filter(
+      (value) => protectedValues.has(value) || !shownPrograms.has(value),
+    );
     const scrub = (text: string): string => scrubPrivateValues(text, scrubValues);
     // Only an input that keeps its recorded token when omitted may be shown with that value: a
     // required input has no value a caller can fall back on, and showing one would claim it does.

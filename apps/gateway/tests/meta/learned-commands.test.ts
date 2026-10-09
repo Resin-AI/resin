@@ -112,6 +112,11 @@ describe("programCommands", () => {
       ]),
     ).toEqual(["stylua"]);
   });
+
+  it("keeps a command a short word-like private value only appears inside", () => {
+    // A harness argument such as `"play"` is private, but `playwright` is not a mention of it.
+    expect(programCommands("npx playwright test; play song.mp3", ["play"])).toEqual(["playwright"]);
+  });
 });
 
 describe("summarizeLearnedCommands", () => {

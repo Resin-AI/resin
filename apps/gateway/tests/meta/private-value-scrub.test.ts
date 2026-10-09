@@ -95,6 +95,56 @@ describe("scrubbing private values from meta-tool text", () => {
     );
   });
 
+  it("leaves a short word-like value alone inside a longer word, name or input", () => {
+    // A harness tool's recorded arguments (`{"mode": "play", "target": "server"}`) are private, so
+    // their short values were scrubbed out of public tool and input names that merely contain them.
+    const values = scrubbablePrivateValues(["play", "server", "client"]);
+    const shown =
+      "Runs solo_playtest, then eval_server_runtime with code = {server_code} and {playtest_instance_id}; the client-side harness replays it.";
+    expect(scrubPrivateValues(shown, values)).toBe(
+      `Runs solo_playtest, then eval_server_runtime with code = {server_code} and {playtest_instance_id}; the ${SCRUBBED_PRIVATE_VALUE}-side harness replays it.`,
+    );
+    expect(scrubPrivateValues("starts a playtest, then plays", values)).toBe(
+      "starts a playtest, then plays",
+    );
+    expect(scrubPrivateValues('mode "play" on the server.', values)).toBe(
+      `mode "${SCRUBBED_PRIVATE_VALUE}" on the ${SCRUBBED_PRIVATE_VALUE}.`,
+    );
+  });
+
+  it("still scrubs a secret-like value wherever it appears, even inside a longer word", () => {
+    const values = scrubbablePrivateValues([SECRET, "hunter2pass", "build/acme-internal"]);
+    expect(
+      scrubPrivateValues(
+        `x${SECRET}y, backup_hunter2pass_old, /srv/build/acme-internal/out`,
+        values,
+      ),
+    ).toBe(
+      `x${SCRUBBED_PRIVATE_VALUE}y, backup_${SCRUBBED_PRIVATE_VALUE}_old, /srv/${SCRUBBED_PRIVATE_VALUE}/out`,
+    );
+  });
+
+  it("treats only short ASCII letter values as words: digits and other scripts scrub anywhere", () => {
+    // Account ids, PINs, short passwords with a digit, and values in scripts written without
+    // spaces between words are not ordinary words, so gluing them to other text does not hide them.
+    const values = scrubbablePrivateValues(["482913771204", "hunter2", "张伟的密码"]);
+    expect(
+      scrubPrivateValues(
+        "accounts/acct_482913771204.json, notes/hunter2_old.md, 笔记/张伟的密码备份.md",
+        values,
+      ),
+    ).toBe(
+      `accounts/acct_${SCRUBBED_PRIVATE_VALUE}.json, notes/${SCRUBBED_PRIVATE_VALUE}_old.md, 笔记/${SCRUBBED_PRIVATE_VALUE}备份.md`,
+    );
+  });
+
+  it("never rewrites a placeholder a longer value already left", () => {
+    const values = scrubbablePrivateValues(["private", "token-long"]);
+    expect(scrubPrivateValues("a token-long, <private:2> and private", values)).toBe(
+      `a ${SCRUBBED_PRIVATE_VALUE}, <private:2> and ${SCRUBBED_PRIVATE_VALUE}`,
+    );
+  });
+
   it("search_tools returns no private value", async () => {
     const registry = await setup();
     const response = text(

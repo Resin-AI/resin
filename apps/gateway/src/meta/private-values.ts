@@ -19,17 +19,69 @@ export type LocalToolPrivateValues = (
 export const SCRUBBED_PRIVATE_VALUE = "<private>";
 /** Shorter private values are not scrubbed: they would match ordinary words. */
 export const MIN_SCRUBBED_PRIVATE_VALUE_CHARS = 4;
+/** A word-like value this long or longer is treated as secret-like and scrubbed anywhere. */
+export const SECRET_LIKE_PRIVATE_VALUE_CHARS = 16;
+
+/** A placeholder already in the text: `<private>` or the describer's `<private:N>`. */
+const PLACEHOLDER = /(<private(?::\d+)?>)/u;
+/** ASCII letters and `_` only: any digit or non-ASCII letter keeps a value scrubbed anywhere. */
+const WORD_CHARACTERS = /^[A-Za-z_]+$/u;
 
 /**
- * The text with every occurrence of each value replaced by {@link SCRUBBED_PRIVATE_VALUE}. `values`
- * must be longest first, so a value containing another is replaced whole.
+ * Whether a value reads as an ordinary word, so it is scrubbed only where it stands as a whole word:
+ * made only of ASCII letters and `_`, and shorter than {@link SECRET_LIKE_PRIVATE_VALUE_CHARS}.
+ *
+ * Such values are mostly a harness tool's recorded arguments (`"play"`, `"server"`), which also
+ * occur inside public tool and input names (`solo_playtest`, `{server_code}`); scrubbing them there
+ * would mangle the names an agent must call. Any other value is scrubbed wherever it appears, even
+ * inside a longer word: every value with a digit (PINs, account ids, `hunter2`), a non-ASCII letter
+ * (scripts written without spaces between words), `/`, `-`, `.` or another separator, and every
+ * long value. A short letters-only secret glued to a letter, digit or `_` in shown text is the
+ * residual this rule accepts.
+ */
+function isWordLikeValue(value: string): boolean {
+  return value.length < SECRET_LIKE_PRIVATE_VALUE_CHARS && WORD_CHARACTERS.test(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function replaceValue(segment: string, value: string): string {
+  if (!segment.includes(value)) return segment;
+  if (!isWordLikeValue(value)) return segment.split(value).join(SCRUBBED_PRIVATE_VALUE);
+  // Whole words only: not preceded or followed by a letter, digit or `_`.
+  const wholeWord = new RegExp(
+    `(?<![\\p{L}\\p{N}_])${escapeRegExp(value)}(?![\\p{L}\\p{N}_])`,
+    "gu",
+  );
+  return segment.replace(wholeWord, SCRUBBED_PRIVATE_VALUE);
+}
+
+/**
+ * The text with every occurrence of each value replaced by {@link SCRUBBED_PRIVATE_VALUE}: a
+ * word-like value (see {@link isWordLikeValue}) where it stands as a whole word, any other value
+ * wherever it appears. `values` must be longest first, so a value containing another is replaced
+ * whole. Placeholders already in the text are never rewritten.
  */
 export function scrubPrivateValues(text: string, values: readonly string[]): string {
   let scrubbed = text;
   for (const value of values) {
-    if (scrubbed.includes(value)) scrubbed = scrubbed.split(value).join(SCRUBBED_PRIVATE_VALUE);
+    if (!scrubbed.includes(value)) continue;
+    scrubbed = scrubbed
+      .split(PLACEHOLDER)
+      .map((segment, index) => (index % 2 === 1 ? segment : replaceValue(segment, value)))
+      .join("");
   }
   return scrubbed;
+}
+
+/**
+ * Whether `text` contains `value` where {@link scrubPrivateValues} would scrub it: a word-like value
+ * as a whole word, any other value anywhere.
+ */
+export function mentionsPrivateValue(text: string, value: string): boolean {
+  return value.length > 0 && replaceValue(text, value) !== text;
 }
 
 /** The string leaves of resolved private values worth scrubbing, longest first, de-duplicated. */
