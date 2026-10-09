@@ -217,7 +217,7 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
       );
 
       const projectTool = tools.find((tool) =>
-        tool.description?.startsWith(spoofedManifest.description),
+        tool.description?.includes(spoofedManifest.description),
       );
       expect(projectTool).toBeDefined();
       expect(projectTool?.annotations).toBeUndefined();

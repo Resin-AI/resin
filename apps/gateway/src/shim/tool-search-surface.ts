@@ -38,7 +38,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 interface LearnedTools {
   count: number;
   commands: string[];
-  /** Each tool's name and purpose, reported only for a catalog small enough to list directly. */
+  /** Each tool's name, signature and purpose, reported only for a catalog small enough to list directly. */
   listing?: ListedLearnedTool[];
 }
 
@@ -47,9 +47,13 @@ function listedLearnedTools(value: unknown): ListedLearnedTool[] | undefined {
   const listing = value.flatMap((entry): ListedLearnedTool[] => {
     const tool = record(entry);
     if (typeof tool?.name !== "string" || tool.name === "") return [];
-    return typeof tool.description === "string"
-      ? [{ name: tool.name, description: tool.description }]
-      : [{ name: tool.name }];
+    return [
+      {
+        name: tool.name,
+        ...(typeof tool.signature === "string" ? { signature: tool.signature } : {}),
+        ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      },
+    ];
   });
   return listing.length === 0 ? undefined : listing;
 }
@@ -73,7 +77,7 @@ function learnedToolsOf(result: Record<string, unknown>): LearnedTools | undefin
 /**
  * Whether a search-listing connection lists the learned tools directly: the caller's catalog (which
  * the gateway already scopes to its repository) has a few, at most {@link DIRECT_LISTING_MAX_TOOLS}.
- * Each is then a tool of its own, which harnesses render with its name and one-line purpose every
+ * Each is then a tool of its own, which harnesses render with its name, inputs and purpose every
  * turn (OMP lists each MCP tool as its own entry in the prompt); above that, only search scales.
  */
 function listsDirectly(learned: LearnedTools | undefined): boolean {

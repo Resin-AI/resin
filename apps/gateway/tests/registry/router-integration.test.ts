@@ -135,7 +135,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     );
   });
 
-  it("lists a learned tool by purpose and input names, leaving its recorded steps to get_tool_schema", async () => {
+  it("lists a learned tool by its inputs and purpose, leaving its recorded steps to get_tool_schema", async () => {
     const registry = new ToolRegistry();
     registry.setLocalToolDescriber(() => "Recorded on this machine:\nStep 1 runs: cat {input}");
     const router = createRegistryGatewayRouter(registry);
@@ -171,8 +171,9 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     const tools = await router.listTools(context);
     const learned = tools.find((tool) => tool.name === "read_design");
     expect(learned?._meta).toEqual({ [RESIN_LEARNED_TOOL_META]: true });
-    // One sentence, however the description punctuates inside it, plus the inputs' names.
-    expect(learned?.description).toBe("Prints a design document, e.g. design.md. Inputs: input.");
+    // How to call it first, then one sentence of purpose, however the description punctuates inside it.
+    expect(learned?.description?.slice(0, 200)).toContain("input (string)");
+    expect(learned?.description).toMatch(/ Prints a design document, e\.g\. design\.md\.$/);
     // Each input keeps its name and type; its docs and `for_each` usage are one lookup away.
     expect(learned?.inputSchema.properties?.input).toEqual({ type: "string" });
     expect(learned?.inputSchema.properties?.for_each).toEqual({ type: "object" });
@@ -187,6 +188,63 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       "File to print, such as design.md.",
     );
     expect(described.inputSchema.properties.for_each.description).toContain("once per value");
+  });
+
+  it("starts each listed learned tool's description with what to call it with", async () => {
+    const registry = new ToolRegistry();
+    const router = createRegistryGatewayRouter(registry);
+    const context = {
+      workspaceId: "ws-signature",
+      projectId: "ws-signature",
+      projectRoot: "/tmp",
+      canonicalRoot: "/tmp",
+      startupPath: "/tmp",
+      isReadOnly: false,
+      name: "signature-test",
+      source: "cwd_fallback" as const,
+      roots: [],
+    };
+    // Long enough that a harness showing only the start of a description would lose a trailing list.
+    const purpose = `Runs the full deployment pipeline ${"and its checks ".repeat(12)}end to end.`;
+    await registry.registerTool(
+      makeManifest({
+        id: "no-input-tool",
+        name: "run_checks",
+        description: purpose,
+        parameters: { type: "object", properties: {} },
+      }),
+      undefined,
+      { workspaceId: context.workspaceId },
+    );
+    await registry.registerTool(
+      makeManifest({
+        id: "input-tool",
+        name: "deploy",
+        description: purpose,
+        parameters: {
+          type: "object",
+          properties: {
+            service: { type: "string", description: "Service to deploy." },
+            paths: { type: "array", items: { type: "string" } },
+          },
+          required: ["service"],
+        },
+      }),
+      undefined,
+      { workspaceId: context.workspaceId },
+    );
+
+    const tools = await router.listTools(context);
+    const lead = (name: string) =>
+      tools.find((tool) => tool.name === name)?.description?.slice(0, 200) ?? "";
+    expect(lead("run_checks")).toContain("{}");
+    expect(lead("deploy")).toContain("service (string)");
+    expect(lead("deploy")).toContain("paths (string[])");
+    expect(lead("deploy")).toMatch(/optional/i);
+
+    // The listed schema is unchanged: it still says which inputs are required.
+    const deploy = tools.find((tool) => tool.name === "deploy");
+    expect(deploy?.inputSchema.required).toEqual(["service"]);
   });
 
   it("lists active catalog tools via tools/list", async () => {
@@ -230,7 +288,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
     expect(listRes.result.tools).toHaveLength(5);
     const greetTool = listRes.result.tools.find((t) => t.name === "greet");
     expect(greetTool).toBeDefined();
-    expect(greetTool?.description).toBe("Greets a user. Inputs: input.");
+    expect(greetTool?.description).toContain("Greets a user");
   });
 
   it("waits once for a fresh install's catalog sync before the first tool list", async () => {
