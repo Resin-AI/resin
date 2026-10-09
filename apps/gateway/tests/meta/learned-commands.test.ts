@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { programCommands, summarizeLearnedCommands } from "../../src/meta/learned-commands.js";
+import {
+  programCommands,
+  programWritesFiles,
+  summarizeLearnedCommands,
+} from "../../src/meta/learned-commands.js";
 
 describe("programCommands", () => {
   it.each([
@@ -126,5 +130,20 @@ describe("summarizeLearnedCommands", () => {
 
   it("keeps at most the limit", () => {
     expect(summarizeLearnedCommands([["a", "b", "c"]], 2)).toEqual(["a", "b"]);
+  });
+});
+
+describe("programWritesFiles", () => {
+  it.each([
+    ["rm -rf target && cargo test", true],
+    ["mkdir -p out; cp a out/", true],
+    ["sed -i 's/a/b/' file.txt", true],
+    ["FOO=1 /bin/rm x", true],
+    ["cargo test 2>&1 | tail -20", false],
+    ["sed 's/a/b/' file.txt | grep b", false],
+    ["echo rm", false],
+    ['git commit -m "rm everything"', false],
+  ])("%j → %j", (program, expected) => {
+    expect(programWritesFiles(program)).toBe(expected);
   });
 });

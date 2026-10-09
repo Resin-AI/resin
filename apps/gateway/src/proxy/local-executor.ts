@@ -97,7 +97,22 @@ import {
   composedResultValue,
   presentStepSections,
 } from "../meta/invoke-tool.js";
-import { programCommands } from "../meta/learned-commands.js";
+import { programCommands, programWritesFiles } from "../meta/learned-commands.js";
+import type { SuggestStep } from "../suggest/index-file.js";
+
+/** Harness tools a recorded step may call that only read; any other call is taken to write. */
+const READ_ONLY_HARNESS_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "glob",
+  "find",
+  "ls",
+  "search",
+  "web_search",
+  "websearch",
+  "webfetch",
+  "fetch",
+]);
 
 /** A completed step's output as text: printed text as is, any other value as JSON. */
 function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
@@ -121,6 +136,8 @@ interface RecordedWorkflowSummary {
   privateValues: readonly string[];
   /** Each recorded-default input's one recorded value, when the plan itself carries it. */
   defaults: ReadonlyMap<string, string>;
+  /** What each recorded step runs (see `SuggestStep`), in plan order. */
+  steps: SuggestStep[];
 }
 
 /** Where one private value sits in a recorded text resolved on this machine. */
@@ -799,6 +816,18 @@ export class LocalArtifactExecutor {
   }
 
   /**
+   * What each step of a cached recorded workflow runs: its command phrases (read like
+   * {@link recordedWorkflowCommands}), its toggle input when optional, and whether it changes
+   * files. Undefined for any other tool.
+   */
+  recordedWorkflowSteps(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): SuggestStep[] | undefined {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.steps;
+  }
+
+  /**
    * The recorded-default inputs of a cached recorded workflow whose recorded value is a date or a
    * time (see {@link isDatedValue}), each with that value as a description may show it (masked
    * where it is private). Such an input is required on this device: rerunning its recorded date
@@ -1321,7 +1350,36 @@ export class LocalArtifactExecutor {
     // Each recorded-default input whose recorded value is a date: it is required, not defaulted.
     const dated = new Map<string, string>();
     const commands: string[] = [];
+    const stepInfo: SuggestStep[] = [];
     for (const [index, step] of plan.steps.entries()) {
+      // Per-step detail for command suggestions, read like `commands` (projected text only).
+      const stepCommands: string[] = [];
+      let writes = false;
+      const stepProgram = step.callable.program;
+      if (step.origin === "derivation") {
+        // Model-written code computing values; it runs in the sandbox and writes nothing.
+      } else if (stepProgram === undefined) {
+        writes = !READ_ONLY_HARNESS_TOOLS.has(step.callable.name.toLowerCase());
+      } else if (stepProgram.kind === "shell") {
+        const stepSource = step.arguments.find(
+          (argument) => argument.name === stepProgram.argument,
+        )?.source;
+        const projected = stepSource === undefined ? undefined : projectedText(stepSource);
+        if (projected !== undefined) {
+          stepCommands.push(...programCommands(projected, privateValues));
+          writes = programWritesFiles(projected);
+        } else {
+          writes = true;
+        }
+      } else {
+        // A patch edits a file; a script in another language is opaque.
+        writes = true;
+      }
+      stepInfo.push({
+        commands: stepCommands,
+        ...(step.optional === undefined ? {} : { optional: step.optional.input }),
+        ...(writes ? { writes: true as const } : {}),
+      });
       // A derivation is model-written code: describe what it computes, never the code itself.
       if (step.origin === "derivation") {
         const computed = new Set<string>();
@@ -1499,6 +1557,7 @@ export class LocalArtifactExecutor {
         dated: shownDated,
         defaults,
         privateValues: scrubValues,
+        steps: stepInfo,
       };
     }
     // An input bound in several places is dated if any of its recorded values is.
@@ -1524,6 +1583,7 @@ export class LocalArtifactExecutor {
       dated: shownDated,
       defaults,
       privateValues: scrubValues,
+      steps: stepInfo,
     };
     this.recordedWorkflowSummaries.set(key, summary);
     return summary;

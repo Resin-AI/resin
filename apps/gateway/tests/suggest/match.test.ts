@@ -1,9 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { SuggestTool } from "../../src/suggest/index-file.js";
-import { isDistinctivePhrase, matchCommand } from "../../src/suggest/match.js";
+import type { SuggestStep } from "../../src/suggest/index-file.js";
+import { isDistinctivePhrase, isLoopOrBackground, matchCommand } from "../../src/suggest/match.js";
+import { renderSuggestion } from "../../src/suggest/render.js";
 
-function tool(name: string, commands: string[], inputs: string[] = []): SuggestTool {
-  return { name, commands, inputs: inputs.map((input) => ({ name: input, required: false })) };
+function tool(
+  name: string,
+  commands: string[],
+  inputs: string[] = [],
+  steps?: SuggestStep[],
+): SuggestTool {
+  return {
+    name,
+    commands,
+    inputs: inputs.map((input) => ({ name: input, required: false })),
+    ...(steps === undefined ? {} : { steps }),
+  };
 }
 
 const VITEST = tool("run_vitest_tests", ["vitest"], ["test_file"]);
@@ -36,9 +48,7 @@ describe("matchCommand", () => {
     ["timeout 600 vitest --reporter=verbose", "run_vitest_tests"],
     ["gh pr checks 12 --watch", "wait_for_pr_checks"],
     ["stylua --check src && selene src", "lint_lua"],
-    ["stylua src", "lint_lua"],
     ["python3 scripts/manifest.py --out build", "build_manifest"],
-    ["npx tsc --noEmit", "typecheck_and_test"],
     ["aws logs filter-log-events --log-group-name example", "tail_errors"],
   ])("suggests a tool for %j", (command, expected) => {
     expect(matchCommand(command, TOOLS)?.tool.name).toBe(expected);
@@ -64,6 +74,9 @@ describe("matchCommand", () => {
     // A command the tool does not fully cover.
     "npx vitest run && npx eslint .",
     "selene src && luacheck src",
+    // A tool that would also run expensive steps the command did not ask for.
+    "stylua src",
+    "npx tsc --noEmit",
     // A command no tool runs.
     "cargo test",
     "",
@@ -72,10 +85,12 @@ describe("matchCommand", () => {
     expect(matchCommand(command, TOOLS)).toBeUndefined();
   });
 
-  it("names what the matched tool also runs", () => {
-    const match = matchCommand("npx tsc --noEmit -p .", TOOLS);
-    expect(match?.covered).toEqual(["tsc"]);
-    expect(match?.alsoRuns).toEqual(["vitest"]);
+  it("names the cheap lookups the matched tool also runs", () => {
+    const watch = tool("watch_pr", ["gh pr checks", "gh run view"]);
+    const match = matchCommand("gh pr checks 7 --watch", [watch]);
+    expect(match?.covered).toEqual(["gh pr checks"]);
+    expect(match?.alsoRuns).toEqual(["gh run view"]);
+    expect(match?.skip).toEqual([]);
   });
 
   it("prefers the tool closest to the command, whatever the listing order", () => {
@@ -97,6 +112,123 @@ describe("matchCommand", () => {
 
   it("matches a here-document body as data, never as a command", () => {
     expect(matchCommand("cat <<EOF\nvitest\nEOF", TOOLS)).toBeUndefined();
+  });
+});
+
+describe("matchCommand: close fits only", () => {
+  // A lint + coverage + test bundle for a test runner `lest`.
+  const LINT_COVERAGE_TEST = tool(
+    "check_everything",
+    ["eslint", "c8", "lest"],
+    [],
+    [{ commands: ["eslint"] }, { commands: ["c8"] }, { commands: ["lest"] }],
+  );
+  // cargo test, clippy, a cross-target check and fmt, as four steps.
+  const rustBundle = (optional: boolean): SuggestTool =>
+    tool(
+      "run_rust_quality_checks",
+      ["cargo test", "cargo clippy", "cargo check", "cargo fmt"],
+      ["run_clippy", "run_windows_check", "run_fmt"],
+      [
+        { commands: ["cargo test"] },
+        { commands: ["cargo clippy"], ...(optional ? { optional: "run_clippy" } : {}) },
+        {
+          commands: ["cargo check"],
+          ...(optional ? { optional: "run_windows_check" } : {}),
+        },
+        { commands: ["cargo fmt"], ...(optional ? { optional: "run_fmt" } : {}), writes: true },
+      ],
+    );
+
+  it("never offers a lint + coverage + test bundle for one filtered test run", () => {
+    expect(
+      matchCommand("lest spec/parser_spec.lua | tail -20", [LINT_COVERAGE_TEST]),
+    ).toBeUndefined();
+    expect(matchCommand("lest spec | tail", [LINT_COVERAGE_TEST])).toBeUndefined();
+  });
+
+  it("never offers a bundle with a required cross-target check for `cargo test --lib x`", () => {
+    expect(matchCommand("cargo test --lib parser", [rustBundle(false)])).toBeUndefined();
+  });
+
+  it("offers the bundle when its extra steps are optional, turning them off in the call", () => {
+    const match = matchCommand("cargo test --lib parser", [rustBundle(true)]);
+    expect(match?.tool.name).toBe("run_rust_quality_checks");
+    expect(match?.skip).toEqual(["run_clippy", "run_windows_check", "run_fmt"]);
+    expect(match === undefined ? "" : renderSuggestion(match, "omp")).toBe(
+      'Resin, next time: learned tool run_rust_quality_checks runs `cargo test`; write {"name":"run_rust_quality_checks","parameters":{"run_clippy":false,"run_windows_check":false,"run_fmt":false}} to xd://mcp__resin_invoke_tool.',
+    );
+  });
+
+  it("offers a PR-checks watcher for `gh pr checks N --watch`", () => {
+    const watcher = tool(
+      "wait_for_pr_checks",
+      ["gh pr checks"],
+      ["pr_number"],
+      [{ commands: ["gh pr checks"] }],
+    );
+    expect(matchCommand("gh pr checks 18 --watch", [watcher])?.tool.name).toBe(
+      "wait_for_pr_checks",
+    );
+  });
+
+  it("never matches a word inside a jq filter or a path", () => {
+    const carbon = tool(
+      "build_carbon_plugin",
+      ["python3 scripts/build_carbon.py", "rojo build"],
+      [],
+      [{ commands: ["python3 scripts/build_carbon.py"] }, { commands: ["rojo build"] }],
+    );
+    for (const command of [
+      `jq '.plugins[] | select(.name == "carbon")' reports/carbon.json`,
+      "jq -r .carbon.size out/carbon/report.json | head",
+      "cat build/carbon.rbxm | wc -c",
+    ]) {
+      expect(matchCommand(command, [carbon])).toBeUndefined();
+    }
+  });
+
+  it.each([
+    "for i in $(seq 1 20); do cargo test --lib parser || break; done",
+    "for i in `seq 5`; do npx vitest run a.test.ts; done",
+    "while true; do gh pr checks 18; sleep 30; done",
+    "until npx vitest run; do :; done",
+    "npx vitest run a.test.ts & npx vitest run b.test.ts & wait",
+    "seq 1 10 | xargs -I{} npx vitest run",
+  ])("never matches a loop, stress test or background job: %j", (command) => {
+    expect(isLoopOrBackground(command)).toBe(true);
+    expect(matchCommand(command, [...TOOLS, rustBundle(true)])).toBeUndefined();
+  });
+
+  it.each([
+    "npx vitest run 2>&1 | tail -40",
+    "npx vitest run &> out.log",
+    "cargo test && cargo clippy",
+    `git commit -m "for while & until"`,
+  ])("does not mistake redirections, && or quoted words for loops: %j", (command) => {
+    expect(isLoopOrBackground(command)).toBe(false);
+  });
+
+  it("rejects a tool whose other required step writes files or runs a non-lookup", () => {
+    const withEdit = tool(
+      "test_and_patch",
+      ["vitest"],
+      [],
+      [{ commands: ["vitest"] }, { commands: [], writes: true }],
+    );
+    const withLookup = tool(
+      "test_and_status",
+      ["vitest", "git status"],
+      [],
+      [{ commands: [] }, { commands: ["vitest"] }, { commands: ["git status"] }],
+    );
+    expect(matchCommand("npx vitest run", [withEdit])).toBeUndefined();
+    expect(matchCommand("npx vitest run", [withLookup])?.alsoRuns).toEqual(["git status"]);
+  });
+
+  it("prefers the tool with fewer skipped steps", () => {
+    const plain = tool("z_plain", ["cargo test"], [], [{ commands: ["cargo test"] }]);
+    expect(matchCommand("cargo test", [rustBundle(true), plain])?.tool.name).toBe("z_plain");
   });
 });
 

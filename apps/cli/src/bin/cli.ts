@@ -252,7 +252,7 @@ Commands:
   status       Display live status and health of the daemon, tools, and harnesses.
   service      Show, start, stop, or restart the Resin background service.
   mcp          Connect AI harnesses to Resin Gateway over Model Context Protocol (MCP).
-  suggest      Command-time learned-tool suggestions (harness hook; --disable/--enable).
+  suggest      Learned-tool suggestions at prompts and commands (harness hooks; --disable/--enable).
   privacy      Inspect and manage device and cloud privacy controls.
   feedback     Send a short message to the Resin team.
   control      Inspect or mutate revisioned Cloud desired state noninteractively.

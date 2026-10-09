@@ -10,9 +10,9 @@ import {
 
 /**
  * The learned-tool discovery funnel: how often agents search Resin, see tools, read a schema, are
- * offered a tool for the command they are about to run, call one, or ask for a tool that is not
- * offered in their repository. Counts only, per UTC day: never a query, a command, a tool name or
- * an argument.
+ * offered a tool for a command they ran or a prompt they were given, call one, or ask for a tool
+ * that is not offered in their repository. Counts only, per UTC day: never a query, a command, a
+ * prompt, a tool name or an argument.
  *
  * Every process that serves discovery (the MCP gateway, the `resin suggest` hook) keeps its own
  * counts for the day and writes them to its own shard, `<stateDir>/discovery-funnel/<day>.<pid>.<token>.json`,
@@ -33,6 +33,7 @@ export type DiscoveryFunnelEvent =
   | "tools_listed"
   | "schema_read"
   | "suggestion_shown"
+  | "prompt_suggestion_shown"
   | "invocation_succeeded"
   | "invocation_failed"
   | "unavailable_here";
@@ -44,6 +45,7 @@ export type DiscoveryFunnelCounter =
   | "tools_listed"
   | "schema_reads"
   | "suggestions_shown"
+  | "prompt_suggestions_shown"
   | "invocations_succeeded"
   | "invocations_failed"
   | "unavailable_here";
@@ -58,6 +60,7 @@ export const DISCOVERY_FUNNEL_COUNTER_FOR_EVENT: Readonly<
   tools_listed: "tools_listed",
   schema_read: "schema_reads",
   suggestion_shown: "suggestions_shown",
+  prompt_suggestion_shown: "prompt_suggestions_shown",
   invocation_succeeded: "invocations_succeeded",
   invocation_failed: "invocations_failed",
   unavailable_here: "unavailable_here",
@@ -69,6 +72,7 @@ export const DISCOVERY_FUNNEL_COUNTERS: readonly DiscoveryFunnelCounter[] = [
   "tools_listed",
   "schema_reads",
   "suggestions_shown",
+  "prompt_suggestions_shown",
   "invocations_succeeded",
   "invocations_failed",
   "unavailable_here",
@@ -101,6 +105,7 @@ export function emptyDiscoveryFunnelCounts(): DiscoveryFunnelCounts {
     tools_listed: 0,
     schema_reads: 0,
     suggestions_shown: 0,
+    prompt_suggestions_shown: 0,
     invocations_succeeded: 0,
     invocations_failed: 0,
     unavailable_here: 0,

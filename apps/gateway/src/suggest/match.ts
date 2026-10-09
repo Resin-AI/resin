@@ -1,18 +1,24 @@
 /**
- * Matches a shell command an agent is about to run against the learned tools offered in its
- * repository. Both sides are reduced to command phrases with the same grammar the gateway uses to
- * name what a learned tool runs (`programCommands`: `vitest`, `gh pr checks`,
- * `python3 scripts/build.py`), so a match means the agent is about to run by hand a command a
- * tool's recorded steps already run.
+ * Matches a shell command an agent ran against the learned tools offered in its repository. Both
+ * sides are reduced to command phrases with the same grammar the gateway uses to name what a
+ * learned tool runs (`programCommands`: `vitest`, `gh pr checks`, `python3 scripts/build.py`), so
+ * a match means a tool's recorded steps already run the command's program and subcommand. A word
+ * elsewhere in the command (a path, a `jq` filter, an argument) never matches.
  *
- * Deliberately conservative: a suggestion that does not fit costs the agent a turn, so a command
- * matches only when every command phrase in it is one the tool runs, and at least one of them names
- * a specific job. Bare CLI names (`git`, `pnpm` with an unknown script), script launchers whose
- * script is unknown (`pnpm run`), read-only lookups (`git status`, `gh pr view`) and `--help` /
- * `--version` probes never match: a learned tool does not replace a quick look.
+ * Only close fits match: a suggestion that does not fit costs the agent a turn, and a tool that
+ * runs more than the agent asked for costs it time or fails on a step it never wanted. So a
+ * command matches only when
+ * - every command phrase in it is one the tool runs, and at least one names a specific job;
+ * - every other step the tool would run is either optional (and turned off in the call example)
+ *   or cheap and non-mutating: a read-only lookup that changes no file;
+ * - it is not a loop, a stress-test or a background job (`for … in $(seq …)`, `while`, `&`).
+ *
+ * Bare CLI names (`git`, `pnpm` with an unknown script), script launchers whose script is unknown
+ * (`pnpm run`), read-only lookups (`git status`, `gh pr view`) and `--help` / `--version` probes
+ * never match: a learned tool does not replace a quick look.
  */
 import { hasSubcommandVocabulary, programCommands } from "../meta/learned-commands.js";
-import type { SuggestTool } from "./index-file.js";
+import type { SuggestStep, SuggestTool } from "./index-file.js";
 
 /** Phrases that run a script or task the grammar cannot name, so they identify no job. */
 const OPAQUE_LAUNCHERS: Readonly<Record<string, true>> = Object.fromEntries(
@@ -72,6 +78,13 @@ const READ_ONLY: Readonly<Record<string, true>> = Object.fromEntries(
     "gh auth status",
     "gh auth",
     "gh status",
+    "gh run view",
+    "gh run list",
+    "gh run watch",
+    "gh workflow view",
+    "gh workflow list",
+    "gh release view",
+    "gh release list",
     "gh search",
     "gh browse",
     "docker ps",
@@ -131,8 +144,10 @@ export interface CommandMatch {
   readonly tool: SuggestTool;
   /** The command's phrases the tool runs, in the command's order. */
   readonly covered: readonly string[];
-  /** The tool's other commands, which calling it also runs. */
+  /** The tool's other commands that calling it as suggested also runs (all cheap lookups). */
   readonly alsoRuns: readonly string[];
+  /** Toggle inputs of the optional steps the command does not need: the call sets them false. */
+  readonly skip: readonly string[];
 }
 
 /** Whether a command phrase names a job a learned tool could do instead. */
@@ -155,10 +170,79 @@ function isReadOnlyAwsOperation(phrase: string): boolean {
   );
 }
 
+/** Whether running a phrase as an extra step is cheap and changes nothing: a read-only lookup. */
+export function isCheapLookup(phrase: string): boolean {
+  return Object.hasOwn(READ_ONLY, phrase) || isReadOnlyAwsOperation(phrase);
+}
+
+/** The command with quoted text blanked, so only its shell syntax is inspected. */
+function shellSyntax(command: string): string {
+  return command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/gu, (quoted) => " ".repeat(quoted.length));
+}
+
+/** A loop keyword in command position. */
+const LOOP_KEYWORD = /(?:^|[;&|({\n]|\bdo|\bthen)\s*(?:for|while|until|select)\s/u;
+/** A lone `&`: not `&&`, nor part of a redirection (`2>&1`, `&>`, `|&`, `<&`). */
+const BACKGROUND = /(?:^|[^&>|<])&(?![&>])/u;
+/** A `seq` counter, the stress-test loop's usual driver. */
+const SEQ = /(?:^|[;&|({\n`]|\$\()\s*seq\s/u;
+
 /**
- * The learned tool that covers `command`, or undefined. With several, the one closest to the command
- * wins (fewest commands of its own beyond it), then the first by name, so the result is independent
- * of listing order.
+ * Whether a command repeats or backgrounds work (`for i in $(seq 20); do …; done`, `while …`,
+ * `cmd &`): a stress test or a watcher is not a job a learned tool replays once.
+ */
+export function isLoopOrBackground(command: string): boolean {
+  const syntax = shellSyntax(command);
+  return LOOP_KEYWORD.test(syntax) || BACKGROUND.test(syntax) || SEQ.test(syntax);
+}
+
+interface Fit {
+  readonly alsoRuns: readonly string[];
+  readonly skip: readonly string[];
+}
+
+/**
+ * How closely a tool fits a command whose phrases it all runs: undefined when calling it would
+ * also run work the command did not ask for.
+ */
+function closeFit(tool: SuggestTool, phrases: readonly string[]): Fit | undefined {
+  const extra = (phrase: string) => !phrases.includes(phrase);
+  if (tool.steps === undefined) {
+    // Without per-step detail only the tool's other commands are known; each must be a lookup.
+    const alsoRuns = tool.commands.filter(extra);
+    return alsoRuns.every(isCheapLookup) ? { alsoRuns, skip: [] } : undefined;
+  }
+  const alsoRuns: string[] = [];
+  const skip: string[] = [];
+  let covers = false;
+  for (const step of tool.steps) {
+    const own = step.commands.filter(extra);
+    if (step.commands.some((phrase) => phrases.includes(phrase))) {
+      covers = true;
+      // A step running the command's job may also run lookups, nothing more.
+      if (!own.every(isCheapLookup)) return undefined;
+      alsoRuns.push(...own);
+      continue;
+    }
+    if (step.optional !== undefined) {
+      if (!skip.includes(step.optional)) skip.push(step.optional);
+      continue;
+    }
+    if (!isCheapStep(step)) return undefined;
+    alsoRuns.push(...own);
+  }
+  if (!covers) return undefined;
+  return { alsoRuns: [...new Set(alsoRuns)], skip };
+}
+
+function isCheapStep(step: SuggestStep): boolean {
+  return step.writes !== true && step.commands.every(isCheapLookup);
+}
+
+/**
+ * The learned tool that is a close fit for `command`, or undefined. With several, the one closest
+ * to the command wins (fewest extra commands, then fewest skipped steps), then the first by name,
+ * so the result is independent of listing order.
  */
 export function matchCommand(
   command: string,
@@ -166,6 +250,7 @@ export function matchCommand(
 ): CommandMatch | undefined {
   if (command.length === 0 || command.length > MAX_SUGGEST_COMMAND_LENGTH) return undefined;
   if (PROBE_FLAG.test(command)) return undefined;
+  if (isLoopOrBackground(command)) return undefined;
   const phrases = programCommands(command);
   if (phrases.length === 0) return undefined;
   if (!phrases.some((phrase) => isDistinctivePhrase(phrase) && !isReadOnlyAwsOperation(phrase))) {
@@ -176,11 +261,9 @@ export function matchCommand(
     if (tool.commands.length === 0) continue;
     // Every command phrase the agent runs must be one the tool runs; plumbing is not a phrase.
     if (!phrases.every((phrase) => tool.commands.includes(phrase))) continue;
-    const candidate: CommandMatch = {
-      tool,
-      covered: phrases,
-      alsoRuns: tool.commands.filter((phrase) => !phrases.includes(phrase)),
-    };
+    const fit = closeFit(tool, phrases);
+    if (fit === undefined) continue;
+    const candidate: CommandMatch = { tool, covered: phrases, ...fit };
     if (best === undefined || ranksAbove(candidate, best)) best = candidate;
   }
   return best;
@@ -188,5 +271,6 @@ export function matchCommand(
 
 function ranksAbove(a: CommandMatch, b: CommandMatch): boolean {
   if (a.alsoRuns.length !== b.alsoRuns.length) return a.alsoRuns.length < b.alsoRuns.length;
+  if (a.skip.length !== b.skip.length) return a.skip.length < b.skip.length;
   return a.tool.name < b.tool.name;
 }

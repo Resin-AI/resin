@@ -1079,7 +1079,9 @@ export function formatDiscoveryFunnelLines(funnel: DiscoveryFunnelSummary | unde
   lines.push(`  Searches:       ${total.searches} (${total.searches_with_results} with results)`);
   lines.push(`  Tools listed:   ${total.tools_listed}`);
   lines.push(`  Schema reads:   ${total.schema_reads}`);
-  lines.push(`  Suggestions:    ${total.suggestions_shown}`);
+  lines.push(
+    `  Suggestions:    ${total.suggestions_shown} after commands, ${total.prompt_suggestions_shown} at prompts`,
+  );
   lines.push(
     `  Calls:          ${total.invocations_succeeded} succeeded, ${total.invocations_failed} failed`,
   );
@@ -1087,7 +1089,7 @@ export function formatDiscoveryFunnelLines(funnel: DiscoveryFunnelSummary | unde
   for (const { day, counts } of funnel.days) {
     const calls = counts.invocations_succeeded + counts.invocations_failed;
     lines.push(
-      `  ${day}: ${counts.searches} searches -> ${counts.schema_reads} schema reads -> ${calls} calls; ${counts.suggestions_shown} suggestions`,
+      `  ${day}: ${counts.searches} searches -> ${counts.schema_reads} schema reads -> ${calls} calls; ${counts.suggestions_shown + counts.prompt_suggestions_shown} suggestions`,
     );
   }
   return lines;

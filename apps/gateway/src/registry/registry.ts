@@ -37,7 +37,7 @@ import {
   createSystemMetaTools,
   isSystemMetaTool,
 } from "../meta/index.js";
-import type { LocalToolCommands } from "../meta/learned-commands.js";
+import type { LocalToolCommands, LocalToolSteps } from "../meta/learned-commands.js";
 import { type LocalToolPrivateValues, scrubPrivateValues } from "../meta/private-values.js";
 import type { LocalToolProfile, ToolProfile } from "../meta/tool-profile.js";
 import {
@@ -48,6 +48,7 @@ import {
 } from "../protocol/types.js";
 import type { ManagedToolAccess } from "../proxy/tool-access.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
+import type { SuggestStep } from "../suggest/index-file.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { CatalogCache } from "./cache.js";
 import { UserControlsManager, type UserControlsManagerOptions } from "./controls.js";
@@ -461,6 +462,7 @@ export class ToolRegistry {
   private safetyGateEvaluator?: SafetyGateEvaluator;
   private localToolDescriber?: LocalToolDescriber;
   private localToolCommands?: LocalToolCommands;
+  private localToolSteps?: LocalToolSteps;
   private localToolDatedInputs?: LocalToolDatedInputs;
   private localToolPrivateValues?: LocalToolPrivateValues;
   private localToolRecordedDefaults?: LocalToolRecordedDefaults;
@@ -715,6 +717,19 @@ export class ToolRegistry {
     context: WorkspaceContext,
   ): string[] {
     return this.localToolCommands?.(tool, context) ?? [];
+  }
+
+  /** Installs the local-only reader of what each of a learned tool's recorded steps runs. */
+  setLocalToolSteps(reader: LocalToolSteps): void {
+    this.localToolSteps = reader;
+  }
+
+  /** What each of a learned tool's recorded steps runs on this machine; undefined when unknown. */
+  learnedToolSteps(
+    tool: Pick<RegistryTool, "artifactDigest">,
+    context: WorkspaceContext,
+  ): SuggestStep[] | undefined {
+    return this.localToolSteps?.(tool, context);
   }
 
   /** Installs the local-only reader of what a learned tool's cached plan replays and where. */

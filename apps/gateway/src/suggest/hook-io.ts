@@ -9,9 +9,17 @@
  *   suggestion, `{"additionalContext": <line>}`, which the extension returns from its `tool_call`
  *   handler.
  *
+ * With `--prompt` (prompt-time suggestions):
+ * - `claude-code`: the UserPromptSubmit payload in (`prompt`, `cwd`, `session_id`); out, only when
+ *   there is a block, `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+ *   "additionalContext": <block>}}`. The prompt is never blocked or changed.
+ * - `omp`: the extension's `before_agent_start` handler sends `{"prompt", "cwd", "sessionId"?}`;
+ *   out, `{"additionalContext": <block>}`, which it returns as a session message.
+ *
  * Anything else (another tool, another event, malformed input) produces no output.
  */
 import path from "node:path";
+import type { PromptSuggestRequest } from "./prompt.js";
 import type { SuggestHarness } from "./render.js";
 import type { SuggestRequest } from "./suggest.js";
 
@@ -83,4 +91,53 @@ export function parseHookInput(harness: SuggestHarness, text: string): SuggestRe
 
 export function renderHookOutput(harness: SuggestHarness, line: string): string {
   return harness === "omp" ? renderOmpHookOutput(line) : renderClaudeCodeHookOutput(line);
+}
+
+/**
+ * The request a Claude Code UserPromptSubmit payload carries (`prompt`, `cwd`, `session_id`), or
+ * undefined for any other event or a malformed payload.
+ */
+export function parseClaudeCodePromptInput(text: string): PromptSuggestRequest | undefined {
+  const payload = parseObject(text);
+  if (payload === undefined) return undefined;
+  const event = field(payload, "hook_event_name");
+  if (event !== undefined && event !== "UserPromptSubmit") return undefined;
+  const prompt = field(payload, "prompt");
+  const cwd = nonEmptyString(field(payload, "cwd"));
+  if (typeof prompt !== "string" || cwd === undefined || !path.isAbsolute(cwd)) return undefined;
+  const sessionId = nonEmptyString(field(payload, "session_id"));
+  return {
+    prompt,
+    cwd,
+    harness: "claude-code",
+    ...(sessionId === undefined ? {} : { sessionId }),
+  };
+}
+
+export function renderClaudeCodePromptOutput(text: string): string {
+  return `${JSON.stringify({
+    hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: text },
+  })}\n`;
+}
+
+/** The request Resin's OMP extension sends from `before_agent_start`: `{prompt, cwd, sessionId?}`. */
+export function parseOmpPromptInput(text: string): PromptSuggestRequest | undefined {
+  const payload = parseObject(text);
+  if (payload === undefined) return undefined;
+  const prompt = field(payload, "prompt");
+  const cwd = nonEmptyString(field(payload, "cwd"));
+  if (typeof prompt !== "string" || cwd === undefined || !path.isAbsolute(cwd)) return undefined;
+  const sessionId = nonEmptyString(field(payload, "sessionId"));
+  return { prompt, cwd, harness: "omp", ...(sessionId === undefined ? {} : { sessionId }) };
+}
+
+export function parsePromptInput(
+  harness: SuggestHarness,
+  text: string,
+): PromptSuggestRequest | undefined {
+  return harness === "omp" ? parseOmpPromptInput(text) : parseClaudeCodePromptInput(text);
+}
+
+export function renderPromptOutput(harness: SuggestHarness, text: string): string {
+  return harness === "omp" ? renderOmpHookOutput(text) : renderClaudeCodePromptOutput(text);
 }

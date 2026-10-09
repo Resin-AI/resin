@@ -1,13 +1,16 @@
 /**
  * Counter hook for the discovery funnel: called once per suggestion actually shown to an agent.
- * Carries the harness only, never the command or the tool name. By default it counts the funnel's
- * `suggestion_shown` and writes it at once: the hook process exits right after printing.
+ * Carries the harness and the kind only, never the command, the prompt or a tool name. By default
+ * it counts the funnel's `suggestion_shown` (after a command) or `prompt_suggestion_shown` (at a
+ * prompt) and writes it at once: the hook process exits right after printing.
  */
 import { flushDiscoveryFunnel, recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import type { SuggestHarness } from "./render.js";
 
 export interface SuggestionShownEvent {
   readonly harness: SuggestHarness;
+  /** Where it was shown: with a command's result (the default) or at a submitted prompt. */
+  readonly kind?: "command" | "prompt";
   readonly resinHome?: string;
 }
 
@@ -16,7 +19,7 @@ export type SuggestionShownCounter = (event: SuggestionShownEvent) => void;
 /** Counts a shown suggestion in the local discovery funnel and writes it before the hook exits. */
 const countInDiscoveryFunnel: SuggestionShownCounter = (event) => {
   recordDiscoveryFunnelEvent(
-    "suggestion_shown",
+    event.kind === "prompt" ? "prompt_suggestion_shown" : "suggestion_shown",
     event.resinHome === undefined ? {} : { resinHome: event.resinHome },
   );
   flushDiscoveryFunnel();

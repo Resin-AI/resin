@@ -455,6 +455,14 @@ describe("recorded workflows of ordinary calls", () => {
     const commands = executor.recordedWorkflowCommands(installed.artifactDigest, context);
     expect(commands).toEqual(["gh pr checks", "stylua", "selene"]);
     expect(JSON.stringify(commands)).not.toMatch(/canary/u);
+
+    // Per step, read the same way: a program kept private names nothing and counts as writing.
+    const steps = executor.recordedWorkflowSteps(installed.artifactDigest, context);
+    expect(steps).toHaveLength(5);
+    expect(steps?.[0]).toEqual({ commands: ["gh pr checks"] });
+    expect(steps?.[2]).toEqual({ commands: ["stylua", "selene"] });
+    expect(steps?.[1]?.commands).toEqual([]);
+    expect(JSON.stringify(steps)).not.toMatch(/canary/u);
   });
 
   it("describes a harness tool step by its tool and the arguments a caller sees", async () => {

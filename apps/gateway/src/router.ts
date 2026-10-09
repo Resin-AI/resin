@@ -71,6 +71,7 @@ import {
 } from "./registry/index.js";
 import { isAutomaticallyRecommended } from "./registry/recommendation.js";
 import type { CatalogEntry, RegistryTool } from "./registry/types.js";
+import type { SuggestStep } from "./suggest/index-file.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
 
 export interface ToolCallOptions {
@@ -92,6 +93,8 @@ export interface CatalogNoticeTool extends McpTool {
   catalogOutputSchema?: McpTool["outputSchema"];
   /** The commands a learned tool's recorded programs run, resolved on this machine. */
   localCommands?: string[];
+  /** What each of a learned tool's recorded steps runs, resolved on this machine. */
+  localSteps?: SuggestStep[];
   /**
    * False for a learned tool whose measured invocations cost more than doing the job directly:
    * no automatic surface (instructions, command suggestions, direct listing) names it.
@@ -107,6 +110,7 @@ export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
     if (
       !("catalogOutputSchema" in tool) &&
       !("localCommands" in tool) &&
+      !("localSteps" in tool) &&
       !("recommended" in tool) &&
       !("listing" in tool)
     )
@@ -114,6 +118,7 @@ export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
     const {
       catalogOutputSchema: _catalogOutputSchema,
       localCommands: _localCommands,
+      localSteps: _localSteps,
       recommended: _recommended,
       listing: _listing,
       ...nativeTool
@@ -441,6 +446,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           inputSchema: schema,
           _meta: undefined,
           localCommands: [],
+          localSteps: undefined,
           recommended: true,
           listing: undefined,
         };
@@ -454,6 +460,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
         inputSchema: listedInputSchema(served),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
         localCommands: this.registry.learnedToolCommands(tool, context),
+        localSteps: this.registry.learnedToolSteps(tool, context),
         recommended: isAutomaticallyRecommended(tool),
         listing: { purpose, signature: scrub(listedSignature(served)) },
       };
@@ -463,10 +470,8 @@ export class RegistryGatewayRouter implements GatewayRouter {
       for (const entry of Object.values(record.entries)) {
         // A learned tool is listed only where it was learned and can run (see repository-scope).
         if (!isToolOfferedHere(this.registry, entry, context)) continue;
-        const { description, inputSchema, _meta, localCommands, recommended, listing } = listed(
-          entry,
-          entry.description || entry.manifest?.description || `Tool ${entry.name}`,
-        );
+        const { description, inputSchema, _meta, localCommands, localSteps, recommended, listing } =
+          listed(entry, entry.description || entry.manifest?.description || `Tool ${entry.name}`);
         mcpTools.push({
           name: entry.exposedName,
           description,
@@ -475,6 +480,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
           annotations: discoveryAnnotations(entry),
           ...(_meta === undefined ? {} : { _meta }),
           ...(localCommands.length === 0 ? {} : { localCommands }),
+          ...(localSteps === undefined || localCommands.length === 0 ? {} : { localSteps }),
           ...(recommended ? {} : { recommended: false as const }),
           ...(listing === undefined ? {} : { listing }),
         });
@@ -488,10 +494,15 @@ export class RegistryGatewayRouter implements GatewayRouter {
         );
         if (tool) {
           if (!isToolOfferedHere(this.registry, tool, context)) continue;
-          const { description, inputSchema, _meta, localCommands, recommended, listing } = listed(
-            tool,
-            tool.description || tool.manifest?.description || `Tool ${tool.name}`,
-          );
+          const {
+            description,
+            inputSchema,
+            _meta,
+            localCommands,
+            localSteps,
+            recommended,
+            listing,
+          } = listed(tool, tool.description || tool.manifest?.description || `Tool ${tool.name}`);
           mcpTools.push({
             name: tool.exposedName || tool.name,
             description,
@@ -500,6 +511,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
             annotations: discoveryAnnotations(tool),
             ...(_meta === undefined ? {} : { _meta }),
             ...(localCommands.length === 0 ? {} : { localCommands }),
+            ...(localSteps === undefined || localCommands.length === 0 ? {} : { localSteps }),
             ...(recommended ? {} : { recommended: false as const }),
             ...(listing === undefined ? {} : { listing }),
           });

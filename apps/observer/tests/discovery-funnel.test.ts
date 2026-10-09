@@ -93,6 +93,7 @@ describe("discovery funnel counting", () => {
     gateway.record("unavailable_here");
     hook.record("suggestion_shown");
     hook.record("suggestion_shown");
+    hook.record("prompt_suggestion_shown");
     gateway.flush({ report: false });
     hook.flush({ report: false });
 
@@ -107,6 +108,7 @@ describe("discovery funnel counting", () => {
           tools_listed: 4,
           schema_reads: 1,
           suggestions_shown: 2,
+          prompt_suggestions_shown: 1,
           invocations_succeeded: 1,
           invocations_failed: 1,
           unavailable_here: 1,
@@ -271,6 +273,7 @@ describe("discovery_funnel_daily usage event", () => {
           tools_listed: 0,
           schema_reads: 2,
           suggestions_shown: 0,
+          prompt_suggestions_shown: 0,
           invocations_succeeded: 2,
           invocations_failed: 0,
           unavailable_here: 0,

@@ -10,6 +10,7 @@
  */
 
 import type { RegistryTool } from "../registry/types.js";
+import type { SuggestStep } from "../suggest/index-file.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 
 /** The commands a learned tool runs, resolved on this machine (none when it runs no program). */
@@ -17,6 +18,12 @@ export type LocalToolCommands = (
   tool: Pick<RegistryTool, "artifactDigest">,
   context: WorkspaceContext,
 ) => string[];
+
+/** What each of a learned tool's recorded steps runs; undefined when its plan is not cached. */
+export type LocalToolSteps = (
+  tool: Pick<RegistryTool, "artifactDigest">,
+  context: WorkspaceContext,
+) => SuggestStep[] | undefined;
 
 /** Flags and options a wrapper accepts before the command it runs. */
 interface WrapperGrammar {
@@ -644,6 +651,28 @@ export function programCommands(program: string, privateValues: readonly string[
  */
 export function hasSubcommandVocabulary(program: string): boolean {
   return Object.hasOwn(SUBCOMMANDS, program);
+}
+
+/** Plumbing that changes files: a step running one is never a cheap extra. */
+const WRITES_FILES: Readonly<Record<string, true>> = Object.fromEntries(
+  ["rm", "mv", "cp", "mkdir", "touch", "tee", "ln", "chmod", "rsync", "dd", "truncate"].map(
+    (name) => [name, true as const],
+  ),
+);
+
+/**
+ * Whether a shell program runs plumbing that changes files (`rm`, `cp`, `mkdir`, `sed -i`), which
+ * {@link programCommands} does not name. Redirections are not considered.
+ */
+export function programWritesFiles(program: string): boolean {
+  for (const words of simpleCommands(program)) {
+    const first = words.find((word) => !ASSIGNMENT.test(word.text));
+    if (first === undefined || first.quoted) continue;
+    const name = first.text.split("/").at(-1) ?? first.text;
+    if (Object.hasOwn(WRITES_FILES, name)) return true;
+    if (name === "sed" && words.some((word) => /^-[a-zA-Z]*i/u.test(word.text))) return true;
+  }
+  return false;
 }
 
 /** How many commands, at most, a summary names; a longer list stops being read. */
