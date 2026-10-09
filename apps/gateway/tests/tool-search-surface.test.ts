@@ -1480,14 +1480,15 @@ describe("search-only listing", () => {
       const instructions = instructionsOf(client.received.at(-1));
       expect(instructions).toBe(searchListingGatewayInstructions(12));
       expect(instructions).toContain("Resin has 12 learned tools");
-      expect(instructions).toContain("search_tools(query=");
+      // No command named: a search could not tell the agent anything its next command needs.
+      expect(instructions).toMatch(/do not search/);
+      expect(instructions).not.toContain("search_tools(query=");
 
       listWithLearned(client, 2, 12);
       const description = searchDescriptionOf(client, 2);
       const first = firstSentence(description);
       expect(first).toMatch(/^Resin has 12 learned tools for this workspace/);
-      expect(first).toMatch(/before running a multi-step job by hand, search them/);
-      expect(first).toMatch(/invoke_tool directly with a tool an earlier search found/);
+      expect(first).toMatch(/so do not search: do the task directly/);
       expect(description.endsWith(SEARCH_DESCRIPTION)).toBe(true);
 
       // A catalog small enough to list directly says so, in the singular for one tool.
@@ -1660,10 +1661,11 @@ describe("search-only listing", () => {
       const instructions = instructionsOf(client.received.at(-1));
       expect(instructions).toBe(searchListingGatewayInstructions(92, commands));
       expect(instructions).toContain(
-        "Resin has 92 learned tools for this workspace, not listed; they run commands such as `vitest`, `gh pr checks`, `stylua`.",
+        "Resin has 92 learned tools for this workspace, not listed; they run `vitest`, `gh pr checks`, `stylua`.",
       );
-      expect(instructions).toContain("Before running one of those commands");
-      expect(instructions).toContain("search_tools(query=<the command line or job");
+      expect(instructions).toContain(
+        "Call search_tools(query=<the command line you are about to run>) only when your next command is one of those; otherwise do not search.",
+      );
 
       client.send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
       client.respond({
@@ -1686,7 +1688,7 @@ describe("search-only listing", () => {
       const first = firstSentence(searchDescriptionOf(client, 2));
       expect(first).toMatch(/^Resin has 92 learned tools for this workspace:/);
       expect(first).toContain(
-        "one of the commands they run (`vitest`, `gh pr checks`, `stylua`) by hand, search them",
+        "search them only when the next command you are about to run is one of theirs (`vitest`, `gh pr checks`, `stylua`), and call invoke_tool directly with a tool an earlier search found",
       );
     } finally {
       client.close();
@@ -1713,13 +1715,14 @@ describe("search-only listing", () => {
   it("routes the model from a search result straight to invoke_tool, not through get_tool_schema", () => {
     for (const instructions of [
       searchListingGatewayInstructions(),
-      searchListingGatewayInstructions(3),
+      searchListingGatewayInstructions(3, ["vitest"]),
     ]) {
       expect(instructions).toContain("invoke_tool(name, parameters)");
       expect(instructions).toContain("inputSchema");
-      expect(instructions).not.toMatch(/get_tool_schema\(name\)\s+and\s+invoke_tool/);
-      expect(instructions).toMatch(/get_tool_schema only for/);
+      expect(instructions).toMatch(/no get_tool_schema call/);
       expect(instructions).toMatch(/already found again without searching/);
+      // What the tool's output holds, so the agent does not rerun its commands.
+      expect(instructions).toMatch(/diagnostics its recorded .* filters hid/);
     }
   });
 

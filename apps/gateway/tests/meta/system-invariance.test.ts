@@ -7,6 +7,7 @@ import {
 } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { LocalMcpGateway } from "../../src/gateway.js";
+import { INVOKE_RESULT_NOTE } from "../../src/meta/search-tools.js";
 import { SYSTEM_META_TOOL_IDS } from "../../src/meta/system-tools.js";
 import type {
   CallToolResult,
@@ -367,6 +368,7 @@ describe("System Meta-Tools Invariance & Non-Shadowability", () => {
         limit: 5,
         offset: 0,
         hasMore: false,
+        note: INVOKE_RESULT_NOTE,
       });
       expect(
         parseJson(

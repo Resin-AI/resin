@@ -12,11 +12,16 @@ import {
   type ToolManifest,
   ToolManifestSchema,
   type WorkflowJsonValue,
+  type WorkflowStep,
   type WorkflowValueSource,
   type WorkflowValueTemplate,
   canonicalJson,
+  displayFilterPipelines,
+  displayFilterShell,
   embeddedPrograms,
   normalizeSha256,
+  splitDisplayFilter,
+  splitDisplayFilters,
   tokenizeProgram,
   validateRecordedWorkflow,
   workflowLocationRepositories,
@@ -310,21 +315,26 @@ export interface RecordedStep {
   head: string;
   /** The program text or added lines the step shows under its head, trimmed to fit the budget. */
   body?: string;
+  /** What an invocation of the step returns, shown whole after its body (see {@link displayFilterNote}). */
+  note?: string;
 }
 
 /**
  * Renders recorded steps within `budget` characters: previews shrink together (each step keeps its
- * head and the start of its body) until they fit, and when even the smallest preview does not, the
- * steps that no longer fit are counted instead of shown.
+ * head, the start of its body and its note) until they fit, and when even the smallest preview does
+ * not, the steps that no longer fit are counted instead of shown.
  */
 export function renderRecordedSteps(
   steps: readonly RecordedStep[],
   budget: number = RECORDED_STEPS_BUDGET_CHARS,
 ): string {
   const render = (step: RecordedStep, limit: number): string => {
-    if (step.body === undefined) return step.head;
-    const shown = step.body.length > limit ? `${step.body.slice(0, limit)}\n[...]` : step.body;
-    return `${step.head}\n${shown}`;
+    const lines = [step.head];
+    if (step.body !== undefined) {
+      lines.push(step.body.length > limit ? `${step.body.slice(0, limit)}\n[...]` : step.body);
+    }
+    if (step.note !== undefined) lines.push(step.note);
+    return lines.join("\n");
   };
   const join = (parts: readonly string[]): string => parts.join("\n");
   for (const limit of RECORDED_PREVIEW_STEPS) {
@@ -344,6 +354,71 @@ export function renderRecordedSteps(
   return omitted === 0
     ? join(kept)
     : `${join(kept)}\n[${omitted} more step${omitted === 1 ? "" : "s"} not shown]`;
+}
+
+/** The longest display filter a {@link displayFilterNote} quotes. */
+const NOTED_FILTER_CHARS = 60;
+
+/**
+ * What an invocation of a display-filter step returns, read from the step's compiled
+ * `displayFilter` and its program's top-level pipelines, as `runRecordedCall` in @resin/runtime
+ * runs it: version 1 runs without the filter its last pipeline ended in, so the whole output and
+ * the command's own exit status come back; version 2 runs as recorded and its report adds the
+ * diagnostic lines the filters hid, keeps the unfiltered output in files and, when a command
+ * fails, lists each command's exit status. A command after `&&` is named with the one it waits
+ * on, since it runs only if that one succeeded; after a filtered pipeline the filter's status
+ * decides instead, so no such claim is made. An agent shown only the recorded program passed over
+ * an exact match, reasoning that its `&& … | tail -3` would hide findings. Undefined for any other
+ * step.
+ */
+function displayFilterNote(step: WorkflowStep): string | undefined {
+  const version = step.displayFilter?.version;
+  const program = step.callable.program;
+  if (version === undefined || program === undefined) return undefined;
+  // The recorded shell is read from literal arguments only (a Codex shell profile), as validation does.
+  const literals: Record<string, unknown> = {};
+  for (const argument of step.arguments) {
+    if (argument.source.kind === "literal") literals[argument.name] = argument.source.value;
+  }
+  const shell = displayFilterShell(step.callable.name, literals, program);
+  if (shell === undefined) return undefined;
+  const filters = (
+    version === 1
+      ? [splitDisplayFilter(shell, program.source, version)?.filter]
+      : (splitDisplayFilters(shell, program.source, version)?.cuts.map((cut) => cut.filter) ?? [])
+  ).flatMap((filter) =>
+    filter === undefined
+      ? []
+      : [
+          filter.length > NOTED_FILTER_CHARS
+            ? `${filter.slice(0, NOTED_FILTER_CHARS - 1)}…`
+            : filter,
+        ],
+  );
+  if (filters.length === 0) return undefined;
+  // Version 1's pipelines are read with version 2's lexer, which reads version 1's grammar; a
+  // program it refuses names no chain.
+  const pipelines =
+    displayFilterPipelines(shell, program.source, version === 1 ? 2 : version) ?? [];
+  const label = (index: number): string => {
+    const command = pipelines[index]?.command;
+    const unique =
+      command !== undefined && pipelines.filter((each) => each.command === command).length === 1;
+    return unique
+      ? `\`${command}\``
+      : `command ${index + 1}${command === undefined ? "" : ` (\`${command}\`)`}`;
+  };
+  const chain = pipelines
+    .flatMap((pipeline, index) =>
+      pipeline.next === "&&" && pipeline.cut === undefined && index + 1 < pipelines.length
+        ? [`${label(index + 1)} runs only if ${label(index)} succeeds`]
+        : [],
+    )
+    .join("; ");
+  if (version === 1) {
+    return `When invoked, it runs without the final \`| ${filters[0]}\`, so the full output comes back and the command's own exit status decides success${chain === "" ? "" : `; ${chain}`}.`;
+  }
+  return `When invoked, it runs as recorded${chain === "" ? "" : `: ${chain}`}. Its output adds the error, warning and failure lines ${filters.map((filter) => `\`${filter}\``).join(" and ")} hid, with the unfiltered output kept in files; if a command fails, the call fails listing each command's exit status.`;
 }
 
 function isRegularFileWithoutFollowingSymlink(filePath: string): boolean {
@@ -1300,9 +1375,11 @@ export class LocalArtifactExecutor {
           if (!commands.includes(command)) commands.push(command);
         }
       }
+      const note = displayFilterNote(step);
       steps.push({
         head: `Step ${index + 1}${toggle} runs this recorded ${program.kind} program${workdir ? ` in ${workdir}` : ""}:`,
         body: programText,
+        ...(note === undefined ? {} : { note }),
       });
     }
     // Step text is scrubbed before any preview is cut, so no part of a private value survives a cut.
@@ -1346,6 +1423,7 @@ export class LocalArtifactExecutor {
     const shownSteps = steps.map((step) => ({
       head: scrub(step.head),
       ...(step.body === undefined ? {} : { body: scrub(step.body) }),
+      ...(step.note === undefined ? {} : { note: scrub(step.note) }),
     }));
     const summary: RecordedWorkflowSummary = {
       description: `Recorded on this machine:\n${renderRecordedSteps(shownSteps)}${inputs}${required}`,

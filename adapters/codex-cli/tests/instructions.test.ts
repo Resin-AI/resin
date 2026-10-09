@@ -18,7 +18,7 @@ describe("CODEX_RESIN_GUIDANCE", () => {
       tools,
       (value: string) => printed.push(value),
     );
-    expect(queries).toEqual([{ query: "<the job>" }]);
+    expect(queries).toEqual([{ query: "<the command line>" }]);
     expect(printed).toEqual([
       JSON.stringify({ content: [{ type: "text", text: "backup_orders_db" }] }),
     ]);

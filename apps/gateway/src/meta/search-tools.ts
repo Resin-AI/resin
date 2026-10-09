@@ -48,8 +48,9 @@ export interface SearchToolsResultItem {
   replaces?: string;
   /**
    * Present only as `false`: repeated measurements showed this tool costing more than doing the
-   * job directly, so Resin no longer names it unprompted. A search is an explicit request, so the
-   * tool keeps its rank here and still invokes by name.
+   * job directly, so Resin no longer offers it unprompted. A query returns it only when it names
+   * the tool (its exact or leading name); an empty-query listing still lists it, and it still
+   * invokes by name.
    */
   recommended?: false;
   /** Lower-ranked matches running the same set of commands as this tool, listed compactly. */
@@ -57,30 +58,21 @@ export interface SearchToolsResultItem {
 }
 
 /**
- * A match that runs the same commands as the item it is listed under, with its purpose. A close
- * contender (see {@link CLOSE_MATCH_RATIO}) also carries its id, score and input schema, so an
- * agent can invoke the one it picks without another lookup. In measured runs, listing the rest by
- * name alone sent agents through up to 8 get_tool_schema calls to tell them apart, so they keep
- * their purpose.
+ * A match that runs the same commands as the item it is listed under: its purpose, and the id,
+ * score and input schema invoke_tool needs, so the agent invokes the one it picks without a
+ * get_tool_schema call. In measured runs, listing these by name alone sent agents through up to 8
+ * get_tool_schema calls to tell them apart, and one carrying no schema cost a request to read it.
  */
 export interface SimilarTool {
+  toolId: string;
   name: string;
   /** The first sentence of what the tool does, at most {@link PURPOSE_MAX_LENGTH} characters. */
   purpose: string;
-  toolId?: string;
   score?: number;
-  inputSchema?: ToolParameterSchema | JsonRpcParams;
+  inputSchema: ToolParameterSchema | JsonRpcParams;
+  /** As {@link SearchToolsResultItem.recommended}. */
+  recommended?: false;
 }
-
-/**
- * A similar tool scoring at least this share of its item's score is a close contender. In
- * measured runs the job's exact tool scored 10.58 under an item scoring 10.61; the agent picked
- * it and spent a request reading its schema.
- */
-const CLOSE_MATCH_RATIO = 0.9;
-
-/** At most this many close contenders per item carry a schema; exact duplicates all tie. */
-const CLOSE_MATCH_LIMIT = 2;
 
 /**
  * A page of search results. `limit`, `offset`, `total` and `hasMore` count items in `tools`: each
@@ -94,8 +86,8 @@ export interface SearchToolsResponse {
   offset: number;
   hasMore: boolean;
   /**
-   * With no match for a non-empty query, {@link NO_MATCHING_TOOL_NOTE}; with results, what the
-   * items leave unsaid once (see {@link resultNote}); otherwise absent.
+   * With no match for a non-empty query, {@link NO_MATCHING_TOOL_NOTE}; with results, how to
+   * invoke them and what the items leave unsaid once (see {@link resultNote}); otherwise absent.
    */
   note?: string;
 }
@@ -203,8 +195,14 @@ const LIST_INPUT_SENTENCE =
 const RECORDED_VALUES_NOTE = "Omitted inputs reuse their recorded values.";
 const LIST_INPUT_NOTE =
   "Each item of an array input is passed to the command as one separate argument.";
+/**
+ * How to run a listed tool. Agents called get_tool_schema after a search before invoking, a
+ * request that told them nothing the result had not.
+ */
+export const INVOKE_RESULT_NOTE =
+  "Call invoke_tool with {name, parameters} directly: each listed tool's inputSchema is all it needs, no get_tool_schema call.";
 const SIMILAR_NOTE =
-  "A tool under `similar` runs the same commands as the item it is listed under; invoke it by name with its inputSchema, or, when none is listed, with the inputs get_tool_schema(name) gives.";
+  "A tool under `similar` runs the same commands as the item it is listed under; invoke it the same way, by name with its inputSchema.";
 
 /** The longest `purpose` a similar tool is listed with. */
 const PURPOSE_MAX_LENGTH = 140;
@@ -322,17 +320,15 @@ function shownInputSchema<T extends object>(schema: T, omissions: Omissions): T 
   });
 }
 
-/** The note a page of results carries: each sentence its items dropped, said once. */
-function resultNote(
-  omissions: Omissions,
-  hasSimilar: boolean,
-): { note: string } | Record<string, never> {
+/** The note a page of results carries: how to invoke them, then each sentence its items dropped, said once. */
+function resultNote(omissions: Omissions, hasSimilar: boolean): { note: string } {
   const sentences = [
+    INVOKE_RESULT_NOTE,
     ...(omissions.recordedValues ? [RECORDED_VALUES_NOTE] : []),
     ...(omissions.listInputs ? [LIST_INPUT_NOTE] : []),
     ...(hasSimilar ? [SIMILAR_NOTE] : []),
   ];
-  return sentences.length === 0 ? {} : { note: sentences.join(" ") };
+  return { note: sentences.join(" ") };
 }
 
 /**
@@ -556,11 +552,11 @@ function withoutRecordedValues(text: string): string {
 /**
  * Lines Resin writes around the programs in a learned tool's local detail (`RecordedWorkflowSummary`
  * in proxy/local-executor.ts): the "Recorded on this machine:" header, the "Step N runs this
- * recorded shell program:" heads, elision markers, and the parameter listings, which hold nothing
- * but recorded values.
+ * recorded shell program:" heads, the "When invoked, …" line saying what a display-filter step
+ * returns, elision markers, and the parameter listings, which hold nothing but recorded values.
  */
 const RECORDED_DETAIL_FRAMING =
-  /^(?:Recorded on this machine:|Step \d+\b|\[(?:\.\.\.|\d+ more steps? not shown)\]$|(?:Required )?[Pp]arameters \()/u;
+  /^(?:Recorded on this machine:|Step \d+\b|When invoked, |\[(?:\.\.\.|\d+ more steps? not shown)\]$|(?:Required )?[Pp]arameters \()/u;
 /** The file an edit step's head names (`Step 2 edits src/app.ts, adding:`). */
 const EDITED_FILE = /^Step \d+\b.*? edits (\S+?)(?:,| \(|$)/u;
 
@@ -597,6 +593,11 @@ interface SearchableTool {
   /** Recorded steps the tool replays, when known: more recorded work ranks higher. */
   steps?: number;
   isPinned: boolean;
+  /**
+   * False when measurements showed the tool costing more than doing the job directly: it then
+   * matches only a query naming it (its exact or leading name), never through its words.
+   */
+  recommended: boolean;
 }
 
 // A query word counts more in a tool's name than in its tags, and more there than in its description.
@@ -667,6 +668,7 @@ function isGenericQueryWord(token: string): boolean {
  * tool contains contributes almost nothing and a distinctive one (`pnpm`, `gh`) decides the ranking.
  * A tool's word score is scaled by the share of the query's weight it covers, so tools matching the
  * whole command outrank tools matching one common word of it. Searching by name earns a bonus.
+ * A tool measured to cost more than doing the job directly matches only by name.
  * Otherwise a tool matches only through a distinctive word: neither one most tools share nor one
  * that merely frames the task (see {@link GENERIC_QUERY_WORDS}), found in the tool's name, tags,
  * description or recorded programs — not only in a recorded argument value or Resin's framing
@@ -793,15 +795,19 @@ function scoreToolsForQuery(
     };
   });
 
+  // Only a tool that can match through its words sets the coverage the others are measured against.
   const bestCoverage = Math.max(
     0,
-    ...scored.map((s) => (s?.matchesInformative && s.clearMatch ? s.subjectCoverage : 0)),
+    ...scored.map((s, index) =>
+      s?.matchesInformative && s.clearMatch && tools[index]?.recommended ? s.subjectCoverage : 0,
+    ),
   );
   return scored.map((s, index) => {
     if (!s) {
       return undefined;
     }
     const relevant =
+      tools[index]?.recommended === true &&
       s.matchesInformative &&
       s.clearMatch &&
       s.subjectCoverage >= RELATIVE_COVERAGE_FLOOR * bestCoverage;
@@ -979,15 +985,18 @@ export function createSearchToolsHandler(
       ? scoreToolsForQuery(
           query,
           // The registered name stays searchable when the exposed one is disambiguated.
-          filtered.map(({ tool, name, tags, description, commands, steps, isPinned }) => ({
-            names: [name, tool.name],
-            tags,
-            description: description.catalog,
-            ...(description.local === undefined ? {} : { recorded: description.local }),
-            commands,
-            ...(steps === undefined ? {} : { steps }),
-            isPinned,
-          })),
+          filtered.map(
+            ({ tool, name, tags, description, commands, steps, isPinned, recommended }) => ({
+              names: [name, tool.name],
+              tags,
+              description: description.catalog,
+              ...(description.local === undefined ? {} : { recorded: description.local }),
+              commands,
+              ...(steps === undefined ? {} : { steps }),
+              isPinned,
+              recommended,
+            }),
+          ),
         )
       : [];
     const scoredTools: RankedCandidate[] = query
@@ -997,8 +1006,8 @@ export function createSearchToolsHandler(
         })
       : filtered.map((candidate) => ({ candidate }));
 
-    // By score descending, then name ascending. Measured cost does not reorder a search: it is an
-    // explicit request, and pushing the best match down only adds a schema lookup.
+    // By score descending, then name ascending. A tool measured to cost more is in a query's
+    // results only when the query names it, and then it ranks by that name match.
     scoredTools.sort(({ candidate: a, score: aScore = 0 }, { candidate: b, score: bScore = 0 }) => {
       if (query) {
         if (bScore !== aScore) {
@@ -1064,28 +1073,19 @@ export function createSearchToolsHandler(
         ...(similar.length === 0
           ? {}
           : {
-              similar: similar.map(({ candidate, score }, index): SimilarTool => {
-                // `similar` is in rank order, so the first contenders are the closest.
-                const close =
-                  index < CLOSE_MATCH_LIMIT &&
-                  score !== undefined &&
-                  lead.score !== undefined &&
-                  score >= CLOSE_MATCH_RATIO * lead.score;
+              similar: similar.map(({ candidate, score }): SimilarTool => {
                 // What the item would show, minus the program: its purpose sentence comes first.
                 const shown =
                   shownCatalog(candidate.description.catalog, candidate.description.local, {
                     recordedValues: false,
                     listInputs: false,
                   }) || `Runs ${candidate.commands.join(", ")}.`;
-                const purpose = purposeOf(
-                  registry.scrubLearnedToolText(candidate.tool, context, shown),
-                );
-                if (!close) return { name: candidate.name, purpose };
                 return {
                   toolId: candidate.tool.toolId,
                   name: candidate.name,
-                  purpose,
+                  purpose: purposeOf(registry.scrubLearnedToolText(candidate.tool, context, shown)),
                   ...(score === undefined ? {} : { score }),
+                  ...(candidate.recommended ? {} : { recommended: false as const }),
                   inputSchema: shownInputSchema(
                     registry.learnedToolInputSchema(
                       candidate.tool,
