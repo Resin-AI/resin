@@ -745,43 +745,53 @@ async function qualifyMcp(installedRoot, sandboxDir) {
     const listed = await rpc.request(2, "tools/list", {});
     if (listed.error) throw new Error(`MCP tools/list failed: ${JSON.stringify(listed)}`);
     const toolNames = (listed.result?.tools ?? []).map((tool) => tool.name);
-    // Search-only listing is the default (resin#234): the four meta-tools, and nothing else.
-    const expectedMetaTools = ["search_tools", "get_tool_schema", "invoke_tool", "manage_tools"];
-    for (const metaTool of expectedMetaTools) {
-      if (!toolNames.includes(metaTool)) {
-        throw new Error(
-          `MCP catalog did not include essential system meta-tool ${metaTool}: ${JSON.stringify(toolNames)}`,
-        );
-      }
-    }
-    const extra = toolNames.filter((name) => !expectedMetaTools.includes(name));
-    if (extra.length > 0) {
+    // A fresh workspace has no learned tools, so the bounded default listing (resin#335) is
+    // invoke_tool alone; nothing else, and none of the removed standalone utilities.
+    if (JSON.stringify(toolNames) !== JSON.stringify(["invoke_tool"])) {
       throw new Error(
-        `MCP catalog listed tools beyond the meta-tools under search-only listing: ${JSON.stringify(extra)}`,
+        `MCP catalog of a workspace without learned tools must list only invoke_tool: ${JSON.stringify(toolNames)}`,
       );
     }
-    const removedUtilities = ["echo", "workspace_info", "fail_tool", "slow_tool"];
-    for (const utility of removedUtilities) {
-      if (toolNames.includes(utility)) {
+    // The unlisted meta-tools still answer when called by name.
+    const calls = [
+      {
+        name: "get_tool_schema",
+        arguments: { toolId: "sys_invoke_tool" },
+        expect: "invoke_tool",
+      },
+      { name: "search_tools", arguments: { query: "tests" } },
+      {
+        name: "manage_tools",
+        arguments: { action: "list_versions", scope: "workspace", compact: true },
+      },
+      {
+        name: "invoke_tool",
+        arguments: { name: "get_tool_schema", parameters: { toolId: "sys_search_tools" } },
+        expect: "search_tools",
+      },
+    ];
+    let id = 3;
+    for (const call of calls) {
+      const called = await rpc.request(id++, "tools/call", {
+        name: call.name,
+        arguments: call.arguments,
+      });
+      const rendered = JSON.stringify(called.result ?? {});
+      if (called.error || called.result === undefined || called.result.isError === true) {
         throw new Error(
-          `MCP catalog unexpectedly leaked removed standalone utility ${utility}: ${JSON.stringify(toolNames)}`,
+          `MCP ${call.name} called by name failed: ${JSON.stringify(called.error ?? called.result)}`,
         );
       }
-    }
-    const called = await rpc.request(3, "tools/call", {
-      name: "get_tool_schema",
-      arguments: { toolId: "sys_invoke_tool" },
-    });
-    if (called.error) throw new Error(`MCP tools/call failed: ${JSON.stringify(called)}`);
-    const rendered = JSON.stringify(called.result ?? {});
-    if (!rendered.includes("invoke_tool")) {
-      throw new Error(`MCP get_tool_schema invocation returned unexpected result: ${rendered}`);
+      if (call.expect !== undefined && !rendered.includes(call.expect)) {
+        throw new Error(`MCP ${call.name} called by name returned unexpected result: ${rendered}`);
+      }
     }
     return {
       initialized: true,
       catalogRefresh: true,
       toolCount: toolNames.length,
-      searchOnlyListing: true,
+      minimalListing: true,
+      metaToolsByName: calls.map((call) => call.name),
       toolInvocation: true,
     };
   } catch (error) {
