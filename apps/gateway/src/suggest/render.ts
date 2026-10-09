@@ -1,3 +1,4 @@
+import { stepRunsClause } from "../step-runs.js";
 import type { SuggestTool } from "./index-file.js";
 import type { CommandMatch } from "./match.js";
 
@@ -45,9 +46,12 @@ function quoted(phrases: readonly string[]): string {
 
 /**
  * The short reminder shown with a command's result when a learned tool is a close fit for it.
- * Harnesses deliver it after the command ran, so it speaks to the next time.
+ * Harnesses deliver it after the command ran, so it speaks to the next time. A tool that also
+ * runs steps besides the matched commands says so (`Runs: …`), so calling it surprises no one.
  */
 export function renderSuggestion(match: CommandMatch, harness: SuggestHarness): string {
   const call = callExample(match.tool, match.skip);
-  return `Resin, next time: learned tool ${match.tool.name} runs ${quoted(match.covered)}; ${invokeHow(harness, call)}.`;
+  const covered = quoted(match.covered);
+  const clause = stepRunsClause(covered, match.tool.runs);
+  return `Resin, next time: learned tool ${match.tool.name} runs ${covered}; ${invokeHow(harness, call)}.${clause === undefined ? "" : ` ${clause}`}`;
 }

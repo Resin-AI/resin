@@ -183,7 +183,12 @@ export function createGetToolSchemaHandler(
     const description = registry.scrubLearnedToolText(
       resolvedTool,
       context,
-      describeToolLocally(resolvedTool, context, describer),
+      describeToolLocally(
+        resolvedTool,
+        context,
+        describer,
+        learned ? registry.learnedToolProfile(resolvedTool, context)?.runs : undefined,
+      ),
     );
 
     // Extract output schema if available in metadata

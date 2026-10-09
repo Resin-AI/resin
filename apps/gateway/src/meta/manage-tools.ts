@@ -5,6 +5,7 @@ import type { CallToolResult, JsonRpcParams } from "../protocol/types.js";
 import type { ToolRegistry } from "../registry/registry.js";
 import type { CatalogSnapshotRecord } from "../registry/types.js";
 import type { ToolCallOptions, ToolHandler } from "../router.js";
+import { withStepRuns } from "../step-runs.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
 import { isToolOfferedHere } from "./repository-scope.js";
 import { isToolInScope, noMatchingToolNote } from "./search-tools.js";
@@ -331,7 +332,12 @@ export function createManageToolsHandler(
             context,
             toolDesc,
           );
-          const description = scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc;
+          const runs =
+            offered === undefined ? undefined : registry.learnedToolProfile(offered, context)?.runs;
+          const description = withStepRuns(
+            scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc,
+            runs?.map((label) => registry.scrubLearnedToolText(offered ?? {}, context, label)),
+          );
 
           summaries.push({
             toolId: summary.toolId,
@@ -383,8 +389,12 @@ export function createManageToolsHandler(
             }
 
             const scrubbedDesc = registry.scrubLearnedToolText(repTool, context, toolDesc);
-            const description =
-              scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc;
+            const description = withStepRuns(
+              scrubbedDesc.length > 160 ? scrubbedDesc.slice(0, 160) : scrubbedDesc,
+              registry
+                .learnedToolProfile(repTool, context)
+                ?.runs?.map((label) => registry.scrubLearnedToolText(repTool, context, label)),
+            );
             const scope = repTool.scope ?? (repTool.sessionId ? "session" : "workspace");
 
             summaries.push({

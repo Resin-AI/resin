@@ -40,11 +40,15 @@ function listedLearnedTools(value: unknown): ListedLearnedTool[] {
   return value.flatMap((entry): ListedLearnedTool[] => {
     const tool = record(entry);
     if (typeof tool?.name !== "string" || tool.name === "") return [];
+    const runs = Array.isArray(tool.runs)
+      ? tool.runs.filter((label): label is string => typeof label === "string" && label !== "")
+      : [];
     return [
       {
         name: tool.name,
         ...(typeof tool.signature === "string" ? { signature: tool.signature } : {}),
         ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+        ...(runs.length === 0 ? {} : { runs }),
       },
     ];
   });
