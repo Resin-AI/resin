@@ -40,9 +40,9 @@ const TOOLS: SuggestTool[] = [
   },
   {
     name: "build_plugin",
-    commands: ["rojo build"],
+    commands: ["bundler build"],
     inputs: [],
-    purpose: "Build the Studio plugin into a model file.",
+    purpose: "Build the editor plugin into a bundle file.",
   },
   {
     name: "deploy_docs",

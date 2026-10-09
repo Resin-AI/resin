@@ -173,18 +173,18 @@ describe("matchCommand: close fits only", () => {
   });
 
   it("never matches a word inside a jq filter or a path", () => {
-    const carbon = tool(
-      "build_carbon_plugin",
-      ["python3 scripts/build_carbon.py", "rojo build"],
+    const widget = tool(
+      "build_widget_plugin",
+      ["python3 scripts/build_widget.py", "bundler build"],
       [],
-      [{ commands: ["python3 scripts/build_carbon.py"] }, { commands: ["rojo build"] }],
+      [{ commands: ["python3 scripts/build_widget.py"] }, { commands: ["bundler build"] }],
     );
     for (const command of [
-      `jq '.plugins[] | select(.name == "carbon")' reports/carbon.json`,
-      "jq -r .carbon.size out/carbon/report.json | head",
-      "cat build/carbon.rbxm | wc -c",
+      `jq '.plugins[] | select(.name == "widget")' reports/widget.json`,
+      "jq -r .widget.size out/widget/report.json | head",
+      "cat build/widget.bin | wc -c",
     ]) {
-      expect(matchCommand(command, [carbon])).toBeUndefined();
+      expect(matchCommand(command, [widget])).toBeUndefined();
     }
   });
 
