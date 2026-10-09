@@ -30,6 +30,7 @@ export * from "./connection.js";
 
 // Local MCP Gateway Server
 export * from "./gateway.js";
+export * from "./listing-surface.js";
 
 // Stdio Shim & Standalone Process Execution
 export * from "./shim/stdio-bridge.js";

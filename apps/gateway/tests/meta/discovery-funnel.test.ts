@@ -15,7 +15,6 @@ import {
   setDiscoveryFunnelStore,
 } from "@resin/observer/discovery-funnel";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DIRECT_LISTING_MAX_TOOLS } from "../../src/gateway.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import { createManageToolsHandler } from "../../src/meta/manage-tools.js";
@@ -26,6 +25,8 @@ import {
   type CallToolResult,
   type JsonRpcMessage,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_IDS_META,
+  RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
 } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
@@ -207,7 +208,8 @@ describe("gateway discovery funnel", () => {
     const received: JsonRpcMessage[] = [];
     output.on("data", (chunk: Buffer) => received.push(...decoder.push(chunk)));
     surface.output.pipe(output);
-    const list = (id: number, learned: number) => {
+    const list = (id: number, learned: number, listed: number) => {
+      const names = Array.from({ length: learned }, (_, index) => `learned_${index}`);
       surface.input.write(encodeMcpMessage({ jsonrpc: "2.0", id, method: "tools/list" }));
       surface.output.write(
         encodeMcpMessage({
@@ -216,21 +218,27 @@ describe("gateway discovery funnel", () => {
           result: {
             tools: [
               { name: "search_tools", inputSchema: { type: "object" } },
-              ...Array.from({ length: learned }, (_, index) => ({
-                name: `learned_${index}`,
+              ...names.map((name) => ({
+                name,
                 inputSchema: { type: "object" },
                 _meta: { [RESIN_LEARNED_TOOL_META]: true },
               })),
             ],
-            _meta: { [RESIN_LEARNED_TOOL_COUNT_META]: learned },
+            _meta: {
+              [RESIN_LEARNED_TOOL_COUNT_META]: learned,
+              [RESIN_LEARNED_TOOL_LISTING_META]: names.slice(0, listed).map((name) => ({ name })),
+              [RESIN_LEARNED_TOOL_IDS_META]: Object.fromEntries(
+                names.map((name) => [name, `tool_${name}`]),
+              ),
+            },
           },
         }),
       );
     };
     try {
-      list(1, 3);
-      // Above the limit the tools are not listed, so none is counted.
-      list(2, DIRECT_LISTING_MAX_TOOLS + 1);
+      list(1, 3, 3);
+      // Tools the listing leaves to search are not listed, so none is counted.
+      list(2, 11, 0);
       expect(received).toHaveLength(2);
       expect(store.pending()).toEqual({ ...emptyDiscoveryFunnelCounts(), tools_listed: 3 });
     } finally {

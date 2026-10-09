@@ -9,6 +9,7 @@ export * from "./canonical.js";
 // Session Events
 export * from "./events.js";
 export * from "./model-request-link.js";
+export * from "./listing-footprint.js";
 
 // Tools & Manifests
 export * from "./tools.js";

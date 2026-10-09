@@ -38,7 +38,11 @@ import {
   withErrorInvocationReceipt,
   withInvocationReceipt,
 } from "./meta/invocation-receipt.js";
-import { isToolOfferedHere, unavailableHereMessage } from "./meta/repository-scope.js";
+import {
+  isToolOfferedHere,
+  isToolScopedHere,
+  unavailableHereMessage,
+} from "./meta/repository-scope.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   GET_TOOL_SCHEMA_MANIFEST,
@@ -102,25 +106,32 @@ export interface CatalogNoticeTool extends McpTool {
   recommended?: false;
   /** A learned tool's purpose and call signature, for a direct listing's instructions. */
   listing?: ListedCall;
+  /** A learned tool's cloud tool id, named in the listing footprint when it is listed. */
+  toolId?: string;
+  /**
+   * A learned tool scoped to the caller's repository (see `isToolScopedHere`): the only learned
+   * tools listed, counted and named automatically. Others are found by search or called by name.
+   */
+  scopedHere?: true;
+  /** A learned tool pinned in the caller's workspace: listed ahead of the others. */
+  pinned?: true;
+  /** Recorded steps a learned tool replays, when this machine knows its plan. */
+  steps?: number;
 }
 
 /** Internal metadata must never reach a harness: no unsupported output contract, no local detail. */
 export function toNativeToolCatalog(tools: CatalogNoticeTool[]): McpTool[] {
   return tools.map((tool) => {
-    if (
-      !("catalogOutputSchema" in tool) &&
-      !("localCommands" in tool) &&
-      !("localSteps" in tool) &&
-      !("recommended" in tool) &&
-      !("listing" in tool)
-    )
-      return tool;
     const {
       catalogOutputSchema: _catalogOutputSchema,
       localCommands: _localCommands,
       localSteps: _localSteps,
       recommended: _recommended,
       listing: _listing,
+      toolId: _toolId,
+      scopedHere: _scopedHere,
+      pinned: _pinned,
+      steps: _steps,
       ...nativeTool
     } = tool;
     return nativeTool;
@@ -437,52 +448,54 @@ export class RegistryGatewayRouter implements GatewayRouter {
     // A tool learned for this workspace is listed by how to call it and its one-line purpose, and
     // marked so a facade that hides the rest of the catalog still offers it by name. Every listed
     // tool is re-sent with each request, so its recorded steps, input docs and `for_each` usage are
-    // left to get_tool_schema.
-    const listed = (tool: CatalogEntry | RegistryTool, catalog: string) => {
+    // left to get_tool_schema. Whether it belongs to the caller's repository, its pin and how much
+    // recorded work it replaces decide whether, and in which order, a capped listing names it.
+    const listed = (
+      tool: CatalogEntry | RegistryTool,
+      catalog: string,
+    ): Pick<CatalogNoticeTool, "description" | "inputSchema"> &
+      Omit<Partial<CatalogNoticeTool>, "name"> => {
       const schema = toMcpInputSchema(tool.parameters ?? tool.manifest?.parameters);
       if (tool.isSystem || (tool.scope !== "workspace" && tool.scope !== "session")) {
-        return {
-          description: catalog,
-          inputSchema: schema,
-          _meta: undefined,
-          localCommands: [],
-          localSteps: undefined,
-          recommended: true,
-          listing: undefined,
-        };
+        return { description: catalog, inputSchema: schema };
       }
-      const hint = replacesStepsHint(this.registry.learnedToolProfile(tool, context)?.steps);
+      const steps = this.registry.learnedToolProfile(tool, context)?.steps;
       const served = this.registry.learnedToolInputSchema(tool, context, schema);
       const scrub = (text: string) => this.registry.scrubLearnedToolText(tool, context, text);
-      const purpose = scrub(listedPurpose(catalog, hint));
+      const purpose = scrub(listedPurpose(catalog, replacesStepsHint(steps)));
+      const localCommands = this.registry.learnedToolCommands(tool, context);
+      const localSteps = this.registry.learnedToolSteps(tool, context);
       return {
         description: scrub(listedDescription(served, purpose)),
         inputSchema: listedInputSchema(served),
         _meta: { [RESIN_LEARNED_TOOL_META]: true },
-        localCommands: this.registry.learnedToolCommands(tool, context),
-        localSteps: this.registry.learnedToolSteps(tool, context),
-        recommended: isAutomaticallyRecommended(tool),
+        ...(localCommands.length === 0
+          ? {}
+          : { localCommands, ...(localSteps === undefined ? {} : { localSteps }) }),
+        ...(isAutomaticallyRecommended(tool) ? {} : { recommended: false as const }),
         listing: { purpose, signature: scrub(listedSignature(served)) },
+        toolId: tool.toolId,
+        ...(isToolScopedHere(this.registry, tool, context) ? { scopedHere: true as const } : {}),
+        ...(tool.isPinned === true ? { pinned: true as const } : {}),
+        ...(steps === undefined ? {} : { steps }),
       };
     };
     const record = "entries" in snapshot ? snapshot : undefined;
     if (record && record.entries && Object.keys(record.entries).length > 0) {
       for (const entry of Object.values(record.entries)) {
-        // A learned tool is listed only where it was learned and can run (see repository-scope).
+        // A learned tool is offered only where it was learned and can run (see repository-scope).
         if (!isToolOfferedHere(this.registry, entry, context)) continue;
-        const { description, inputSchema, _meta, localCommands, localSteps, recommended, listing } =
-          listed(entry, entry.description || entry.manifest?.description || `Tool ${entry.name}`);
+        const { description, inputSchema, ...learned } = listed(
+          entry,
+          entry.description || entry.manifest?.description || `Tool ${entry.name}`,
+        );
         mcpTools.push({
           name: entry.exposedName,
           description,
           inputSchema,
           catalogOutputSchema: entry.outputSchema ?? entry.manifest?.outputSchema,
           annotations: discoveryAnnotations(entry),
-          ...(_meta === undefined ? {} : { _meta }),
-          ...(localCommands.length === 0 ? {} : { localCommands }),
-          ...(localSteps === undefined || localCommands.length === 0 ? {} : { localSteps }),
-          ...(recommended ? {} : { recommended: false as const }),
-          ...(listing === undefined ? {} : { listing }),
+          ...learned,
         });
       }
     } else {
@@ -494,26 +507,17 @@ export class RegistryGatewayRouter implements GatewayRouter {
         );
         if (tool) {
           if (!isToolOfferedHere(this.registry, tool, context)) continue;
-          const {
-            description,
-            inputSchema,
-            _meta,
-            localCommands,
-            localSteps,
-            recommended,
-            listing,
-          } = listed(tool, tool.description || tool.manifest?.description || `Tool ${tool.name}`);
+          const { description, inputSchema, ...learned } = listed(
+            tool,
+            tool.description || tool.manifest?.description || `Tool ${tool.name}`,
+          );
           mcpTools.push({
             name: tool.exposedName || tool.name,
             description,
             inputSchema,
             catalogOutputSchema: tool.outputSchema ?? tool.manifest?.outputSchema,
             annotations: discoveryAnnotations(tool),
-            ...(_meta === undefined ? {} : { _meta }),
-            ...(localCommands.length === 0 ? {} : { localCommands }),
-            ...(localSteps === undefined || localCommands.length === 0 ? {} : { localSteps }),
-            ...(recommended ? {} : { recommended: false as const }),
-            ...(listing === undefined ? {} : { listing }),
+            ...learned,
           });
         }
       }

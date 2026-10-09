@@ -72,7 +72,7 @@ A captured baseline can request validation, but it cannot prove correctness or e
 
 ## Coding agent compatibility
 
-Every coding agent sees four stable MCP tools from Resin: `search_tools` to discover tools, `get_tool_schema` to inspect their inputs, `invoke_tool` to run them, and `manage_tools` to manage them. Learned tools are not listed one by one, which keeps each session's prompt small; agents find them with `search_tools`, and newly available tools are reached through these same routes without restarting the session. `resin mcp --full-catalog` lists every tool instead (`--search-listing`, the former opt-in, is accepted and does nothing).
+Resin's MCP server lists only what the current repository needs, because every listed tool is sent with every model request: the learned tools scoped to that repository (at most 8, and at most about 1,500 estimated tokens for the whole listing including its instructions), `invoke_tool` to run any Resin tool by name, and `search_tools` only when more learned tools exist than fit. A workspace with no learned tools of its own gets `invoke_tool` and a one-line instruction. Learned tools not tied to a repository, and the other meta-tools (`get_tool_schema`, `manage_tools`), are not listed but still answer by name. `resin mcp --full-catalog` lists every tool instead (`--search-listing`, the former opt-in, is accepted and does nothing).
 
 Oh My Pi supports deeply nested workspaces with bounded, deterministic workspace IDs. Existing IDs within the shared 128-character limit remain unchanged; longer paths use a readable prefix and a path-derived hash.
 

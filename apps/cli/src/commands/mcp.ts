@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import process from "node:process";
 import { LocalDatabaseConnection } from "@resin/db";
 import {
@@ -121,10 +123,11 @@ Usage:
 Options:
   -s, --standalone       Run the in-process MCP gateway (default)
   --no-standalone        Require a daemon socket connection
-  --full-catalog        List every tool (learned tools included) instead of only the meta
-                        tools search_tools, get_tool_schema, invoke_tool and manage_tools
+  --full-catalog        List every tool (learned tools included) instead of only invoke_tool,
+                        this repository's learned tools within the listing cap, and
+                        search_tools when some do not fit
   --enable-tool-search  With --full-catalog, also expose search_tools (disabled by default)
-  --search-listing      No-op: listing only the meta tools is the default
+  --search-listing      No-op: the bounded listing is the default
   -S, --socket <path>    Daemon socket path
   -C, --cwd <path>       Working directory
   -d, --db <path>        Database path for local state store
@@ -177,6 +180,31 @@ function harnessMcpConnections(
   return (name) => resolveMcpServer(name, workspaceRoot);
 }
 
+/**
+ * The Resin guidance block installed for a harness, exactly as its context file holds it (markers
+ * included): part of what every request in that harness carries, so the gateway counts it in the
+ * listing footprint it records. "" when the harness has no guidance or none is installed; undefined
+ * when the file cannot be read, so the footprint stays unknown.
+ */
+export function installedGuidanceBlock(
+  harnessId: string,
+  home: string,
+  env: NodeJS.ProcessEnv,
+  definitions: readonly HarnessDefinition[] = HARNESS_DEFINITIONS,
+): string | undefined {
+  const guidance = definitions.find((definition) => definition.id === harnessId)?.guidance;
+  if (guidance === undefined) return "";
+  let content: string;
+  try {
+    content = fs.readFileSync(guidance.resolvePath(home, env), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "" : undefined;
+  }
+  const start = content.indexOf(guidance.markers.start);
+  const end = start === -1 ? -1 : content.indexOf(guidance.markers.end, start);
+  return end === -1 ? "" : content.slice(start, end + guidance.markers.end.length);
+}
+
 export interface McpCommandOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?:
@@ -226,6 +254,8 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     home: options.home,
     clientVersion: CLI_VERSION,
     recordedWorkflowConnections: harnessMcpConnections(servedHarness, parsedArgs.cwd),
+    harnessGuidanceBlock: (harnessId) =>
+      installedGuidanceBlock(harnessId, options.home ?? os.homedir(), options.env ?? process.env),
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
     // A supervised gateway's session switches to a newly activated release on its own (see
     // `@resin/gateway/mcp-supervisor`), so only an unsupervised one tells the agent to restart.

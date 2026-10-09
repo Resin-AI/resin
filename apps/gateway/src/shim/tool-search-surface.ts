@@ -1,14 +1,14 @@
 import { Transform } from "node:stream";
+import type { ListingToolDefinition } from "@resin/contracts";
 import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
-  DIRECT_LISTING_MAX_TOOLS,
   DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
+  type LearnedToolListing,
   type ListedLearnedTool,
-  directListingGatewayInstructions,
-  learnedToolCountSentence,
-  searchListingGatewayInstructions,
-} from "../gateway.js";
+  searchListingInstructions,
+  searchListingTools,
+} from "../listing-surface.js";
 import { JSON_RPC_ERROR_CODES, MCP_ERROR_CODES, McpProtocolError } from "../protocol/errors.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../protocol/framing.js";
 import {
@@ -18,6 +18,7 @@ import {
   RESIN_BENCHMARK_ID_META,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_IDS_META,
   RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
@@ -34,17 +35,9 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** A workspace's learned tools as the gateway reports them: how many, and the commands they run. */
-interface LearnedTools {
-  count: number;
-  commands: string[];
-  /** Each tool's name, signature and purpose, reported only for a catalog small enough to list directly. */
-  listing?: ListedLearnedTool[];
-}
-
-function listedLearnedTools(value: unknown): ListedLearnedTool[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const listing = value.flatMap((entry): ListedLearnedTool[] => {
+function listedLearnedTools(value: unknown): ListedLearnedTool[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ListedLearnedTool[] => {
     const tool = record(entry);
     if (typeof tool?.name !== "string" || tool.name === "") return [];
     return [
@@ -55,55 +48,35 @@ function listedLearnedTools(value: unknown): ListedLearnedTool[] | undefined {
       },
     ];
   });
-  return listing.length === 0 ? undefined : listing;
 }
 
 /** The learned tools the gateway put in a result's `_meta`: only once the catalog is known. */
-function learnedToolsOf(result: Record<string, unknown>): LearnedTools | undefined {
+function learnedToolsOf(result: Record<string, unknown>): LearnedToolListing | undefined {
   const meta = record(result._meta);
   const count = meta?.[RESIN_LEARNED_TOOL_COUNT_META];
   if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return undefined;
   const commands = meta?.[RESIN_LEARNED_TOOL_COMMANDS_META];
-  const listing = listedLearnedTools(meta?.[RESIN_LEARNED_TOOL_LISTING_META]);
   return {
     count,
     commands: Array.isArray(commands)
       ? commands.filter((command): command is string => typeof command === "string")
       : [],
-    ...(listing === undefined ? {} : { listing }),
+    listing: listedLearnedTools(meta?.[RESIN_LEARNED_TOOL_LISTING_META]),
   };
 }
 
 /**
- * Whether a search-listing connection lists the learned tools directly: the caller's catalog (which
- * the gateway already scopes to its repository) has a few, at most {@link DIRECT_LISTING_MAX_TOOLS}.
- * Each is then a tool of its own, which harnesses render with its name, inputs and purpose every
- * turn (OMP lists each MCP tool as its own entry in the prompt); above that, only search scales.
+ * What one connection was served, reported each time a tools/list answer reaches the harness: the
+ * instructions its initialize answer carried, every tool definition the list carried, the cloud ids
+ * of the learned tools among them, and whether the listing cap left relevant learned tools out.
  */
-function listsDirectly(learned: LearnedTools | undefined): boolean {
-  return learned !== undefined && learned.count > 0 && learned.count <= DIRECT_LISTING_MAX_TOOLS;
-}
-
-/**
- * search_tools as a search-listing connection lists it: its description opens with how many learned
- * tools there are and the commands they run, because harnesses show tool descriptions even where
- * they drop server instructions.
- */
-function withLearnedTools(tool: unknown, learned: LearnedTools | undefined): unknown {
-  const listed = record(tool);
-  if (learned === undefined || !listed || !isSearch(listed.name)) return tool;
-  const sentence = learnedToolCountSentence(
-    learned.count,
-    learned.commands,
-    listsDirectly(learned),
-  );
-  return {
-    ...listed,
-    description:
-      typeof listed.description === "string" && listed.description.length > 0
-        ? `${sentence} ${listed.description}`
-        : sentence,
-  };
+export interface ServedListingSurface {
+  /** The MCP client's own name, from its initialize request. */
+  clientName?: string;
+  instructions: string;
+  tools: ListingToolDefinition[];
+  listedToolIds: string[];
+  capped: boolean;
 }
 
 function isSearch(value: unknown): boolean {
@@ -304,9 +277,9 @@ export interface ToolSearchSurfaceOptions {
   /** With `fullCatalog`, list and allow search_tools (Codex clients always get it). */
   enableSearch?: boolean;
   /**
-   * List the daemon's whole catalog instead of only the meta tools. Off by default: the client
-   * sees search_tools, get_tool_schema, invoke_tool and manage_tools, finds learned tools with
-   * search_tools, and can still call them by name.
+   * List the daemon's whole catalog instead of the bounded default listing (see listing-surface):
+   * invoke_tool, the learned tools of the caller's repository that fit the listing cap, and
+   * search_tools only for the ones left out. Any learned tool still answers tools/call by name.
    */
   fullCatalog?: boolean;
   /**
@@ -314,14 +287,22 @@ export interface ToolSearchSurfaceOptions {
    * invocations it records for this client.
    */
   benchmarkId?: string;
+  /** Told what the harness was served, each time a tools/list answer reaches it. */
+  onServed?: (surface: ServedListingSurface) => void;
 }
 
-const META_TOOL_NAMES: Record<string, true> = {
-  search_tools: true,
-  get_tool_schema: true,
-  invoke_tool: true,
-  manage_tools: true,
-};
+/** A served tool definition: only the fields a model reads, which the footprint counts. */
+function servedDefinition(tool: unknown): ListingToolDefinition[] {
+  const entry = record(tool);
+  if (entry === undefined || typeof entry.name !== "string") return [];
+  return [
+    {
+      name: entry.name,
+      ...(typeof entry.description === "string" ? { description: entry.description } : {}),
+      ...(entry.inputSchema === undefined ? {} : { inputSchema: entry.inputSchema }),
+    },
+  ];
+}
 
 /** A per-stdio-client view. Never mutates the daemon's shared catalog. */
 export function createToolSearchSurface(
@@ -335,11 +316,14 @@ export function createToolSearchSurface(
   const initializeIds = new Set<JsonRpcId>();
   const pendingMetadataCalls = new Map<JsonRpcId, PendingMetadataCall>();
   let clientIdentified = false;
+  let clientName: string | undefined;
   let codexClient = false;
   let searchEnabled = enableSearch || searchOnlyListing;
   // Learned tools in the workspace's catalog, as the gateway last reported them; unknown until it
   // reports a count, which it does only once the catalog is known.
-  let learnedTools: LearnedTools | undefined;
+  let learnedTools: LearnedToolListing | undefined;
+  // The instructions the harness's initialize answer carried; a surface is reported only after it.
+  let servedInstructions: string | undefined;
   const send = (message: JsonRpcMessage) => output.write(encodeMcpMessage(message));
   const transform = (filter: (message: JsonRpcMessage) => JsonRpcMessage | undefined) => {
     const decoder = new McpFrameDecoder();
@@ -378,6 +362,7 @@ export function createToolSearchSurface(
           // Exact public MCP client names, not the gateway's broad harness-name heuristic.
           // This is a connection-local discovery surface, never an authorization decision.
           const name = parsed.data.clientInfo.name;
+          clientName = name;
           codexClient = name === "codex-mcp-client" || name === "openai-codex-cli";
           searchEnabled = enableSearch || searchOnlyListing || codexClient;
         }
@@ -447,27 +432,24 @@ export function createToolSearchSurface(
     output: transform((message) => {
       if (!("method" in message) && "id" in message && message.id !== null) {
         if (initializeIds.delete(message.id)) {
-          const initialized = "result" in message ? record(message.result) : undefined;
-          if (initialized) learnedTools = learnedToolsOf(initialized) ?? learnedTools;
+          const result =
+            "result" in message && message.error === undefined ? record(message.result) : undefined;
+          if (result) learnedTools = learnedToolsOf(result) ?? learnedTools;
           const replacement = searchOnlyListing
-            ? listsDirectly(learnedTools) && learnedTools?.listing !== undefined
-              ? directListingGatewayInstructions(learnedTools.listing)
-              : searchListingGatewayInstructions(learnedTools?.count, learnedTools?.commands)
+            ? searchListingInstructions(learnedTools)
             : searchEnabled
               ? undefined
               : DISABLED_SEARCH_GATEWAY_INSTRUCTIONS;
-          if (replacement !== undefined && "result" in message && message.error === undefined) {
-            const result = record(message.result);
-            if (result && typeof result.instructions === "string") {
-              return {
-                ...message,
-                result: {
-                  ...result,
-                  instructions: result.instructions.includes(DEFAULT_GATEWAY_INSTRUCTIONS)
-                    ? result.instructions.replace(DEFAULT_GATEWAY_INSTRUCTIONS, replacement)
-                    : `${replacement}\n${result.instructions}`,
-                },
-              };
+          if (result && typeof result.instructions === "string") {
+            const instructions =
+              replacement === undefined
+                ? result.instructions
+                : result.instructions.includes(DEFAULT_GATEWAY_INSTRUCTIONS)
+                  ? result.instructions.replace(DEFAULT_GATEWAY_INSTRUCTIONS, replacement)
+                  : `${replacement}\n${result.instructions}`;
+            servedInstructions = instructions;
+            if (instructions !== result.instructions) {
+              return { jsonrpc: "2.0", id: message.id, result: { ...result, instructions } };
             }
           }
         }
@@ -480,36 +462,47 @@ export function createToolSearchSurface(
           const result = record(message.result);
           if (result && Array.isArray(result.tools)) {
             learnedTools = learnedToolsOf(result);
-            const direct = searchOnlyListing && listsDirectly(learnedTools);
-            // The listing names only the tools to offer: a learned tool measured to cost more than
-            // doing the job directly is left out of it, though tools/list still carries it.
-            const listedNames = learnedTools?.listing?.map((tool) => tool.name);
-            const isListed = (tool: unknown) => {
+            const tools = searchOnlyListing
+              ? searchListingTools(result.tools, learnedTools)
+              : result.tools.filter((tool) => {
+                  const name = record(tool)?.name;
+                  return typeof name === "string" && (searchEnabled || !isSearch(name));
+                });
+            const learnedIds = record(record(result._meta)?.[RESIN_LEARNED_TOOL_IDS_META]) ?? {};
+            const listedToolIds = tools.flatMap((tool) => {
               const entry = record(tool);
-              return (
-                record(entry?._meta)?.[RESIN_LEARNED_TOOL_META] === true &&
-                (listedNames === undefined ||
-                  (typeof entry?.name === "string" && listedNames.includes(entry.name)))
-              );
-            };
-            const tools = result.tools
-              .filter((tool) => {
-                const name = record(tool)?.name;
-                if (typeof name !== "string") return false;
-                // Search-only listing: the meta tools, plus the learned tools themselves when the
-                // caller's catalog is small enough to list directly. Unlisted learned tools are
-                // found by search and still answer tools/call by name.
-                if (searchOnlyListing)
-                  return META_TOOL_NAMES[name] === true || (direct && isListed(tool));
-                return searchEnabled || !isSearch(name);
-              })
-              .map((tool) => (searchOnlyListing ? withLearnedTools(tool, learnedTools) : tool));
-            if (direct) {
-              // The discovery funnel counts the learned tools a direct listing showed.
-              const shown = tools.filter(isListed).length;
-              if (shown > 0) recordDiscoveryFunnelEvent("tools_listed", { count: shown });
+              const id = typeof entry?.name === "string" ? learnedIds[entry.name] : undefined;
+              return record(entry?._meta)?.[RESIN_LEARNED_TOOL_META] === true &&
+                typeof id === "string"
+                ? [id]
+                : [];
+            });
+            // The discovery funnel counts the learned tools a search-only listing showed.
+            if (searchOnlyListing && listedToolIds.length > 0) {
+              recordDiscoveryFunnelEvent("tools_listed", { count: listedToolIds.length });
             }
-            return { jsonrpc: "2.0", id: message.id, result: { ...result, tools } };
+            const forwarded: JsonRpcMessage = {
+              jsonrpc: "2.0",
+              id: message.id,
+              result: { ...result, tools },
+            };
+            if (servedInstructions !== undefined && options.onServed !== undefined) {
+              try {
+                options.onServed({
+                  ...(clientName === undefined ? {} : { clientName }),
+                  instructions: servedInstructions,
+                  tools: tools.flatMap(servedDefinition),
+                  listedToolIds,
+                  capped:
+                    searchOnlyListing &&
+                    learnedTools !== undefined &&
+                    learnedTools.listing.length < learnedTools.count,
+                });
+              } catch {
+                // Observing what was served never affects serving it.
+              }
+            }
+            return forwarded;
           }
         }
       }

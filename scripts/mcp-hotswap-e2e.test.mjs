@@ -161,8 +161,9 @@ describe("resin mcp release switching (end to end)", () => {
       expect(init.result).toBeDefined();
       harness.send({ method: "notifications/initialized" });
       const listed = await harness.request(2, "tools/list");
+      // A workspace without learned tools lists only invoke_tool; the meta tools answer by name.
       expect(listed.result).toMatchObject({
-        tools: expect.arrayContaining([expect.objectContaining({ name: "search_tools" })]),
+        tools: expect.arrayContaining([expect.objectContaining({ name: "invoke_tool" })]),
       });
 
       const registrationPath = path.join(resinHome, "run", "mcp-supervisors", `${child.pid}.json`);

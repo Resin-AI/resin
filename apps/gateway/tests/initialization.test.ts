@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_GATEWAY_INSTRUCTIONS, LocalMcpGateway } from "../src/gateway.js";
+import { LocalMcpGateway } from "../src/gateway.js";
+import { DEFAULT_GATEWAY_INSTRUCTIONS } from "../src/listing-surface.js";
 import { JSON_RPC_ERROR_CODES } from "../src/protocol/errors.js";
 import type {
   InitializeResult,

@@ -17,7 +17,8 @@ import {
 /**
  * Guidance lives in a Resin-owned user rule, `~/.cursor/rules/resin.mdc`. A `.mdc` rule needs
  * its frontmatter on the first line, so the start marker carries it and the whole file is the
- * managed block (removal deletes the file).
+ * managed block (removal deletes the file). cursor-agent shows Resin's server instructions (when
+ * to call each listed tool, and the use rules), so the rule only names where the tools are.
  */
 export const cursorGuidance: HarnessGuidanceSurface = {
   resolvePath: (home) => path.join(resolveCursorHome(home), "rules", "resin.mdc"),
@@ -28,13 +29,7 @@ export const cursorGuidance: HarnessGuidanceSurface = {
   },
   body: `# Resin learned tools
 
-Resin may have learned tools from earlier work in your projects. They are not listed: the \`resin\` server lists only \`search_tools\`, \`get_tool_schema\`, \`invoke_tool\` and \`manage_tools\`. The \`search_tools\` description says how many learned tools this workspace has and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: call the \`resin\` server's \`search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`,
+Resin may have learned tools for this repository: the \`resin\` server's tools beside its \`invoke_tool\`. Resin's server instructions say when to call them.`,
 };
 
 export const cursorInstallHarness: HarnessInstallDefinition = {

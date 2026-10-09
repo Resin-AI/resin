@@ -10,18 +10,13 @@ export const CODEX_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  * Guidance for Codex's global instructions. Codex hides MCP tools from the model unless its
  * instructions mention them, and how it hides them depends on the session: Code Mode nests them
  * in `tools` inside `exec`, while direct tool calling defers them behind `tool_search`. Codex
- * picks the mode per session from its features and profiles, so one global file names both.
- * `resin mcp` lists only Resin's meta tools, so learned tools are found with search_tools.
+ * picks the mode per session from its features and profiles, so one global file names both; that
+ * is why this block runs past the others' length. Codex repeats Resin's server instructions (when
+ * to call each tool, and the use rules) in each tool's description, so the block does not.
  */
 export const CODEX_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier runs in this workspace. They are not listed: Resin lists only \`mcp__resin__search_tools\`, \`mcp__resin__get_tool_schema\`, \`mcp__resin__invoke_tool\` and \`mcp__resin__manage_tools\`. The \`mcp__resin__search_tools\` description says how many learned tools this workspace has and names the commands they run, as do Resin's server instructions.
-
-- Search only when the next command you are about to run is one of those commands, with that command line as the query. With an \`exec\` tool (Code Mode), do it in that \`exec\` call: \`text(JSON.stringify(await tools.mcp__resin__search_tools({query: "<the command line>"})))\`. Without \`exec\`, Resin's tools are deferred: call \`tool_search\` with \`resin search_tools\` to load them, then call \`mcp__resin__search_tools\` with \`{"query": "<the command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`mcp__resin__invoke_tool({name: "<name>", parameters: {...}})\` with parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. Omitted inputs reuse the recorded values. Run several at once with \`Promise.all\` in \`exec\`.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
+Resin may have learned tools for this repository: \`mcp__resin__<name>\` tools beside \`mcp__resin__invoke_tool\`; their descriptions say when to call them. In \`exec\` (Code Mode) call them from \`tools\`, e.g. \`text(JSON.stringify(await tools.mcp__resin__invoke_tool({name: "<name>", parameters: {}})))\`, several at once with \`Promise.all\`. Without \`exec\`, load them with \`tool_search\` (query \`resin\`).
 `;
 
 /** Resolves Codex's home directory: `$CODEX_HOME`, else `<home>/.codex`. */

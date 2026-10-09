@@ -30,18 +30,12 @@ export const CLAUDE_GUIDANCE_MARKERS = {
 
 /**
  * Claude Code defers MCP tools behind its tool search on first-party models: the model sees only
- * their names until it loads them. `resin mcp` lists only Resin's meta tools, so the block says
- * how to find learned tools with search_tools and run them with invoke_tool.
+ * their names until it loads them. Claude shows Resin's server instructions (when to call each
+ * listed tool, and the use rules), so the block only names the tools and how to load them.
  */
 export const CLAUDE_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in your projects. They are not listed: Resin lists only \`mcp__resin__search_tools\`, \`mcp__resin__get_tool_schema\`, \`mcp__resin__invoke_tool\` and \`mcp__resin__manage_tools\` (if they are deferred, load them with tool search, query \`resin\`). The \`mcp__resin__search_tools\` description says how many learned tools this workspace has and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
+Resin may have learned tools for this repository: \`mcp__resin__<name>\` tools beside \`mcp__resin__invoke_tool\`. If they are deferred, load them with tool search (query \`resin\`). Resin's server instructions say when to call them.`;
 
 export const claudeCodeInstallHarness: HarnessInstallDefinition = {
   id: "claude-code",

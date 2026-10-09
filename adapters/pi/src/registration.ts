@@ -95,18 +95,14 @@ export const PI_GUIDANCE_MARKERS: ManagedBlockMarkers = {
 };
 
 /**
- * Guidance placed in Pi's global context file. `resin mcp` lists only Resin's meta tools, so the
- * bridge extension registers just those; learned tools are found by searching.
+ * Guidance placed in Pi's global context file. The bridge extension registers each tool `resin
+ * mcp` lists but passes on no server instructions, so this block is the only channel for when to
+ * call them and the use rules; that is why it is longer than the blocks of harnesses that show
+ * server instructions.
  */
 export const PI_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. They are not in your tool list: find them with \`mcp__resin__search_tools\`. Its description says how many learned tools this workspace has and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: call \`mcp__resin__search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`mcp__resin__invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`mcp__resin__get_tool_schema\` first. Omitted inputs reuse the recorded values.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
+Resin may have learned tools for this repository: \`mcp__resin__<name>\` tools beside \`mcp__resin__invoke_tool\`. Call one directly when it is your next step; omitted inputs reuse recorded values. If \`mcp__resin__search_tools\` is listed, search only when your next command is one its description names, then invoke a result directly. Otherwise do the task directly. Use a tool only for exactly the user's task; check its errors and effects; never enable, pin, disable or roll back tools.`;
 
 /** Context-file names Pi reads from the agent directory; the first existing one wins. */
 const PI_CONTEXT_FILE_NAMES = [

@@ -322,6 +322,19 @@ export interface TrajectoryCaptureRuntimeModuleOptions {
    */
   captureWatermarkPath?: string;
 
+  /**
+   * Directory of the listing-footprint records the `resin mcp` processes write. When set, each
+   * session's first user prompt carries the Resin surface it was served (see
+   * `ListingFootprintJoin`); the records themselves never leave the device.
+   */
+  listingFootprintRecordsDir?: string;
+
+  /**
+   * Owner-only local file recording each session's first-prompt position, so the footprint lands
+   * on the same prompt across restarts. No footprint is attached without it.
+   */
+  listingFootprintFirstPromptsPath?: string;
+
   /** Overrides `MAX_DOWNTIME_CATCH_UP_MS`, the longest downtime that is caught up. */
   maxDowntimeCatchUpMs?: number;
 
@@ -622,6 +635,8 @@ export class TrajectoryCaptureRuntimeModule implements DaemonModule {
             ? coordinator.workspaceRootPath(session.workspaceId)
             : undefined;
         },
+        listingFootprintRecordsDir: options.listingFootprintRecordsDir,
+        listingFootprintFirstPromptsPath: options.listingFootprintFirstPromptsPath,
         uploadStatus: this.uploadStatus,
         onPipelineResults: this.decodeStats
           ? (session, results) => this.decodeStats?.record(session, results)

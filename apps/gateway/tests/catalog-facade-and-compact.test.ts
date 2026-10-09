@@ -8,11 +8,11 @@ import {
 } from "@resin/contracts";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { LocalMcpGateway } from "../src/gateway.js";
 import {
   DEFAULT_GATEWAY_INSTRUCTIONS,
   DISABLED_SEARCH_GATEWAY_INSTRUCTIONS,
-  LocalMcpGateway,
-} from "../src/gateway.js";
+} from "../src/listing-surface.js";
 import { createManageToolsHandler } from "../src/meta/manage-tools.js";
 import { McpFrameDecoder, encodeMcpMessage } from "../src/protocol/framing.js";
 import {
@@ -156,7 +156,7 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
     { harness: "codex-mcp-client", enableSearch: false },
     { harness: "openai-codex-cli", enableSearch: false },
   ])(
-    "lists only the meta tools by default for $harness (enableSearch=$enableSearch)",
+    "lists only invoke_tool and search_tools by default while the catalog is unknown for $harness (enableSearch=$enableSearch)",
     async ({ harness, enableSearch }) => {
       const client = createTestClient({ enableSearch });
       try {
@@ -178,28 +178,18 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
           .parse(listRes.result)
           .tools.map((t) => t.name);
 
-        expect(toolNames).toContain("get_tool_schema");
-        expect(toolNames).toContain("invoke_tool");
-        expect(toolNames).toContain("manage_tools");
-        expect(toolNames.slice().sort()).toEqual([
-          "get_tool_schema",
-          "invoke_tool",
-          "manage_tools",
-          "search_tools",
-        ]);
+        expect(toolNames.slice().sort()).toEqual(["invoke_tool", "search_tools"]);
         // Hidden evolved tools are NOT advertised
         expect(toolNames).not.toContain("git_status_diff");
         expect(toolNames).not.toContain("code_analyzer");
         expect(toolNames).not.toContain("echo");
-
-        expect(toolNames).toHaveLength(4);
       } finally {
         client.close();
       }
     },
   );
 
-  it("keeps this workspace's learned tools out of the default listing", async () => {
+  it("keeps a learned tool the gateway's listing does not name out of the default listing", async () => {
     const client = createTestClient();
     try {
       await client.initialize("codex-mcp-client");
@@ -223,7 +213,7 @@ describe("Generalized Stable Facade and Client Compatibility", () => {
         .parse((await listPromise).result)
         .tools.map((tool) => tool.name)
         .sort();
-      expect(names).toEqual(["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]);
+      expect(names).toEqual(["invoke_tool", "search_tools"]);
     } finally {
       client.close();
     }
@@ -335,13 +325,12 @@ describe("Live Hidden Invocation and Delta Discovery", () => {
         clientInfo: { name: "omp-session", version: "1.0.0" },
       });
 
-      // tools/list only exposes meta-tools
+      // The workspace has no learned tools: tools/list exposes only invoke_tool
       const listRes = await req("tools/list");
       const listNames = (listRes.result as { tools: Array<{ name: string }> }).tools.map(
         (t) => t.name,
       );
-      expect(listNames).not.toContain("hidden_compute");
-      expect(listNames.slice().sort()).toEqual(["get_tool_schema", "invoke_tool", "manage_tools"]);
+      expect(listNames).toEqual(["invoke_tool"]);
 
       // 1. Direct call to hidden tool
       const directRes = await req("tools/call", { name: "hidden_compute", arguments: {} });

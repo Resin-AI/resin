@@ -7,7 +7,11 @@ import {
   applyOmpCatalogInstructions,
   getOmpRefreshCapability,
 } from "@resin/adapter-omp";
-import type { V1LockedToolEntry } from "@resin/contracts";
+import {
+  type HarnessId,
+  LISTING_FOOTPRINT_RECORDS_DIRNAME,
+  type V1LockedToolEntry,
+} from "@resin/contracts";
 import type { SecretManager } from "@resin/crypto";
 import { LocalDatabaseConnection, type LocalStateStore, createLocalStateStore } from "@resin/db";
 import {
@@ -30,6 +34,10 @@ import type { ToolRegistryDatabaseOption } from "../registry/types.js";
 import { type GatewayRouter, createRegistryGatewayRouter } from "../router.js";
 import { createCommandSuggestIndexWriter } from "../suggest/index-writer.js";
 import { withResolvers } from "../utils/deferred.js";
+import {
+  type ListingFootprintRecorder,
+  createListingFootprintRecorder,
+} from "./listing-footprint-recorder.js";
 import { type ToolSearchSurface, createToolSearchSurface } from "./tool-search-surface.js";
 export interface McpStdioShimOptions {
   socketPath?: string;
@@ -88,6 +96,18 @@ export interface McpStdioShimOptions {
    * host that injects its own registry or database never writes into the user's Resin home.
    */
   commandSuggestDir?: string | false;
+  /**
+   * Where this process records the listing footprint it serves (`<state dir>/listing-footprints`),
+   * or false for nowhere. Defaults like {@link commandSuggestDir}: only when the shim owns Resin's
+   * local state store.
+   */
+  listingFootprintDir?: string | false;
+  /**
+   * The Resin guidance block installed for a harness, as its context file holds it (markers
+   * included), "" when none is installed, undefined when unreadable. Without it no footprint is
+   * recorded: the guidance is part of what every request carries.
+   */
+  harnessGuidanceBlock?: (harnessId: HarnessId) => string | undefined;
 }
 export type ShimMode = "daemon_ipc" | "standalone_inprocess" | "failed";
 
@@ -214,6 +234,7 @@ export class McpStdioShim {
   private activeSocket?: Duplex;
   private isRunning = false;
   private surface?: ToolSearchSurface;
+  private footprintRecorder?: ListingFootprintRecorder;
   private closeSignal = withResolvers<ShimCloseReason>();
   private closeSettled = false;
   /** Streams that already carry this shim's error listener; each gets exactly one. */
@@ -329,10 +350,30 @@ export class McpStdioShim {
   }
 
   private prepareTransport(): { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } {
+    const footprintDir =
+      this.options.listingFootprintDir ??
+      (this.ownedStateStore === undefined
+        ? false
+        : path.join(
+            resolvePaths({ home: this.options.home, resinHome: this.options.resinHome }).stateDir,
+            LISTING_FOOTPRINT_RECORDS_DIRNAME,
+          ));
+    const guidanceBlock = this.options.harnessGuidanceBlock;
+    this.footprintRecorder =
+      footprintDir === false || guidanceBlock === undefined
+        ? undefined
+        : createListingFootprintRecorder({
+            dir: footprintDir,
+            cwd: this.cwd,
+            ...(this.harnessId === undefined ? {} : { harnessId: this.harnessId }),
+            guidanceBlock,
+          });
+    const recorder = this.footprintRecorder;
     this.surface = createToolSearchSurface(this.stdout, {
       enableSearch: this.options.enableToolSearch === true,
       fullCatalog: this.options.fullCatalog === true,
       benchmarkId: benchmarkIdOf(this.options.benchmarkId ?? process.env.RESIN_BENCHMARK_ID),
+      ...(recorder === undefined ? {} : { onServed: (surface) => recorder.served(surface) }),
     });
     // `pipe()` forwards no errors: every stream in the chain needs its own listener, or a write
     // after the harness closed stdout (EPIPE) is an uncaught exception that kills the process.
@@ -645,6 +686,12 @@ export class McpStdioShim {
       this.activeCloudRuntime = undefined;
       await runtime.stop();
     }
+    try {
+      this.footprintRecorder?.close();
+    } catch {
+      // The record stays open; the next gateway's prune closes it at its last write.
+    }
+    this.footprintRecorder = undefined;
     this.ownedStateStore?.close();
     this.ownedStateStore = undefined;
   }
