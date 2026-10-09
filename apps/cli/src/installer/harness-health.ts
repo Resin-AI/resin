@@ -991,6 +991,10 @@ export function startHarnessHealthScheduler(
     void runBoundedHarnessHealthCheck({
       runner,
       trigger,
+      // The daemon starts after an install, an upgrade or a reboot. A new release can carry new
+      // managed hooks or extension content that only a full check installs: the file-change
+      // debounce sees nothing changed, so without this they would wait for the hourly check.
+      force: trigger === "startup",
       deadlineMs: options.deadlineMs,
     }).catch(() => {
       // Resident checks are isolated from the supervisor lifecycle.

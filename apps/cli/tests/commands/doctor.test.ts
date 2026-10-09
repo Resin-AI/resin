@@ -679,15 +679,17 @@ describe("harness health production triggers", () => {
       });
       try {
         await vi.advanceTimersByTimeAsync(0);
+        // A daemon start forces a full check, so a new release's managed hooks are installed
+        // at once instead of waiting for the hourly check.
         expect(runner.run).toHaveBeenNthCalledWith(
           1,
-          expect.objectContaining({ trigger: "startup" }),
+          expect.objectContaining({ trigger: "startup", force: true }),
         );
 
         await vi.advanceTimersByTimeAsync(1_000);
         expect(runner.run).toHaveBeenNthCalledWith(
           2,
-          expect.objectContaining({ trigger: "scheduled" }),
+          expect.objectContaining({ trigger: "scheduled", force: false }),
         );
       } finally {
         scheduler.stop();
