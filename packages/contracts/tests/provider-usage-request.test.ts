@@ -13,37 +13,37 @@ const completeRequest: ProviderReportedUsage = {
   accountingVersion: "omp-v1",
   availability: "complete",
   usageScope: "request",
-  requestId: "msg_011CfprvQwejVWuABwxsQfun",
-  inputTokens: 4,
+  requestId: "msg_01Hq7ZtR2vKx9LmPw4NcYs8D",
+  inputTokens: 10,
   cachedInputTokens: 0,
-  cacheWriteTokens: 26_788,
-  outputTokens: 181,
-  totalTokens: 26_973,
-  costMicroUsd: 217_940,
+  cacheWriteTokens: 2_000,
+  outputTokens: 100,
+  totalTokens: 2_110,
+  costMicroUsd: 50_000,
   costProvenance: "harness_estimate",
 };
 
 describe("request-scoped provider usage", () => {
   it("accepts a complete request whose total is the four disjoint categories", () => {
     expect(ProviderReportedUsageSchema.parse(completeRequest)).toEqual(completeRequest);
-    expect(providerUsageNormalizedTotal(completeRequest)).toBe(26_973);
+    expect(providerUsageNormalizedTotal(completeRequest)).toBe(2_110);
   });
 
   it("keeps reasoning inside output: it is never added to the total", () => {
     const usage = {
       ...completeRequest,
-      requestId: "resp_6a9b290fe8e192ab75734005",
-      inputTokens: 3_956,
+      requestId: "resp_0a1b2c3d4e5f60718293a4b5",
+      inputTokens: 3_000,
       cachedInputTokens: 0,
       cacheWriteTokens: 0,
-      outputTokens: 205,
-      reasoningTokens: 141,
-      totalTokens: 4_161,
+      outputTokens: 200,
+      reasoningTokens: 150,
+      totalTokens: 3_200,
     };
     expect(ProviderReportedUsageSchema.safeParse(usage).success).toBe(true);
-    expect(providerUsageNormalizedTotal(usage)).toBe(4_161);
+    expect(providerUsageNormalizedTotal(usage)).toBe(3_200);
     expect(
-      ProviderReportedUsageSchema.safeParse({ ...usage, totalTokens: 4_161 + 141 }).success,
+      ProviderReportedUsageSchema.safeParse({ ...usage, totalTokens: 3_200 + 150 }).success,
     ).toBe(false);
   });
 
@@ -51,7 +51,7 @@ describe("request-scoped provider usage", () => {
     const { cacheWriteTokens: _omitted, ...withoutCacheWrites } = completeRequest;
     expect(ProviderReportedUsageSchema.safeParse(withoutCacheWrites).success).toBe(false);
     expect(
-      ProviderReportedUsageSchema.safeParse({ ...completeRequest, reasoningTokens: 182 }).success,
+      ProviderReportedUsageSchema.safeParse({ ...completeRequest, reasoningTokens: 101 }).success,
     ).toBe(false);
   });
 
@@ -59,7 +59,7 @@ describe("request-scoped provider usage", () => {
     const orchestrated = {
       ...completeRequest,
       availability: "partial" as const,
-      totalTokens: 27_100,
+      totalTokens: 2_200,
     };
     expect(ProviderReportedUsageSchema.parse(orchestrated)).toEqual(orchestrated);
     expect(providerUsageNormalizedTotal(orchestrated)).toBeUndefined();
