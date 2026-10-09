@@ -8,6 +8,7 @@ import {
   Sha256DigestSchema,
   UUIDSchema,
 } from "./common.js";
+import { ResinBenchmarkIdSchema } from "./model-request-link.js";
 import { ToolScopeSchema } from "./tools.js";
 import { SignatureMetadataSchema } from "./versions.js";
 
@@ -366,6 +367,12 @@ export const InvocationRecordSchema = z.object({
   errorDetails: InvocationErrorDetailsSchema.optional(),
   resourceUsage: InvocationResourceUsageSchema.optional(),
   usageEstimate: InvocationUsageEstimateSchema.optional(),
+  /**
+   * The benchmark run the gateway recorded this invocation for, from the harness run's
+   * `RESIN_BENCHMARK_ID`. Absent for ordinary use; benchmark invocations stay out of ordinary
+   * savings and recommendation totals.
+   */
+  benchmarkId: ResinBenchmarkIdSchema.optional(),
 });
 
 export type InvocationRecord = z.infer<typeof InvocationRecordSchema>;

@@ -19,11 +19,40 @@ export const ProviderUsageAvailabilitySchema = z.enum(["complete", "partial", "u
 export type ProviderUsageAvailability = z.infer<typeof ProviderUsageAvailabilitySchema>;
 
 /**
+ * What one usage record measures.
+ * - request: exactly one model request, identified by `requestId`. Categories are disjoint and
+ *   follow the request-category semantics below.
+ * - cumulative: a running total across several requests (a session or thread meter). It is never a
+ *   request value and never sums with request records of the same session.
+ * An absent scope marks a legacy record: its categories keep whatever meaning the source gave them
+ *   (input may include cache reads) and no normalized total is derived from it.
+ */
+export const ProviderUsageScopeSchema = z.enum(["request", "cumulative"]);
+
+export type ProviderUsageScope = z.infer<typeof ProviderUsageScopeSchema>;
+
+/**
+ * Stable identity of one model request within a session: the provider's response or message id
+ * when the source records one, otherwise the harness's own stable record id for the assistant
+ * response. Opaque printable ASCII, never derived from token values or tool calls.
+ */
+export const ProviderUsageRequestIdSchema = z.string().regex(/^[\x21-\x7E]{1,256}$/);
+
+/**
  * Normalized usage reported by a provider or harness for model executions.
  * Explicit nonnegative token, cost, and duration components use canonical units.
  * Missing/unsupported components remain absent/null rather than synthesized.
  * Cost provenance distinguishes source monetary fields from harness estimates;
  * neither source-reported values nor estimates establish provider billing.
+ *
+ * Request-category semantics (`usageScope` present):
+ * - inputTokens: uncached input only.
+ * - cachedInputTokens: input read from the provider's prompt cache.
+ * - cacheWriteTokens: input written to the prompt cache.
+ * - outputTokens: all output, including billed reasoning.
+ * - reasoningTokens: the reasoning part of outputTokens; never added to a total.
+ * A complete request record has all four disjoint categories and totalTokens equal to their sum.
+ * Counts a source reports inconsistently stay `partial` rather than being clamped.
  */
 export const ProviderReportedUsageSchema = z
   .object({
@@ -31,10 +60,13 @@ export const ProviderReportedUsageSchema = z
     model: z.string().min(1).optional().nullable(),
     accountingVersion: z.string().min(1),
     availability: ProviderUsageAvailabilitySchema,
+    usageScope: ProviderUsageScopeSchema.optional(),
+    requestId: ProviderUsageRequestIdSchema.optional(),
     inputTokens: z.number().int().nonnegative().optional().nullable(),
     outputTokens: z.number().int().nonnegative().optional().nullable(),
     reasoningTokens: z.number().int().nonnegative().optional().nullable(),
     cachedInputTokens: z.number().int().nonnegative().optional().nullable(),
+    cacheWriteTokens: z.number().int().nonnegative().optional().nullable(),
     totalTokens: z.number().int().nonnegative().optional().nullable(),
     costMicroUsd: z.number().int().nonnegative().optional().nullable(),
     // Omission supports legacy records; unpriced means no usable monetary value, not free.
@@ -43,6 +75,20 @@ export const ProviderReportedUsageSchema = z
   })
   .strict()
   .superRefine((val, ctx) => {
+    if (val.usageScope === "request" && val.requestId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Request-scoped provider usage requires requestId",
+        path: ["requestId"],
+      });
+    }
+    if (val.requestId !== undefined && val.usageScope !== "request") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "requestId is only valid on request-scoped provider usage",
+        path: ["usageScope"],
+      });
+    }
     if (val.availability === "complete") {
       if (val.totalTokens === undefined || val.totalTokens === null) {
         ctx.addIssue({
@@ -51,12 +97,46 @@ export const ProviderReportedUsageSchema = z
           path: ["totalTokens"],
         });
       }
+      if (val.usageScope === "request") {
+        for (const field of REQUEST_CATEGORY_FIELDS) {
+          if (val[field] === undefined || val[field] === null) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `Complete request usage requires ${field}`,
+              path: [field],
+            });
+          }
+        }
+        const sum = requestCategorySum(val);
+        if (sum !== undefined && val.totalTokens !== sum) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              "Complete request usage requires totalTokens to equal input + cache reads + cache writes + output",
+            path: ["totalTokens"],
+          });
+        }
+        if (
+          val.reasoningTokens !== undefined &&
+          val.reasoningTokens !== null &&
+          val.outputTokens !== undefined &&
+          val.outputTokens !== null &&
+          val.reasoningTokens > val.outputTokens
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Complete request usage cannot report more reasoning than output tokens",
+            path: ["reasoningTokens"],
+          });
+        }
+      }
     } else if (val.availability === "unavailable") {
       const metricFields = [
         "inputTokens",
         "outputTokens",
         "reasoningTokens",
         "cachedInputTokens",
+        "cacheWriteTokens",
         "totalTokens",
         "costMicroUsd",
         "durationMs",
@@ -75,6 +155,90 @@ export const ProviderReportedUsageSchema = z
   });
 
 export type ProviderReportedUsage = z.infer<typeof ProviderReportedUsageSchema>;
+
+/** The disjoint categories whose sum is a request's normalized total; reasoning is inside output. */
+const REQUEST_CATEGORY_FIELDS = [
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteTokens",
+  "outputTokens",
+] as const;
+
+type RequestCategoryCounts = Pick<ProviderReportedUsage, (typeof REQUEST_CATEGORY_FIELDS)[number]>;
+
+function requestCategorySum(usage: RequestCategoryCounts): number | undefined {
+  let sum = 0;
+  for (const field of REQUEST_CATEGORY_FIELDS) {
+    const value = usage[field];
+    if (value === undefined || value === null) return undefined;
+    sum += value;
+  }
+  return sum;
+}
+
+/**
+ * Identity of one request-scoped usage record: provider, session and request id. Two records with
+ * the same key are snapshots of the same request; records with different keys are distinct
+ * requests even when every count matches. Legacy and cumulative records have no request identity.
+ */
+export function providerUsageRequestKey(
+  sessionId: string,
+  usage: ProviderReportedUsage,
+): string | undefined {
+  if (usage.usageScope !== "request" || usage.requestId === undefined) return undefined;
+  return JSON.stringify([usage.provider, sessionId, usage.requestId]);
+}
+
+/**
+ * Normalized total of one complete request: uncached input + cache reads + cache writes + output.
+ * Reasoning is part of output and is not added. Undefined for legacy, cumulative or incomplete
+ * records, which have no normalized total to derive.
+ */
+export function providerUsageNormalizedTotal(usage: ProviderReportedUsage): number | undefined {
+  if (usage.usageScope !== "request" || usage.availability !== "complete") return undefined;
+  return requestCategorySum(usage);
+}
+
+const AVAILABILITY_RANK: Record<ProviderUsageAvailability, number> = {
+  unavailable: 0,
+  partial: 1,
+  complete: 2,
+};
+
+const SNAPSHOT_METRIC_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "reasoningTokens",
+  "cachedInputTokens",
+  "cacheWriteTokens",
+  "totalTokens",
+  "costMicroUsd",
+  "durationMs",
+] as const;
+
+function knownMetricCount(usage: ProviderReportedUsage): number {
+  let count = 0;
+  for (const field of SNAPSHOT_METRIC_FIELDS) {
+    if (usage[field] !== undefined && usage[field] !== null) count++;
+  }
+  return count;
+}
+
+/**
+ * Chooses between two snapshots of the same request (same `providerUsageRequestKey`). A source can
+ * rewrite a request's usage as it streams, so the later snapshot replaces the earlier one unless it
+ * is strictly less complete: lower availability, or the same availability with fewer known metrics.
+ * Snapshots are never summed.
+ */
+export function selectProviderUsageSnapshot(
+  current: ProviderReportedUsage,
+  next: ProviderReportedUsage,
+): ProviderReportedUsage {
+  const currentRank = AVAILABILITY_RANK[current.availability];
+  const nextRank = AVAILABILITY_RANK[next.availability];
+  if (nextRank !== currentRank) return nextRank > currentRank ? next : current;
+  return knownMetricCount(next) >= knownMetricCount(current) ? next : current;
+}
 
 /**
  * Base header fields present on every NormalizedSessionEvent.
