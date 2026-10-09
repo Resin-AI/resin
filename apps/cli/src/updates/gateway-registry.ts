@@ -2,6 +2,11 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import {
+  type SupervisorRegistration,
+  parseSupervisorRegistration,
+  supervisorRegistryDir,
+} from "@resin/gateway/mcp-supervisor";
 import { z } from "zod";
 import { getActiveVersion } from "../installer/asset-downloader.js";
 import { compareSemver } from "../installer/channel-verifier.js";
@@ -62,10 +67,11 @@ export function registerRunningGateway(options: {
 export const RELEASE_NOTICE_CHECK_INTERVAL_MS = 60_000;
 
 /**
- * The tool-result notice a long-lived gateway gives once a newer release is active. A stdio MCP
- * server cannot swap in the new code itself: Node has no in-place exec, and a replacement process
- * would not hold the harness's initialize handshake or in-flight requests. So the gateway tells
- * the agent instead. Reads the `current` pointer at most once per interval; never throws.
+ * The tool-result notice a long-lived unsupervised gateway gives once a newer release is active.
+ * A gateway running in process (a session started before the MCP supervisor shipped, or with
+ * `RESIN_MCP_HOTSWAP=0`) cannot swap in the new code itself: Node has no in-place exec. So it tells
+ * the agent instead. Supervised gateways are switched by their supervisor and give no notice.
+ * Reads the `current` pointer at most once per interval; never throws.
  */
 export function createActivatedReleaseNotice(options: {
   readonly resinHome: string;
@@ -146,7 +152,10 @@ async function readProcessStartTimeMs(procRoot: string, pid: number): Promise<nu
  * Whether the live process holding a registration's PID started after the gateway registered,
  * i.e. the gateway died without unregistering (SIGKILL, OOM) and the PID was reused.
  */
-async function isReusedPid(registration: GatewayRegistration, procRoot: string): Promise<boolean> {
+async function isReusedPid(
+  registration: { readonly pid: number; readonly startedAt: string },
+  procRoot: string,
+): Promise<boolean> {
   const registeredAtMs = Date.parse(registration.startedAt);
   if (!Number.isFinite(registeredAtMs)) return false;
   const startedAtMs = await readProcessStartTimeMs(procRoot, registration.pid);
@@ -192,6 +201,58 @@ export async function listRunningGateways(options: {
     await fs.rm(filePath, { force: true }).catch(() => undefined);
   }
   return live;
+}
+
+/**
+ * Lists live `resin mcp` supervisors (`run/mcp-supervisors`, written by
+ * `@resin/gateway/mcp-supervisor`), pruning records of exited or reused PIDs like
+ * {@link listRunningGateways}. A supervisor switches its session to a newly activated release on
+ * its own, so neither it nor the gateways it runs need a restart.
+ */
+export async function listRunningSupervisors(options: {
+  readonly resinHome: string;
+  readonly isAlive?: (pid: number) => boolean;
+  readonly procRoot?: string;
+}): Promise<SupervisorRegistration[]> {
+  const directory = supervisorRegistryDir(options.resinHome);
+  let names: string[];
+  try {
+    names = (await fs.readdir(directory)).filter((name) => /^\d+\.json$/u.test(name));
+  } catch {
+    return [];
+  }
+  const isAlive = options.isAlive ?? isProcessAlive;
+  const procRoot = options.procRoot ?? "/proc";
+  const live: SupervisorRegistration[] = [];
+  for (const name of names.slice(0, MAX_REGISTRATIONS)) {
+    const filePath = path.join(directory, name);
+    try {
+      const parsed = parseSupervisorRegistration(JSON.parse(await fs.readFile(filePath, "utf8")));
+      if (
+        parsed !== null &&
+        `${parsed.pid}.json` === name &&
+        isAlive(parsed.pid) &&
+        !(await isReusedPid(parsed, procRoot))
+      ) {
+        live.push(parsed);
+        continue;
+      }
+    } catch {
+      // Unreadable registrations are treated as stale.
+    }
+    await fs.rm(filePath, { force: true }).catch(() => undefined);
+  }
+  return live;
+}
+
+/** PIDs that switch releases on their own: live supervisors and the gateways they run. */
+export function switchableGatewayPids(supervisors: readonly SupervisorRegistration[]): Set<number> {
+  const pids = new Set<number>();
+  for (const supervisor of supervisors) {
+    pids.add(supervisor.pid);
+    for (const childPid of supervisor.childPids) pids.add(childPid);
+  }
+  return pids;
 }
 
 const RESIN_ENTRY_BASENAME = /^resin(?:\.m?js)?$/u;
@@ -303,9 +364,14 @@ export async function listCredentialUnsafeGateways(options: {
   readonly procRoot?: string;
 }): Promise<CredentialUnsafeGateway[]> {
   const registered = await listRunningGateways(options);
+  const supervisors = await listRunningSupervisors(options);
   const unregisteredPids = await listUnregisteredGatewayPids({
     resinHome: options.resinHome,
-    registeredPids: registered.map((gateway) => gateway.pid),
+    // A supervisor runs no credential client of its own; the gateways it runs register.
+    registeredPids: [
+      ...registered.map((gateway) => gateway.pid),
+      ...supervisors.map((supervisor) => supervisor.pid),
+    ],
     procRoot: options.procRoot,
   });
   return selectCredentialUnsafeGateways(registered, unregisteredPids);

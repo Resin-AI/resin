@@ -68,6 +68,8 @@ Cloud tokens are not copied into harness MCP configs, `.resin/project.json`, `.r
 | `RESIN_POSTHOG_HOST` | `string` | `https://resin.sh/ingest` | Error-report and usage-event endpoint. HTTPS, or HTTP on loopback only. |
 | `RESIN_POSTHOG_KEY` | `string` | built-in public project key | Overrides the PostHog project key (`phc_…`), e.g. for a private PostHog project. |
 | `RESIN_ENVIRONMENT` | `production`/`staging`/`development` | derived | Environment label attached to error reports and usage events. |
+| `RESIN_MCP_HOTSWAP` | `0`/`off`/`false`/`no` | unset (on) | Runs `resin mcp` in process instead of under the supervisor that switches a running session to a newly activated release. Sessions started with it keep their version until the harness restarts them. |
+| `RESIN_MCP_HOTSWAP_POLL_MS` | integer ms | `2000` | How often the `resin mcp` supervisor checks the active version; `0` stops checking. |
 | `RESIN_COMMAND_SUGGEST` | `0`/`off`/`false`/`no` | unset (on) | Turns off prompt-time and command-time learned-tool suggestions for processes that inherit it. |
 
 `--gateway-url` is a `resin init` flag, not an environment variable. Default when omitted: `http://127.0.0.1:9400/mcp/sse`.

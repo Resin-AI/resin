@@ -34,6 +34,11 @@
       "types": "./dist/suggest/index.d.ts",
       "import": "./dist/suggest/index.js",
       "default": "./dist/suggest/index.js"
+    },
+    "./mcp-supervisor": {
+      "types": "./dist/mcp-supervisor/index.d.ts",
+      "import": "./dist/mcp-supervisor/index.js",
+      "default": "./dist/mcp-supervisor/index.js"
     }
   },
   "scripts": {

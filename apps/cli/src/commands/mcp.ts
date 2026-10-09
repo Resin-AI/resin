@@ -7,6 +7,7 @@ import {
   type ShimStatus,
   shimExitCode,
 } from "@resin/gateway";
+import { isSupervisedGateway } from "@resin/gateway/mcp-supervisor";
 import type { HarnessDefinition } from "@resin/harness-contracts";
 import { resolvePaths } from "@resin/observer";
 import { getErrorReporter, reportHandledError } from "@resin/observer/error-reporting/core";
@@ -226,7 +227,9 @@ export async function mcpCommand(args: string[], options: McpCommandOptions = {}
     clientVersion: CLI_VERSION,
     recordedWorkflowConnections: harnessMcpConnections(servedHarness, parsedArgs.cwd),
     ...(nativeToolInvoker === undefined ? {} : { recordedHarnessToolInvoker: nativeToolInvoker }),
-    ...(resinHome === undefined
+    // A supervised gateway's session switches to a newly activated release on its own (see
+    // `@resin/gateway/mcp-supervisor`), so only an unsupervised one tells the agent to restart.
+    ...(resinHome === undefined || isSupervisedGateway(options.env ?? process.env)
       ? {}
       : {
           releaseNotice: createActivatedReleaseNotice({ resinHome, runningVersion: CLI_VERSION }),

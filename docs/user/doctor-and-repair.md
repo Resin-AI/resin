@@ -22,7 +22,7 @@ Human output uses boxed sections. Typical states:
 | Production Safety Gate | `PASS (open)`, `BLOCKED (fail-closed)`, `OVERRIDE (unsafe dev mode)` |
 | Tools & MCP Catalog | `System Tools: 4` (`search_tools`, `get_tool_schema`, `invoke_tool`, `manage_tools`). `Custom Tools` counts the learned tools in the latest catalog the MCP gateway served for the workspace of the current directory (from the local state store), with the time of that catalog; it reads `unknown (<reason>)`, never `0`, when no catalog has been served for that workspace or the store cannot be read. |
 | Agent Harness Connections | Installed/Not Installed and Configured (MCP Attached)/Not Configured, or `Resin removed by you` after `resin uninstall --harness <id>` |
-| Running sessions | Harness sessions that started without Resin's MCP gateway, or run an older Resin, by harness and PID, with a restart hint. Read from the local process table on Linux, WSL and macOS; not checked on native Windows. |
+| Running sessions | Harness sessions that started without Resin's MCP gateway, or run an older Resin that cannot switch releases by itself, by harness and PID, with a restart hint. Sessions under the `resin mcp` supervisor switch to a newly activated release on their own and are not listed. Read from the local process table on Linux, WSL and macOS; not checked on native Windows. |
 
 JSON mode:
 
