@@ -12,6 +12,7 @@
 import type { RegistryTool } from "../registry/types.js";
 import type { SuggestStep } from "../suggest/index-file.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
+import { mentionsPrivateValue } from "./private-values.js";
 
 /** The commands a learned tool runs, resolved on this machine (none when it runs no program). */
 export type LocalToolCommands = (
@@ -612,8 +613,9 @@ function commandPhrase(words: readonly Word[]): string | undefined {
 }
 
 /**
- * Whether a command names a private value: it contains one, or one of its words is one. Values
- * too short to be told from ordinary words are matched as whole words only.
+ * Whether a command names a private value: it contains one where the description scrub would
+ * replace it (a short word-like value as a whole word, any other value anywhere), or one of its
+ * words is one. Values too short to be told from ordinary words are matched as whole words only.
  */
 function namesPrivateValue(command: string, privateValues: readonly string[]): boolean {
   const lower = command.toLowerCase();
@@ -621,7 +623,7 @@ function namesPrivateValue(command: string, privateValues: readonly string[]): b
   return privateValues.some((value) => {
     const needle = value.trim().toLowerCase();
     if (needle.length === 0) return false;
-    return needle.length >= 4 ? lower.includes(needle) : commandWords.includes(needle);
+    return needle.length >= 4 ? mentionsPrivateValue(lower, needle) : commandWords.includes(needle);
   });
 }
 

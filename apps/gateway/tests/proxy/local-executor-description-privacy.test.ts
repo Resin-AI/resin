@@ -362,4 +362,86 @@ describe("learned tool descriptions never show a resolved private value", () => 
     ]);
     expectNoSecret(description);
   });
+
+  it("keeps tool and input names whole when a harness argument is a short word they contain", async () => {
+    // A playtest tool's recorded arguments (`mode: "play"`, `target: "server"`) are private; the
+    // harness tool names and the caller's input names contain those words but must stay callable.
+    own("private:mode", "play");
+    own("private:target", "server");
+    const harnessStep = (id: string, name: string, argument: string, reference: string) => ({
+      id,
+      callId: `call_${id}`,
+      callable: { runtime: RESIN_HARNESS_TOOL_RUNTIME, name },
+      arguments: [
+        {
+          name: argument,
+          source: { kind: "template", template: { type: "private", reference } },
+        },
+        { name: "code", source: { kind: "input", name: "playtest_code" } },
+      ],
+      dependsOn: [],
+      failurePolicy: { onError: "abort", policy: "default" },
+      observed: { outcome: "succeeded" },
+    });
+    const installed = await install(
+      {
+        type: "object",
+        properties: { playtest_code: { type: "string", description: "Code for the playtest." } },
+        required: ["playtest_code"],
+        additionalProperties: false,
+      },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_playtest",
+        inputs: [{ name: "playtest_code", type: "string" }],
+        privateReferences: ["private:mode", "private:target"],
+        steps: [
+          harnessStep("step0", "solo_playtest", "mode", "private:mode"),
+          harnessStep("step1", "eval_server_runtime", "target", "private:target"),
+        ],
+      },
+    );
+
+    const described = executor();
+    const description = described.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toContain("solo_playtest tool with mode = <private:1>");
+    expect(description).toContain("eval_server_runtime tool with target = <private:2>");
+    expect(description).toContain("{playtest_code}");
+    expect(description).not.toContain(SCRUBBED_PRIVATE_VALUE);
+    // Both values are still scrubbed where they stand as words of their own.
+    const values = described.recordedWorkflowPrivateValues(installed.artifactDigest, context);
+    expect(values).toEqual(["server", "play"]);
+  });
+
+  it("shows a program whose recorded arguments repeat it as a private value", async () => {
+    // A harness bash call's laundered arguments are one private value whose `command` leaf is the
+    // very program the plan shows; its `cwd` leaf is a private directory.
+    const program = "npx tsc --noEmit -p . 2>&1 | head -20";
+    const privateDirectory = path.join(tempDir, "private-checkout-dir");
+    own("private:program", program);
+    privateValues.set(
+      "private:demonstration",
+      { command: program, cwd: privateDirectory, timeout: 120 },
+      { workspaceId: context.workspaceId },
+    );
+    const installed = await install(
+      { type: "object", properties: {}, additionalProperties: false },
+      {
+        schemaVersion: 1,
+        workflowId: "wf_repeated_program",
+        inputs: [],
+        privateReferences: ["private:program", "private:demonstration"],
+        steps: [projectedStep("step0", "private:program", program, program)],
+      },
+    );
+
+    const described = executor();
+    const description = described.describeRecordedWorkflow(installed.artifactDigest, context);
+    expect(description).toBe(
+      `Recorded on this machine:\nStep 1 runs this recorded shell program:\n${program}`,
+    );
+    const values = described.recordedWorkflowPrivateValues(installed.artifactDigest, context);
+    expect(values).toEqual([privateDirectory]);
+    expect(values).not.toContain(program);
+  });
 });

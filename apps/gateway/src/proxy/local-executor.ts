@@ -1165,7 +1165,27 @@ export class LocalArtifactExecutor {
         // An original that no longer tokenizes has no protected token to find; it is scrubbed whole.
       }
     }
-    const scrubValues = scrubbablePrivateValues(scrubbed);
+    // A recording's laundered arguments repeat the program they ran, so a private value can be the
+    // whole text of a program the plan shows by design (its sanitized source). Scrubbing that copy
+    // blanked the program in the description, and every catalog sentence quoting it. Such a value
+    // is not scrubbed as a whole; any secret inside the program differs from the sanitized source
+    // and is still scrubbed as a protected token.
+    const shownPrograms = new Set<string>();
+    const collectShownPrograms = (template: WorkflowValueTemplate): void => {
+      if (template.type === "text") template.parts.forEach(collectShownPrograms);
+      if (template.type !== "program") return;
+      const shown = projectedTemplateText(template);
+      if (shown !== undefined) shownPrograms.add(shown);
+      collectShownPrograms(template.source);
+    };
+    for (const step of plan.steps) {
+      for (const argument of step.arguments) {
+        if (argument.source.kind === "template") collectShownPrograms(argument.source.template);
+      }
+    }
+    const scrubValues = scrubbablePrivateValues(scrubbed).filter(
+      (value) => !shownPrograms.has(value),
+    );
     const scrub = (text: string): string => scrubPrivateValues(text, scrubValues);
     // Only an input that keeps its recorded token when omitted may be shown with that value: a
     // required input has no value a caller can fall back on, and showing one would claim it does.
