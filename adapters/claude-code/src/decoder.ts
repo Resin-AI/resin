@@ -422,7 +422,8 @@ function withBaseFields<T extends IntermediateSessionEvent>(
 /** A `tool_use` seen earlier in the transcript, awaiting the `tool_result` that answers it. */
 export interface PendingClaudeToolCall {
   toolName: string;
-  timestamp: string;
+  /** Absent for a call restored from a resume snapshot: its result's duration is unknown. */
+  timestamp?: string;
   /** A built-in `Bash` call run in the foreground: its result without an error means exit 0. */
   foregroundShell?: true;
   /** The model request whose response issued the call. */
@@ -1371,6 +1372,114 @@ function decodeLineEvents(
 }
 
 /**
+ * Local-only record metadata a source attaches to the first record it emits after resuming
+ * mid-transcript: the request-link state the transcript before its cursor established.
+ */
+export const CLAUDE_REQUEST_LINK_RESUME_KEY = "__resinClaudeRequestLinkResumeV1";
+
+const ClaudeRequestLinkResumeSchema = z
+  .object({
+    version: z.literal(1),
+    taskId: ResinTaskIdSchema.optional(),
+    /** Unanswered calls: `[tool_use id, issuing model request id, tool name]`. */
+    calls: z
+      .array(
+        z.tuple([
+          z.string().min(1).max(1024),
+          ProviderUsageRequestIdSchema,
+          z.string().min(1).max(1024),
+        ]),
+      )
+      .max(MAX_TRACKED_ENTRIES),
+  })
+  .strict();
+
+/** Request-link state a resumed decoder would otherwise only learn from the transcript's prefix. */
+export type ClaudeRequestLinkResume = z.infer<typeof ClaudeRequestLinkResumeSchema>;
+
+/** Decodes a source record's payload: a raw JSONL line or its parsed object. */
+function decodeClaudeRecordPayload(
+  rawPayload: unknown,
+  sessionId: string,
+  sequenceNumber: number,
+  timestamp: string,
+  pendingCalls: PendingClaudeToolCalls,
+  usageSnapshots: ClaudeUsageSnapshots,
+  sessionTasks: ClaudeSessionTasks,
+): IntermediateSessionEvent[] {
+  if (String(rawPayload) === rawPayload) {
+    return decodeClaudeTranscriptLine(
+      rawPayload,
+      sessionId,
+      sequenceNumber,
+      timestamp,
+      pendingCalls,
+      usageSnapshots,
+      sessionTasks,
+    );
+  }
+  if (
+    rawPayload !== null &&
+    rawPayload !== undefined &&
+    !Array.isArray(rawPayload) &&
+    Object.prototype.toString.call(rawPayload) === "[object Object]"
+  ) {
+    // SAFETY: Raw payload is a JSON object record conforming to Claude transcript lines.
+    return decodeClaudeTranscriptLine(
+      rawPayload as ClaudeTranscriptPayload,
+      sessionId,
+      sequenceNumber,
+      timestamp,
+      pendingCalls,
+      usageSnapshots,
+      sessionTasks,
+    );
+  }
+  return [];
+}
+
+/**
+ * Rebuilds a session's request-link state from the transcript before a resume point: decodes each
+ * prefix record exactly as the live decoder would, with throwaway state, and discards the events.
+ */
+export class ClaudeRequestLinkPrimer {
+  private readonly pendingCalls: PendingClaudeToolCalls = new Map();
+  private readonly usageSnapshots: ClaudeUsageSnapshots = new Map();
+  private readonly sessionTasks: ClaudeSessionTasks = new Map();
+
+  constructor(private readonly sessionId: string) {}
+
+  /** Observes one prefix record: the payload and sequence number the source would emit for it. */
+  observe(rawPayload: unknown, sequenceNumber: number): void {
+    decodeClaudeRecordPayload(
+      rawPayload,
+      this.sessionId,
+      sequenceNumber,
+      new Date().toISOString(),
+      this.pendingCalls,
+      this.usageSnapshots,
+      this.sessionTasks,
+    );
+  }
+
+  /** The session's task and its most recent unanswered calls that link an issuing request. */
+  snapshot(): ClaudeRequestLinkResume {
+    const calls: ClaudeRequestLinkResume["calls"] = [];
+    for (const [toolCallId, call] of this.pendingCalls) {
+      if (call.modelRequestId !== undefined) {
+        calls.push([toolCallId, call.modelRequestId, call.toolName]);
+      }
+    }
+    const taskId = this.sessionTasks.get(this.sessionId);
+    return {
+      version: 1,
+      ...(taskId === undefined ? {} : { taskId }),
+      calls: calls.slice(-MAX_TRACKED_ENTRIES),
+    };
+  }
+}
+
+/**
  * HarnessRecordDecoder implementation for Claude Code JSONL transcripts.
  */
 export class ClaudeRecordDecoder implements HarnessRecordDecoder {
@@ -1404,36 +1513,40 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
     const sessionId = record.sessionId || context?.sessionId || "session-1";
     const sequenceNumber = record.sequenceNumber ?? record.cursor?.sequence ?? 0;
     const timestamp = record.timestamp || new Date().toISOString();
+    this.installRequestLinkResume(record, sessionId);
 
-    const rawPayload = record.rawPayload;
-    if (String(rawPayload) === rawPayload) {
-      return decodeClaudeTranscriptLine(
-        rawPayload,
-        sessionId,
-        sequenceNumber,
-        timestamp,
-        this.pendingCalls,
-        this.usageSnapshots,
-        this.sessionTasks,
-      );
+    return decodeClaudeRecordPayload(
+      record.rawPayload,
+      sessionId,
+      sequenceNumber,
+      timestamp,
+      this.pendingCalls,
+      this.usageSnapshots,
+      this.sessionTasks,
+    );
+  }
+
+  /**
+   * Installs the link state a resuming source primed, without overriding state this decoder
+   * already holds; the local-only key never reaches event metadata. Invalid values are ignored.
+   */
+  private installRequestLinkResume(record: RawHarnessRecord, sessionId: string): void {
+    const metadata = record.metadata;
+    if (metadata === undefined || !Object.hasOwn(metadata, CLAUDE_REQUEST_LINK_RESUME_KEY)) return;
+    const parsed = ClaudeRequestLinkResumeSchema.safeParse(
+      metadata[CLAUDE_REQUEST_LINK_RESUME_KEY],
+    );
+    delete metadata[CLAUDE_REQUEST_LINK_RESUME_KEY];
+    if (!parsed.success) return;
+    const { taskId, calls } = parsed.data;
+    if (taskId !== undefined && !this.sessionTasks.has(sessionId)) {
+      rememberBounded(this.sessionTasks, sessionId, taskId);
     }
-    if (
-      rawPayload !== null &&
-      rawPayload !== undefined &&
-      !Array.isArray(rawPayload) &&
-      Object.prototype.toString.call(rawPayload) === "[object Object]"
-    ) {
-      // SAFETY: Raw payload is a JSON object record conforming to Claude transcript lines.
-      return decodeClaudeTranscriptLine(
-        rawPayload as ClaudeTranscriptPayload,
-        sessionId,
-        sequenceNumber,
-        timestamp,
-        this.pendingCalls,
-        this.usageSnapshots,
-        this.sessionTasks,
-      );
+    // A restored call keeps no start time (its duration is unknown) and no foreground-shell mark.
+    for (const [toolCallId, modelRequestId, toolName] of calls) {
+      if (!this.pendingCalls.has(toolCallId)) {
+        this.pendingCalls.set(toolCallId, { toolName, modelRequestId });
+      }
     }
-    return [];
   }
 }

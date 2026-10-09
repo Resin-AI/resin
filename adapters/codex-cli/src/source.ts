@@ -6,6 +6,11 @@ import type {
   SessionEventSource,
   SourceCursor,
 } from "@resin/harness-contracts";
+import {
+  CODEX_REQUEST_LINK_RESUME_KEY,
+  CodexRequestLinkPrimer,
+  type CodexRequestLinkResume,
+} from "./decoder.js";
 import { CODEX_HARNESS_ID } from "./discovery.js";
 
 /**
@@ -53,6 +58,64 @@ function isCodexRecordObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** The record the source emits for one non-empty, trimmed rollout line. */
+function codexSourceRecord(
+  sessionId: string,
+  filePath: string,
+  trimmed: string,
+  fallbackTimestamp: string,
+  position: { offset: number; line: number; sequence: number },
+): RawHarnessRecord {
+  let parsedPayload: unknown = trimmed;
+  let recordTimestamp = fallbackTimestamp;
+  let recordType: RecordType = "transcript_line";
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (isCodexRecordObject(parsed)) {
+      parsedPayload = parsed;
+      recordTimestamp = codexRecordTimestamp(parsed, recordTimestamp);
+      const rawType = String(parsed.type ?? parsed.role ?? "").toLowerCase();
+      if (Object.hasOwn(CODEX_NATIVE_RECORD_TYPES, rawType)) {
+        recordType = "custom";
+      } else if (rawType.includes("call")) {
+        recordType = "tool_call";
+      } else if (rawType.includes("result") || rawType.includes("response")) {
+        recordType = "tool_result";
+      } else if (rawType === "user" || rawType === "user_message") {
+        recordType = "prompt";
+      } else if (rawType === "assistant" || rawType === "assistant_message") {
+        recordType = "completion";
+      } else if (rawType === "system") {
+        recordType = "system";
+      }
+    }
+  } catch {
+    parsedPayload = trimmed;
+    recordType = "transcript_line";
+  }
+
+  return {
+    recordId: `rec_${position.sequence}`,
+    sessionId,
+    harnessId: CODEX_HARNESS_ID,
+    sequenceNumber: position.sequence,
+    timestamp: recordTimestamp,
+    recordType,
+    rawPayload: parsedPayload,
+    cursor: {
+      offset: position.offset,
+      line: position.line,
+      sequence: position.sequence,
+      timestamp: recordTimestamp,
+    },
+    metadata: {
+      filePath,
+      line: position.line,
+    },
+  };
+}
+
 /**
  * Event source that tails and reads from a Codex CLI session transcript (JSONL).
  */
@@ -73,6 +136,10 @@ export class CodexSessionEventSource implements SessionEventSource {
   private operationQueue: Promise<void> = Promise.resolve();
   private hasReadActivity = false;
   private activePoll?: Promise<void>;
+  /** Whether the first read has run: a source resuming mid-file primes link state once, then. */
+  private primed = false;
+  /** Primed link state, held until the first record after the resume (a JSON object) carries it. */
+  private pendingLinkResume: CodexRequestLinkResume | undefined;
 
   constructor(options: CodexSessionEventSourceOptions) {
     this.filePath = options.filePath;
@@ -121,7 +188,17 @@ export class CodexSessionEventSource implements SessionEventSource {
         this.pendingSearchOffset = 0;
         this.droppingOversizedLine = false;
         this.discardedLineBytes = 0;
+        this.pendingLinkResume = undefined;
+      } else if (!this.primed && this.cursor.offset > 0) {
+        // Resuming mid-file: recover the native context (turn, model, provider) the rollout
+        // before the cursor established, which a fresh decoder would otherwise lack.
+        this.pendingLinkResume = await this.primeRequestLinks(
+          handle,
+          this.cursor.offset,
+          fileStat.mtime.toISOString(),
+        );
       }
+      this.primed = true;
       this.fileIdentity = { device: fileStat.dev, inode: fileStat.ino };
 
       const records: RawHarnessRecord[] = [];
@@ -142,56 +219,19 @@ export class CodexSessionEventSource implements SessionEventSource {
           if (!trimmed) continue;
 
           this.cursor.sequence++;
-          const recordId = `rec_${this.cursor.sequence}`;
-          let parsedPayload: unknown = trimmed;
-          let recordTimestamp = fileStat.mtime.toISOString();
-          let recordType: RecordType = "transcript_line";
-
-          try {
-            const parsed: unknown = JSON.parse(trimmed);
-            if (isCodexRecordObject(parsed)) {
-              parsedPayload = parsed;
-              recordTimestamp = codexRecordTimestamp(parsed, recordTimestamp);
-              const rawType = String(parsed.type ?? parsed.role ?? "").toLowerCase();
-              if (Object.hasOwn(CODEX_NATIVE_RECORD_TYPES, rawType)) {
-                recordType = "custom";
-              } else if (rawType.includes("call")) {
-                recordType = "tool_call";
-              } else if (rawType.includes("result") || rawType.includes("response")) {
-                recordType = "tool_result";
-              } else if (rawType === "user" || rawType === "user_message") {
-                recordType = "prompt";
-              } else if (rawType === "assistant" || rawType === "assistant_message") {
-                recordType = "completion";
-              } else if (rawType === "system") {
-                recordType = "system";
-              }
-            }
-          } catch {
-            parsedPayload = trimmed;
-            recordType = "transcript_line";
+          const record = codexSourceRecord(
+            this.sessionId,
+            this.filePath,
+            trimmed,
+            fileStat.mtime.toISOString(),
+            this.cursor,
+          );
+          this.cursor.timestamp = record.timestamp;
+          if (this.pendingLinkResume !== undefined && isCodexRecordObject(record.rawPayload)) {
+            record.metadata[CODEX_REQUEST_LINK_RESUME_KEY] = this.pendingLinkResume;
+            this.pendingLinkResume = undefined;
           }
-
-          this.cursor.timestamp = recordTimestamp;
-          records.push({
-            recordId,
-            sessionId: this.sessionId,
-            harnessId: CODEX_HARNESS_ID,
-            sequenceNumber: this.cursor.sequence,
-            timestamp: recordTimestamp,
-            recordType,
-            rawPayload: parsedPayload,
-            cursor: {
-              offset: this.cursor.offset,
-              line: this.cursor.line,
-              sequence: this.cursor.sequence,
-              timestamp: recordTimestamp,
-            },
-            metadata: {
-              filePath: this.filePath,
-              line: this.cursor.line,
-            },
-          });
+          records.push(record);
           continue;
         }
 
@@ -268,6 +308,68 @@ export class CodexSessionEventSource implements SessionEventSource {
     } finally {
       await handle?.close().catch(() => undefined);
     }
+  }
+
+  /**
+   * Decodes native link state from every complete line in `[0, end)`, in bounded chunks and with
+   * the same oversized-line rule as `readNextSerial`. Nothing is emitted and the prefix is never
+   * read again.
+   */
+  private async primeRequestLinks(
+    handle: fs.FileHandle,
+    end: number,
+    fallbackTimestamp: string,
+  ): Promise<CodexRequestLinkResume | undefined> {
+    const primer = new CodexRequestLinkPrimer(this.sessionId);
+    let pending = Buffer.alloc(0);
+    let dropping = false;
+    let position = 0;
+    let offset = 0;
+    let line = 1;
+    let sequence = 0;
+    while (position < end) {
+      const buffer = Buffer.allocUnsafe(Math.min(CODEX_READ_QUANTUM_BYTES, end - position));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      let chunk = buffer.subarray(0, bytesRead);
+      let newline = chunk.indexOf(0x0a);
+      while (newline >= 0) {
+        const lineLength = pending.length + newline;
+        offset += lineLength + 1;
+        line++;
+        if (!dropping && lineLength <= CODEX_MAX_PENDING_RECORD_BYTES) {
+          const lineBytes =
+            pending.length > 0
+              ? Buffer.concat([pending, chunk.subarray(0, newline)])
+              : chunk.subarray(0, newline);
+          const trimmed = lineBytes.toString("utf8").trim();
+          if (trimmed) {
+            sequence++;
+            primer.observe(
+              codexSourceRecord(this.sessionId, this.filePath, trimmed, fallbackTimestamp, {
+                offset,
+                line,
+                sequence,
+              }),
+            );
+          }
+        }
+        dropping = false;
+        pending = Buffer.alloc(0);
+        chunk = chunk.subarray(newline + 1);
+        newline = chunk.indexOf(0x0a);
+      }
+      if (dropping || pending.length + chunk.length > CODEX_MAX_PENDING_RECORD_BYTES) {
+        // Track the oversized line's length without buffering it.
+        offset += pending.length + chunk.length;
+        dropping = true;
+        pending = Buffer.alloc(0);
+      } else {
+        pending = Buffer.concat([pending, chunk]);
+      }
+    }
+    return primer.snapshot();
   }
 
   /**

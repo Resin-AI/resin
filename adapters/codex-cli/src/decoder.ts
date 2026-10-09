@@ -159,12 +159,15 @@ export interface CodexDecoderOptions {
   initialSequence?: number;
   lastCausalSequence?: number;
   workspaceId?: string;
+  /** Whether to report unrecognized native output formats as process warnings (default true). */
+  reportWarnings?: boolean;
 }
 const CodexDecoderOptionsSchema: z.ZodType<CodexDecoderOptions> = z.object({
   sessionId: z.string().optional(),
   initialSequence: z.number().optional(),
   lastCausalSequence: z.number().optional(),
   workspaceId: z.string().optional(),
+  reportWarnings: z.boolean().optional(),
 });
 
 /** Codex thread and turn ids are lowercase UUIDv7: lexicographic order is creation order. */
@@ -390,6 +393,7 @@ function reportUnrecognizedExecOutput(text: string): void {
 function parseNativeShellOutput(
   rawOutput: CodexTranscriptValue | undefined,
   rawRecord: CodexTranscriptPayload,
+  reportUnrecognized: boolean,
 ): NativeShellOutput {
   const outputObject = asObject(rawOutput);
   const recordMetadata = asObject(rawRecord.metadata);
@@ -518,7 +522,7 @@ function parseNativeShellOutput(
         outcome: statusOutcome ?? (formattedExitCode === 0 ? "completed" : "failed"),
       };
     }
-    reportUnrecognizedExecOutput(formatted);
+    if (reportUnrecognized) reportUnrecognizedExecOutput(formatted);
   }
 
   const outcome =
@@ -1178,6 +1182,63 @@ interface CodexNativeThreadContext {
   contextWindow?: number;
 }
 
+/**
+ * Local-only record metadata a source attaches to the first record it emits after resuming
+ * mid-rollout: the native context the rollout before its cursor established.
+ */
+export const CODEX_REQUEST_LINK_RESUME_KEY = "__resinCodexRequestLinkResumeV1";
+
+const MAX_RESUME_CONTEXTS = 256;
+const CodexResumeStringSchema = z.string().min(1).max(4096);
+const CodexResumeContextEntrySchema = z.tuple([
+  CodexResumeStringSchema,
+  z
+    .object({
+      threadId: CodexResumeStringSchema.optional(),
+      rootThreadId: CodexResumeStringSchema.optional(),
+      nativeSessionId: CodexResumeStringSchema.optional(),
+      turnId: CodexResumeStringSchema.optional(),
+      rootTurnId: CodexResumeStringSchema.optional(),
+      cwd: CodexResumeStringSchema.optional(),
+      model: CodexResumeStringSchema.optional(),
+      modelProvider: CodexResumeStringSchema.optional(),
+      effort: CodexResumeStringSchema.optional(),
+      contextWindow: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+]);
+const CodexResumeUsageTurnSchema = z.tuple([CodexResumeStringSchema, CodexResumeStringSchema]);
+const CodexRequestLinkResumeSchema = z
+  .object({
+    version: z.literal(1),
+    /** The thread of the decoder's current native context. */
+    currentThreadId: CodexResumeStringSchema.optional(),
+    /** Native context per context key (thread id, else session id), current context last. */
+    contexts: z.array(CodexResumeContextEntrySchema).max(MAX_RESUME_CONTEXTS),
+    /** `[thread key, turn id]` of turns whose responses already reported request-scoped usage. */
+    requestUsageTurns: z.array(CodexResumeUsageTurnSchema).max(MAX_RESUME_CONTEXTS),
+    /** The rollout's own `session_meta` was read: a later one is a replayed parent header. */
+    seenSessionMeta: z.boolean(),
+    /** Own thread id of a forked rollout still replaying its parent's history. */
+    forkReplayOwnThreadId: CodexResumeStringSchema.refine(isUuidV7).optional(),
+  })
+  .strict();
+
+/** Native link state a resumed decoder would otherwise only learn from the rollout's prefix. */
+export type CodexRequestLinkResume = z.infer<typeof CodexRequestLinkResumeSchema>;
+
+/** Removes the resume key from a record's metadata, returning its value when it is valid. */
+function takeCodexRequestLinkResume(
+  record: RawHarnessRecord | undefined,
+): CodexRequestLinkResume | undefined {
+  const metadata = record?.metadata;
+  if (metadata === undefined || metadata === null) return undefined;
+  if (!Object.hasOwn(metadata, CODEX_REQUEST_LINK_RESUME_KEY)) return undefined;
+  const parsed = CodexRequestLinkResumeSchema.safeParse(metadata[CODEX_REQUEST_LINK_RESUME_KEY]);
+  delete metadata[CODEX_REQUEST_LINK_RESUME_KEY];
+  return parsed.success ? parsed.data : undefined;
+}
+
 interface CodexNativeThreadUsage {
   turnId?: string;
   turnUsage?: CodexTranscriptPayload;
@@ -1197,6 +1258,7 @@ interface CodexNativeThreadUsage {
 export class CodexSessionDecoder {
   readonly sessionId: string;
   readonly workspaceId: string;
+  private readonly reportWarnings: boolean;
   private sequenceCounter: number;
   private lastEventId: string | null = null;
   private toolCallSeq = 0;
@@ -1330,10 +1392,70 @@ export class CodexSessionDecoder {
   constructor(options: CodexDecoderOptions = {}) {
     this.sessionId = options.sessionId || generateEventId("sess");
     this.workspaceId = options.workspaceId || "default";
+    this.reportWarnings = options.reportWarnings ?? true;
     this.sequenceCounter =
       options.initialSequence !== undefined
         ? options.initialSequence - 1
         : (options.lastCausalSequence ?? 0);
+  }
+
+  /** The native link state this decoder holds, for a decoder that resumes after its records. */
+  requestLinkResume(): CodexRequestLinkResume | undefined {
+    const currentKey = this.currentNativeThreadId ?? this.sessionId;
+    const entries = [...this.nativeContexts].filter(([key]) => key !== currentKey);
+    const current = this.nativeContexts.get(currentKey);
+    if (current !== undefined) entries.push([currentKey, current]);
+    const contexts: CodexRequestLinkResume["contexts"] = [];
+    for (const entry of entries.slice(-MAX_RESUME_CONTEXTS)) {
+      const parsed = CodexResumeContextEntrySchema.safeParse(entry);
+      if (parsed.success) contexts.push(parsed.data);
+    }
+    const requestUsageTurns: CodexRequestLinkResume["requestUsageTurns"] = [];
+    for (const [key, state] of this.nativeUsageByThread) {
+      const parsed = CodexResumeUsageTurnSchema.safeParse([key, state.turnId]);
+      if (state.requestUsageEmitted && parsed.success) requestUsageTurns.push(parsed.data);
+    }
+    if (contexts.length === 0 && requestUsageTurns.length === 0 && !this.seenSessionMeta) {
+      return undefined;
+    }
+    const parsed = CodexRequestLinkResumeSchema.safeParse({
+      version: 1,
+      ...(this.currentNativeThreadId === undefined
+        ? {}
+        : { currentThreadId: this.currentNativeThreadId }),
+      contexts,
+      requestUsageTurns: requestUsageTurns.slice(-MAX_RESUME_CONTEXTS),
+      seenSessionMeta: this.seenSessionMeta,
+      ...(this.forkReplayOwnThreadId === undefined
+        ? {}
+        : { forkReplayOwnThreadId: this.forkReplayOwnThreadId }),
+    });
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  /** Installs resume state, never overriding native state this decoder already holds. */
+  installRequestLinkResume(resume: CodexRequestLinkResume): void {
+    for (const [key, context] of resume.contexts) {
+      if (!this.nativeContexts.has(key)) this.nativeContexts.set(key, { ...context });
+    }
+    if (this.currentNativeContext === undefined && this.currentNativeThreadId === undefined) {
+      this.currentNativeContext = this.nativeContexts.get(resume.currentThreadId ?? this.sessionId);
+      this.currentNativeThreadId = resume.currentThreadId;
+    }
+    for (const [key, turnId] of resume.requestUsageTurns) {
+      if (!this.nativeUsageByThread.has(key)) {
+        this.nativeUsageByThread.set(key, {
+          turnId,
+          responseUsage: [],
+          responseIds: new Set<string>(),
+          requestUsageEmitted: true,
+        });
+      }
+    }
+    if (!this.seenSessionMeta) {
+      this.seenSessionMeta = resume.seenSessionMeta;
+      this.forkReplayOwnThreadId = resume.forkReplayOwnThreadId;
+    }
   }
 
   /** Losing track of an interactive session could link its input-dependent result: stop linking. */
@@ -3752,7 +3874,7 @@ export class CodexSessionDecoder {
         : undefined;
       const terminalOutput =
         codexNative && isNativeTerminalTool(toolName)
-          ? parseNativeShellOutput(rawResult, p)
+          ? parseNativeShellOutput(rawResult, p, this.reportWarnings)
           : undefined;
       const outputObject = asObject(rawResult);
       const status = (
@@ -4151,6 +4273,13 @@ export class CodexRecordDecoder implements HarnessRecordDecoder {
   readonly decoderVersion = "1.0.0";
   private sessionDecoders = new Map<string, CodexSessionDecoder>();
 
+  constructor(private readonly options: Pick<CodexDecoderOptions, "reportWarnings"> = {}) {}
+
+  /** The native link state of one session's decoder (see `CodexRequestLinkPrimer`). */
+  requestLinkResume(sessionId: string): CodexRequestLinkResume | undefined {
+    return this.sessionDecoders.get(sessionId)?.requestLinkResume();
+  }
+
   canDecode(record: RawHarnessRecord): boolean {
     if (!record || !(record instanceof Object) || Array.isArray(record)) {
       return false;
@@ -4203,10 +4332,11 @@ export class CodexRecordDecoder implements HarnessRecordDecoder {
   }
 
   decode(record: RawHarnessRecord, context?: RecordDecoderContext): IntermediateSessionEvent[] {
+    // Always removed, so the local-only key never reaches event metadata.
+    const linkResume = takeCodexRequestLinkResume(record);
     if (!this.canDecode(record)) {
       return [];
     }
-
     const rawParsed = CodexTranscriptValueSchema.safeParse(record.rawPayload);
     const rawPayload = rawParsed.success ? rawParsed.data : undefined;
     const metaParsed = CodexTranscriptPayloadSchema.safeParse(record.metadata);
@@ -4288,9 +4418,13 @@ export class CodexRecordDecoder implements HarnessRecordDecoder {
         sessionId,
         workspaceId,
         lastCausalSequence: asNumber(context?.lastCausalSequence) ?? 0,
+        ...(this.options.reportWarnings === undefined
+          ? {}
+          : { reportWarnings: this.options.reportWarnings }),
       });
       this.sessionDecoders.set(sessionId, sessionDecoder);
     }
+    if (linkResume !== undefined) sessionDecoder.installRequestLinkResume(linkResume);
 
     const timestamp =
       asString(record.timestamp) ?? asString(payload.timestamp) ?? new Date().toISOString();
@@ -4324,6 +4458,26 @@ export class CodexRecordDecoder implements HarnessRecordDecoder {
     const events = sessionDecoder.decodeRecord(effectivePayload);
     // SAFETY: NormalizedSessionEvent matches IntermediateSessionEvent structurally for decoder output.
     return events as IntermediateSessionEvent[];
+  }
+}
+
+/**
+ * Rebuilds a session's native link state from the rollout before a resume point: decodes each
+ * prefix record exactly as the live decoder would, with a throwaway decoder that reports no
+ * warnings, and discards the events.
+ */
+export class CodexRequestLinkPrimer {
+  private readonly decoder = new CodexRecordDecoder({ reportWarnings: false });
+
+  constructor(private readonly sessionId: string) {}
+
+  /** Observes one prefix record exactly as the source would have emitted it. */
+  observe(record: RawHarnessRecord): void {
+    this.decoder.decode(record);
+  }
+
+  snapshot(): CodexRequestLinkResume | undefined {
+    return this.decoder.requestLinkResume(this.sessionId);
   }
 }
 

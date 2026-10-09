@@ -44,6 +44,7 @@ import type {
   RecordDecoderContext,
 } from "@resin/harness-contracts";
 import { RESIN_LOCAL_SOURCE_INTERFACE_KEY } from "@resin/harness-contracts";
+import { z } from "zod";
 import {
   OMP_ASYNC_RESULT_CUSTOM_TYPE,
   type OmpJobCompletion,
@@ -70,6 +71,53 @@ export const OMP_ACCOUNTING_VERSION = "omp-v1";
 
 /** Local-only late arguments; the recorder consumes this and metadata projection always drops it. */
 export const RESIN_LOCAL_OMP_NATIVE_CALL_KEY = "__resinLocalOmpNativeCallV1";
+
+/**
+ * Local-only handoff from the event source to the decoder: the request links and call state of the
+ * transcript prefix a resumed source skipped, for calls whose result had not been seen yet. Set by
+ * the source on the first record after a mid-file resume, consumed (and removed) by the decoder; it
+ * never reaches event metadata.
+ */
+export const RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY = "__resinLocalOmpRequestLinkResumeV1";
+
+/** Most entries of each kind a resume handoff carries: the most recent, which can still get results. */
+const MAX_RESUMED_CALL_LINKS = 4096;
+
+const ResumedCallKeySchema = z.string().min(1).max(256);
+
+const OmpRequestLinkResumeSchema = z
+  .object({
+    version: z.literal(1),
+    taskId: ResinTaskIdSchema.optional(),
+    /** `[raw call id, issuing request id]`, oldest first. */
+    calls: z
+      .array(z.tuple([ResumedCallKeySchema, ProviderUsageRequestIdSchema]))
+      .max(MAX_RESUMED_CALL_LINKS),
+    /**
+     * `[raw call id, announcing record kind]`: an execution marker written after the cursor for a
+     * call the prefix already announced is the same call, not a new one.
+     */
+    announced: z
+      .array(z.tuple([ResumedCallKeySchema, z.enum(["assistant_message", "execution_record"])]))
+      .max(MAX_RESUMED_CALL_LINKS),
+    /** `[call id (raw or normalized), recorded tool name]`, so the result names its call's tool. */
+    names: z
+      .array(z.tuple([ResumedCallKeySchema, z.string().min(1).max(256)]))
+      .max(2 * MAX_RESUMED_CALL_LINKS),
+    /** `[call id, device-surface identity]` of calls made through `xd://` paths. */
+    surfaces: z
+      .array(
+        z.tuple([
+          ResumedCallKeySchema,
+          z
+            .object({ connection: z.string().min(1).max(256), tool: z.string().min(1).max(256) })
+            .strict(),
+        ]),
+      )
+      .max(MAX_RESUMED_CALL_LINKS),
+  })
+  .strict();
+export type OmpRequestLinkResume = z.infer<typeof OmpRequestLinkResumeSchema>;
 
 /**
  * URI schemes OMP's `read` tool resolves against the harness's own session or installation rather
@@ -1108,6 +1156,14 @@ class BoundedSessionCallMap<T> {
     this.sessions.delete(sessionId);
   }
 
+  /** A session's entries, oldest first. */
+  entries(sessionId: string): Array<[string, T]> {
+    return [...(this.sessions.get(sessionId)?.entries() ?? [])].map(([callId, entry]) => [
+      callId,
+      entry.value,
+    ]);
+  }
+
   get size(): number {
     return this.entryCount;
   }
@@ -1262,6 +1318,52 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     this.backgroundJobs.clearSession(sessionId);
     this.callModelRequests.clearSession(sessionId);
     this.sessionTasks.clearSession(sessionId);
+  }
+
+  /**
+   * The links and call state this decoder holds for a session's calls whose result is not among
+   * `answeredCallIds`: the current task, each call's issuing request, which record announced it,
+   * the tool name it was recorded under and its device-surface identity. Most recent entries only.
+   */
+  requestLinkResume(sessionId: string, answeredCallIds: ReadonlySet<string>): OmpRequestLinkResume {
+    const unanswered = <T>(entries: Array<[string, T]>): Array<[string, T]> =>
+      entries
+        .filter(([callId]) => !answeredCallIds.has(normalizeCallId(callId, callId)))
+        .slice(-MAX_RESUMED_CALL_LINKS);
+    const taskId = this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY);
+    const resume: OmpRequestLinkResume = {
+      version: 1,
+      calls: unanswered(this.callModelRequests.entries(sessionId)),
+      announced: unanswered(this.announcedToolCalls.entries(sessionId)),
+      names: unanswered(this.callToolNames.entries(sessionId)),
+      surfaces: unanswered(this.deviceSurfaceResultCalls.entries(sessionId)).map(
+        ([callId, identity]) => [callId, { connection: identity.connection, tool: identity.tool }],
+      ),
+    };
+    if (taskId !== undefined) resume.taskId = taskId;
+    return resume;
+  }
+
+  /**
+   * Installs state a resumed source recovered from the prefix it skipped, without replacing any this
+   * decoder already holds: a decoder that read the prefix itself knows at least as much.
+   */
+  private resumeRequestLinks(sessionId: string, resume: OmpRequestLinkResume): void {
+    if (
+      resume.taskId !== undefined &&
+      this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY) === undefined
+    ) {
+      this.sessionTasks.set(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY, resume.taskId);
+    }
+    const install = <T>(map: BoundedSessionCallMap<T>, entries: Array<[string, T]>): void => {
+      for (const [callId, value] of entries) {
+        if (map.get(sessionId, callId) === undefined) map.set(sessionId, callId, value);
+      }
+    };
+    install(this.callModelRequests, resume.calls);
+    install(this.announcedToolCalls, resume.announced);
+    install(this.callToolNames, resume.names);
+    install(this.deviceSurfaceResultCalls, resume.surfaces);
   }
 
   /**
@@ -1690,6 +1792,12 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     delete metadata[RESIN_LOCAL_OMP_NATIVE_CALL_KEY];
     delete metadata[RESIN_LOCAL_SOURCE_INTERFACE_KEY];
     for (const key of REQUEST_LINK_METADATA_KEYS) delete metadata[key];
+    // A source resumed mid-file hands over the request links of the prefix it skipped.
+    const resume = OmpRequestLinkResumeSchema.safeParse(
+      metadata[RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY],
+    );
+    delete metadata[RESIN_LOCAL_OMP_REQUEST_LINK_RESUME_KEY];
+    if (resume.success) this.resumeRequestLinks(sessionId, resume.data);
     // Every event belongs to the task of the session's latest prompt; a prompt replaces it below.
     const taskId = this.sessionTasks.get(sessionId, OmpRecordDecoder.CURRENT_TASK_KEY);
     if (taskId !== undefined) metadata[RESIN_TASK_ID_METADATA_KEY] = taskId;
@@ -3200,5 +3308,51 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
       evt.providerUsage = providerUsage;
     }
     return evt;
+  }
+}
+
+/**
+ * Recovers the request links and call state a transcript prefix leaves, for a source resuming
+ * mid-file with a new decoder. The prefix is decoded once by a throwaway decoder, configured like the
+ * live one and whose events are discarded, so the task, call links and announcements follow exactly
+ * the rules of a decoder that read the whole file, and nothing is emitted, counted or uploaded twice.
+ */
+export class OmpRequestLinkPrimer {
+  private readonly decoder: OmpRecordDecoder;
+  private readonly answeredCallIds = new Set<string>();
+  private sequence = 0;
+
+  constructor(
+    private readonly sessionId: string,
+    options: OmpRecordDecoderOptions = {},
+  ) {
+    this.decoder = new OmpRecordDecoder(options);
+  }
+
+  /** Decodes one prefix record (a parsed transcript line) for its links only. */
+  observe(payload: unknown): void {
+    this.sequence += 1;
+    // No record timestamp: the decoder then takes the payload's own, as the source would.
+    const decoded = this.decoder.decode({
+      recordId: `${this.sessionId}-prime-${this.sequence}`,
+      sessionId: this.sessionId,
+      harnessId: "omp",
+      sequenceNumber: this.sequence,
+      timestamp: "",
+      recordType: "transcript_line",
+      rawPayload: payload,
+      cursor: { offset: 0, line: this.sequence, sequence: this.sequence, timestamp: "" },
+      metadata: {},
+    });
+    for (const event of decoded === null ? [] : Array.isArray(decoded) ? decoded : [decoded]) {
+      if (event.type === "tool_result" && event.callId !== undefined) {
+        this.answeredCallIds.add(event.callId);
+      }
+    }
+  }
+
+  /** The links to hand to the decoder that continues after the prefix. */
+  snapshot(): OmpRequestLinkResume {
+    return this.decoder.requestLinkResume(this.sessionId, this.answeredCallIds);
   }
 }
