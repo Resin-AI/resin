@@ -23,12 +23,19 @@ export const OMP_DEVICE_SURFACE_PREFIX = "xd://mcp__";
 export const OMP_DEVICE_SURFACE_WRITE_TOOL = "write";
 
 /**
- * The tool the surface reads through to invoke a callable that takes no arguments.
- *
- * A device path is reached either by writing the invocation's JSON arguments to it or, for a tool
- * that takes none, by reading it. Both spell the same path, so both resolve the same way.
+ * The tool the surface reads a device path through. A read never invokes the tool behind the
+ * path, however few arguments it takes: OMP answers it with that tool's documentation and input
+ * schema (`# mcp__resin_x — resin/x … ## Schema`), and the tool runs only when written to.
  */
 export const OMP_DEVICE_SURFACE_READ_TOOL = "read";
+
+/**
+ * The Resin gateway tool a read of one of Resin's own device paths is recorded as: the same
+ * documentation lookup `get_tool_schema` is, so it counts as schema overhead rather than as an
+ * invocation of the tool it describes. A read of another server's path is documentation the
+ * harness pages for itself and is not recorded at all.
+ */
+export const OMP_DEVICE_SURFACE_DOCUMENTATION_TOOL = "get_tool_schema";
 
 function ompNamePart(value: string, fallback: string): string {
   const part = value

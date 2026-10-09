@@ -55,6 +55,7 @@ import {
   ompJobReportCompletions,
 } from "./background-jobs.js";
 import {
+  OMP_DEVICE_SURFACE_DOCUMENTATION_TOOL,
   OMP_DEVICE_SURFACE_PREFIX,
   OMP_DEVICE_SURFACE_READ_TOOL,
   OMP_DEVICE_SURFACE_WRITE_TOOL,
@@ -1474,12 +1475,10 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   }
 
   /**
-   * The invocation a device-surface call carried, when the harness's own configured servers
-   * resolve its path.
-   *
-   * The surface invokes a tool by writing JSON to the path, so the invocation's own arguments are
-   * the payload; a callable that takes no arguments is reached by reading the path instead, so its
-   * payload is empty. Either way the transport's envelope is not an argument of the tool.
+   * The invocation a device-surface write carried, when the harness's own configured servers
+   * resolve its path. The surface invokes a tool by writing JSON to the path, so the invocation's
+   * own arguments are the payload; the transport's envelope is not an argument of the tool. A read
+   * of a path is documentation (see {@link deviceSurfaceDocumentation}), never an invocation.
    * `undefined` means the path is not one a configured server owns (or two own equally): the call
    * keeps the harness's own naming and no connection.
    */
@@ -1487,9 +1486,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     toolName: string,
     parameters: OmpTranscriptPayload,
   ): { identity: OmpDeviceSurfaceCall; arguments: OmpTranscriptPayload | undefined } | undefined {
-    if (toolName !== OMP_DEVICE_SURFACE_WRITE_TOOL && toolName !== OMP_DEVICE_SURFACE_READ_TOOL) {
-      return undefined;
-    }
+    if (toolName !== OMP_DEVICE_SURFACE_WRITE_TOOL) return undefined;
     const devicePath = asString(parameters.path);
     if (devicePath === undefined || !devicePath.startsWith(OMP_DEVICE_SURFACE_PREFIX)) {
       return undefined;
@@ -1509,21 +1506,70 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
   }
 
   /**
-   * Resin's management tool requires an action: reading its device path is documentation, not a
-   * zero-argument invocation. Only its two read-only catalog actions are discovery when written.
-   * Unknown arguments, mutations, and same-named tools on other connections remain executable work.
+   * A read of a device path, which OMP answers with the tool's documentation and input schema
+   * whatever tool the path names. `resin` is set when the path is one of Resin's own tools: the
+   * read is then recorded as the documentation lookup it is ({@link documentationLookup}), schema
+   * overhead of using that tool rather than an invocation of it. Any other path (another server's,
+   * or one no configured server owns) is documentation the harness pages for itself, recorded
+   * neither as a call nor as its result. `undefined` when the call is no read of a device path.
+   */
+  private deviceSurfaceDocumentation(
+    toolName: string,
+    parameters: OmpTranscriptPayload,
+  ): { resin?: OmpDeviceSurfaceCall } | undefined {
+    if (toolName !== OMP_DEVICE_SURFACE_READ_TOOL) return undefined;
+    const devicePath = asString(parameters.path);
+    if (devicePath === undefined || !devicePath.startsWith(OMP_DEVICE_SURFACE_PREFIX)) {
+      return undefined;
+    }
+    const identity = resolveOmpDeviceSurfaceCall(devicePath, this.deviceSurfaceServers?.() ?? []);
+    return identity?.connection === "resin" ? { resin: identity } : {};
+  }
+
+  /**
+   * A read of one of Resin's device paths, recorded with the discovery of the tool it documents as
+   * the gateway's documentation lookup over the resin connection: `get_tool_schema` with the
+   * tool's name. Its result keeps that identity.
+   */
+  private documentationLookup(
+    identity: OmpDeviceSurfaceCall,
+    call: { sessionId: string; timestamp: string; callId: string },
+    causalRef: CausalRefInput,
+    metadata: OmpTranscriptPayload,
+  ): IntermediateSessionEvent[] {
+    // The result keeps the lookup's identity, whichever record of the read announced it.
+    this.deviceSurfaceResultCalls.set(call.sessionId, call.callId, {
+      connection: identity.connection,
+      tool: OMP_DEVICE_SURFACE_DOCUMENTATION_TOOL,
+    });
+    return [
+      this.deviceSurfaceDiscovery(identity, call.sessionId, call.timestamp, causalRef, metadata),
+      {
+        sessionId: call.sessionId,
+        timestamp: call.timestamp,
+        schemaVersion: "1.0.0",
+        causalRef,
+        metadata,
+        type: "tool_call",
+        toolName: OMP_DEVICE_SURFACE_DOCUMENTATION_TOOL,
+        connection: identity.connection,
+        callId: call.callId,
+        toolCallId: call.callId,
+        parameters: { name: identity.tool },
+      },
+    ];
+  }
+
+  /**
+   * Resin's management tool's read-only catalog actions are discovery when written. Unknown
+   * arguments, mutations, and same-named tools on other connections remain executable work.
    */
   private isResinCatalogDiscovery(
-    toolName: string,
     identity: OmpDeviceSurfaceCall,
     args: OmpTranscriptPayload | undefined,
   ): boolean {
     if (identity.connection !== "resin" || identity.tool !== "manage_tools") return false;
-    return (
-      (toolName === OMP_DEVICE_SURFACE_READ_TOOL && args === undefined) ||
-      (toolName === OMP_DEVICE_SURFACE_WRITE_TOOL &&
-        (args?.action === "list_versions" || args?.action === "status"))
-    );
+    return args?.action === "list_versions" || args?.action === "status";
   }
 
   /**
@@ -1683,13 +1729,30 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         heldCall?.intent !== undefined && recordedMetadata.intent === undefined
           ? { ...recordedMetadata, intent: heldCall.intent }
           : recordedMetadata;
+      // A read of a device path is the tool's documentation, never an invocation of it.
+      const documentation = this.deviceSurfaceDocumentation(toolName, recordedParameters);
+      if (documentation !== undefined) {
+        if (documentation.resin === undefined) {
+          this.skipHarnessInternalRead(sessionId, call.rawCallId, "assistant_message");
+        } else {
+          events.push(
+            ...this.documentationLookup(
+              documentation.resin,
+              { sessionId, timestamp, callId },
+              { ...causalRef, stepIndex },
+              callMetadata,
+            ),
+          );
+        }
+        continue;
+      }
       const surface = this.deviceSurfaceCallOf(toolName, recordedParameters);
       // Results may only carry the sanitized identity, so keep the name resolvable under it too.
       this.setToolCallName(sessionId, callId, surface?.identity.tool ?? toolName);
       const pendingSurface = this.pendingDeviceSurfaceCalls.getAndClear(sessionId, call.rawCallId);
       if (
         surface !== undefined &&
-        this.isResinCatalogDiscovery(toolName, surface.identity, surface.arguments)
+        this.isResinCatalogDiscovery(surface.identity, surface.arguments)
       ) {
         // A path-only execution marker may already have announced this same discovery.
         if (pendingSurface === undefined) {
@@ -2643,6 +2706,23 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const recorded = this.recordedArguments(toolName, parameters, metadata);
     parameters = recorded.parameters;
     if (recorded.metadata !== metadata) metadata.intent = recorded.metadata.intent;
+    // A read of a device path is the tool's documentation, never an invocation of it.
+    const documentation = this.deviceSurfaceDocumentation(toolName, parameters);
+    if (documentation !== undefined) {
+      if (documentation.resin === undefined) {
+        this.skipHarnessInternalRead(sessionId, cacheCallId, "execution_record");
+        return null;
+      }
+      if (toolCallObj.intent !== undefined && metadata.intent === undefined) {
+        metadata.intent = toolCallObj.intent;
+      }
+      return this.documentationLookup(
+        documentation.resin,
+        { sessionId, timestamp, callId },
+        causalRef,
+        metadata,
+      );
+    }
 
     // A device-surface invocation is recorded as the tool it reached, over the connection the
     // harness's own registry resolved, not as the transport that carried it. The surface's start
@@ -2652,7 +2732,7 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
     const surface = this.deviceSurfaceCallOf(toolName, parameters);
     if (
       surface !== undefined &&
-      this.isResinCatalogDiscovery(toolName, surface.identity, surface.arguments)
+      this.isResinCatalogDiscovery(surface.identity, surface.arguments)
     ) {
       return [
         this.deviceSurfaceDiscovery(surface.identity, sessionId, timestamp, causalRef, metadata),
@@ -2743,14 +2823,11 @@ export class OmpRecordDecoder implements HarnessRecordDecoder {
         toolName = "unknown_tool";
       }
     } else {
-      // A device-surface result names the transport that carried the call (a `write` or the `read`
-      // that reaches a callable taking no arguments), not the tool the call reached: the name the
-      // call itself recorded is the one to keep.
-      if (
-        (toolName === OMP_DEVICE_SURFACE_WRITE_TOOL || toolName === OMP_DEVICE_SURFACE_READ_TOOL) &&
-        lateName !== undefined
-      ) {
-        toolName = lateName;
+      // A device-surface result names the transport that carried the call (the `write` that
+      // invoked a tool, or the `read` of Resin's documentation recorded as `get_tool_schema`), not
+      // the call it answers: the name the call itself recorded is the one to keep.
+      if (toolName === OMP_DEVICE_SURFACE_WRITE_TOOL || toolName === OMP_DEVICE_SURFACE_READ_TOOL) {
+        toolName = resultSurface?.tool ?? lateName ?? toolName;
       }
       this.getAndClearToolCallName(sessionId, callId);
     }
