@@ -1505,6 +1505,80 @@ describe("recorded workflows of ordinary calls", () => {
       expect(text).not.toContain("promoted");
     });
 
+    it("bounds a long completed output in the failure report and keeps all of it in a file", async () => {
+      // Step 1 prints 3000 numbered lines; step 2 fails; step 3 must not run after the failure.
+      const commands = {
+        0: "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); echo line-$i; done",
+        1: "echo built; echo ok",
+        2: "echo lint failed: unused import >&2; exit 2",
+        3: "echo merged > merged.marker; echo merged",
+      };
+      const { privateValues, context } = record(commands);
+      const installed = await installPlan(manifest("check_and_merge"), {
+        schemaVersion: 1,
+        workflowId: "check_and_merge",
+        inputs: [],
+        privateReferences: Object.keys(commands).map((index) => `private:sess:${index}`),
+        steps: [shellStep(0), shellStep(1), shellStep(2), shellStep(3)],
+      });
+
+      const result = await execute({ ...installed, privateValues }, {}, context);
+
+      expect(result.isError).toBe(true);
+      const text = String(result.content[0]?.text);
+      // The failed step, marked, with what it printed.
+      expect(text).toMatch(/^Step 3 of 4 failed: .*exited with code 2: lint failed: unused import/);
+      expect(text).toContain("Outputs of the steps that completed before it:");
+      // The short output is whole; the long one shows its last part and where all of it is.
+      expect(text).toContain("--- step 2/4 ---\nbuilt\nok\n");
+      const shortened =
+        /--- step 1\/4 ---\n…\[output shortened to its last part; all of it is in (\S+)\]\n/.exec(
+          text,
+        );
+      expect(shortened).not.toBeNull();
+      expect(text).toContain("line-3000\n");
+      expect(text).not.toContain("line-1\n");
+      expect(text.length).toBeLessThan(6_000);
+      expect(fs.readFileSync(shortened![1]!, "utf8")).toBe(
+        Array.from({ length: 3000 }, (_, index) => `line-${index + 1}\n`).join(""),
+      );
+      expect(text).toContain("Did not run: step 4/4.");
+      expect(fs.existsSync(path.join(workspaceDir, "merged.marker"))).toBe(false);
+    });
+
+    it("refuses a call by name that leaves out a required input, with the call to repeat", async () => {
+      const commands = { 0: "echo released" };
+      const { privateValues, context } = record(commands);
+      const installed = await installPlan(manifest("release_notes"), {
+        schemaVersion: 1,
+        workflowId: "release_notes",
+        inputs: [
+          { name: "tag", type: "string", description: "The release tag, such as v1.2.0" },
+          { name: "draft", type: "boolean", default: false },
+        ],
+        privateReferences: ["private:sess:0"],
+        steps: [shellStep(0)],
+      });
+
+      const result = await execute({ ...installed, privateValues }, { draft: true }, context);
+
+      expect(result.isError).toBe(true);
+      const call = '{"name":"release_notes","parameters":{"tag":"<tag>","draft":true}}';
+      expect(result.content[0]?.text).toBe(
+        [
+          "Missing required input for tool 'release_notes'; nothing ran:",
+          "- tag (string): The release tag, such as v1.2.0",
+          "Repeat the call with it: replace each <placeholder> with your value. A complete call:",
+          `- OMP: write ${call} to xd://mcp__resin_invoke_tool`,
+          `- invoke_tool arguments: ${call}`,
+        ].join("\n"),
+      );
+      expect(result._meta).toMatchObject({
+        resinFailureReason: "validation_error",
+        resinMissingInputs: ["tag"],
+      });
+    });
+
     it("labels several outputs with the plan steps that produced them", async () => {
       const commands = {
         0: "echo r-17",

@@ -74,6 +74,7 @@ export * from "./program-tokens.js";
 export * from "./input-roles.js";
 export * from "./shell-and-chain.js";
 export * from "./display-filter.js";
+export * from "./check-segments.js";
 export * from "./shell-dialects.js";
 export * from "./powershell-tokens.js";
 export * from "./extract-locator.js";

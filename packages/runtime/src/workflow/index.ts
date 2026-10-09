@@ -19,3 +19,7 @@ export * from "./program-identity.js";
 export * from "./compile-recorded-workflow.js";
 export * from "./reference-invocation.js";
 export * from "./agent-tool-session.js";
+export {
+  createInvocationOutputDirectory,
+  pruneInvocationOutputs,
+} from "./display-filter-observation.js";
