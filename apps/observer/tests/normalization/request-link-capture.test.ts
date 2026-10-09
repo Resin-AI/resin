@@ -99,6 +99,43 @@ describe("request link capture through normalization and upload projection", () 
     expect(projected.metadata).not.toHaveProperty("taskId");
   });
 
+  it.each(["native-discovery-1", "-bad"])(
+    "projects standalone discovery marker %s without an invocation",
+    async (benchmarkId) => {
+      const pipeline = new NormalizationPipeline();
+      const results = await pipeline.processRecord(
+        record(
+          {
+            type: "tool_result",
+            callId: "call_search_1",
+            toolName: "search_tools",
+            result: "SYNTHETIC_PRIVATE_SEARCH_RESULT",
+            isError: false,
+            metadata: {
+              modelRequestId: providerRequestId,
+              taskId: "rec0002b",
+              benchmarkId,
+              resinAccountingOnly: true,
+            },
+          },
+          4,
+        ),
+      );
+      const result = results[0];
+      expect(result?.status).toBe("success");
+      if (result?.status !== "success") throw new Error("Expected normalized discovery");
+      const projected = projectEventToMetadataOnly(result.event, { validate: true });
+      expect(projected.metadata?.benchmarkId).toBe(
+        benchmarkId === "native-discovery-1" ? benchmarkId : undefined,
+      );
+      expect(projected.metadata?.taskId).toBe("rec0002b");
+      expect(projected.metadata?.resinAccountingOnly).toBe(true);
+      expect(projected.metadata).not.toHaveProperty("resinInvocationId");
+      expect(projected.metadata).not.toHaveProperty("resinInvocationIds");
+      expect(JSON.stringify(projected)).not.toContain("SYNTHETIC_PRIVATE_SEARCH_RESULT");
+    },
+  );
+
   it("still scrubs explicit credentials smuggled into request ids and link metadata", async () => {
     const anthropicKey = `sk-ant-${"a1B2c3D4e5".repeat(3)}`;
     const githubToken = `ghp_${"A1b2C3d4E5f6".repeat(3)}`;
@@ -117,7 +154,11 @@ describe("request link capture through normalization and upload projection", () 
             requestId: anthropicKey,
             outputTokens: 1,
           },
-          metadata: { modelRequestId: githubToken, taskId: anthropicKey },
+          metadata: {
+            modelRequestId: githubToken,
+            taskId: anthropicKey,
+            benchmarkId: githubToken,
+          },
         },
         3,
       ),
@@ -134,6 +175,7 @@ describe("request link capture through normalization and upload projection", () 
         "providerUsage.requestId",
         "metadata.modelRequestId",
         "metadata.taskId",
+        "metadata.benchmarkId",
       ]),
     );
 

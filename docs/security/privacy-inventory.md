@@ -121,7 +121,8 @@ The suppression marker (`__resinLocalWorkflowResultSuppressedV1: true`) survives
 
 - `metadata.modelRequestId`: the issuing model request's id, the same value as `providerUsage.requestId` (a provider response or message id such as `msg_…`/`resp_…`, else the harness's own record id for that response).
 - `metadata.taskId`: the harness's own record id of the user prompt the event follows. The prompt text is never sent.
-- `metadata.resinInvocationId` (one run) or `metadata.resinInvocationIds` (several runs of one call), and `metadata.benchmarkId`: copied from the receipt the Resin gateway appends to its own tool results (`_meta["resin/invocation"]` and a trailing `{"resinInvocationId":…}` text part). Only results of Resin gateway calls are read for receipts.
+- `metadata.resinInvocationId` (one run) or `metadata.resinInvocationIds` (several runs of one call): copied from the receipt the Resin gateway appends to its own tool results (`_meta["resin/invocation"]` and a trailing `{"resinInvocationId":…}` text part). Only results of Resin gateway calls are read for receipts.
+- `metadata.benchmarkId`: a validated explicit run classification, kept independently of invocation receipts on user, assistant, discovery and final events, including discovery-only tasks. A label does not authorize access or create task/invocation identities. Invalid labels are dropped; private task accounting retains conflicting valid labels and excludes that task from ordinary totals and recommendations without choosing one run.
 - `metadata.modelRequestPurpose`: the harness's short label (for example `auto-thinking`, `cache-warm`) for a model call it made outside the conversation, such as OMP's `model_usage` records.
 - `metadata.delegatedModelUsage`: token counts and cost a harness reported for subagents a tool call started (OMP's `task` result). Counts only, kept as evidence and never added to request totals.
 

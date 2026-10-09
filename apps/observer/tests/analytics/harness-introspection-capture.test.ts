@@ -83,6 +83,7 @@ async function captureRecords(
   options: {
     attributed?: boolean;
     batchSize?: number;
+    benchmarkId?: string;
     normalized?: NormalizedSessionEvent[];
     trajectories?: TrajectoryObservation[];
   } = {},
@@ -145,7 +146,7 @@ async function captureRecords(
     status: "active" as const,
     createdAt: timestamp,
     updatedAt: timestamp,
-    metadata: {},
+    metadata: options.benchmarkId ? { benchmarkId: options.benchmarkId } : {},
   };
   const batchSize = options.batchSize ?? records.length;
   for (let offset = 0; offset < records.length; offset += batchSize) {
@@ -324,7 +325,7 @@ describe("discovery accounting capture", () => {
         new OmpRecordDecoder({ deviceSurfaceServers: () => ["resin"] }),
         { sessionId, harnessId: "omp", timestamp: records[0]!.timestamp },
         records,
-        { attributed, batchSize: 1, normalized, trajectories },
+        { attributed, benchmarkId: "native-discovery-1", batchSize: 1, normalized, trajectories },
       );
       const accounting = submitted.filter((event) => event.metadata?.resinAccountingOnly === true);
       expect(accounting.map((event) => event.type)).toEqual(["tool_call", "tool_result"]);
@@ -332,7 +333,11 @@ describe("discovery accounting capture", () => {
         toolName,
         connection: "resin",
         callId: "call-discovery",
-        metadata: { taskId: "fixture-task", modelRequestId: "request-discovery" },
+        metadata: {
+          taskId: "fixture-task",
+          modelRequestId: "request-discovery",
+          benchmarkId: "native-discovery-1",
+        },
       });
       expect(accounting[1]).toMatchObject({ toolName, callId: "call-discovery", isError });
       for (const event of accounting) {
@@ -341,6 +346,9 @@ describe("discovery accounting capture", () => {
         expect(event.causalRef).toEqual(original!.causalRef);
         expect(event.metadata?.modelRequestId).toBe(original!.metadata?.modelRequestId);
         expect(event.metadata?.taskId).toBe(original!.metadata?.taskId);
+        expect(event.metadata?.benchmarkId).toBe("native-discovery-1");
+        expect(event.metadata?.resinInvocationId).toBeUndefined();
+        expect(event.metadata?.resinInvocationIds).toBeUndefined();
         expect(event.metadata?.resinTokenEstimateV1).toEqual(
           original!.metadata?.resinTokenEstimateV1,
         );
