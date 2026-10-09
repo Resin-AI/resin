@@ -101,15 +101,15 @@ describe("request link metadata", () => {
   it("keeps only valid identifiers", () => {
     expect(
       readRequestLinkMetadata({
-        modelRequestId: "msg_011CfprvQwejVWuABwxsQfun",
-        taskId: "b6970dc7",
+        modelRequestId: "msg_01Hq7ZtR2vKx9LmPw4NcYs8D",
+        taskId: "rec0002b",
         resinInvocationId: FIRST,
         benchmarkId: "bench-1",
         other: "dropped",
       }),
     ).toEqual({
-      modelRequestId: "msg_011CfprvQwejVWuABwxsQfun",
-      taskId: "b6970dc7",
+      modelRequestId: "msg_01Hq7ZtR2vKx9LmPw4NcYs8D",
+      taskId: "rec0002b",
       resinInvocationId: FIRST,
       benchmarkId: "bench-1",
     });
@@ -136,12 +136,12 @@ describe("request link metadata", () => {
     };
     expect(
       readRequestLinkMetadata({
-        modelRequestId: "d5e31ae6",
+        modelRequestId: "aux0001a",
         modelRequestPurpose: "cache-warm:extension-override",
         delegatedModelUsage: delegated,
       }),
     ).toEqual({
-      modelRequestId: "d5e31ae6",
+      modelRequestId: "aux0001a",
       modelRequestPurpose: "cache-warm:extension-override",
       delegatedModelUsage: delegated,
     });
