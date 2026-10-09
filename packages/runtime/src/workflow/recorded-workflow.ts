@@ -11,12 +11,12 @@
 import {
   analyzeProgramSourceProjection,
   applyProgramTokenValues,
-  extractPrintedValue,
   parseExtractLocator,
   programNotLearnableReason,
   programTokenValueAt,
   projectedEmbeddedTokenIsBindable,
   recordedProgramLanguage,
+  searchPrintedValue,
   segmentOriginal,
   tokenizeProgram,
   validateWorkflowProgramProjection,
@@ -428,15 +428,22 @@ async function buildTemplate(
       if (locator === undefined) {
         throw new WorkflowBindingError("the extract locator is malformed", step.id, argumentName);
       }
-      const value = extractPrintedValue(produced, locator);
-      if (value === undefined) {
+      const search = searchPrintedValue(produced, locator);
+      if (search.found === "several") {
+        throw new WorkflowBindingError(
+          `step '${template.stepId}' printed several values where this argument reads exactly one`,
+          step.id,
+          argumentName,
+        );
+      }
+      if (search.found === "none") {
         throw new WorkflowBindingError(
           `step '${template.stepId}' did not print the value this argument extracts`,
           step.id,
           argumentName,
         );
       }
-      return value;
+      return search.value;
     }
     case "unresolved":
       throw new WorkflowBindingError(

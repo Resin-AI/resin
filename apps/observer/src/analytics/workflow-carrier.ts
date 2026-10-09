@@ -627,6 +627,44 @@ export interface WorkflowResultCarrier {
   /** How the original baseline result may be projected before comparison. */
   baselineComparison?: "text-trim";
   output?: WorkflowObservedOutput;
+  /**
+   * What the call's own output calls values its program ran with (`Package` for the token a
+   * `Package: fastgraph` line names): letters and spaces only, never the value or other output.
+   */
+  operandLabels?: WorkflowOperandLabel[];
+}
+
+export interface WorkflowOperandLabel {
+  argument: string;
+  path: WorkflowValuePath;
+  label: string;
+}
+
+const OPERAND_LABEL = /^[A-Za-z][A-Za-z ]{0,30}$/;
+const MAX_OPERAND_LABELS = 16;
+
+function readOperandLabels(value: unknown): WorkflowOperandLabel[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_OPERAND_LABELS)
+    return undefined;
+  const labels: WorkflowOperandLabel[] = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry) || Object.keys(entry).length !== 3) return undefined;
+    const { argument, path, label } = entry;
+    if (typeof argument !== "string" || argument.length === 0) return undefined;
+    if (typeof label !== "string" || !OPERAND_LABEL.test(label)) return undefined;
+    // `["tokens", i]`, or `["tokens", i, "span", start, end]`.
+    if (!Array.isArray(path) || (path.length !== 2 && path.length !== 5)) return undefined;
+    const index = (part: unknown) =>
+      typeof part === "number" && Number.isInteger(part) && part >= 0;
+    if (path[0] !== "tokens" || !index(path[1])) return undefined;
+    if (path.length === 5 && (path[2] !== "span" || !index(path[3]) || !index(path[4])))
+      return undefined;
+    const parsed: WorkflowValuePath = path.flatMap((part: unknown) =>
+      typeof part === "string" || typeof part === "number" ? [part] : [],
+    );
+    labels.push({ argument, path: parsed, label });
+  }
+  return labels;
 }
 
 /** Re-reads a result carrier for projection. */
@@ -659,11 +697,17 @@ export function readWorkflowResultCarrier(value: unknown): WorkflowResultCarrier
       hasContent: output.hasContent,
     };
   }
+  if (value.operandLabels !== undefined) {
+    const operandLabels = readOperandLabels(value.operandLabels);
+    if (operandLabels === undefined) return undefined;
+    carrier.operandLabels = operandLabels;
+  }
   return carrier.handle === undefined &&
     carrier.heldOut === undefined &&
     carrier.baselineReference === undefined &&
     carrier.baselineComparison === undefined &&
-    carrier.output === undefined
+    carrier.output === undefined &&
+    carrier.operandLabels === undefined
     ? undefined
     : carrier;
 }

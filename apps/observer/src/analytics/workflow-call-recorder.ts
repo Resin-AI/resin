@@ -56,7 +56,11 @@ import type { RedactedStringResult } from "../normalization/redaction.js";
 import { isClosedCodexSource } from "./computation/codex-source-dependencies.js";
 import { extractComputationSourceFrames } from "./computation/source-frames.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
-import { deriveNativeCalls } from "./native-argument-derivation.js";
+import {
+  type ProgramOperandLabel,
+  deriveNativeCalls,
+  programOperandLabels,
+} from "./native-argument-derivation.js";
 import {
   FilePrivateValueStore,
   type PrivateValueOrigin,
@@ -724,12 +728,21 @@ export class WorkflowCallRecorder {
           }
         }
         const demonstration = this.demonstrationCarrier(event.sessionId, callId);
+        const operandLabels =
+          succeeded && call.program !== undefined
+            ? programOperandLabels(
+                derivationProgram(call.program, call.provenDialect),
+                call.arguments,
+                raw.stdout,
+              )
+            : [];
         const result = {
           ...(succeeded && call.resultReference !== undefined
             ? { baselineReference: call.resultReference }
             : {}),
           output: { type: "string" as const, hasContent: raw.stdout.length > 0 },
           ...(demonstration === undefined ? {} : { heldOut: demonstration }),
+          ...(operandLabels.length === 0 ? {} : { operandLabels }),
         };
         return {
           ...event,
@@ -2063,6 +2076,7 @@ export class WorkflowCallRecorder {
     let output:
       | { type: "null" | "boolean" | "number" | "string" | "array" | "object"; hasContent: boolean }
       | undefined;
+    let operandLabels: ProgramOperandLabel[] = [];
     if (event.type === "tool_result") {
       // The result's own value is what a later call's argument may have carried, so it is kept
       // locally for that comparison and never attached to the event.
@@ -2161,6 +2175,13 @@ export class WorkflowCallRecorder {
         ) {
           baselineReference = call.resultReference;
           baselineComparison = baselineReference === undefined ? undefined : call.resultComparison;
+          if (call.program !== undefined) {
+            operandLabels = programOperandLabels(
+              derivationProgram(call.program, call.provenDialect),
+              call.arguments,
+              value,
+            );
+          }
         }
         // A repeat's own observations are what its results produced, so the demonstration grows
         // here rather than at a call that was recorded before they happened.
@@ -2189,7 +2210,8 @@ export class WorkflowCallRecorder {
       heldOut === undefined &&
       baselineReference === undefined &&
       baselineComparison === undefined &&
-      output === undefined
+      output === undefined &&
+      operandLabels.length === 0
     ) {
       return event;
     }
@@ -2200,6 +2222,7 @@ export class WorkflowCallRecorder {
       ...(baselineReference === undefined ? {} : { baselineReference }),
       ...(output === undefined ? {} : { output }),
       ...(baselineComparison === undefined ? {} : { baselineComparison }),
+      ...(operandLabels.length === 0 ? {} : { operandLabels }),
     };
     return { ...event, metadata } as NormalizedSessionEvent;
   }

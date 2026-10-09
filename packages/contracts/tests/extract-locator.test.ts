@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { extractPrintedValue, parseExtractLocator } from "../src/extract-locator.js";
+import {
+  extractPrintedValue,
+  parseExtractLocator,
+  searchPrintedValue,
+} from "../src/extract-locator.js";
 import {
   type RecordedWorkflow,
   collectWorkflowPrivateReferences,
@@ -40,6 +44,59 @@ describe("extractPrintedValue", () => {
     expect(parseExtractLocator('{"before":"a","charset":["space"]}')).toBe(undefined);
     expect(parseExtractLocator('{"before":"a","charset":[]}')).toBe(undefined);
     expect(parseExtractLocator("not json")).toBe(undefined);
+  });
+});
+
+describe("exactly-one locators", () => {
+  const CHECK =
+    "FAIL migration-compat\n" +
+    "  0058_orders_created_at_index: ok\n" +
+    "  0059_accounts_contact_email: NOT backward compatible (2.13.4 pods keep running)\n" +
+    "  0060_accounts_marketing_opt_in: ok\n";
+  const MIGRATION = ["lower", "digit", "_"];
+
+  it("reads the one whole run a label after it names, on any line", () => {
+    const locator = { only: { before: "", after: ": NOT" }, charset: MIGRATION };
+    expect(extractPrintedValue(CHECK, locator)).toBe("0059_accounts_contact_email");
+    const several = CHECK.replace("orders_created_at_index: ok", "orders_created_at_index: NOT ok");
+    expect(searchPrintedValue(several, locator)).toEqual({ found: "several" });
+    expect(searchPrintedValue(CHECK.replace(": NOT", ": ok"), locator)).toEqual({ found: "none" });
+  });
+
+  it("reads the one run at an indented line start", () => {
+    const locator = { only: { before: "\n  ", after: "" }, charset: ["lower", "-", "_"] };
+    const policy = "FAIL license-policy\n  Scanned 14 deps.\n  pdfweave 0.12.0: not allowed\n";
+    expect(extractPrintedValue(policy, locator)).toBe("pdfweave");
+    expect(
+      searchPrintedValue(policy.replace("\n  Scanned", "\n  geohashx 2.2.0\n  Scanned"), locator),
+    ).toEqual({ found: "several" });
+  });
+
+  it("reads the line a marker names, refusing a marker on several lines or a missing line", () => {
+    const locator = {
+      only: { before: "", after: "", line: { marker: "warnings", offset: 1 } },
+      charset: ["lower", "-"],
+    };
+    const table =
+      "service  errors  warnings\nbilling      46         6\nauth          6         8\n";
+    expect(extractPrintedValue(table, locator)).toBe("billing");
+    // `warnings` inside `warnings_total` is not the marker word.
+    expect(extractPrintedValue(`${table}warnings_total 14\n`, locator)).toBe("billing");
+    expect(searchPrintedValue(`${table}no warnings\n`, locator)).toEqual({ found: "several" });
+    expect(searchPrintedValue("service  errors  warnings", locator)).toEqual({ found: "none" });
+  });
+
+  it("parses only well-shaped exactly-one locators", () => {
+    const parse = (value: unknown) => parseExtractLocator(JSON.stringify(value));
+    const only = { before: "", after: ": NOT", line: { marker: "warnings", offset: 1 } };
+    const at = (line: unknown) => parse({ only: { ...only, line }, charset: ["lower"] });
+    expect(parse({ only, charset: ["lower"] })).toEqual({ only, charset: ["lower"] });
+    // A locator is one form or the other, never both.
+    expect(parse({ only, before: "", charset: ["lower"] })).toBe(undefined);
+    expect(parse({ only: { before: "" }, charset: ["lower"] })).toBe(undefined);
+    expect(at({ marker: "w4", offset: 1 })).toBe(undefined);
+    expect(at({ marker: "warnings", offset: 0 })).toBe(undefined);
+    expect(parse({ only: { ...only, before: "a\nb" }, charset: ["lower"] })).toBe(undefined);
   });
 });
 

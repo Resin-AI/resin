@@ -26,6 +26,7 @@
 import {
   type EmbeddedProgram,
   type ExtractLocator,
+  type ExtractOnlyPlace,
   type ProgramLanguage,
   type ProgramToken,
   ProgramTokenizationError,
@@ -588,9 +589,15 @@ export function deriveNativeCalls(
         });
       }
 
+      // A shell word at command position — the first word of a simple command after any leading
+      // assignments — names the program to run, never a value it runs with.
+      const positions = isShellGrammar(call.program.kind)
+        ? shellArgumentPositions(text, tokens)
+        : undefined;
+
       // A token an earlier call printed inside its text output (`created deployment dep-9e983a`).
       // Whole-value equality above cannot see it; a locator on the producer's output can.
-      if (isShellGrammar(call.program.kind)) {
+      if (positions !== undefined) {
         const bound = new Set(
           candidates
             .filter((entry) => entry.stepId === call.stepId && entry.path[0] === "tokens")
@@ -601,7 +608,15 @@ export function deriveNativeCalls(
           if (resultFull()) break;
           if (!token.bindable || typeof token.value !== "string" || bound.has(tokenIndex)) continue;
           if (requestWords.has(token.value)) continue;
-          let found = printedBy(token.value, index, calls, mentionStrings);
+          // An operand: an option's value, or the last argument of its command — what a command
+          // runs on, where a subcommand (`migration show`) only names what it does.
+          const position = positions[tokenIndex];
+          const next = positions[tokenIndex + 1];
+          const operand =
+            position !== undefined &&
+            position >= 1 &&
+            (valueFlag(tokens, tokenIndex) !== undefined || next === undefined || next === 0);
+          let found = printedBy(token.value, index, calls, mentionStrings, operand);
           let span: { start: number; end: number } | undefined;
           // An inline option or field value (`-f commit_sha=<sha>`, `--run=<id>`) is read from the
           // output where the value alone was printed: the token keeps its name, the value is the
@@ -610,7 +625,7 @@ export function deriveNativeCalls(
             const name = INLINE_VALUE_NAME.exec(token.value)?.[0];
             const value = name === undefined ? undefined : token.value.slice(name.length);
             if (value !== undefined && value.length > 0 && !requestWords.has(value)) {
-              found = printedBy(value, index, calls, mentionStrings);
+              found = printedBy(value, index, calls, mentionStrings, true);
               span = { start: name!.length, end: token.value.length };
             }
           }
@@ -636,13 +651,8 @@ export function deriveNativeCalls(
       // A value the program ran with can be offered as an optional input that defaults to exactly
       // what the recording ran. One recording cannot show that the value varies, but omitting the
       // input reproduces the recording, so the offer is safe to confirm by replaying it unchanged.
+      // A bare word past the subcommand's position is a value when other calls ran with it too.
       const offered = new Set<string>();
-      // A shell word at command position — the first word of a simple command after any leading
-      // assignments — names the program to run, never a value it runs with. A bare word past the
-      // subcommand's position is a value when other calls ran with it too.
-      const positions = isShellGrammar(call.program.kind)
-        ? shellArgumentPositions(text, tokens)
-        : undefined;
       // A script's record-field keys (`x['merchant']`) are its schema, never its data.
       const script = call.program.kind === "python" || call.program.kind === "javascript";
       const fieldKeys = script ? scriptRecordFieldKeys(text, tokens) : new Set<number>();
@@ -988,7 +998,8 @@ function spanTokenOf(path: WorkflowValuePath): WorkflowValuePath | undefined {
  * Whether a token looks like a minted identifier rather than a word: `dep-9e983a`, a long hash, or
  * a prefixed hex id whose random part happens to be letters only (`dep-abcdef`, about 1 in 360).
  * A flag (`--exit-status`) or a name made only of letters (`acme/widgets`, `fix/login-page`) is
- * chosen, not minted, however long: an earlier output that shows one is echoing it.
+ * chosen, not minted, however long: an earlier output that shows one may be echoing it, so it is
+ * read only under the stricter rules `printedBy` gives a word.
  */
 function looksMinted(value: string): boolean {
   if (/\s/.test(value) || value.startsWith("-")) return false;
@@ -1054,25 +1065,16 @@ function printedStructure(
 }
 
 /**
- * The text before the value at `position` that finds exactly it in `output`, or undefined.
- *
- * The shortest text naming the value's position is tried first: from a word start or a character
- * that opens a segment or field (`/runs/`, `"merge":"`, `?code=`), holding a letter. It names the
- * field without repeating the run's other values, so a URL's owner and repository — often a caller
- * input — never become part of where the value is read. Then the last one, two and three whole
- * words, and the whole line. A number's locator must name it; only a table cell, whose row is the
- * structure, may be read at the start of its line.
+ * Texts before the value at `position` in `text` that may name where it is printed, in the order
+ * they are tried. The shortest text naming the value's position comes first: from a word start or a
+ * character that opens a segment or field (`/runs/`, `"merge":"`, `?code=`), holding a letter. It
+ * names the field without repeating the run's other values, so a URL's owner and repository — often
+ * a caller input — never become part of where the value is read. Then the last one, two and three
+ * whole words, the whole line with the break before it, and the empty text at the start of `text`.
  */
-function locatePrinted(
-  output: string,
-  position: number,
-  value: string,
-  charset: string[],
-  numeric: boolean,
-  structure: PrintedStructure | undefined,
-): ExtractLocator | undefined {
-  const lineStart = output.lastIndexOf("\n", position - 1) + 1;
-  const prefix = output.slice(lineStart, position);
+function beforeTexts(text: string, position: number): string[] {
+  const lineStart = text.lastIndexOf("\n", position - 1) + 1;
+  const prefix = text.slice(lineStart, position);
   const named: string[] = [];
   for (
     let at = Math.max(0, prefix.length - MAX_NAMED_LOCATOR_LENGTH);
@@ -1091,18 +1093,127 @@ function locatePrinted(
     const word = words[words.length - count];
     if (word !== undefined) attempts.push(prefix.slice(word.index));
   }
-  attempts.push(lineStart > 0 ? output.slice(lineStart - 1, position) : prefix);
+  attempts.push(lineStart > 0 ? text.slice(lineStart - 1, position) : prefix);
   if (position === 0) attempts.push("");
-  for (const attempt of new Set(attempts)) {
-    if (attempt.length === 0 && position !== 0) continue;
-    if (
-      numeric &&
-      !/[A-Za-z]/.test(attempt) &&
-      !(structure === "table-cell" && (attempt === "" || attempt === "\n"))
-    )
-      continue;
-    const locator = { before: attempt, charset };
-    if (extractPrintedValue(output, locator) === value) return locator;
+  return [...new Set(attempts)].filter((attempt) => attempt.length > 0 || position === 0);
+}
+
+/** Texts after the value ending at `end`, through its line's next one, two and three words. */
+function afterTexts(output: string, end: number): string[] {
+  const lineBreak = output.indexOf("\n", end);
+  const rest = output.slice(end, lineBreak < 0 ? output.length : lineBreak);
+  const attempts: string[] = [];
+  for (const word of rest.matchAll(/\s*\S+/g)) {
+    const text = rest.slice(0, word.index + word[0].length);
+    if (attempts.length === 3 || text.length > MAX_NAMED_LOCATOR_LENGTH) break;
+    attempts.push(text);
+  }
+  return attempts;
+}
+
+/** How far above the value's line a marker line is looked for. */
+const MAX_MARKER_LINES_ABOVE = 8;
+
+/** A marker word: letters no letter, digit or `_` adjoins, as `holdsMarkerWord` finds it. */
+const MARKER_WORD = /(?<![A-Za-z0-9_])[A-Za-z]{3,64}(?![A-Za-z0-9_])/g;
+
+/** What a printed value is, which decides the locators that may read it. */
+type PrintedKind = "number" | "minted" | "word";
+
+/**
+ * A locator that reads exactly the value at `position` from `output`, or undefined.
+ *
+ * A number keeps the first-run form, and its locator must name it; only a table cell, whose row is
+ * the structure, may be read at the start of its line. A minted identifier is read first by a
+ * naming text before it (the first-run form). Then the value must be the only whole run its
+ * locator finds: named by the text before it, by the label after it
+ * (`0059_accounts_contact_email: NOT backward compatible`), by its position at a line start
+ * (`\n  fastgraph`), or on the line a marker word on a line above names (`warnings`, one line
+ * above `checkout  38 …`). A word is read only by its position or a marker. These texts hold no
+ * digit: a count, version or date printed around a value changes with it. A minted identifier
+ * finally falls back to the first run after its line start.
+ */
+function locatePrinted(
+  output: string,
+  position: number,
+  value: string,
+  charset: string[],
+  kind: PrintedKind,
+  structure: PrintedStructure | undefined,
+): ExtractLocator | undefined {
+  const reads = (locator: ExtractLocator) => extractPrintedValue(output, locator) === value;
+  const befores = beforeTexts(output, position);
+  const named = befores.filter((before) => /[A-Za-z]/.test(before));
+  const positional = befores.filter((before) => !/[A-Za-z]/.test(before));
+  if (kind === "number") {
+    for (const before of befores) {
+      const tableStart = structure === "table-cell" && (before === "" || before === "\n");
+      if (!/[A-Za-z]/.test(before) && !tableStart) continue;
+      if (reads({ before, charset })) return { before, charset };
+    }
+    return undefined;
+  }
+  if (kind === "minted") {
+    for (const before of named) if (reads({ before, charset })) return { before, charset };
+  }
+  // A word stands at its line's start (see `printedBy`): the text before it is only that.
+  const places: ExtractOnlyPlace[] = [
+    ...(kind === "word"
+      ? []
+      : [
+          ...named.filter((before) => !/\d/.test(before)).map((before) => ({ before, after: "" })),
+          ...afterTexts(output, position + value.length)
+            .filter((after) => /[A-Za-z]/.test(after) && !/\d/.test(after))
+            .map((after) => ({ before: "", after })),
+        ]),
+    ...positional.filter((before) => !/\d/.test(before)).map((before) => ({ before, after: "" })),
+  ];
+  for (const only of places) if (reads({ only, charset })) return { only, charset };
+  const marked = markedLocator(output, position, value, charset);
+  if (marked !== undefined) return marked;
+  if (kind === "minted") {
+    for (const before of positional) if (reads({ before, charset })) return { before, charset };
+  }
+  return undefined;
+}
+
+/**
+ * A locator reading the value at `position` as the only whole run on its line, that line named as
+ * the first row under a header: the nearest non-blank line above it, opening its block (the output
+ * or a blank line comes before it, so it is no earlier row), holding no digit (a header or a label,
+ * not a row of measured values), and holding a marker word no other line holds. A row further down
+ * is chosen by more than its place under the header, so it is not read this way.
+ */
+function markedLocator(
+  output: string,
+  position: number,
+  value: string,
+  charset: string[],
+): ExtractLocator | undefined {
+  const lines = output.split("\n");
+  const lineStart = output.lastIndexOf("\n", position - 1) + 1;
+  const valueLine = output.slice(0, lineStart).split("\n").length - 1;
+  let offset = 1;
+  while (
+    offset < valueLine &&
+    offset < MAX_MARKER_LINES_ABOVE &&
+    !lines[valueLine - offset]!.trim()
+  )
+    offset += 1;
+  const markerLine = valueLine - offset;
+  const markerText = lines[markerLine];
+  if (markerText === undefined || !markerText.trim() || /\d/.test(markerText)) return undefined;
+  if (markerLine > 0 && lines[markerLine - 1]!.trim()) return undefined;
+  const befores = beforeTexts(lines[valueLine]!, position - lineStart).filter(
+    (before) => !/\d/.test(before),
+  );
+  // A marker another line also holds reads several lines, so the locator check refuses it.
+  for (const marker of new Set(markerText.match(MARKER_WORD) ?? [])) {
+    if (marker === value) continue;
+    for (const before of new Set(["", ...befores])) {
+      const locator = { only: { before, after: "", line: { marker, offset } }, charset };
+      if (extractPrintedValue(output, locator) === value) return locator;
+    }
   }
   return undefined;
 }
@@ -1115,47 +1226,75 @@ function stringLeaves(value: WorkflowJsonValue | undefined): string[] {
 }
 
 /**
+ * Where `value` next stands in `text` at or after `from` as a whole run of its charset's characters:
+ * `473` inside `…-46-473Z` or `pr473.log` is part of another value. -1 when it does not.
+ */
+function wholeIndexOf(
+  text: string,
+  value: string,
+  charset: readonly string[],
+  from: number,
+): number {
+  const inCharset = (char: string | undefined): boolean => {
+    const entry = char === undefined ? undefined : extractCharsetOf(char)?.[0];
+    return entry !== undefined && charset.includes(entry);
+  };
+  let position = text.indexOf(value, from);
+  while (
+    position >= 0 &&
+    (inCharset(text[position - 1]) || inCharset(text[position + value.length]))
+  )
+    position = text.indexOf(value, position + 1);
+  return position;
+}
+
+/**
  * The earlier call that printed `value` and the locator that finds it in that call's output.
  *
- * A value counts where it stands as a whole run of its characters: `473` inside `…-46-473Z` or
- * `pr473.log` is part of another value, neither printed nor given. The producer is the latest
- * earlier call whose text result prints the value, provided no call up to and including it was
- * given the value: a value a call was given is echoed, not minted. A short integer is read only
- * where the output gives it a structured position (`/pull/107`, `"number": 107`, `pr=107`, `#107`,
- * a table cell). The locator is the shortest text before the value, on its own line, that finds
- * exactly this value in the producer's output (see `locatePrinted`).
+ * A value counts where it stands as a whole run of its characters, neither printed nor given
+ * inside another value. The producer is the latest earlier call whose text result prints the
+ * value, provided no call up to and including it was given the value: a value a call was given is
+ * echoed, not minted. A short integer is read only where the output gives it a structured position
+ * (`/pull/107`, `"number": 107`, `pr=107`, `#107`, a table cell).
+ *
+ * A word (`checkout`, `fastgraph`) is chosen as often as it is printed, so it is read only when the
+ * call takes it as an `operand` — an option's value or its command's last argument, never a
+ * subcommand — and only where the output starts a line with it: a listing's row names it, where a
+ * printed command line (`gh run watch 123 --repo acme/widgets`) or prose would echo it. Its locator
+ * must find it as the only run (see `locatePrinted`).
  */
 function printedBy(
   value: string,
   before: number,
   calls: readonly DerivationCall[],
   mentionStrings: Array<string[] | undefined>,
+  operand: boolean,
 ): { producer: number; locator: ExtractLocator } | undefined {
   // A computed number is found as a whole run of digits, `.` and `-`, so a replay reads the new
   // number whatever its sign or precision; numbers coincide easily, so its locator must name it.
-  const numeric = /^-?(?:\d+\.\d+|\d{3,})$/.test(value);
-  if (!numeric && !looksMinted(value)) return undefined;
-  const charset = numeric ? ["digit", "-", "."] : extractCharsetOf(value);
+  const kind: PrintedKind | undefined = /^-?(?:\d+\.\d+|\d{3,})$/.test(value)
+    ? "number"
+    : looksMinted(value)
+      ? "minted"
+      : operand &&
+          value.length >= MIN_CANDIDATE_STRING_LENGTH &&
+          !value.startsWith("-") &&
+          /[A-Za-z]/.test(value)
+        ? "word"
+        : undefined;
+  if (kind === undefined) return undefined;
+  // A word is read as a name, letters joined by `-` or `_` (`checkout`, `search-indexer`), so a
+  // replay reads the whole name another run printed there, whichever joiners it holds.
+  const charset =
+    kind === "number"
+      ? ["digit", "-", "."]
+      : extractCharsetOf(kind === "word" ? `${value}-_` : value);
   if (charset === undefined) return undefined;
-  const inCharset = (char: string | undefined): boolean => {
-    const entry = char === undefined ? undefined : extractCharsetOf(char)?.[0];
-    return entry !== undefined && charset.includes(entry);
-  };
-  const wholeFrom = (text: string, from: number): number => {
-    let position = text.indexOf(value, from);
-    while (
-      position >= 0 &&
-      (inCharset(text[position - 1]) || inCharset(text[position + value.length]))
-    ) {
-      position = text.indexOf(value, position + 1);
-    }
-    return position;
-  };
   const structuredOnly = /^\d+$/.test(value) && value.length < MIN_UNSTRUCTURED_INTEGER_DIGITS;
   let firstMention = before;
   for (let index = 0; index < before; index += 1) {
     const strings = (mentionStrings[index] ??= stringLeaves(calls[index]!.arguments));
-    if (strings.some((leaf) => wholeFrom(leaf, 0) >= 0)) {
+    if (strings.some((leaf) => wholeIndexOf(leaf, value, charset, 0) >= 0)) {
       firstMention = index;
       break;
     }
@@ -1165,17 +1304,127 @@ function printedBy(
     if (typeof output !== "string") continue;
     let seen = 0;
     for (
-      let position = wholeFrom(output, 0);
+      let position = wholeIndexOf(output, value, charset, 0);
       position >= 0 && seen < MAX_PRINTED_OCCURRENCES;
-      position = wholeFrom(output, position + 1), seen += 1
+      position = wholeIndexOf(output, value, charset, position + 1), seen += 1
     ) {
+      const lineStart = output.lastIndexOf("\n", position - 1) + 1;
+      if (kind === "word" && output.slice(lineStart, position).trim() !== "") continue;
       const structure = printedStructure(output, position, value.length);
       if (structuredOnly && structure === undefined) continue;
-      const locator = locatePrinted(output, position, value, charset, numeric, structure);
+      const locator = locatePrinted(output, position, value, charset, kind, structure);
       if (locator !== undefined) return { producer, locator };
     }
   }
   return undefined;
+}
+
+/** A label an agent reads a value by: letters and spaces, as the cloud accepts it. */
+const OPERAND_LABEL = /^[A-Za-z][A-Za-z ]{0,30}$/;
+
+/** Labels one call's result reports, so a long command cannot grow its result carrier. */
+const MAX_OPERAND_LABELS = 16;
+
+/** What a call's own output calls one of the values its program ran with. */
+export interface ProgramOperandLabel {
+  argument: string;
+  /** `["tokens", i]`, or `["tokens", i, "span", start, end]` for an inline option's value. */
+  path: WorkflowValuePath;
+  label: string;
+}
+
+/**
+ * The labels a shell call's own output gives the values it ran with, past each command's name: an
+ * agent reading `Package: fastgraph` after `release.py license fastgraph` knows the operand is a
+ * package. Only the label leaves the device; the value and the text around it never do.
+ */
+export function programOperandLabels(
+  program: NonNullable<DerivationCall["program"]>,
+  args: Record<string, WorkflowJsonValue>,
+  output: WorkflowJsonValue | undefined,
+): ProgramOperandLabel[] {
+  const text = args[program.argument];
+  if (program.opaque || !isShellGrammar(program.kind) || typeof text !== "string") return [];
+  if (typeof output !== "string" || output.length === 0) return [];
+  let tokens: readonly ProgramToken[];
+  try {
+    tokens = cachedTokens(program.kind, text);
+  } catch (error) {
+    if (error instanceof ProgramTokenizationError) return [];
+    throw error;
+  }
+  const positions = shellArgumentPositions(text, tokens);
+  const labels: ProgramOperandLabel[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (labels.length >= MAX_OPERAND_LABELS) break;
+    if (!token.bindable || typeof token.value !== "string" || !positions[index]) continue;
+    const name = INLINE_VALUE_NAME.exec(token.value)?.[0];
+    const start = name?.length ?? 0;
+    const label = operandLabel(token.value.slice(start), output);
+    if (label === undefined) continue;
+    labels.push({
+      argument: program.argument,
+      path:
+        name === undefined
+          ? ["tokens", index]
+          : ["tokens", index, "span", start, token.value.length],
+      label,
+    });
+  }
+  return labels;
+}
+
+/**
+ * What `output` calls `value`, when it says so the same way everywhere. The label is the text
+ * before the value on its line, without trailing `:`, `=` or space (`Package: fastgraph` →
+ * `Package`), or — for a value that starts its line inside a block led by a digit-free header
+ * line — the header word over its column (`service` over `checkout  38 …`). Occurrences without
+ * such a label are skipped; two different labels give none. A label holding the value is dropped.
+ */
+function operandLabel(value: string, output: string): string | undefined {
+  if (value.length === 0) return undefined;
+  const charset = extractCharsetOf(value);
+  if (charset === undefined) return undefined;
+  let label: string | undefined;
+  let seen = 0;
+  for (
+    let position = wholeIndexOf(output, value, charset, 0);
+    position >= 0 && seen < MAX_PRINTED_OCCURRENCES;
+    position = wholeIndexOf(output, value, charset, position + 1), seen += 1
+  ) {
+    const lineStart = output.lastIndexOf("\n", position - 1) + 1;
+    const prefix = output.slice(lineStart, position);
+    let found = prefix
+      .replace(/[\s:=]+$/, "")
+      .trim()
+      .replace(/\s+/g, " ");
+    if (found === "" && prefix.trim() === "") {
+      found = columnHeader(output, lineStart, position - lineStart) ?? "";
+    }
+    if (!OPERAND_LABEL.test(found) || found.toLowerCase().includes(value.toLowerCase())) continue;
+    if (label !== undefined && label !== found) return undefined;
+    label = found;
+  }
+  return label;
+}
+
+/**
+ * The header word over `column` for the line starting at `lineStart`: the first line of its block
+ * (lines up to the previous blank line), when that line holds no digit and a word starts at the
+ * column.
+ */
+function columnHeader(output: string, lineStart: number, column: number): string | undefined {
+  let headerStart = lineStart;
+  while (headerStart > 0) {
+    const previousStart = output.lastIndexOf("\n", headerStart - 2) + 1;
+    if (output.slice(previousStart, headerStart - 1).trim() === "") break;
+    headerStart = previousStart;
+  }
+  if (headerStart === lineStart) return undefined;
+  const lineBreak = output.indexOf("\n", headerStart);
+  const header = output.slice(headerStart, lineBreak < 0 ? output.length : lineBreak);
+  if (/\d/.test(header) || (column > 0 && !/\s/.test(header[column - 1] ?? ""))) return undefined;
+  return /^[A-Za-z]+/.exec(header.slice(column))?.[0];
 }
 
 /**
