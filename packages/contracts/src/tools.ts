@@ -6,6 +6,7 @@ import {
   SchemaVersionSchema,
   Sha256DigestSchema,
 } from "./common.js";
+import { isRepositoryId } from "./repository-location.js";
 
 /**
  * Tool Scope boundary.
@@ -65,15 +66,38 @@ export const ToolLimitConfigSchema = z.object({
 
 export type ToolLimitConfig = z.infer<typeof ToolLimitConfigSchema>;
 
+/** A repository id (see {@link isRepositoryId}). */
+const RepositoryIdSchema = z.string().refine(isRepositoryId);
+
+/**
+ * What the cloud observed of a learned tool in the workspace's ordinary sessions: runs of work
+ * matching the tool's recorded steps, done without the tool, that the tool would have shortened.
+ * `runs` counts those with at least one avoidable model request, `avoidableRequests` sums those
+ * requests, `sessions` counts the sessions observed since the tool's active version was published,
+ * and `repositories` names the repositories (sorted, distinct) the runs were in.
+ */
+export const ToolOpportunitiesSchema = z.object({
+  runs: z.number().int().nonnegative(),
+  avoidableRequests: z.number().int().nonnegative(),
+  sessions: z.number().int().nonnegative(),
+  repositories: z.array(RepositoryIdSchema).max(64),
+});
+
+export type ToolOpportunities = z.infer<typeof ToolOpportunitiesSchema>;
+
 /**
  * The cloud's measured recommendation for a learned tool, across all its versions. Absent means
  * the tool is recommended. `automatic: false` means repeated measured invocations cost more than
  * doing the job directly, so the client stops offering the tool on its own (instructions, command
  * suggestions, direct listings, query searches): a search returns it only when the query names it
  * (its exact or leading name), an empty-query listing still lists it, and it stays invocable by name.
+ * It may carry `opportunities` (see {@link ToolOpportunitiesSchema}); read it with
+ * {@link toolOpportunities}.
  *
  * Passthrough: the catalog snapshot checksum is computed over the parsed tools, so keys a newer
  * cloud adds here must survive parsing or every snapshot carrying them would fail verification.
+ * For the same reason `opportunities` is not validated while parsing: a malformed value is kept
+ * as sent and ignored when read, rather than failing the manifest or the snapshot.
  */
 export const ToolRecommendationSchema = z
   .object({
@@ -86,6 +110,14 @@ export const ToolRecommendationSchema = z
   .passthrough();
 
 export type ToolRecommendation = z.infer<typeof ToolRecommendationSchema>;
+
+/** A recommendation's observed opportunities; undefined when it carries none or a malformed value. */
+export function toolOpportunities(
+  recommendation: ToolRecommendation | undefined,
+): ToolOpportunities | undefined {
+  const parsed = ToolOpportunitiesSchema.safeParse(recommendation?.opportunities);
+  return parsed.success ? parsed.data : undefined;
+}
 
 /**
  * Tool Manifest: Canonical definition of an evolved or built-in tool.

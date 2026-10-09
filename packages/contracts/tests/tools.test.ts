@@ -6,6 +6,7 @@ import {
   ToolParameterSchema,
   ToolRuntimeRequirementSchema,
   ToolScopeSchema,
+  toolOpportunities,
 } from "../src/tools.js";
 
 describe("tools contracts", () => {
@@ -37,6 +38,47 @@ describe("tools contracts", () => {
     it("rejects manifest with empty id or name", () => {
       expect(() => ToolManifestSchema.parse({ ...validToolManifest, id: "" })).toThrow();
       expect(() => ToolManifestSchema.parse({ ...validToolManifest, name: "" })).toThrow();
+    });
+  });
+
+  describe("recommendation opportunities", () => {
+    const REPO = "c".repeat(64);
+    const opportunities = { runs: 2, avoidableRequests: 5, sessions: 9, repositories: [REPO] };
+    const recommended = (value: unknown) => ({
+      automatic: true,
+      reason: "expected_net_value",
+      tasks: 0,
+      invocations: 0,
+      savedTokens: 0,
+      opportunities: value,
+    });
+
+    it("reads well-formed opportunities from a parsed manifest", () => {
+      const parsed = ToolManifestSchema.parse({
+        ...validToolManifest,
+        recommendation: recommended(opportunities),
+      });
+      expect(toolOpportunities(parsed.recommendation)).toEqual(opportunities);
+      expect(toolOpportunities(ToolManifestSchema.parse(validToolManifest).recommendation)).toBe(
+        undefined,
+      );
+    });
+
+    it.each([
+      ["a negative count", { ...opportunities, runs: -1 }],
+      ["a fractional count", { ...opportunities, avoidableRequests: 1.5 }],
+      ["a missing count", { runs: 1, avoidableRequests: 1, repositories: [REPO] }],
+      ["a malformed repository id", { ...opportunities, repositories: [REPO.toUpperCase()] }],
+      ["too many repositories", { ...opportunities, repositories: Array(65).fill(REPO) }],
+      ["a non-object", "many"],
+    ])("keeps a manifest with %s, as sent, and ignores the field", (_case, value) => {
+      const parsed = ToolManifestSchema.parse({
+        ...validToolManifest,
+        recommendation: recommended(value),
+      });
+      // Passthrough keeps the value verbatim, so a snapshot checksum over parsed tools still holds.
+      expect(parsed.recommendation?.opportunities).toEqual(value);
+      expect(toolOpportunities(parsed.recommendation)).toBeUndefined();
     });
   });
 

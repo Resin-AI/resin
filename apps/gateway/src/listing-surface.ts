@@ -3,14 +3,16 @@
  * server instructions and the tools its tools/list shows. Every request a harness makes carries
  * all of it, so it is kept to what the workspace's own learned tools need, and bounded:
  *
- * - Only learned tools scoped to the caller's repository are listed, counted or named (see
- *   `isToolScopedHere`). Others stay searchable and invocable by name.
+ * - Only learned tools scoped to the caller's repository, or unscoped ones the cloud observed
+ *   shortening work in it, are listed, counted or named (see `isToolScopedHere`). Others stay
+ *   searchable and invocable by name.
  * - With none, the server lists only invoke_tool, for a Resin tool the user names, and one line of
  *   instructions: there is nothing to search for.
  * - The relevant tools are listed directly, as tools of their own, in a deterministic order (pinned
- *   first, then those replacing the most recorded work, then by name) for as long as the whole
- *   surface stays within {@link LISTING_CAP}. search_tools is listed only when some are left out,
- *   for those; the instructions say how many and which commands they run.
+ *   first, then those observed saving the most model requests, then those replacing the most
+ *   recorded work, then by name), each one that still fits while the whole surface stays within
+ *   {@link LISTING_CAP}. search_tools is listed only when some are left out, for those; the
+ *   instructions say how many and which commands they run.
  *
  * The gateway chooses the listing from the catalog; the stdio shim serves it with the same
  * functions, so the cap holds for exactly what is served.
@@ -211,9 +213,14 @@ export function searchListingTools(
   });
 }
 
-/** Pinned first, then those replacing the most recorded work, then by name. */
+/**
+ * Pinned first, then those the cloud observed saving the most model requests here, then those
+ * replacing the most recorded work, then by name.
+ */
 function listingOrder(a: CatalogNoticeTool, b: CatalogNoticeTool): number {
   if ((a.pinned === true) !== (b.pinned === true)) return a.pinned === true ? -1 : 1;
+  const avoidable = (b.avoidableRequests ?? 0) - (a.avoidableRequests ?? 0);
+  if (avoidable !== 0) return avoidable;
   const steps = (b.steps ?? 0) - (a.steps ?? 0);
   if (steps !== 0) return steps;
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
@@ -231,9 +238,11 @@ function listedLearnedTool(tool: CatalogNoticeTool): ListedLearnedTool {
 
 /**
  * The listing a search-listing connection serves for a known catalog: the recommended learned
- * tools scoped to the caller's repository, as many of them, in {@link listingOrder}, as keep the
- * served surface (instructions and tool definitions, measured as served) within
- * {@link LISTING_CAP}. When even one does not fit, none is listed and search finds them.
+ * tools scoped to the caller's repository, chosen in {@link listingOrder} while the served surface
+ * (instructions and tool definitions, measured as served) stays within {@link LISTING_CAP}. When
+ * every relevant tool fits together they are all listed. Otherwise each tool in turn is listed if
+ * it still fits beside those already chosen, and skipped if not, so one long definition does not
+ * keep shorter ones after it out. When none fits, none is listed and search finds them.
  */
 export function learnedToolListing(tools: readonly CatalogNoticeTool[]): LearnedToolListing {
   const relevant = tools
@@ -250,20 +259,32 @@ export function learnedToolListing(tools: readonly CatalogNoticeTool[]): Learned
     inputSchema: tool.inputSchema,
     ...(tool._meta === undefined ? {} : { _meta: tool._meta }),
   }));
-  const listingOf = (listed: number): LearnedToolListing => ({
+  const listingOf = (listed: ReadonlySet<CatalogNoticeTool>): LearnedToolListing => ({
     count: relevant.length,
     commands: summarizeLearnedCommands(
-      relevant.slice(listed).map((tool) => tool.localCommands ?? []),
+      relevant.filter((tool) => !listed.has(tool)).map((tool) => tool.localCommands ?? []),
     ),
-    listing: relevant.slice(0, listed).map(listedLearnedTool),
+    listing: relevant.filter((tool) => listed.has(tool)).map(listedLearnedTool),
   });
-  for (let listed = Math.min(LISTING_CAP.maxTools, relevant.length); listed > 0; listed--) {
-    const learned = listingOf(listed);
-    const cost = searchListingTools(served, learned).reduce(
+  const fits = (learned: LearnedToolListing): boolean =>
+    searchListingTools(served, learned).reduce(
       (sum, tool) => sum + listingToolTokens(tool as unknown as ListingToolDefinition),
       listingTextTokens(searchListingInstructions(learned)),
-    );
-    if (cost <= LISTING_CAP.maxTokens) return learned;
+    ) <= LISTING_CAP.maxTokens;
+  // Listing every relevant tool also drops search_tools and the unlisted-tools instructions, so
+  // the whole set can fit when a part of it, still paying for search, does not.
+  if (relevant.length > 0 && relevant.length <= LISTING_CAP.maxTools) {
+    const all = listingOf(new Set(relevant));
+    if (fits(all)) return all;
   }
-  return listingOf(0);
+  const listed = new Set<CatalogNoticeTool>();
+  let learned = listingOf(listed);
+  for (const tool of relevant) {
+    if (listed.size === LISTING_CAP.maxTools) break;
+    listed.add(tool);
+    const candidate = listingOf(listed);
+    if (fits(candidate)) learned = candidate;
+    else listed.delete(tool);
+  }
+  return learned;
 }
