@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import {
   type InvocationFailureReason,
   type InvocationRecord,
   type InvocationUsageEstimate,
+  type ResinInvocationReceipt,
   type SafetyGateRefusal,
   TOOL_IO_UTF8_METHOD,
   type ToolParameterSchema,
@@ -13,6 +13,7 @@ import {
   isSafetyGateBypassTool,
 } from "@resin/contracts";
 import { recordDiscoveryFunnelEvent } from "@resin/observer/discovery-funnel";
+import { reportHandledError } from "@resin/observer/error-reporting/core";
 import { RecordedExecutionClock, type SafetyGateEvaluator } from "@resin/runtime";
 import {
   FOR_EACH_ARGUMENT,
@@ -31,6 +32,12 @@ import {
   failureReasonOfResult,
   invocationStatusFor,
 } from "./meta/invocation-failure.js";
+import {
+  invocationReceipt,
+  newInvocationId,
+  withErrorInvocationReceipt,
+  withInvocationReceipt,
+} from "./meta/invocation-receipt.js";
 import { isToolOfferedHere, unavailableHereMessage } from "./meta/repository-scope.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
@@ -70,6 +77,8 @@ export interface ToolCallOptions {
   signal?: AbortSignal;
   onProgress?: (progress: number, total?: number) => void;
   timeoutMs?: number;
+  /** The benchmark run the calling connection belongs to; marks each invocation recorded for it. */
+  benchmarkId?: string;
 }
 
 export type ToolHandler = (
@@ -431,6 +440,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
     // calls the same way, or the invocation ledger (and every saving computed
     // from it) only ever sees the meta-tool path.
     const recorder = tool.isSystem ? undefined : this.registry.getInvocationRecorder();
+    // The id is fixed before the call runs: the record and the caller's receipt carry the same one.
+    const recording = recorder && {
+      recorder,
+      receipt: invocationReceipt(newInvocationId(), options?.benchmarkId),
+    };
     const startedAtMs = Date.now();
     // Times the tool's recorded calls apart from Resin's own work around them. A system tool is
     // not recorded here (invoke_tool measures the call it makes itself), so it gets no clock.
@@ -441,16 +455,17 @@ export class RegistryGatewayRouter implements GatewayRouter {
       executed = await (executionClock ? executionClock.run(execute) : execute());
     } catch (error) {
       if (!tool.isSystem) recordDiscoveryFunnelEvent("invocation_failed");
+      if (!recording) throw error;
       // A call the routing layer refused or lost is still a failed invocation of this tool,
       // and the error the caller receives is its output: estimate usage from it like a result.
-      if (recorder) {
-        this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
-          output: jsonRpcErrorOf(error instanceof Error ? error : String(error)),
-          reason: failureReasonOfError(error),
-          executionDurationMs: executionClock?.durationMs(),
-        });
-      }
-      throw error;
+      const thrown = withErrorInvocationReceipt(error, recording.receipt);
+      this.recordNativeInvocation(recording, context, tool, params, startedAtMs, {
+        output: jsonRpcErrorOf(error instanceof Error ? error : String(error)),
+        shown: jsonRpcErrorOf(thrown instanceof Error ? thrown : String(thrown)),
+        reason: failureReasonOfError(error),
+        executionDurationMs: executionClock?.durationMs(),
+      });
+      throw thrown;
     }
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
     if (!tool.isSystem) {
@@ -469,34 +484,44 @@ export class RegistryGatewayRouter implements GatewayRouter {
           );
         }
       }
-    } else if (recorder) {
-      this.recordNativeInvocation(recorder, context, tool, params, startedAtMs, {
+    } else if (recording) {
+      const shown = withInvocationReceipt(executed, recording.receipt);
+      this.recordNativeInvocation(recording, context, tool, params, startedAtMs, {
         output: executed,
+        shown,
         ...(executed.isError ? { reason: failureReasonOfResult(executed) } : {}),
         executionDurationMs: executionClock?.durationMs(),
       });
+      return shown;
     }
     return executed;
   }
 
   private recordNativeInvocation(
-    recorder: (record: InvocationRecord) => Promise<void>,
+    recording: {
+      recorder: (record: InvocationRecord) => Promise<void>;
+      receipt: ResinInvocationReceipt;
+    },
     context: WorkspaceContext,
     tool: RegistryTool,
     params: JsonRpcParams,
     startedAtMs: number,
     outcome: {
+      /** The tool's own result or error, before Resin's receipt: what the output digest covers. */
       output: CallToolResult | JsonRpcErrorObject;
+      /** What the caller receives, receipt included: what output usage is estimated from. */
+      shown: CallToolResult | JsonRpcErrorObject;
       reason?: InvocationFailureReason;
       /** Time the tool's recorded calls ran; undefined when none ran. */
       executionDurationMs: number | undefined;
     },
   ): void {
-    const { output, reason, executionDurationMs } = outcome;
+    const { output, shown, reason, executionDurationMs } = outcome;
+    const { recorder, receipt } = recording;
     const sessionId = context.sessionId ?? `ses_standalone_${context.workspaceId}`;
     const inBytes = estimatePayloadBytes(params);
     // The caller reads a result's content, not Resin's `_meta`; an error object is read whole.
-    const outBytes = estimatePayloadBytes("content" in output ? output.content : output);
+    const outBytes = estimatePayloadBytes("content" in shown ? shown.content : shown);
     let usageEstimate: InvocationUsageEstimate | undefined;
     if (inBytes !== undefined && outBytes !== undefined) {
       const inputTokens = bytesToTokens(inBytes);
@@ -512,7 +537,7 @@ export class RegistryGatewayRouter implements GatewayRouter {
     const completedAtMs = Date.now();
     const durationMs = Math.max(0, completedAtMs - startedAtMs);
     const record: InvocationRecord = {
-      invocationId: `inv_${randomUUID().replace(/-/g, "")}`,
+      invocationId: receipt.invocationId,
       sessionId,
       workspaceId: context.workspaceId,
       toolId: tool.toolId,
@@ -542,9 +567,11 @@ export class RegistryGatewayRouter implements GatewayRouter {
             },
           }),
       ...(usageEstimate ? { usageEstimate } : {}),
+      ...(receipt.benchmarkId === undefined ? {} : { benchmarkId: receipt.benchmarkId }),
     };
-    void recorder(record).catch(() => {
-      // Recording never fails the call; the uploader reconciles from what was written.
+    // Recording never fails the call; a failed write is reported, never dropped quietly.
+    recorder(record).catch((error: unknown) => {
+      reportHandledError(error, { failureClass: "tool_invocation_record" });
     });
   }
 

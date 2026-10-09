@@ -3,7 +3,11 @@ import {
   type NormalizedErrorEvent,
   type NormalizedSessionEvent,
   type NormalizedToolResultEvent,
+  type ProviderReportedUsage,
   hashCanonicalContent,
+  providerUsageRequestKey,
+  readRequestLinkMetadata,
+  selectProviderUsageSnapshot,
 } from "@resin/contracts";
 import type { Episode, EpisodeMetrics, OpportunityDataValue, SegmenterOptions } from "./types.js";
 
@@ -16,7 +20,12 @@ export interface EventTokenUsage {
   outputTokens: number;
   /** Prompt tokens served from the provider's cache; already counted in `totalTokens`. */
   cachedInputTokens: number;
+  /** Prompt tokens written to the provider's cache; already counted in `totalTokens`. */
+  cacheWriteTokens: number;
+  /** Reported total, 0 when `totalKnown` is false. */
   totalTokens: number;
+  /** Whether the source reported a total; a missing total is unknown, never derived. */
+  totalKnown: boolean;
   /** Source-reported or harness-estimated spend, never inferred from token counts. */
   costUsd?: number;
   costSource: "reported" | "estimated" | "unknown";
@@ -25,8 +34,14 @@ export interface EventTokenUsage {
 }
 
 export interface EpisodeUsageSummary {
+  /** Sum of every known total; `tokensComplete` says whether it covers every model request. */
   totalTokens: number;
   cachedInputTokens: number;
+  cacheWriteTokens: number;
+  /** Distinct identified model requests, with or without usage. */
+  requestCount: number;
+  /** False when any model execution's usage or total is missing: the total is then a lower bound. */
+  tokensComplete: boolean;
   costUsd: number | null;
   costSource: "reported" | "estimated" | "unknown";
 }
@@ -73,7 +88,9 @@ export function extractEventTokens(event: NormalizedSessionEvent): EventTokenUsa
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
+  let cacheWriteTokens = 0;
   let totalTokens = 0;
+  let totalKnown = false;
   let costUsd: number | undefined;
   let costSource: EventTokenUsage["costSource"] = "unknown";
 
@@ -101,13 +118,15 @@ export function extractEventTokens(event: NormalizedSessionEvent): EventTokenUsa
     const cachedTok = usage.cachedInputTokens ?? usage.cachedTokens ?? usage.cacheReadInputTokens;
     cachedInputTokens = Number.isFinite(cachedTok) ? Number(cachedTok) : 0;
 
-    // The per-turn context re-send is what a tool saves, so a provider total that
-    // includes cache reads is the number we want; only fall back to the visible
-    // input/output split when the provider reported no total.
+    const writeTok = usage.cacheWriteTokens;
+    cacheWriteTokens = Number.isFinite(writeTok) ? Number(writeTok) : 0;
+
+    // The per-turn context re-send is what a tool saves, so the provider total that includes
+    // cache reads and writes is the number we want. A missing total stays unknown rather than
+    // being rebuilt from categories whose overlap differs between sources.
     const totTok = usage.totalTokens;
-    totalTokens = Number.isFinite(totTok)
-      ? Number(totTok)
-      : inputTokens + outputTokens + cachedInputTokens;
+    totalKnown = Number.isFinite(totTok);
+    totalTokens = totalKnown ? Number(totTok) : 0;
 
     const micro = usage.costMicroUsd;
     const direct = usage.costUsd;
@@ -128,13 +147,16 @@ export function extractEventTokens(event: NormalizedSessionEvent): EventTokenUsa
     if (Number.isFinite(pTotal)) totalTokens = Number(pTotal);
     const mTotal = metadata?.totalTokens;
     if (Number.isFinite(mTotal)) totalTokens = Number(mTotal);
+    totalKnown = [pTok, mTok, pTotal, mTotal].some((value) => Number.isFinite(value));
   }
 
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
+    cacheWriteTokens,
     totalTokens,
+    totalKnown,
     ...(costUsd !== undefined ? { costUsd } : {}),
     costSource,
     hasUsage:
@@ -145,37 +167,90 @@ export function extractEventTokens(event: NormalizedSessionEvent): EventTokenUsa
 }
 
 /**
- * Sums captured usage only when every usage-bearing event has a known cost.
- * A harness estimate remains an estimate; missing accounting never becomes a
- * partial authoritative total or a token-priced dollar fallback.
+ * Sums captured usage once per model execution. Request-scoped usage is keyed by request identity:
+ * repeated snapshots of one request replace each other, while distinct requests with equal counts
+ * all count. A cumulative meter counts only its latest snapshot. Events that name their issuing
+ * request share that request's usage instead of needing their own; a named request that never
+ * reports usage leaves tokens and cost incomplete. Cost is known only when every usage-bearing
+ * execution has one; a harness estimate remains an estimate, and missing accounting never becomes
+ * a partial authoritative total or a token-priced dollar fallback.
  */
 export function summarizeEpisodeUsage(
   events: readonly NormalizedSessionEvent[],
 ): EpisodeUsageSummary {
-  let totalTokens = 0;
-  let cachedInputTokens = 0;
-  let reportedCostUsd = 0;
-  let reported = false;
-  let complete = true;
-  let estimated = false;
+  type Snapshot = { usage: ProviderReportedUsage; tokens: EventTokenUsage };
+  const counted: EventTokenUsage[] = [];
+  const requestUsages = new Map<string, Snapshot>();
+  const cumulativeUsages = new Map<string, Snapshot>();
+  const requestIdsWithUsage = new Set<string>();
+  const linkedRequestIds = new Set<string>();
   for (const event of events) {
     const tokens = extractEventTokens(event);
-    totalTokens += tokens.totalTokens;
-    cachedInputTokens += tokens.cachedInputTokens;
-    if (tokens.costUsd !== undefined) {
-      reported = true;
-      reportedCostUsd += tokens.costUsd;
-      estimated ||= tokens.costSource === "estimated";
-    } else if (tokens.hasUsage) {
-      complete = false;
+    const { modelRequestId } = readRequestLinkMetadata(event.metadata);
+    if (modelRequestId !== undefined) {
+      linkedRequestIds.add(JSON.stringify([event.sessionId, modelRequestId]));
+    }
+    const usage = event.providerUsage;
+    const requestKey = usage && providerUsageRequestKey(event.sessionId, usage);
+    const snapshots =
+      requestKey !== undefined
+        ? requestUsages
+        : usage?.usageScope === "cumulative"
+          ? cumulativeUsages
+          : undefined;
+    if (usage !== undefined && snapshots !== undefined) {
+      const key = requestKey ?? JSON.stringify([usage.provider, event.sessionId]);
+      const current = snapshots.get(key);
+      if (current === undefined || selectProviderUsageSnapshot(current.usage, usage) === usage) {
+        snapshots.set(key, { usage, tokens });
+      }
+      if (usage.requestId !== undefined) {
+        requestIdsWithUsage.add(JSON.stringify([event.sessionId, usage.requestId]));
+      }
+    } else if (usage !== undefined || modelRequestId === undefined) {
+      counted.push(tokens);
     }
   }
-  const known = reported && complete && Number.isFinite(reportedCostUsd);
+  for (const entry of requestUsages.values()) counted.push(entry.tokens);
+  for (const entry of cumulativeUsages.values()) counted.push(entry.tokens);
+  const requestsWithoutUsage = [...linkedRequestIds].filter(
+    (id) => !requestIdsWithUsage.has(id),
+  ).length;
+
+  let totalTokens = 0;
+  let cachedInputTokens = 0;
+  let cacheWriteTokens = 0;
+  let reportedCostUsd = 0;
+  let costComplete = requestsWithoutUsage === 0;
+  let tokensComplete = requestsWithoutUsage === 0;
+  const costSources = new Set<EventTokenUsage["costSource"]>();
+  for (const tokens of counted) {
+    totalTokens += tokens.totalTokens;
+    cachedInputTokens += tokens.cachedInputTokens;
+    cacheWriteTokens += tokens.cacheWriteTokens;
+    if (tokens.hasUsage && !tokens.totalKnown) tokensComplete = false;
+    if (tokens.costUsd !== undefined) {
+      reportedCostUsd += tokens.costUsd;
+      costSources.add(tokens.costSource);
+    } else if (tokens.hasUsage) {
+      costComplete = false;
+    }
+  }
+  // Reported and estimated amounts are different bases and are never added together.
+  const [costSource] = costSources;
+  const known =
+    costSource !== undefined &&
+    costSources.size === 1 &&
+    costComplete &&
+    Number.isFinite(reportedCostUsd);
   return {
     totalTokens,
     cachedInputTokens,
+    cacheWriteTokens,
+    requestCount: requestUsages.size + requestsWithoutUsage,
+    tokensComplete,
     costUsd: known ? reportedCostUsd : null,
-    costSource: known ? (estimated ? "estimated" : "reported") : "unknown",
+    costSource: known ? costSource : "unknown",
   };
 }
 
@@ -488,6 +563,9 @@ export class EpisodeSegmenter {
       stepCount,
       totalTokens: usage.totalTokens,
       cachedInputTokens: usage.cachedInputTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      requestCount: usage.requestCount,
+      tokensComplete: usage.tokensComplete,
       retryCount,
       estimatedCostUsd: usage.costUsd,
       costSource: usage.costSource,

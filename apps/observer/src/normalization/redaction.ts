@@ -282,11 +282,56 @@ export class RedactionEngine {
     return this.redactText(text, fieldPath);
   }
 
+  /**
+   * Redacts the opaque identifiers stored under `keys` of `record` (strings or string arrays), such
+   * as a provider response id (`msg_…`, `resp_…`) or a harness record id. Every explicit transform
+   * still applies (known credential formats, secret values from the environment, custom secrets,
+   * identity scrubbing); only the high-entropy heuristic is skipped, because a random-looking id is
+   * what an identifier is, and scrubbing it would break the identity it carries. Redacted fields are
+   * reported by key.
+   */
+  redactOpaqueIdentifiers(
+    record: JsonObject,
+    keys: readonly string[],
+  ): RedactionResult<JsonObject> {
+    const redactedFields = new Set<string>();
+    const patterns = new Set<string>();
+    const fingerprints = new Set<string>();
+    const scrub = (id: string, key: string): string => {
+      const scrubbed = this.redactText(id, key, undefined, false);
+      if (scrubbed.changed) {
+        redactedFields.add(key);
+        for (const p of scrubbed.patterns) patterns.add(p);
+        for (const f of scrubbed.fingerprints) fingerprints.add(f);
+      }
+      return scrubbed.redactedText;
+    };
+    const data: JsonObject = { ...record };
+    for (const key of keys) {
+      const value = data[key];
+      if (typeof value === "string") {
+        data[key] = scrub(value, key);
+      } else if (Array.isArray(value)) {
+        data[key] = value.map((id) => (typeof id === "string" ? scrub(id, key) : id));
+      }
+    }
+    const isRedacted = redactedFields.size > 0;
+    return {
+      data,
+      isRedacted,
+      redactedFields: Array.from(redactedFields).sort(),
+      redactionStrategy: isRedacted ? (this.config.strategy ?? "mask") : "none",
+      scrubbedPatterns: Array.from(patterns).sort(),
+      fingerprintHashes: Array.from(fingerprints).sort(),
+    };
+  }
+
   /** `record` hears every replacement text with the text it replaced, at whatever step it ran. */
   private redactText(
     text: string,
     fieldPath: string,
     record?: (replacement: string, original: string) => void,
+    entropyHeuristics = true,
   ): RedactedStringResult {
     if (!text) {
       return { redactedText: text, changed: false, patterns: [], fingerprints: [] };
@@ -358,7 +403,9 @@ export class RedactionEngine {
 
     // 4. Content Scanning (Regex & High Entropy)
     if (this.config.scanContent) {
-      const matches = this.scanner.scan(current);
+      const matches = this.scanner
+        .scan(current)
+        .filter((m) => entropyHeuristics || m.secretType !== "HIGH_ENTROPY_SECRET");
       if (matches.length > 0) {
         // Replace from end to start to keep offsets valid
         for (let i = matches.length - 1; i >= 0; i--) {
@@ -486,6 +533,19 @@ export class RedactionEngine {
           if (PRESERVED_IDENTIFIER_FIELDS.has(key)) {
             // SAFETY: Preserved identifier fields are kept intact without redaction.
             result[key] = val as JsonValue;
+            continue;
+          }
+          // A request id is the opaque identity usage accounting dedupes by, so it is scanned only
+          // for explicit secrets: a provider id such as `msg_…` or `resp_…` would otherwise read as a
+          // high-entropy secret and lose its identity.
+          if (fieldPath === "providerUsage.requestId" && typeof val === "string") {
+            const scrubbed = this.redactText(val, fieldPath, undefined, false);
+            if (scrubbed.changed) {
+              redactedFieldsSet.add(fieldPath);
+              for (const p of scrubbed.patterns) patternsSet.add(p);
+              for (const f of scrubbed.fingerprints) fingerprintsSet.add(f);
+            }
+            result[key] = scrubbed.redactedText;
             continue;
           }
 

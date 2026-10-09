@@ -120,5 +120,53 @@ describe("Invocation Record Usage Estimate Persistence", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0].usageEstimate).toBeUndefined();
     expect(pending[0].executionDurationMs).toBeUndefined();
+    expect(pending[0].benchmarkId).toBeUndefined();
+  });
+
+  it("persists an invocation's benchmark marker through every readback", async () => {
+    const store = await createInMemoryStateStore();
+    await store.sessions.saveSession({
+      sessionId: "ses_bench_001",
+      harnessId: "omp",
+      status: "active",
+      startedAt: "2026-08-17T14:00:00.000Z",
+    });
+    const base: InvocationRecord = {
+      invocationId: "inv_0123456789abcdef0123456789abcdef",
+      sessionId: "ses_bench_001",
+      workspaceId: "ws_bench_001",
+      toolId: "tool_bench",
+      toolVersion: "1.0.0",
+      startedAt: "2026-08-17T14:05:00.000Z",
+      completedAt: "2026-08-17T14:05:01.000Z",
+      durationMs: 1000,
+      status: "success",
+      inputDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    };
+    await store.audit.recordInvocation({ ...base, benchmarkId: "tb-run.7:a" });
+    await store.audit.recordInvocation({
+      ...base,
+      invocationId: "inv_fedcba9876543210fedcba9876543210",
+      startedAt: "2026-08-17T14:06:00.000Z",
+    });
+
+    const fetched = await store.audit.getInvocation(base.invocationId);
+    expect(fetched?.benchmarkId).toBe("tb-run.7:a");
+    const listed = await store.audit.listInvocations({ sessionId: "ses_bench_001" });
+    expect(listed.map((record) => record.benchmarkId)).toEqual([undefined, "tb-run.7:a"]);
+    const pending = store.audit.listPendingInvocationUploads(10);
+    expect(pending.map((record) => record.benchmarkId)).toEqual(["tb-run.7:a", undefined]);
+    const raw = store.conn.all<{ benchmark_id: string | null }>(
+      "SELECT benchmark_id FROM invocation_records ORDER BY started_at ASC;",
+    );
+    expect(raw).toEqual([{ benchmark_id: "tb-run.7:a" }, { benchmark_id: null }]);
+
+    await expect(
+      store.audit.recordInvocation({
+        ...base,
+        invocationId: "inv_00000000000000000000000000000000",
+        benchmarkId: "../escape me",
+      }),
+    ).rejects.toThrow();
   });
 });

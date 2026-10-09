@@ -35,6 +35,7 @@ import {
   readCodexCommandMetadata,
   readComputationEvidence,
   readRepositoryLocationMetadata,
+  readRequestLinkMetadata,
   readToolLinkEvidence,
   readWorkingDirectoryIdentity,
 } from "@resin/contracts";
@@ -855,6 +856,10 @@ export function projectEventToMetadataOnly(
     metadata.sessionKind = sessionKind;
   }
   Object.assign(metadata, projectSessionAttribution(event.metadata));
+  // Opaque model-request, task and Resin invocation identifiers let the cloud join a tool call and its
+  // result to the request that issued it, the user task it served and the invocation the gateway
+  // recorded. Each is re-validated against its schema; anything malformed is dropped.
+  Object.assign(metadata, readRequestLinkMetadata(event.metadata));
   // A source-observed successful assistant stop is bounded completion evidence, not arbitrary
   // metadata. It survives only on assistant messages and only for the shared allowlist; tool-use,
   // truncation, errors and unknown values are deliberately omitted.

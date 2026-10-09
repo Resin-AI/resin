@@ -4,9 +4,16 @@ import {
   type MessageContentPart,
   type ProviderReportedUsage,
   ProviderReportedUsageSchema,
+  ProviderUsageRequestIdSchema,
   RESIN_ASSISTANT_STOP_REASON_METADATA_KEY,
   RESIN_CODEX_COMMAND_METADATA_KEY,
+  RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+  RESIN_TASK_ID_METADATA_KEY,
   type RedactionMeta,
+  ResinTaskIdSchema,
+  isResinGatewayToolCall,
+  readResinInvocationReceipts,
+  resinInvocationReceiptMetadata,
 } from "@resin/contracts";
 import type {
   DecoderMetadataRecord,
@@ -123,12 +130,16 @@ function extractModelName(
  *
  * Requirements:
  * - Only authoritative provider metrics are preserved.
- * - If totalTokens is missing, marks availability as 'partial'.
  * - If no metrics exist, returns undefined (never fabricates zero-token objects).
  * - Converts cost and duration to canonical schema units (micro-USD, milliseconds).
+ *
+ * With `requestId`, the record is request-scoped and reads Anthropic's disjoint categories (see
+ * `claudeRequestUsage`). Without it, the legacy record keeps its old meaning: complete only when
+ * the source reports a total, and cache writes are not reported.
  */
 export function extractClaudeProviderUsage(
   payload: ClaudeTranscriptPayload,
+  requestId?: string,
 ): ProviderReportedUsage | undefined {
   // 1. Locate usage container: payload.usage, payload.message.usage, or payload directly
   const rawUsage: ClaudeTranscriptPayload | undefined =
@@ -147,6 +158,8 @@ export function extractClaudeProviderUsage(
     return undefined;
   }
 
+  const scope = requestId === undefined ? {} : { usageScope: "request" as const, requestId };
+
   // Check explicit unavailable state
   if (asString(rawUsage.availability) === "unavailable") {
     const model = extractModelName(payload, rawUsage);
@@ -154,12 +167,17 @@ export function extractClaudeProviderUsage(
       provider: CLAUDE_PROVIDER,
       accountingVersion: CLAUDE_ACCOUNTING_VERSION,
       availability: "unavailable",
+      ...scope,
     };
     if (model) {
       unavailableUsage.model = model;
     }
     const parsed = ProviderReportedUsageSchema.safeParse(unavailableUsage);
     return parsed.success ? parsed.data : undefined;
+  }
+
+  if (requestId !== undefined) {
+    return claudeRequestUsage(payload, rawUsage, requestId);
   }
 
   // Extract explicit token counts
@@ -193,44 +211,8 @@ export function extractClaudeProviderUsage(
   const inputTokens = rawInputTokens;
   const outputTokens = rawOutputTokens;
   const reasoningTokens = rawReasoningTokens;
-
-  // Extract Cost (normalize USD to integer micro-USD)
-  let costMicroUsd: number | undefined;
-  const rawCostMicro =
-    toNonNegativeInteger(rawUsage.cost_micro_usd) ??
-    toNonNegativeInteger(rawUsage.costMicroUsd) ??
-    toNonNegativeInteger(rawUsage.cost_micros) ??
-    toNonNegativeInteger(rawUsage.costMicros);
-  if (rawCostMicro !== undefined) {
-    costMicroUsd = rawCostMicro;
-  } else {
-    const rawCostUsd =
-      asNumber(rawUsage.cost_usd) ??
-      asNumber(rawUsage.costUsd) ??
-      asNumber(rawUsage.cost) ??
-      asNumber(rawUsage.total_cost);
-    if (rawCostUsd !== undefined && rawCostUsd >= 0) {
-      costMicroUsd = Math.round(rawCostUsd * 1_000_000);
-    }
-  }
-
-  // Extract Duration
-  let durationMs =
-    toNonNegativeInteger(rawUsage.duration_ms) ??
-    toNonNegativeInteger(rawUsage.durationMs) ??
-    toNonNegativeInteger(rawUsage.latency_ms) ??
-    toNonNegativeInteger(rawUsage.latencyMs) ??
-    toNonNegativeInteger(payload.duration_ms) ??
-    toNonNegativeInteger(payload.durationMs);
-  if (durationMs === undefined) {
-    const durSec =
-      asNumber(rawUsage.duration_s) ??
-      asNumber(rawUsage.duration_seconds) ??
-      asNumber(rawUsage.durationSeconds);
-    if (durSec !== undefined && durSec >= 0) {
-      durationMs = Math.round(durSec * 1000);
-    }
-  }
+  const costMicroUsd = claudeCostMicroUsd(rawUsage);
+  const durationMs = claudeDurationMs(payload, rawUsage);
 
   // Check if we have at least one genuine metric
   const hasAnyMetric =
@@ -271,6 +253,123 @@ export function extractClaudeProviderUsage(
   }
 
   return parseResult.data;
+}
+
+/**
+ * Request-scoped usage of one Anthropic Messages response. Anthropic reports disjoint categories:
+ * `input_tokens` excludes cache reads and writes, so it is already the uncached input;
+ * `cache_creation_input_tokens` is every cache write (its `cache_creation` TTL fields subdivide it
+ * and are never added); `output_tokens` includes thinking, and
+ * `output_tokens_details.thinking_tokens` is the thinking part of it. Anthropic reports no total, so
+ * a complete record's total is the sum of the four categories. A missing category stays unknown and
+ * makes the record partial.
+ */
+function claudeRequestUsage(
+  payload: ClaudeTranscriptPayload,
+  rawUsage: ClaudeTranscriptPayload,
+  requestId: string,
+): ProviderReportedUsage | undefined {
+  const inputTokens = toNonNegativeInteger(rawUsage.input_tokens);
+  const cachedInputTokens = toNonNegativeInteger(rawUsage.cache_read_input_tokens);
+  const cacheWriteTokens = toNonNegativeInteger(rawUsage.cache_creation_input_tokens);
+  const outputTokens = toNonNegativeInteger(rawUsage.output_tokens);
+  const reasoningTokens = toNonNegativeInteger(
+    asObject(rawUsage.output_tokens_details)?.thinking_tokens,
+  );
+  const sourceTotal = toNonNegativeInteger(rawUsage.total_tokens);
+  const costMicroUsd = claudeCostMicroUsd(rawUsage);
+  const durationMs = claudeDurationMs(payload, rawUsage);
+
+  if (
+    inputTokens === undefined &&
+    cachedInputTokens === undefined &&
+    cacheWriteTokens === undefined &&
+    outputTokens === undefined &&
+    reasoningTokens === undefined &&
+    sourceTotal === undefined &&
+    costMicroUsd === undefined &&
+    durationMs === undefined
+  ) {
+    return undefined;
+  }
+
+  const sum =
+    inputTokens !== undefined &&
+    cachedInputTokens !== undefined &&
+    cacheWriteTokens !== undefined &&
+    outputTokens !== undefined
+      ? inputTokens + cachedInputTokens + cacheWriteTokens + outputTokens
+      : undefined;
+  const complete =
+    sum !== undefined &&
+    (reasoningTokens === undefined ||
+      outputTokens === undefined ||
+      reasoningTokens <= outputTokens) &&
+    (sourceTotal === undefined || sourceTotal === sum);
+
+  const usage: ProviderReportedUsage = {
+    provider: CLAUDE_PROVIDER,
+    accountingVersion: CLAUDE_ACCOUNTING_VERSION,
+    availability: complete ? "complete" : "partial",
+    usageScope: "request",
+    requestId,
+  };
+  const model = extractModelName(payload, rawUsage);
+  if (model) usage.model = model;
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  if (cachedInputTokens !== undefined) usage.cachedInputTokens = cachedInputTokens;
+  if (cacheWriteTokens !== undefined) usage.cacheWriteTokens = cacheWriteTokens;
+  if (outputTokens !== undefined) usage.outputTokens = outputTokens;
+  if (reasoningTokens !== undefined) usage.reasoningTokens = reasoningTokens;
+  const totalTokens = complete ? sum : sourceTotal;
+  if (totalTokens !== undefined) usage.totalTokens = totalTokens;
+  // A cost in the transcript's own usage record is a source monetary field, not a Resin estimate.
+  if (costMicroUsd !== undefined) {
+    usage.costMicroUsd = costMicroUsd;
+    usage.costProvenance = "source_reported";
+  }
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+
+  const parsed = ProviderReportedUsageSchema.safeParse(usage);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** Reported cost in integer micro-USD, from a micro-USD field or a USD amount. */
+function claudeCostMicroUsd(rawUsage: ClaudeTranscriptPayload): number | undefined {
+  const rawCostMicro =
+    toNonNegativeInteger(rawUsage.cost_micro_usd) ??
+    toNonNegativeInteger(rawUsage.costMicroUsd) ??
+    toNonNegativeInteger(rawUsage.cost_micros) ??
+    toNonNegativeInteger(rawUsage.costMicros);
+  if (rawCostMicro !== undefined) return rawCostMicro;
+  const rawCostUsd =
+    asNumber(rawUsage.cost_usd) ??
+    asNumber(rawUsage.costUsd) ??
+    asNumber(rawUsage.cost) ??
+    asNumber(rawUsage.total_cost);
+  return rawCostUsd !== undefined && rawCostUsd >= 0
+    ? Math.round(rawCostUsd * 1_000_000)
+    : undefined;
+}
+
+/** Reported duration in milliseconds, from a millisecond or a seconds field. */
+function claudeDurationMs(
+  payload: ClaudeTranscriptPayload,
+  rawUsage: ClaudeTranscriptPayload,
+): number | undefined {
+  const durationMs =
+    toNonNegativeInteger(rawUsage.duration_ms) ??
+    toNonNegativeInteger(rawUsage.durationMs) ??
+    toNonNegativeInteger(rawUsage.latency_ms) ??
+    toNonNegativeInteger(rawUsage.latencyMs) ??
+    toNonNegativeInteger(payload.duration_ms) ??
+    toNonNegativeInteger(payload.durationMs);
+  if (durationMs !== undefined) return durationMs;
+  const durSec =
+    asNumber(rawUsage.duration_s) ??
+    asNumber(rawUsage.duration_seconds) ??
+    asNumber(rawUsage.durationSeconds);
+  return durSec !== undefined && durSec >= 0 ? Math.round(durSec * 1000) : undefined;
 }
 
 /**
@@ -326,18 +425,54 @@ export interface PendingClaudeToolCall {
   timestamp: string;
   /** A built-in `Bash` call run in the foreground: its result without an error means exit 0. */
   foregroundShell?: true;
+  /** The model request whose response issued the call. */
+  modelRequestId?: string;
 }
 
 /** Tool calls awaiting their results, keyed by Claude's `tool_use` id. */
 export type PendingClaudeToolCalls = Map<string, PendingClaudeToolCall>;
 
 /**
- * Assistant message ids whose provider usage an event already carries. Claude writes one content
- * block per line, each repeating its message's usage, so only the first carrying event of a message
- * may report it. Bounded: a message's lines arrive together, so only recent ids can recur.
+ * The last usage snapshot an event carried for each request id. Claude writes one content block per
+ * line, each repeating its message's usage (earlier lines may carry a smaller streaming output
+ * count), so a line reports usage only when it differs from the last snapshot of its request;
+ * consumers keep the latest snapshot per request id. Bounded: a message's lines arrive together.
  */
-export type AttributedClaudeMessages = Set<string>;
-const MAX_ATTRIBUTED_MESSAGES = 4096;
+export type ClaudeUsageSnapshots = Map<string, string>;
+
+/**
+ * The `uuid` of each session's latest genuine user prompt: the task its later events belong to.
+ * Unknown after a restart until the next prompt.
+ */
+export type ClaudeSessionTasks = Map<string, string>;
+
+const MAX_TRACKED_ENTRIES = 4096;
+
+/** Sets `key` as the most recent entry, evicting the oldest past the bound. */
+function rememberBounded(map: Map<string, string>, key: string, value: string): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > MAX_TRACKED_ENTRIES) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+}
+
+/** Claude writes `<synthetic>` assistant messages locally, without a model request. */
+const CLAUDE_SYNTHETIC_MODEL = "<synthetic>";
+
+/**
+ * The provider request id of an assistant line: the Anthropic message id, else the API request id;
+ * every line of one response shares both. Never the per-line `uuid`.
+ */
+function claudeRequestId(payload: ClaudeTranscriptPayload): string | undefined {
+  const message = asObject(payload.message);
+  for (const candidate of [message?.id, payload.requestId]) {
+    const parsed = ProviderUsageRequestIdSchema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
 
 /** Canonical call id for a Claude `tool_use` id (`toolu_…`), constrained to identifier characters. */
 /**
@@ -368,8 +503,9 @@ export function claudeCallId(toolCallId: string): string {
 /**
  * Decodes a single Claude Code JSONL or memory transcript line into canonical intermediate events.
  * `pendingCalls` carries tool calls across lines so a result can name its tool, measure its
- * duration, and report the shell command it completed; `attributedMessages` keeps a message split
- * across lines from reporting its usage more than once.
+ * duration, report the shell command it completed, and link the model request that issued it;
+ * `usageSnapshots` keeps a message split across lines from repeating an unchanged usage snapshot;
+ * `sessionTasks` links each event to its session's latest user prompt.
  */
 export function decodeClaudeTranscriptLine(
   lineOrPayload: string | ClaudeTranscriptPayload,
@@ -377,7 +513,8 @@ export function decodeClaudeTranscriptLine(
   sequenceNumber = 0,
   timestamp = new Date().toISOString(),
   pendingCalls: PendingClaudeToolCalls = new Map(),
-  attributedMessages: AttributedClaudeMessages = new Set(),
+  usageSnapshots: ClaudeUsageSnapshots = new Map(),
+  sessionTasks: ClaudeSessionTasks = new Map(),
 ): IntermediateSessionEvent[] {
   const events = decodeLineEvents(
     lineOrPayload,
@@ -385,7 +522,8 @@ export function decodeClaudeTranscriptLine(
     sequenceNumber,
     timestamp,
     pendingCalls,
-    attributedMessages,
+    usageSnapshots,
+    sessionTasks,
   );
   // Every event of one line shares the line's sequence; its position within the line keeps each
   // one distinct (a tool result and the command it completed would otherwise collide).
@@ -405,7 +543,8 @@ function decodeLineEvents(
   sequenceNumber: number,
   timestamp: string,
   pendingCalls: PendingClaudeToolCalls,
-  attributedMessages: AttributedClaudeMessages,
+  usageSnapshots: ClaudeUsageSnapshots,
+  sessionTasks: ClaudeSessionTasks,
 ): IntermediateSessionEvent[] {
   const payload = parseRawPayload(lineOrPayload);
   if (!payload) {
@@ -697,6 +836,15 @@ function decodeLineEvents(
     const rawContent =
       asObject(payload.message)?.content ?? payload.content ?? payload.text ?? payload.prompt;
     const recordedCwd = asString(payload.cwd);
+    // A genuine user prompt starts a task named by the prompt record's own `uuid`; tool results
+    // and harness-authored turns continue the current one. A prompt without a usable id leaves
+    // the task unknown rather than reusing the previous one.
+    const currentTaskId = sessionTasks.get(sessionId);
+    const parsedPromptId = ResinTaskIdSchema.safeParse(payload.uuid);
+    const promptTaskId = parsedPromptId.success ? parsedPromptId.data : undefined;
+    const promptMetadata =
+      promptTaskId === undefined ? undefined : { [RESIN_TASK_ID_METADATA_KEY]: promptTaskId };
+    let startsTask = false;
 
     const strContent = asString(rawContent);
     if (strContent !== undefined) {
@@ -707,6 +855,7 @@ function decodeLineEvents(
         payload.isMeta === true ||
         asObject(payload.origin) !== undefined ||
         /^<(command-name|local-command-[a-z]+|task-notification)>/u.test(strContent);
+      startsTask = !harnessAuthored;
       events.push(
         withBaseFields<IntermediateMessageEvent>(
           {
@@ -715,6 +864,7 @@ function decodeLineEvents(
             timestamp: recordTime,
             role: harnessAuthored ? "system" : "user",
             content: strContent,
+            ...(startsTask && promptMetadata ? { metadata: promptMetadata } : {}),
           },
           sessionId,
           recordTime,
@@ -752,6 +902,23 @@ function decodeLineEvents(
             const endedAt = Date.parse(recordTime);
             const durationKnown = Number.isFinite(startedAt) && Number.isFinite(endedAt);
             const durationMs = durationKnown ? Math.max(0, endedAt - startedAt) : 0;
+            const metadata: DecoderMetadataRecord = {
+              ...(durationKnown ? {} : { executionDurationUnknown: true }),
+              // Claude reports a foreground `Bash` that exited non-zero as an error.
+              ...(pending?.foregroundShell && !isError
+                ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
+                : {}),
+              ...(pending?.modelRequestId === undefined
+                ? {}
+                : { [RESIN_MODEL_REQUEST_ID_METADATA_KEY]: pending.modelRequestId }),
+              ...(currentTaskId === undefined
+                ? {}
+                : { [RESIN_TASK_ID_METADATA_KEY]: currentTaskId }),
+              // Only a Resin gateway call's result may carry its invocation receipts.
+              ...(isResinGatewayToolCall(toolName)
+                ? resinInvocationReceiptMetadata(readResinInvocationReceipts(rawOutput))
+                : {}),
+            };
 
             events.push(
               withBaseFields<IntermediateToolResultEvent>(
@@ -767,17 +934,7 @@ function decodeLineEvents(
                   ...(isError ? { error: output } : {}),
                   executionDurationMs: durationMs,
                   outputSizeBytes: Buffer.byteLength(output, "utf8"),
-                  ...(durationKnown && !(pending?.foregroundShell && !isError)
-                    ? {}
-                    : {
-                        metadata: {
-                          ...(durationKnown ? {} : { executionDurationUnknown: true }),
-                          // Claude reports a foreground `Bash` that exited non-zero as an error.
-                          ...(pending?.foregroundShell && !isError
-                            ? { [RESIN_LOCAL_SOURCE_INTERFACE_KEY]: "shell-exited-0" }
-                            : {}),
-                        },
-                      }),
+                  ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
                 },
                 sessionId,
                 recordTime,
@@ -787,15 +944,18 @@ function decodeLineEvents(
             toolResultIds.push(toolCallId);
           } else if (blockType === "text" || asString(block.text) !== undefined) {
             const text = asString(block.text) || asString(block.content) || "";
+            // "[Request interrupted by user...]" is Claude's notice of an abort, not a request.
+            const isPrompt = !/^\[Request interrupted by user/u.test(text);
+            if (isPrompt) startsTask = true;
             events.push(
               withBaseFields<IntermediateMessageEvent>(
                 {
                   type: "message",
                   sessionId,
                   timestamp: recordTime,
-                  // "[Request interrupted by user...]" is Claude's notice of an abort, not a request.
-                  role: /^\[Request interrupted by user/u.test(text) ? "system" : "user",
+                  role: isPrompt ? "user" : "system",
                   content: text,
+                  ...(isPrompt && promptMetadata ? { metadata: promptMetadata } : {}),
                 },
                 sessionId,
                 recordTime,
@@ -839,6 +999,11 @@ function decodeLineEvents(
       }
     }
 
+    if (startsTask) {
+      if (promptTaskId === undefined) sessionTasks.delete(sessionId);
+      else rememberBounded(sessionTasks, sessionId, promptTaskId);
+    }
+
     if (events.length > 0) {
       return events;
     }
@@ -850,29 +1015,35 @@ function decodeLineEvents(
     rawType === "assistant_message" ||
     asString(payload.role) === "assistant"
   ) {
-    const messageId = asString(asObject(payload.message)?.id);
+    // A synthetic message is not a model request: it reports no usage and links no request.
+    const synthetic = asString(asObject(payload.message)?.model) === CLAUDE_SYNTHETIC_MODEL;
+    const requestId = synthetic ? undefined : claudeRequestId(payload);
+    const lineUsage = synthetic ? undefined : extractClaudeProviderUsage(payload, requestId);
+    // A request's lines repeat its usage; only a changed snapshot is reported again.
+    const usageSnapshot = lineUsage === undefined ? undefined : JSON.stringify(lineUsage);
     const providerUsage =
-      messageId !== undefined && attributedMessages.has(messageId)
+      requestId !== undefined && usageSnapshots.get(requestId) === usageSnapshot
         ? undefined
-        : extractClaudeProviderUsage(payload);
+        : lineUsage;
     const rawContent = asObject(payload.message)?.content ?? payload.content ?? payload.text;
 
     const assistantTurnEvents: IntermediateSessionEvent[] = [];
 
     const strContent = asString(rawContent);
     if (strContent !== undefined) {
-      const msgEvent: IntermediateMessageEvent = {
-        type: "message",
-        sessionId,
-        timestamp: recordTime,
-        role: "assistant",
-        content: strContent,
-      };
-      if (providerUsage) {
-        msgEvent.providerUsage = providerUsage;
-      }
       assistantTurnEvents.push(
-        withBaseFields<IntermediateMessageEvent>(msgEvent, sessionId, recordTime, sequenceNumber),
+        withBaseFields<IntermediateMessageEvent>(
+          {
+            type: "message",
+            sessionId,
+            timestamp: recordTime,
+            role: "assistant",
+            content: strContent,
+          },
+          sessionId,
+          recordTime,
+          sequenceNumber,
+        ),
       );
     } else {
       const contentParts = asArray(rawContent);
@@ -950,13 +1121,14 @@ function decodeLineEvents(
               inputRecord.run_in_background !== true
                 ? { foregroundShell: true as const }
                 : {}),
+              ...(requestId === undefined ? {} : { modelRequestId: requestId }),
             });
           }
         }
       }
     }
 
-    // Attach providerUsage to the primary model execution event of the message's first line
+    // Attach providerUsage to the primary model execution event of the line
     if (providerUsage && assistantTurnEvents.length > 0) {
       let targetEvent: IntermediateSessionEvent | undefined = assistantTurnEvents.find(
         (e): e is IntermediateMessageEvent => e.type === "message" && e.role === "assistant",
@@ -969,12 +1141,8 @@ function decodeLineEvents(
       }
       if (targetEvent) {
         targetEvent.providerUsage = providerUsage;
-        if (messageId !== undefined) {
-          attributedMessages.add(messageId);
-          if (attributedMessages.size > MAX_ATTRIBUTED_MESSAGES) {
-            const oldest = attributedMessages.values().next().value;
-            if (oldest !== undefined) attributedMessages.delete(oldest);
-          }
+        if (requestId !== undefined && usageSnapshot !== undefined) {
+          rememberBounded(usageSnapshots, requestId, usageSnapshot);
         }
       }
     }
@@ -982,12 +1150,15 @@ function decodeLineEvents(
     // Claude writes one content block per record, each repeating the message's stop reason; an
     // `end_turn` on the final block is what closes the turn.
     const stopReason = asString(asObject(payload.message)?.stop_reason);
-    if (stopReason) {
+    const taskId = sessionTasks.get(sessionId);
+    const lineMetadata: DecoderMetadataRecord = {
+      ...(stopReason ? { [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: stopReason } : {}),
+      ...(requestId === undefined ? {} : { [RESIN_MODEL_REQUEST_ID_METADATA_KEY]: requestId }),
+      ...(taskId === undefined ? {} : { [RESIN_TASK_ID_METADATA_KEY]: taskId }),
+    };
+    if (Object.keys(lineMetadata).length > 0) {
       for (const event of assistantTurnEvents) {
-        event.metadata = {
-          ...event.metadata,
-          [RESIN_ASSISTANT_STOP_REASON_METADATA_KEY]: stopReason,
-        };
+        event.metadata = { ...event.metadata, ...lineMetadata };
       }
     }
 
@@ -1207,8 +1378,10 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
   readonly decoderVersion = CLAUDE_ACCOUNTING_VERSION;
   /** Tool calls awaiting results; Claude `tool_use` ids are unique across sessions. */
   private readonly pendingCalls: PendingClaudeToolCalls = new Map();
-  /** Messages whose usage is already reported; Claude message ids are unique across sessions. */
-  private readonly attributedMessages: AttributedClaudeMessages = new Set();
+  /** Last usage snapshot reported per request; Claude message ids are unique across sessions. */
+  private readonly usageSnapshots: ClaudeUsageSnapshots = new Map();
+  /** Each session's latest user prompt id. */
+  private readonly sessionTasks: ClaudeSessionTasks = new Map();
 
   canDecode(record: RawHarnessRecord): boolean {
     if (!record) return false;
@@ -1240,7 +1413,8 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
         sequenceNumber,
         timestamp,
         this.pendingCalls,
-        this.attributedMessages,
+        this.usageSnapshots,
+        this.sessionTasks,
       );
     }
     if (
@@ -1256,7 +1430,8 @@ export class ClaudeRecordDecoder implements HarnessRecordDecoder {
         sequenceNumber,
         timestamp,
         this.pendingCalls,
-        this.attributedMessages,
+        this.usageSnapshots,
+        this.sessionTasks,
       );
     }
     return [];

@@ -77,6 +77,39 @@ describe.each(CODEX_TESTED_VERSIONS)("recorded Codex %s rollouts", (version) => 
     expect(usage.every((entry) => (entry.inputTokens ?? 0) > 0)).toBe(true);
   });
 
+  it.each(SCENARIOS)("reports %s usage once per model response", async (scenario) => {
+    const jsonl = await recorded(version, scenario);
+    const records = jsonl
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+    const responseIds = records
+      .filter((record) => record.type === "token_usage_record")
+      .map((record) => record.payload.response_id);
+    const turnIds = new Set(
+      records.flatMap((record) =>
+        record.type === "event_msg" && record.payload.type === "task_started"
+          ? [record.payload.turn_id]
+          : [],
+      ),
+    );
+    const events = await decode(version, scenario);
+    const lifecycles = ofType(events, "session_lifecycle");
+    const requests = lifecycles.filter((event) => event.providerUsage?.usageScope === "request");
+    expect(requests.map((event) => event.providerUsage?.requestId)).toEqual(responseIds);
+    for (const request of requests) {
+      // Recorded Codex counts are consistent: every request is complete.
+      expect(request.providerUsage?.availability).toBe("complete");
+      expect(request.metadata?.modelRequestId).toBe(request.providerUsage?.requestId);
+      expect(turnIds.has(request.metadata?.taskId)).toBe(true);
+    }
+    // Usage lives only on the request events; turn ends never add a summed copy.
+    expect(events.filter((event) => event.providerUsage)).toEqual(requests);
+    const prompts = ofType(events, "message").filter((event) => event.role === "user");
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.every((event) => turnIds.has(event.metadata?.taskId))).toBe(true);
+  });
+
   it("captures compaction boundaries", async () => {
     const compactions = ofType(await decode(version, "compaction"), "compaction");
     expect(compactions.length).toBeGreaterThan(0);

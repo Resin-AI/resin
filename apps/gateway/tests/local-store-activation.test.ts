@@ -175,7 +175,6 @@ describe("GitHub Issue #110: Published Tool Versions in Local Gateway Catalog", 
         },
       })) as JsonRpcSuccessResponse<CallToolResult>;
       expect(callRes.error).toBeUndefined();
-      expect(callRes.result.content).toHaveLength(1);
       expect(callRes.result.content[0].type).toBe("text");
       const parsedOutput = JSON.parse(callRes.result.content[0].text);
       expect(parsedOutput.status).toBe("executed");

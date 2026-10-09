@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type CodexCommandAssociation,
+  ProviderUsageRequestIdSchema,
   RESIN_CODEX_COMMAND_METADATA_KEY,
+  RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+  RESIN_TASK_ID_METADATA_KEY,
+  ResinTaskIdSchema,
+  isResinGatewayToolCall,
+  readResinInvocationReceipts,
+  resinInvocationReceiptMetadata,
   shellDialectOfExecutable,
   windowsShellInvocation,
 } from "@resin/contracts";
@@ -1070,6 +1077,81 @@ function buildProviderUsage(
   return parsed.success ? parsed.data : undefined;
 }
 
+/**
+ * Accounting version of all usage read from native rollout `token_usage_record`s. Request-scoped
+ * and legacy turn records share it within one session; `usageScope` tells them apart.
+ */
+const CODEX_NATIVE_ROLLOUT_ACCOUNTING_VERSION = "codex-cli-native-rollout-v1";
+
+/**
+ * Request-scoped usage of one model response from a native `token_usage_record.usage`.
+ * OpenAI counts cache reads and cache writes inside `input_tokens` and reasoning inside
+ * `output_tokens`, so uncached input is input - cached - cache writes. The record is complete only
+ * when all four categories are known, reasoning fits in output and the source total equals
+ * input + output; otherwise it is partial and keeps every reported value. A missing count stays
+ * unknown, and a record with no counts at all is unavailable rather than zero.
+ */
+function buildNativeRequestUsage(
+  rawUsage: CodexTranscriptPayload | undefined,
+  requestId: string,
+  provider: string,
+  model: string | undefined,
+): ProviderReportedUsage | undefined {
+  const usage: ProviderReportedUsage = {
+    provider,
+    accountingVersion: CODEX_NATIVE_ROLLOUT_ACCOUNTING_VERSION,
+    availability: "unavailable",
+    usageScope: "request",
+    requestId,
+  };
+  if (model) usage.model = model;
+  const input = rawUsage && parseNonNegativeInt(rawUsage.input_tokens);
+  const cached = rawUsage && parseNonNegativeInt(rawUsage.cached_input_tokens);
+  const cacheWrite = rawUsage && parseNonNegativeInt(rawUsage.cache_write_input_tokens);
+  const output = rawUsage && parseNonNegativeInt(rawUsage.output_tokens);
+  const reasoning = rawUsage && parseNonNegativeInt(rawUsage.reasoning_output_tokens);
+  const total = rawUsage && parseNonNegativeInt(rawUsage.total_tokens);
+  const costMicroUsd = rawUsage && parseCostMicroUsd(rawUsage);
+  const durationMs = rawUsage && parseDurationMs(rawUsage);
+  const explicitlyUnavailable =
+    asString(rawUsage?.availability) === "unavailable" || rawUsage?.unavailable === true;
+  const known = [input, cached, cacheWrite, output, reasoning, total, costMicroUsd, durationMs];
+  if (explicitlyUnavailable || known.every((value) => value === undefined)) {
+    const parsed = ProviderReportedUsageSchema.safeParse(usage);
+    return parsed.success ? parsed.data : undefined;
+  }
+  const uncached =
+    input !== undefined && cached !== undefined && cacheWrite !== undefined
+      ? input - cached - cacheWrite
+      : undefined;
+  const inputTokens = uncached !== undefined && uncached >= 0 ? uncached : undefined;
+  const categorySum =
+    inputTokens !== undefined && input !== undefined && output !== undefined
+      ? input + output
+      : undefined;
+  const complete =
+    categorySum !== undefined &&
+    (reasoning === undefined || output === undefined || reasoning <= output) &&
+    (total === undefined || total === categorySum);
+  usage.availability = complete ? "complete" : "partial";
+  if (inputTokens !== undefined) usage.inputTokens = inputTokens;
+  if (cached !== undefined) usage.cachedInputTokens = cached;
+  if (cacheWrite !== undefined) usage.cacheWriteTokens = cacheWrite;
+  if (output !== undefined) usage.outputTokens = output;
+  if (reasoning !== undefined) usage.reasoningTokens = reasoning;
+  // Complete: the four disjoint categories sum to input + output. Partial: the source total as is.
+  const totalTokens = complete ? categorySum : total;
+  if (totalTokens !== undefined) usage.totalTokens = totalTokens;
+  // A cost in the rollout's own usage record is a source monetary field, not a Resin estimate.
+  if (costMicroUsd !== undefined) {
+    usage.costMicroUsd = costMicroUsd;
+    usage.costProvenance = "source_reported";
+  }
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+  const parsed = ProviderReportedUsageSchema.safeParse(usage);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export interface BaseNormalizedEventHeader {
   eventId: string;
   sessionId: string;
@@ -1100,8 +1182,11 @@ interface CodexNativeThreadUsage {
   turnId?: string;
   turnUsage?: CodexTranscriptPayload;
   lastTokenUsage?: CodexTranscriptPayload;
+  /** Usage records of the turn's responses that carry no usable response id. */
   responseUsage: CodexTranscriptPayload[];
   responseIds: Set<string>;
+  /** The turn's responses already reported their own request-scoped usage. */
+  requestUsageEmitted: boolean;
   cumulativeUsage?: CodexTranscriptPayload;
 }
 
@@ -1235,6 +1320,8 @@ export class CodexSessionDecoder {
     { responseItem: number; itemCompleted: number }
   >();
   private nativeUsageByThread = new Map<string, CodexNativeThreadUsage>();
+  /** Last request usage emitted per thread and response id, to drop unchanged repeats. */
+  private nativeRequestSnapshots = new Map<string, string>();
   private nativeStartedThreads = new Set<string>();
   private seenNativeTerminalTurns = new Set<string>();
   /** Direct MCP calls whose result one of their two records already gave (`claimDirectMcpResult`). */
@@ -1522,7 +1609,7 @@ export class CodexSessionDecoder {
     const key = threadId ?? this.sessionId;
     let state = this.nativeUsageByThread.get(key);
     if (!state) {
-      state = { responseUsage: [], responseIds: new Set<string>() };
+      state = { responseUsage: [], responseIds: new Set<string>(), requestUsageEmitted: false };
       this.nativeUsageByThread.set(key, state);
     }
     return state;
@@ -1535,6 +1622,7 @@ export class CodexSessionDecoder {
     state.lastTokenUsage = undefined;
     state.responseUsage = [];
     state.responseIds.clear();
+    state.requestUsageEmitted = false;
     state.cumulativeUsage = undefined;
   }
 
@@ -1606,6 +1694,8 @@ export class CodexSessionDecoder {
   ): CodexTranscriptPayload {
     const priorMetadata = { ...(this.currentMetadata ?? {}) };
     delete priorMetadata.codexNative;
+    // The turn link is set below from this record's own context, never carried over.
+    delete priorMetadata[RESIN_TASK_ID_METADATA_KEY];
     const sourceMetadata = {
       ...priorMetadata,
       ...(asObject(payload.metadata) ?? {}),
@@ -1674,13 +1764,25 @@ export class CodexSessionDecoder {
     };
     const metadata: CodexTranscriptPayload = {
       ...sourceMetadata,
+      ...(context.turnId && ResinTaskIdSchema.safeParse(context.turnId).success
+        ? { [RESIN_TASK_ID_METADATA_KEY]: context.turnId }
+        : {}),
       codexNative: nativeMetadata,
     };
     this.currentMetadata = metadata;
     return metadata;
   }
 
-  private saveNativeUsageRecord(payload: CodexTranscriptPayload): void {
+  /**
+   * A native `token_usage_record`. One with a usable `response_id` is one model response: it
+   * becomes a `resume` lifecycle event carrying that response's request-scoped usage, and the
+   * turn's terminal event then carries no summed usage. Records without an id keep the legacy
+   * turn sum. `thread_token_usage` is cumulative and only kept as terminal metadata.
+   */
+  private normalizeNativeUsageRecord(
+    payload: CodexTranscriptPayload,
+    timestamp: string | undefined,
+  ): NormalizedSessionEvent[] {
     const threadId = asString(payload.thread_id) ?? this.currentNativeThreadId;
     let state = this.nativeUsageState(threadId);
     const turnId = asString(payload.turn_id);
@@ -1692,17 +1794,72 @@ export class CodexSessionDecoder {
     const responseUsage = asObject(payload.usage);
     const cumulativeUsage = asObject(payload.thread_token_usage);
     const responseId = asString(payload.response_id);
-    if (turnUsage) state.turnUsage = turnUsage;
     if (cumulativeUsage) state.cumulativeUsage = cumulativeUsage;
+    if (responseId !== undefined && ProviderUsageRequestIdSchema.safeParse(responseId).success) {
+      state.requestUsageEmitted = true;
+      return this.nativeRequestUsage(responseId, responseUsage, threadId, timestamp);
+    }
+    if (turnUsage) state.turnUsage = turnUsage;
     if (responseUsage && (!responseId || !state.responseIds.has(responseId))) {
       if (responseId) state.responseIds.add(responseId);
       state.responseUsage.push(responseUsage);
     }
+    return [];
+  }
+
+  /**
+   * The `resume` lifecycle event of one model response, linked by `modelRequestId`. A repeated
+   * record of the same response is emitted again only when its usage changed; consumers keep the
+   * later snapshot of a request and never sum snapshots.
+   */
+  private nativeRequestUsage(
+    responseId: string,
+    rawUsage: CodexTranscriptPayload | undefined,
+    threadId: string | undefined,
+    timestamp: string | undefined,
+  ): NormalizedSessionEvent[] {
+    const context =
+      this.nativeContexts.get(threadId ?? this.sessionId) ?? this.currentNativeContext;
+    const usage = buildNativeRequestUsage(
+      rawUsage,
+      responseId,
+      context?.modelProvider || "openai",
+      context?.model,
+    );
+    if (!usage) return [];
+    const key = JSON.stringify([threadId ?? this.sessionId, responseId]);
+    const snapshot = JSON.stringify(usage);
+    if (this.nativeRequestSnapshots.get(key) === snapshot) return [];
+    this.nativeRequestSnapshots.delete(key);
+    if (this.nativeRequestSnapshots.size >= 4096) {
+      this.nativeRequestSnapshots.delete(this.nativeRequestSnapshots.keys().next().value!);
+    }
+    this.nativeRequestSnapshots.set(key, snapshot);
+    const metadata: CodexTranscriptPayload = {
+      ...(this.currentMetadata ?? {}),
+      [RESIN_MODEL_REQUEST_ID_METADATA_KEY]: responseId,
+    };
+    const event: NormalizedSessionLifecycleEvent = {
+      ...this.emitHeader("session_lifecycle", timestamp, undefined, metadata),
+      type: "session_lifecycle",
+      lifecycleType: "resume",
+      harnessName: "codex-cli",
+      workspaceId: this.workspaceId,
+      providerUsage: usage,
+    };
+    return [event];
   }
 
   private nativeTurnUsage(
     state: CodexNativeThreadUsage,
   ): { rawUsage: CodexTranscriptPayload; isLastResponseSnapshot: boolean } | undefined {
+    if (state.requestUsageEmitted) {
+      // Each identified response already carried its own usage, and the turn total and the last
+      // token-count snapshot include it, so only responses without an id remain to sum.
+      return state.responseUsage.length > 0
+        ? { rawUsage: sumUsageRecords(state.responseUsage), isLastResponseSnapshot: false }
+        : undefined;
+    }
     if (state.turnUsage) {
       return { rawUsage: state.turnUsage, isLastResponseSnapshot: false };
     }
@@ -1735,7 +1892,7 @@ export class CodexSessionDecoder {
       isLastResponseSnapshot && !preserveUnavailable
         ? { ...rawUsage, availability: "partial" }
         : rawUsage;
-    return buildProviderUsage(usage, rawPayload, "codex-cli-native-rollout-v1");
+    return buildProviderUsage(usage, rawPayload, CODEX_NATIVE_ROLLOUT_ACCOUNTING_VERSION);
   }
 
   private normalizeNativeItem(
@@ -1887,14 +2044,21 @@ export class CodexSessionDecoder {
       normalizedItem.model = this.currentNativeContext.model;
     }
     if (itemTurnId && combinedMetadata) {
-      normalizedItem.metadata = {
+      const itemTurnMetadata: CodexTranscriptPayload = {
         ...combinedMetadata,
         codexNative: {
           ...(asObject(combinedMetadata.codexNative) ?? {}),
           turnId: itemTurnId,
         },
       };
-      this.currentMetadata = normalizedItem.metadata;
+      // The item names its own turn; that turn, not the decoder's current one, is its task.
+      if (ResinTaskIdSchema.safeParse(itemTurnId).success) {
+        itemTurnMetadata[RESIN_TASK_ID_METADATA_KEY] = itemTurnId;
+      } else {
+        delete itemTurnMetadata[RESIN_TASK_ID_METADATA_KEY];
+      }
+      normalizedItem.metadata = itemTurnMetadata;
+      this.currentMetadata = itemTurnMetadata;
     }
     return this.normalizePayload(normalizedItem, source === "response_item");
   }
@@ -2136,7 +2300,18 @@ export class CodexSessionDecoder {
           ? "failed"
           : "completed";
     const nativeMetadata = this.nativeMetadataWithOutcome(outcome, { connection });
-    const header = this.emitHeader("tool_result", timestamp, asString(payload.id), nativeMetadata);
+    // Only a Resin gateway call's own result may report Resin invocations.
+    const resinCall = isResinGatewayToolCall(
+      cached?.toolName ?? toolName,
+      cached?.connection ?? connection,
+    );
+    const resultMetadata = resinCall
+      ? {
+          ...nativeMetadata,
+          ...resinInvocationReceiptMetadata(readResinInvocationReceipts(successResult)),
+        }
+      : nativeMetadata;
+    const header = this.emitHeader("tool_result", timestamp, asString(payload.id), resultMetadata);
     const durationMs = parseDurationMs(payload) ?? 0;
     const event: NormalizedToolResultEvent = {
       ...header,
@@ -2380,8 +2555,7 @@ export class CodexSessionDecoder {
       return [];
     if (wrapperType === "compacted") return this.normalizeNativeCompaction(payload, timestamp);
     if (wrapperType === "token_usage_record") {
-      this.saveNativeUsageRecord(payload);
-      return [];
+      return this.normalizeNativeUsageRecord(payload, timestamp);
     }
     if (wrapperType === "response_item") {
       const itemType = asString(payload.type);

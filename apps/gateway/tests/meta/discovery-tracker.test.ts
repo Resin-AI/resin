@@ -299,7 +299,14 @@ describe("Gateway SessionDiscoveryTracker & Usage Estimates", () => {
         parameters: { message: "show" },
       });
 
-      expect(res.content).toEqual([{ type: "text", text: report }]);
+      // The display text, then the invocation receipt; both are what the caller reads.
+      expect(res.content).toEqual([
+        { type: "text", text: report },
+        {
+          type: "text",
+          text: JSON.stringify({ resinInvocationId: capturedRecord?.invocationId }),
+        },
+      ]);
       const outputTokens = capturedRecord?.usageEstimate?.outputTokens;
       expect(outputTokens).toBe(bytesToTokens(estimatePayloadBytes(res.content) ?? 0));
       expect(outputTokens).toBeLessThan(bytesToTokens(estimatePayloadBytes(raw) ?? 0));
@@ -384,6 +391,7 @@ describe("Gateway SessionDiscoveryTracker & Usage Estimates", () => {
           estimatePayloadBytes({
             code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
             message: "runtime exploded",
+            data: { resinInvocationId: failed.invocationId },
           }) ?? 0,
         ),
       );

@@ -148,6 +148,8 @@ describe("Provider Capture Integration", () => {
         totalTokens: number | null;
         costMicroUsd: number | null;
         durationMs: number | null;
+        /** Request-scoped captures only: the cache-write category and request semantics. */
+        cacheWriteTokens?: number | null;
       };
     }
 
@@ -158,7 +160,8 @@ describe("Provider Capture Integration", () => {
       {
         providerName: "Claude Code",
         harnessId: "claude-code",
-        description: "complete usage with all token components, cache read, cost, and duration",
+        description:
+          "complete request usage with disjoint input, cache read, cache write and output, reasoning within output",
         rawPayload: {
           type: "assistant",
           model: "claude-3-7-sonnet-20250219",
@@ -169,9 +172,10 @@ describe("Provider Capture Integration", () => {
             usage: {
               input_tokens: 2500,
               output_tokens: 800,
-              reasoning_tokens: 350,
+              output_tokens_details: { thinking_tokens: 350 },
               cache_read_input_tokens: 1200,
-              total_tokens: 3650,
+              cache_creation_input_tokens: 300,
+              cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 300 },
               cost_micros: 15400,
               duration_ms: 1250,
             },
@@ -186,7 +190,8 @@ describe("Provider Capture Integration", () => {
           outputTokens: 800,
           reasoningTokens: 350,
           cachedInputTokens: 1200,
-          totalTokens: 3650,
+          cacheWriteTokens: 300,
+          totalTokens: 2500 + 1200 + 300 + 800,
           costMicroUsd: 15400,
           durationMs: 1250,
         },
@@ -505,6 +510,11 @@ describe("Provider Capture Integration", () => {
         expect(observation.usage.totalTokens).toBe(tc.expectedUsage.totalTokens);
         expect(observation.usage.costMicroUsd).toBe(tc.expectedUsage.costMicroUsd);
         expect(observation.usage.durationMs).toBe(tc.expectedUsage.durationMs);
+        if (tc.expectedUsage.cacheWriteTokens !== undefined) {
+          expect(observation.usage.cacheWriteTokens).toBe(tc.expectedUsage.cacheWriteTokens);
+          expect(observation.usage.usageSemantics).toBe("request");
+          expect(observation.usage.requestCount).toBe(1);
+        }
 
         // 4. SHA-256 Digest format check
         expect(observation.digest).toMatch(/^[a-f0-9]{64}$/);
@@ -688,10 +698,12 @@ describe("Provider Capture Integration", () => {
           message: {
             id: "msg_dup_1",
             content: "Response",
+            // Anthropic's real shape: disjoint classes and no total; the request total is their sum.
             usage: {
               input_tokens: 1000,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
               output_tokens: 250,
-              total_tokens: 1250,
             },
           },
         },
@@ -884,10 +896,12 @@ describe("Provider Capture Integration", () => {
                 { type: "text", text: sensitivePrompt },
                 { type: "tool_use", name: "bash", input: { command: sensitiveCommand } },
               ],
+              // Anthropic's real shape: disjoint classes and no total; the request total is their sum.
               usage: {
                 input_tokens: 2200,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
                 output_tokens: 700,
-                total_tokens: 2900,
               },
             },
           },

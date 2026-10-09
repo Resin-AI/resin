@@ -219,6 +219,13 @@ export const RESIN_LEARNED_TOOL_META = "resin/learned";
 export const RESIN_SEARCH_LISTING_META = "resin/searchListing";
 
 /**
+ * Initialize `params._meta` key the stdio shim sets from its run's `RESIN_BENCHMARK_ID`: the
+ * gateway marks every invocation it records on that connection, and each receipt, with it. The
+ * shim, not the daemon, runs inside the harness's run, so only it can read that run's environment.
+ */
+export const RESIN_BENCHMARK_ID_META = "resin/benchmarkId";
+
+/**
  * Result `_meta` key on `initialize` and `tools/list`: how many learned tools the connection's
  * workspace has. Set only once the workspace's catalog is known, so an unloaded catalog never
  * reads as zero; the stdio shim states it to the model on a search-listing connection.

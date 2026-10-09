@@ -101,7 +101,7 @@ The default `metadata-only` redaction strategy is a deterministic projection, no
 
 | Event | Kept verbatim | Normalized on device | Dropped |
 |---|---|---|---|
-| `message`, `model_reasoning` | role, model, token/usage metrics | — | all text |
+| `message`, `model_reasoning` | role, model, token/usage metrics (uncached input, cache reads, cache writes, output, reasoning within output, total, cost and its provenance), the usage's scope and request id | — | all text |
 | `tool_call` (shell tools such as `bash`) | tool name | `command` → command profile: executable basename, leading subcommand words for a fixed executable allowlist (`git`, `pnpm`, `cargo`, …), flag names, shell operators; every other argument becomes a typed placeholder (`$STR`, `$PATH`, `$SRC_FILE`, `$TEST_FILE`, `$URL`, `$NUM`, `$GLOB`); a `$STR`/`$URL`/`$GLOB` argument's value is committed to only as an HMAC-SHA256 under the device redaction key (`parameterValueHmacSha256`), which the cloud never holds, so a guessed value cannot be confirmed; `cwd` → path pattern | quoted strings, environment values, heredoc bodies, all other parameters |
 | `tool_call` (file tools such as `read`, `write`, `edit`, `grep`) | tool name | `path`-like parameters → path pattern: home directory removed, at most the last 4 segments, hash/UUID/timestamp/version segments replaced by `*` | file contents, patches, search patterns, all other parameters |
 | `tool_call` (recorded JavaScript, TypeScript, or Python program; a built-in shell tool's command: Codex `exec`/`exec_command`, OMP `bash`, Claude Code `Bash`, OpenCode `bash`, Cursor `Shell`/`run_terminal_cmd`, Copilot CLI `bash`, Pi `bash`, Grok Build `run_terminal_command`) | tool name | program source or command → engine-redacted, canonical-token-aligned view; local original → opaque `sourceReference`; changed token indexes → `protectedTokens` | original private source and store entries; the shell call's cwd, environment, timeout, description and other parameters; source without trusted scanning, complete parsing, or token alignment |
@@ -112,6 +112,16 @@ The default `metadata-only` redaction strategy is a deterministic projection, no
 | `error` | error type, recoverable flag | — | message, stack, details |
 
 The suppression marker (`__resinLocalWorkflowResultSuppressedV1: true`) survives metadata-only persistence so reloaded events cannot turn an incomplete result into a successful baseline. It carries no output, source, or native error text.
+
+**Request links** (`packages/contracts/src/model-request-link.ts`). Events may carry opaque identifiers that let the cloud join a tool call and its result to the model request that issued it, the user task it served and the Resin invocation the gateway recorded for it, without matching on time or names. Each is re-validated against its pattern before upload and dropped when malformed:
+
+- `metadata.modelRequestId`: the issuing model request's id, the same value as `providerUsage.requestId` (a provider response or message id such as `msg_…`/`resp_…`, else the harness's own record id for that response).
+- `metadata.taskId`: the harness's own record id of the user prompt the event follows. The prompt text is never sent.
+- `metadata.resinInvocationId` (one run) or `metadata.resinInvocationIds` (several runs of one call), and `metadata.benchmarkId`: copied from the receipt the Resin gateway appends to its own tool results (`_meta["resin/invocation"]` and a trailing `{"resinInvocationId":…}` text part). Only results of Resin gateway calls are read for receipts.
+- `metadata.modelRequestPurpose`: the harness's short label (for example `auto-thinking`, `cache-warm`) for a model call it made outside the conversation, such as OMP's `model_usage` records.
+- `metadata.delegatedModelUsage`: token counts and cost a harness reported for subagents a tool call started (OMP's `task` result). Counts only, kept as evidence and never added to request totals.
+
+These identifiers and `providerUsage.requestId` go through every explicit redaction step (known credential formats, secret environment values, custom secrets, identity scrubbing) but skip the high-entropy heuristic, since a random-looking id is expected and scrubbing it would break the identity. A credential placed in one is still replaced by its placeholder.
 
 **Working-directory identity** (`apps/observer/src/analytics/working-directory-identity.ts`). A call's working directory is never uploaded as text; `tool_call` and `command_exec` events instead carry `metadata.__resinWorkingDirectoryV1 = { directory, repository? }`, two 32-hex values the cloud can compare for equality and nothing else:
 

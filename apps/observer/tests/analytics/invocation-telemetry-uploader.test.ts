@@ -90,6 +90,7 @@ describe("InvocationTelemetryUploader", () => {
         totalTokens: 66,
       },
       executionDurationMs: 640,
+      benchmarkId: "goal-matrix.resin-arm:3",
     });
     const inv2 = makeInvocation({
       invocationId: "inv_ws1_2",
@@ -149,6 +150,8 @@ describe("InvocationTelemetryUploader", () => {
     expect(alphaBatch?.invocations[1].usageEstimate).toBeUndefined();
     expect(alphaBatch?.invocations[0].executionDurationMs).toBe(640);
     expect(alphaBatch?.invocations[1].executionDurationMs).toBeUndefined();
+    expect(alphaBatch?.invocations[0].benchmarkId).toBe("goal-matrix.resin-arm:3");
+    expect(alphaBatch?.invocations[1].benchmarkId).toBeUndefined();
     expect(betaBatch?.invocations).toHaveLength(1);
     expect(betaBatch?.invocations[0].invocationId).toBe("inv_ws2_1");
 

@@ -6,10 +6,14 @@ import {
   type ProviderReportedUsage,
   Sha256DigestSchema,
   hashCanonicalContent,
+  providerUsageRequestKey,
+  readRequestLinkMetadata,
+  selectProviderUsageSnapshot,
 } from "@resin/contracts";
 import { z } from "zod";
 import {
   type ProviderUsageAvailability,
+  type TrajectoryModelUsage,
   type TrajectoryObservation,
   TrajectoryObservationSchema,
   TrajectoryRoleSchema,
@@ -115,6 +119,102 @@ export function computeTrajectoryObservationDigest(
   return hashCanonicalContent(rest);
 }
 
+/** One distinct request's latest usage snapshot and the auxiliary purpose its event named. */
+interface RequestUsageEntry {
+  usage: ProviderReportedUsage;
+  /** Absent for the conversation's own requests. */
+  purpose: string | undefined;
+}
+
+type RequestSums = Omit<TrajectoryModelUsage, "provider" | "model" | "requestCount" | "purposes">;
+
+/**
+ * Sums distinct requests the way the cloud request summarizer does. A category sums only when every
+ * request reported it, and `missing` requests (named by a link, never reporting usage) leave every
+ * category unknown. The total is the four categories' sum only when every request is complete.
+ * Cost sums only when every request reported one on the same basis: source-reported and
+ * harness-estimated amounts are never added together.
+ */
+function sumRequests(usages: readonly ProviderReportedUsage[], missing: number): RequestSums {
+  const known = (field: keyof RequestSums & keyof ProviderReportedUsage): number | null =>
+    missing === 0 && usages.every((usage) => typeof usage[field] === "number")
+      ? usages.reduce((total, usage) => total + Number(usage[field]), 0)
+      : null;
+  const complete = missing === 0 && usages.every((usage) => usage.availability === "complete");
+  const inputTokens = known("inputTokens");
+  const cachedInputTokens = known("cachedInputTokens");
+  const cacheWriteTokens = known("cacheWriteTokens");
+  const outputTokens = known("outputTokens");
+  const basis = usages[0]?.costProvenance;
+  const oneCostBasis =
+    basis !== undefined && usages.every((usage) => usage.costProvenance === basis);
+  const availability: ProviderUsageAvailability = complete
+    ? "complete"
+    : missing === 0 && usages.every((usage) => usage.availability === "unavailable")
+      ? "unavailable"
+      : "partial";
+  return {
+    availability,
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteTokens,
+    outputTokens,
+    reasoningTokens: known("reasoningTokens"),
+    totalTokens:
+      complete &&
+      inputTokens !== null &&
+      cachedInputTokens !== null &&
+      cacheWriteTokens !== null &&
+      outputTokens !== null
+        ? inputTokens + cachedInputTokens + cacheWriteTokens + outputTokens
+        : null,
+    costMicroUsd: oneCostBasis ? known("costMicroUsd") : null,
+    durationMs: known("durationMs"),
+    costProvenances: [
+      ...new Set(usages.flatMap((usage) => (usage.costProvenance ? [usage.costProvenance] : []))),
+    ].sort(),
+  };
+}
+
+/**
+ * Request-semantics usage of a trajectory: every distinct request counts once whatever its
+ * provider or model, with a per provider/model breakdown (sorted) carrying each model's own sums,
+ * cost bases and auxiliary purposes. No price is ever carried from one model to another.
+ */
+function summarizeTrajectoryRequests(
+  entries: readonly RequestUsageEntry[],
+  missing: number,
+): TrajectoryUsage {
+  const groups = new Map<string, RequestUsageEntry[]>();
+  for (const entry of entries) {
+    const key = JSON.stringify([entry.usage.provider, entry.usage.model ?? null]);
+    groups.set(key, [...(groups.get(key) ?? []), entry]);
+  }
+  const models: TrajectoryModelUsage[] = [...groups.entries()]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([, group]) => ({
+      provider: group[0]!.usage.provider,
+      model: group[0]!.usage.model ?? null,
+      requestCount: group.length,
+      ...sumRequests(
+        group.map((entry) => entry.usage),
+        0,
+      ),
+      purposes: [
+        ...new Set(group.flatMap((entry) => (entry.purpose ? [entry.purpose] : []))),
+      ].sort(),
+    }));
+  return {
+    ...sumRequests(
+      entries.map((entry) => entry.usage),
+      missing,
+    ),
+    usageSemantics: "request",
+    requestCount: entries.length + missing,
+    models,
+  };
+}
+
 /**
  * TrajectoryEmitter: aggregates successful non-duplicate normalized session events
  * into authoritative, privacy-safe TrajectoryObservation records for cloud calibration.
@@ -131,20 +231,23 @@ export class TrajectoryEmitter {
   private currentStatus: TrajectoryStatus;
   private lastObservedAt: string | null = null;
 
-  private usageEventsCount = 0;
-  private allUnavailable = true;
-  private anyCompleteOrPartial = false;
-  private hasPartialOrUnavailable = false;
-
-  private readonly metrics = {
-    inputTokens: { sum: 0, hasValue: false, missingInComplete: false },
-    outputTokens: { sum: 0, hasValue: false, missingInComplete: false },
-    reasoningTokens: { sum: 0, hasValue: false },
-    cachedInputTokens: { sum: 0, hasValue: false },
-    totalTokens: { sum: 0, hasValue: false, missingInComplete: false },
-    costMicroUsd: { sum: 0, hasValue: false },
-    durationMs: { sum: 0, hasValue: false },
-  };
+  /** The session every ingested event must belong to, named by the first event. */
+  private boundSessionId: string | null = null;
+  /** Usage records without request identity (legacy), summed as they arrive. */
+  private readonly legacyUsages: ProviderReportedUsage[] = [];
+  /** Cumulative meters: only the latest snapshot per provider and session counts. */
+  private readonly cumulativeUsages = new Map<string, ProviderReportedUsage>();
+  /**
+   * Request-scoped usage, one snapshot per request identity (provider, session, request id), with
+   * the auxiliary purpose its event named (absent for the conversation's own requests).
+   */
+  private readonly requestUsages = new Map<string, RequestUsageEntry>();
+  /** Session-scoped request ids that reported usage, to match request links against. */
+  private readonly requestIdsWithUsage = new Set<string>();
+  /** Session-scoped request ids that events name as their issuing request. */
+  private readonly linkedRequestIds = new Set<string>();
+  /** The first auxiliary request's identity, used only when no other names the session. */
+  private auxiliaryIdentity: ProviderReportedUsage | null = null;
 
   constructor(contextInput: TrajectoryAttributionContextInput) {
     this.context = TrajectoryAttributionContextSchema.parse(contextInput);
@@ -194,6 +297,13 @@ export class TrajectoryEmitter {
         `Cannot ingest event '${event.eventId}': trajectory '${this.context.trajectoryId}' has already been finalized`,
       );
     }
+    if (this.boundSessionId === null) {
+      this.boundSessionId = event.sessionId;
+    } else if (event.sessionId !== this.boundSessionId) {
+      throw new MixedTrajectoryIdentityError(
+        `Mixed session identity in trajectory '${this.context.trajectoryId}': expected '${this.boundSessionId}', got '${event.sessionId}'`,
+      );
+    }
 
     if (this.seenEventIds.has(event.eventId)) {
       return false;
@@ -205,8 +315,12 @@ export class TrajectoryEmitter {
     }
 
     // Process provider usage if present on the event
+    const { modelRequestId, modelRequestPurpose } = readRequestLinkMetadata(event.metadata);
     if (event.providerUsage) {
-      this.processProviderUsage(event.providerUsage);
+      this.processProviderUsage(event.sessionId, event.providerUsage, modelRequestPurpose);
+    }
+    if (modelRequestId !== undefined) {
+      this.linkedRequestIds.add(JSON.stringify([event.sessionId, modelRequestId]));
     }
 
     // Automatically finalize on session end or crash
@@ -253,10 +367,37 @@ export class TrajectoryEmitter {
   }
 
   /**
-   * Processes and aggregates provider usage from a single event.
+   * Records provider usage from a single event. Request-scoped snapshots of one request replace each
+   * other instead of summing; distinct requests stay separate even when their counts are equal.
+   * A session's requests may use several providers, models and accounting versions (fallbacks,
+   * judges, title and cache-warming calls), so request-scoped usage is never rejected for its
+   * identity; the conversation's own requests name the session when the context does not. Legacy
+   * and cumulative records cannot be told apart by request, so they must match the session.
    */
-  private processProviderUsage(usage: ProviderReportedUsage): void {
-    // 1. Validate identity consistency (reject mixed identities)
+  private processProviderUsage(
+    sessionId: string,
+    usage: ProviderReportedUsage,
+    purpose: string | undefined,
+  ): void {
+    const requestKey = providerUsageRequestKey(sessionId, usage);
+    if (requestKey !== undefined && usage.requestId !== undefined) {
+      if (purpose === undefined) {
+        this.resolvedProvider ??= usage.provider;
+        if (usage.model) this.resolvedModel ??= usage.model;
+        this.resolvedAccountingVersion ??= usage.accountingVersion;
+      } else {
+        this.auxiliaryIdentity ??= usage;
+      }
+      const current = this.requestUsages.get(requestKey);
+      this.requestUsages.set(requestKey, {
+        usage: current === undefined ? usage : selectProviderUsageSnapshot(current.usage, usage),
+        purpose: purpose ?? current?.purpose,
+      });
+      this.requestIdsWithUsage.add(JSON.stringify([sessionId, usage.requestId]));
+      return;
+    }
+
+    // Validate identity consistency (reject mixed identities)
     if (usage.provider) {
       if (this.resolvedProvider === null) {
         this.resolvedProvider = usage.provider;
@@ -287,55 +428,33 @@ export class TrajectoryEmitter {
       }
     }
 
-    // 2. Aggregate component metrics
-    this.usageEventsCount++;
-    if (usage.availability === "unavailable") {
-      this.hasPartialOrUnavailable = true;
-      return;
+    if (usage.usageScope === "cumulative") {
+      const meterKey = JSON.stringify([usage.provider, sessionId]);
+      const current = this.cumulativeUsages.get(meterKey);
+      this.cumulativeUsages.set(
+        meterKey,
+        current === undefined ? usage : selectProviderUsageSnapshot(current, usage),
+      );
+    } else {
+      this.legacyUsages.push(usage);
     }
-
-    this.allUnavailable = false;
-    this.anyCompleteOrPartial = true;
-    if (usage.availability === "partial") {
-      this.hasPartialOrUnavailable = true;
-    }
-
-    const aggregateComponent = (
-      field:
-        | "inputTokens"
-        | "outputTokens"
-        | "reasoningTokens"
-        | "cachedInputTokens"
-        | "totalTokens"
-        | "costMicroUsd"
-        | "durationMs",
-    ) => {
-      const val = usage[field];
-      if (val !== undefined && val !== null) {
-        this.metrics[field].hasValue = true;
-        this.metrics[field].sum += val;
-      } else if (
-        usage.availability === "complete" &&
-        (field === "totalTokens" || field === "inputTokens" || field === "outputTokens")
-      ) {
-        this.metrics[field].missingInComplete = true;
-      }
-    };
-
-    aggregateComponent("inputTokens");
-    aggregateComponent("outputTokens");
-    aggregateComponent("reasoningTokens");
-    aggregateComponent("cachedInputTokens");
-    aggregateComponent("totalTokens");
-    aggregateComponent("costMicroUsd");
-    aggregateComponent("durationMs");
   }
 
   /**
    * Computes the aggregated TrajectoryUsage without mutating state.
+   *
+   * Request semantics apply only when every usage record is request-scoped; see
+   * {@link summarizeTrajectoryRequests}. Any legacy or cumulative record keeps the trajectory on
+   * legacy semantics, whose output shape is unchanged.
    */
   public computeUsage(): TrajectoryUsage {
-    if (this.usageEventsCount === 0 || this.allUnavailable) {
+    const requestEntries = [...this.requestUsages.values()];
+    const usages = [
+      ...this.legacyUsages,
+      ...this.cumulativeUsages.values(),
+      ...requestEntries.map((entry) => entry.usage),
+    ];
+    if (usages.every((usage) => usage.availability === "unavailable")) {
       return TrajectoryUsageSchema.parse({
         availability: "unavailable",
         inputTokens: null,
@@ -348,27 +467,70 @@ export class TrajectoryEmitter {
       });
     }
 
+    const requestsWithoutUsage = [...this.linkedRequestIds].filter(
+      (id) => !this.requestIdsWithUsage.has(id),
+    ).length;
+    if (
+      requestEntries.length > 0 &&
+      this.legacyUsages.length === 0 &&
+      this.cumulativeUsages.size === 0
+    ) {
+      return TrajectoryUsageSchema.parse(
+        summarizeTrajectoryRequests(requestEntries, requestsWithoutUsage),
+      );
+    }
+
+    const metrics = {
+      inputTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      outputTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      reasoningTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      cachedInputTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      cacheWriteTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      totalTokens: { sum: 0, hasValue: false, missingInComplete: false },
+      costMicroUsd: { sum: 0, hasValue: false, missingInComplete: false },
+      durationMs: { sum: 0, hasValue: false, missingInComplete: false },
+    };
+    // Legacy aggregation keeps its original rule: only a complete record's missing total makes the
+    // aggregate incomplete.
+    const requiredInComplete: readonly (keyof typeof metrics)[] = ["totalTokens"];
+    let hasPartialOrUnavailable = false;
+    for (const usage of usages) {
+      if (usage.availability !== "complete") hasPartialOrUnavailable = true;
+      if (usage.availability === "unavailable") continue;
+      for (const field of Object.keys(metrics) as (keyof typeof metrics)[]) {
+        const value = usage[field];
+        if (value !== undefined && value !== null) {
+          metrics[field].hasValue = true;
+          metrics[field].sum += value;
+        } else if (usage.availability === "complete" && requiredInComplete.includes(field)) {
+          metrics[field].missingInComplete = true;
+        }
+      }
+    }
+
     const isPartial =
-      this.hasPartialOrUnavailable ||
-      !this.metrics.totalTokens.hasValue ||
-      this.metrics.totalTokens.missingInComplete;
+      hasPartialOrUnavailable ||
+      requestsWithoutUsage > 0 ||
+      !metrics.totalTokens.hasValue ||
+      requiredInComplete.some((field) => metrics[field].missingInComplete);
 
     const availability: ProviderUsageAvailability = isPartial ? "partial" : "complete";
+    const metricValue = (field: keyof typeof metrics): number | null =>
+      metrics[field].hasValue ? metrics[field].sum : null;
 
     const usageObj: TrajectoryUsage = {
       availability,
-      inputTokens: this.metrics.inputTokens.hasValue ? this.metrics.inputTokens.sum : null,
-      outputTokens: this.metrics.outputTokens.hasValue ? this.metrics.outputTokens.sum : null,
-      reasoningTokens: this.metrics.reasoningTokens.hasValue
-        ? this.metrics.reasoningTokens.sum
-        : null,
-      cachedInputTokens: this.metrics.cachedInputTokens.hasValue
-        ? this.metrics.cachedInputTokens.sum
-        : null,
-      totalTokens: this.metrics.totalTokens.hasValue ? this.metrics.totalTokens.sum : null,
-      costMicroUsd: this.metrics.costMicroUsd.hasValue ? this.metrics.costMicroUsd.sum : null,
-      durationMs: this.metrics.durationMs.hasValue ? this.metrics.durationMs.sum : null,
+      inputTokens: metricValue("inputTokens"),
+      outputTokens: metricValue("outputTokens"),
+      reasoningTokens: metricValue("reasoningTokens"),
+      cachedInputTokens: metricValue("cachedInputTokens"),
+      totalTokens: metricValue("totalTokens"),
+      costMicroUsd: metricValue("costMicroUsd"),
+      durationMs: metricValue("durationMs"),
     };
+    if (metrics.cacheWriteTokens.hasValue) {
+      usageObj.cacheWriteTokens = metrics.cacheWriteTokens.sum;
+    }
 
     return TrajectoryUsageSchema.parse(usageObj);
   }
@@ -389,7 +551,12 @@ export class TrajectoryEmitter {
     if (options?.status) {
       this.currentStatus = options.status;
     }
-
+    // A session whose only requests were auxiliary is named by the first of them.
+    if (this.auxiliaryIdentity !== null) {
+      this.resolvedProvider ??= this.auxiliaryIdentity.provider;
+      if (this.auxiliaryIdentity.model) this.resolvedModel ??= this.auxiliaryIdentity.model;
+      this.resolvedAccountingVersion ??= this.auxiliaryIdentity.accountingVersion;
+    }
     if (!this.resolvedProvider || this.resolvedProvider.trim() === "") {
       throw new TrajectoryValidationError(
         `Cannot finalize trajectory '${this.context.trajectoryId}': provider identity was not established in context or events`,

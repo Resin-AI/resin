@@ -85,6 +85,8 @@ Resin follows session transcripts in `~/.claude/projects/<encoded-project>/<sess
 
 A successful `Edit` or `Write` becomes a patch step, the same representation as a Codex `apply_patch`: the diff Claude recorded as applied, confined to the session's working directory and stored only on this device. An edit Claude cannot restate exactly as a unified diff (for example a file without a final newline) is not learned.
 
+Token usage is recorded per model request, keyed by the Anthropic message id (else the API request id) that every transcript line of one response shares: uncached input, cache reads, cache writes (`cache_creation_input_tokens`; its TTL breakdown is part of it, not added) and output. Claude repeats a response's usage on each of its lines, sometimes with a smaller output count on earlier lines, so Resin reports a line's usage only when it differs from the last one it reported for that response, and the latest report of a request replaces the earlier ones. A request missing a category is partial. Claude's locally written `<synthetic>` messages are not model requests and report no usage. Every event a response produced carries its request id, each tool result carries its call's request id, and each event carries the `uuid` of the user prompt it follows as its task.
+
 Only the version listed above is qualified with recorded sessions; `resin status` reports other versions as untested, and they still register.
 
 ### Known Limits
@@ -148,7 +150,7 @@ Fresh sessions that start while observation is running are read from the beginni
 
 Native source reads are serialized, and delayed acknowledgements do not rewind unread buffered data. Reads yield between bounded work quanta without treating a partially scanned complete record as end-of-file. Metadata headers are inspected up to 1 MiB; individual records larger than 8 MiB are skipped without fabricating events.
 
-Explicit turn usage takes precedence over duplicate last-response snapshots. Unique response reports are summed when turn totals are absent; a last-response-only fallback is marked partial, not claimed as complete turn usage. Missing billing amounts are not invented.
+Each model response's `token_usage_record` with a `response_id` is recorded as its own request, keyed by that id: uncached input (input minus cache reads and cache writes), cache reads, cache writes, and output with reasoning inside it. A count that is missing or inconsistent leaves that request partial rather than filled in or clamped, and a repeated record for the same response replaces the earlier one. Codex writes a response's messages and tool calls before its usage record and gives them no response id, so they are linked to their turn (`taskId`, the turn id) but not to their request. Turns whose usage records carry no response id keep the older turn total: explicit turn usage first, then the sum of unique response reports, then a last-response-only fallback marked partial. The cumulative thread total is never counted as a request. Missing billing amounts are not invented.
 
 Only a confirmed completed native shell result can establish a successful local baseline. Running, explicitly truncated, or unclassified results are withheld from baseline and computation-success evidence without being relabeled as execution errors. Raw source and result values remain local.
 
@@ -207,6 +209,10 @@ OMP reaches MCP tools through its device surface (`write xd://mcp__<server>_<too
 When an Eval cell prints more than OMP shows inline, OMP keeps the full output in `<timestamp>_<id>/<n>.eval.log` and marks the result as truncated. Resin reads that file as the call's result. If the file is missing or does not match what the transcript declares, the result is treated as unavailable rather than taken from the truncated display.
 
 A call to a tool the session does not have (OMP answers `Tool <name> not found`) is recorded as a failed call with no result.
+
+Each assistant record is one model request, keyed by its `responseId` or, when OMP recorded none, by the record's own id. OMP's usage is recorded as reported: `input` is already uncached, and `cacheRead`, `cacheWrite` and `output` (which includes thinking) are separate. When OMP counts provider orchestration tokens, or its total does not equal those four categories, the request is kept as partial with its reported total and cost rather than adjusted. OMP's `cost` is its own estimate, not a provider bill. The assistant message, its tool calls and their results carry the request id, and every event carries the id of the user prompt it follows as its task. A Resin tool result carries the invocation id the Resin gateway reported for it. Receipts are read only from results that OMP's own recorded MCP transport attributes to the `resin` server (`details.serverName`, or `details.xdev.inner.serverName` on a device-surface call), or that the configured `resin` server resolves to, so a server later removed from the configuration still has its receipts read and no other tool's output is ever read for them.
+
+OMP also records model calls made outside the conversation (`model_usage`: the auto-thinking judge, cache warming, TTSR, advisors). Each is a request of its own, keyed by its record id, with its own provider, model and usage and the purpose OMP gave it, so a session's requests can span several models. The usage a `task` result reports for its subagents is kept on that result as evidence only: the subagents' requests are counted in their own sessions, which name this session as their parent.
 
 ### Subagents and learning
 

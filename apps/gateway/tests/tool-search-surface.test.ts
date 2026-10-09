@@ -17,6 +17,7 @@ import {
   type JsonRpcMessage,
   type JsonRpcParams,
   type JsonRpcResponse,
+  RESIN_BENCHMARK_ID_META,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_LISTING_META,
@@ -1419,6 +1420,20 @@ describe("search-only listing", () => {
       expect(instructions).not.toMatch(/\d+ learned tool/);
     } finally {
       client.close();
+    }
+  });
+
+  it("forwards the run's benchmark id on initialize, with or without the full catalog", () => {
+    for (const fullCatalog of [false, true]) {
+      const client = createSurfaceClient({ fullCatalog, benchmarkId: "goal-matrix.resin-arm:3" });
+      try {
+        client.send(initialize(1));
+        expect(client.forwarded[0]).toMatchObject({
+          params: { _meta: { [RESIN_BENCHMARK_ID_META]: "goal-matrix.resin-arm:3" } },
+        });
+      } finally {
+        client.close();
+      }
     }
   });
 

@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
+import { benchmarkIdOf } from "./meta/invocation-receipt.js";
 import {
   type InitializeParams,
   type JsonRpcId,
   type McpClientCapabilities,
   type McpImplementationInfo,
   type McpServerCapabilities,
+  RESIN_BENCHMARK_ID_META,
   RESIN_SEARCH_LISTING_META,
 } from "./protocol/types.js";
 import type { WorkspaceContext } from "./workspace-resolver.js";
@@ -87,6 +89,8 @@ export class McpConnection {
   isClosed = false;
   /** The client lists only the meta tools and finds learned tools with search_tools. */
   searchListing = false;
+  /** The benchmark run the client's shim belongs to; invocations it records are marked with it. */
+  benchmarkId: string | undefined;
 
   private readonly rateLimiter: TokenBucketRateLimiter;
   private readonly inFlightRequests = new Map<string | number, InFlightRequest>();
@@ -119,6 +123,7 @@ export class McpConnection {
     this.clientCapabilities = params.capabilities;
     this.protocolVersion = params.protocolVersion;
     this.searchListing = params._meta?.[RESIN_SEARCH_LISTING_META] === true;
+    this.benchmarkId = benchmarkIdOf(params._meta?.[RESIN_BENCHMARK_ID_META]);
     if (detectedHarnessId) {
       this.harnessId = detectedHarnessId;
     }

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import process from "node:process";
 import {
   type InvocationFailureReason,
@@ -42,6 +41,7 @@ import {
   failureReasonOfResult,
   invocationStatusFor,
 } from "./invocation-failure.js";
+import { invocationReceipt, newInvocationId, withInvocationReceipt } from "./invocation-receipt.js";
 import { isToolOfferedHere, unavailableHereMessage } from "./repository-scope.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
@@ -343,16 +343,17 @@ export function createInvokeToolHandler(
       isDiscoveryTool(resolvedTool.toolId) || isDiscoveryTool(resolvedTool.name);
 
     /**
-     * Records one call. `shown` is what the caller receives (default `result`): output usage is
-     * estimated from the content the caller reads, never from Resin's own `_meta` or a raw value
-     * the caller is shown in another form.
+     * Records one call and returns what the caller receives: `shown` (default `result`) with the
+     * recorded invocation's receipt added, or `shown` unchanged when nothing was recorded (a meta
+     * tool, no recorder). Output usage is estimated from that returned content, receipt included,
+     * never from Resin's own `_meta` or a raw value the caller is shown in another form.
      */
     const recordInvocation = (
       outcome: "success" | InvocationFailureReason,
-      result?: CallToolResult,
+      result: CallToolResult,
       errorMessage?: string,
-      shown: CallToolResult | undefined = result,
-    ) => {
+      shown: CallToolResult = result,
+    ): CallToolResult => {
       const status = outcome === "success" ? "success" : invocationStatusFor(outcome);
       if (outcome !== "success") {
         // Only ids, status, reason and timing: never inputs, outputs or the error text.
@@ -369,7 +370,7 @@ export function createInvokeToolHandler(
       if (isMetaTool) {
         if (isRecordedDiscoveryTool) {
           const inBytes = estimatePayloadBytes(params);
-          const outBytes = shown !== undefined ? estimatePayloadBytes(shown.content) : undefined;
+          const outBytes = estimatePayloadBytes(shown.content);
           if (inBytes !== undefined && outBytes !== undefined) {
             discoveryTracker.recordDiscoveryOverhead(
               sessionId,
@@ -377,13 +378,13 @@ export function createInvokeToolHandler(
             );
           }
         }
-        return;
+        return shown;
       }
       recordDiscoveryFunnelEvent(
         outcome === "success" ? "invocation_succeeded" : "invocation_failed",
       );
       if (!onInvocationRecorded) {
-        return;
+        return shown;
       }
       try {
         const completedTime = Date.now();
@@ -397,11 +398,12 @@ export function createInvokeToolHandler(
             ? recordedToolVersion
             : "1.0.0";
         const inputDigest = hashCanonicalContent(targetParams);
-        const outputDigest = result ? hashCanonicalContent(result) : undefined;
-        const invocationId = `inv_${randomUUID().replace(/-/g, "")}`;
+        const outputDigest = hashCanonicalContent(result);
+        const receipt = invocationReceipt(newInvocationId(), options?.benchmarkId);
+        const delivered = withInvocationReceipt(shown, receipt);
 
         const inputBytes = estimatePayloadBytes(targetParams);
-        const outputBytes = shown !== undefined ? estimatePayloadBytes(shown.content) : undefined;
+        const outputBytes = estimatePayloadBytes(delivered.content);
         let usageEstimate: InvocationUsageEstimate | undefined;
         if (inputBytes !== undefined && outputBytes !== undefined) {
           const inputTokens = bytesToTokens(inputBytes);
@@ -415,7 +417,7 @@ export function createInvokeToolHandler(
         }
 
         const record: InvocationRecord = {
-          invocationId,
+          invocationId: receipt.invocationId,
           sessionId,
           workspaceId: context.workspaceId,
           toolId: recordedToolId,
@@ -428,7 +430,7 @@ export function createInvokeToolHandler(
             : { executionDurationMs: Math.min(measuredExecutionMs, durationMs) }),
           status,
           inputDigest,
-          ...(outputDigest ? { outputDigest } : {}),
+          outputDigest,
           ...(outcome !== "success"
             ? {
                 errorDetails: {
@@ -444,6 +446,7 @@ export function createInvokeToolHandler(
               }
             : {}),
           ...(usageEstimate ? { usageEstimate } : {}),
+          ...(receipt.benchmarkId === undefined ? {} : { benchmarkId: receipt.benchmarkId }),
         };
 
         Promise.resolve()
@@ -458,6 +461,7 @@ export function createInvokeToolHandler(
               // Ignore write errors to closed stderr
             }
           });
+        return delivered;
       } catch (err) {
         reportHandledError(err, { failureClass: "tool_invocation_record" });
         try {
@@ -467,6 +471,7 @@ export function createInvokeToolHandler(
         } catch {
           // Ignore write errors to closed stderr
         }
+        return shown;
       }
     };
     // A learned tool scoped to another repository, or unable to run from here, is refused like one
@@ -485,15 +490,13 @@ export function createInvokeToolHandler(
     const preliminary = analyzeAgentArguments(dispatchParams);
     if (preliminary.composed) {
       if (!context.sessionId) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "Composed invocation arguments require a session scope; none is bound to this context.",
-            },
-          ],
-        };
+        const message =
+          "Composed invocation arguments require a session scope; none is bound to this context.";
+        return recordInvocation(
+          "validation_error",
+          { isError: true, content: [{ type: "text", text: message }] },
+          message,
+        );
       }
       const entry = composedScopeFor(context.sessionId);
       const callId = `call_${++entry.callCounter}`;
@@ -518,8 +521,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("validation_error", res, message);
-        return res;
+        return recordInvocation("validation_error", res, message);
       }
       composed = { entry, callId };
       dispatchParams = resolvedArgs;
@@ -540,12 +542,11 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation(
+        return recordInvocation(
           "tool_unavailable",
           res,
           `Version '${requestedVersion}' of tool '${displayIdentifier}' not found or not accessible.`,
         );
-        return res;
       }
       resolvedTool = explicitVersion;
     }
@@ -562,8 +563,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation("tool_unavailable", res, `Tool '${resolvedTool.name}' is disabled.`);
-      return res;
+      return recordInvocation("tool_unavailable", res, `Tool '${resolvedTool.name}' is disabled.`);
     }
 
     if (
@@ -592,8 +592,7 @@ export function createInvokeToolHandler(
           content: gateCheck.refusal.content,
           _meta: { refusal },
         };
-        recordInvocation("capability_rejected", res, gateCheck.refusal.refusalReason);
-        return res;
+        return recordInvocation("capability_rejected", res, gateCheck.refusal.refusalReason);
       }
     }
 
@@ -609,8 +608,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation("validation_error", res, validation.errors.join("; "));
-      return res;
+      return recordInvocation("validation_error", res, validation.errors.join("; "));
     }
 
     const timeoutMs =
@@ -649,8 +647,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("cancelled", res, "Tool invocation was cancelled.");
-        return res;
+        return recordInvocation("cancelled", res, "Tool invocation was cancelled.");
       }
       parentSignal.addEventListener("abort", onParentAbort, { once: true });
     }
@@ -678,13 +675,12 @@ export function createInvokeToolHandler(
         return { content: [{ type: "text", text: JSON.stringify({ result: value, handle }) }] };
       };
       const shown = result.isError ? result : composed ? handled() : presentedResult(result);
-      recordInvocation(
+      return recordInvocation(
         result.isError ? failureReasonOfResult(result) : "success",
         result,
         undefined,
         shown,
       );
-      return shown;
     } catch (error) {
       if (timedOut) {
         const res: CallToolResult = {
@@ -696,12 +692,11 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation(
+        return recordInvocation(
           "timeout",
           res,
           `Tool '${resolvedTool.name}' timed out after ${timeoutMs}ms.`,
         );
-        return res;
       }
       if (abortController.signal.aborted || parentSignal?.aborted) {
         const res: CallToolResult = {
@@ -713,8 +708,7 @@ export function createInvokeToolHandler(
             },
           ],
         };
-        recordInvocation("cancelled", res, "Tool invocation was cancelled.");
-        return res;
+        return recordInvocation("cancelled", res, "Tool invocation was cancelled.");
       }
       const message = error instanceof Error ? error.message : String(error);
       const res: CallToolResult = {
@@ -726,8 +720,7 @@ export function createInvokeToolHandler(
           },
         ],
       };
-      recordInvocation(failureReasonOfError(error), res, message);
-      return res;
+      return recordInvocation(failureReasonOfError(error), res, message);
     } finally {
       clearTimeout(timerId);
       if (parentSignal) {

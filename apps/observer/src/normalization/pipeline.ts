@@ -6,6 +6,12 @@ import {
   InvocationUsageEstimateSchema,
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
+  RESIN_BENCHMARK_ID_METADATA_KEY,
+  RESIN_INVOCATION_IDS_METADATA_KEY,
+  RESIN_INVOCATION_ID_METADATA_KEY,
+  RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+  RESIN_MODEL_REQUEST_PURPOSE_METADATA_KEY,
+  RESIN_TASK_ID_METADATA_KEY,
   type RedactionMeta,
   TOOL_IO_UTF8_METHOD,
   canonicalJson,
@@ -349,6 +355,30 @@ export class NormalizationPipeline {
     // by a transcript. The metadata-only projection validates it before it leaves the device.
     if (typeof context?.harnessId === "string" && context.harnessId.length > 0) {
       mergedMetadata.harnessId = context.harnessId;
+    }
+    // Request-link ids are opaque identities that leave the device. Like `providerUsage.requestId`,
+    // they are scrubbed of explicit secrets but not by the high-entropy heuristic, so a provider id
+    // keeps its identity while a credential smuggled into one does not survive.
+    const linkScrub = this.redactionEngine.redactOpaqueIdentifiers(mergedMetadata, [
+      RESIN_MODEL_REQUEST_ID_METADATA_KEY,
+      RESIN_MODEL_REQUEST_PURPOSE_METADATA_KEY,
+      RESIN_TASK_ID_METADATA_KEY,
+      RESIN_INVOCATION_ID_METADATA_KEY,
+      RESIN_INVOCATION_IDS_METADATA_KEY,
+      RESIN_BENCHMARK_ID_METADATA_KEY,
+    ]);
+    Object.assign(mergedMetadata, linkScrub.data);
+    if (linkScrub.isRedacted) {
+      redactionMeta.isRedacted = true;
+      redactionMeta.redactionStrategy = linkScrub.redactionStrategy;
+      redactionMeta.redactedFields = [
+        ...redactionMeta.redactedFields,
+        ...linkScrub.redactedFields.map((key) => `metadata.${key}`),
+      ].sort();
+      redactionMeta.scrubbedPatterns = [
+        ...new Set([...(redactionMeta.scrubbedPatterns ?? []), ...linkScrub.scrubbedPatterns]),
+      ].sort();
+      redactionMeta.redactedAt ??= nowIso();
     }
 
     if (!mergedMetadata.resinTokenEstimateV1) {

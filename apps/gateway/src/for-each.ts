@@ -3,7 +3,13 @@
  * per value, in order, through the same call path a single call takes, and stops at the first
  * failing run.
  */
-import type { CallToolResult, JsonRpcParams, McpToolInput } from "./protocol/types.js";
+import { errorInvocationReceiptPart, splitInvocationReceipt } from "./meta/invocation-receipt.js";
+import type {
+  CallToolResult,
+  JsonRpcParams,
+  McpTextContent,
+  McpToolInput,
+} from "./protocol/types.js";
 
 export const FOR_EACH_ARGUMENT = "for_each";
 export const FOR_EACH_MIN_VALUES = 2;
@@ -123,18 +129,24 @@ function runText(result: CallToolResult): string {
 /**
  * Runs each planned call in order and combines the results. A run that returns an error or throws
  * ends the loop; the combined result is an error that names the failing item and the skipped ones.
+ * Each recorded run's invocation receipt follows the combined text as its own part, in run order.
  */
 export async function runForEach(
   plan: Extract<ForEachPlan, { kind: "runs" }>,
   runOnce: (args: JsonRpcParams) => Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const sections: string[] = [];
+  const receipts: McpTextContent[] = [];
   for (const [index, args] of plan.runs.entries()) {
     const label = `[${plan.input}=${plan.values[index]}]`;
     let result: CallToolResult;
     try {
-      result = await runOnce(args);
+      const split = splitInvocationReceipt(await runOnce(args));
+      result = split.result;
+      if (split.receiptPart) receipts.push(split.receiptPart);
     } catch (error) {
+      const receiptPart = errorInvocationReceiptPart(error);
+      if (receiptPart) receipts.push(receiptPart);
       result = invalidForEachResult(error instanceof Error ? error.message : String(error));
     }
     sections.push(`${label}\n${runText(result)}`);
@@ -147,8 +159,11 @@ export async function runForEach(
             : "."
         }`,
       );
-      return { isError: true, content: [{ type: "text", text: sections.join("\n\n") }] };
+      return {
+        isError: true,
+        content: [{ type: "text", text: sections.join("\n\n") }, ...receipts],
+      };
     }
   }
-  return { content: [{ type: "text", text: sections.join("\n\n") }] };
+  return { content: [{ type: "text", text: sections.join("\n\n") }, ...receipts] };
 }

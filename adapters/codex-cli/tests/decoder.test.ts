@@ -1,4 +1,10 @@
-import { NormalizedSessionEventSchema } from "@resin/contracts";
+import {
+  type NormalizedSessionEvent,
+  NormalizedSessionEventSchema,
+  providerUsageNormalizedTotal,
+  providerUsageRequestKey,
+  selectProviderUsageSnapshot,
+} from "@resin/contracts";
 import type {
   HarnessRecordDecoder,
   IntermediateMessageEvent,
@@ -1372,32 +1378,44 @@ describe("Codex CLI Session Decoder", () => {
         lifecycles.map((event) =>
           event.type === "session_lifecycle" ? event.lifecycleType : undefined,
         ),
-      ).toEqual(["start", "end"]);
+      ).toEqual(["start", "resume", "end"]);
+      const request = lifecycles.find(
+        (event) => event.type === "session_lifecycle" && event.lifecycleType === "resume",
+      );
+      expect(request?.providerUsage).toEqual({
+        provider: "openai",
+        model: "gpt-6-luna",
+        accountingVersion: "codex-cli-native-rollout-v1",
+        availability: "complete",
+        usageScope: "request",
+        requestId: "response-native-1",
+        inputTokens: 72,
+        cachedInputTokens: 40,
+        cacheWriteTokens: 8,
+        outputTokens: 30,
+        reasoningTokens: 10,
+        totalTokens: 150,
+      });
+      expect(request?.metadata).toMatchObject({
+        modelRequestId: "response-native-1",
+        taskId: "turn-native-1",
+        codexNative: { threadId: "thread-native-smoke", turnId: "turn-native-1" },
+      });
+      expect(userMessage?.metadata?.taskId).toBe("turn-native-1");
       const end = lifecycles.find(
         (event) => event.type === "session_lifecycle" && event.lifecycleType === "end",
       );
       if (!end || end.type !== "session_lifecycle") {
         throw new Error("Expected a native turn end lifecycle");
       }
-      expect(end.providerUsage).toMatchObject({
-        provider: "openai",
-        model: "gpt-6-luna",
-        accountingVersion: "codex-cli-native-rollout-v1",
-        availability: "complete",
-        inputTokens: 120,
-        outputTokens: 30,
-        reasoningTokens: 10,
-        cachedInputTokens: 40,
-        totalTokens: 150,
-      });
-      expect(end.providerUsage?.costMicroUsd).toBeUndefined();
+      // The response already reported its usage; the turn end must not count it again.
+      expect(end.providerUsage).toBeUndefined();
       expect(end.metadata?.codexNative).toMatchObject({
-        cacheWriteInputTokens: 8,
         threadTokenUsage: { input_tokens: 220, total_tokens: 250 },
       });
     });
 
-    it("uses the explicit turn total across multiple native responses", () => {
+    it("uses the explicit turn total across responses recorded without an id", () => {
       const events = decodeCodexTranscript(
         [
           { type: "session_meta", payload: { id: "thread-usage", session_id: "root-usage" } },
@@ -1407,7 +1425,6 @@ describe("Codex CLI Session Decoder", () => {
             payload: {
               thread_id: "thread-usage",
               turn_id: "turn-usage-1",
-              response_id: "response-usage-1",
               usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
               turn_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
             },
@@ -1427,7 +1444,6 @@ describe("Codex CLI Session Decoder", () => {
             payload: {
               thread_id: "thread-usage",
               turn_id: "turn-usage-1",
-              response_id: "response-usage-2",
               usage: { input_tokens: 150, output_tokens: 20, total_tokens: 170 },
               turn_token_usage: { input_tokens: 250, output_tokens: 30, total_tokens: 280 },
             },
@@ -1460,7 +1476,7 @@ describe("Codex CLI Session Decoder", () => {
       });
     });
 
-    it("keeps duplicate token-count snapshots subordinate in either record order", () => {
+    it("keeps duplicate token counts subordinate to an id-less usage record", () => {
       const countRecord: CodexTranscriptPayload = {
         type: "event_msg",
         payload: {
@@ -1476,7 +1492,6 @@ describe("Codex CLI Session Decoder", () => {
         payload: {
           thread_id: "thread-usage-order",
           turn_id: "turn-usage-order",
-          response_id: "response-usage-order",
           usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
           turn_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
         },
@@ -1515,7 +1530,7 @@ describe("Codex CLI Session Decoder", () => {
       }
     });
 
-    it("sums unique response usage records when per-turn totals are absent", () => {
+    it("emits each identified response once instead of a terminal turn sum", () => {
       const first: CodexTranscriptPayload = {
         type: "token_usage_record",
         payload: {
@@ -1577,18 +1592,27 @@ describe("Codex CLI Session Decoder", () => {
         ],
         { sessionId: "sess_native_response_only_usage" },
       );
+      const requests = events.filter(
+        (event) =>
+          event.type === "session_lifecycle" && event.providerUsage?.usageScope === "request",
+      );
+      expect(requests.map((event) => event.providerUsage?.requestId)).toEqual([
+        "response-usage-1",
+        "response-usage-2",
+      ]);
+      // No cache counts were recorded, so uncached input is unknown and each request is partial.
+      expect(requests.map((event) => event.providerUsage)).toMatchObject([
+        { availability: "partial", outputTokens: 10, totalTokens: 110 },
+        { availability: "partial", outputTokens: 20, totalTokens: 170 },
+      ]);
+      expect(requests.every((event) => event.providerUsage?.inputTokens === undefined)).toBe(true);
       const end = events.find(
         (event) => event.type === "session_lifecycle" && event.lifecycleType === "end",
       );
       if (!end || end.type !== "session_lifecycle") {
         throw new Error("Expected the response-only native usage turn to end");
       }
-      expect(end.providerUsage).toMatchObject({
-        availability: "complete",
-        inputTokens: 250,
-        outputTokens: 30,
-        totalTokens: 280,
-      });
+      expect(end.providerUsage).toBeUndefined();
     });
 
     it("keeps consecutive turn usage separate from cumulative token counts", () => {
@@ -2291,5 +2315,471 @@ describe("Codex CLI Session Decoder", () => {
       const eventIds = events.map((event) => event.eventId);
       expect(new Set(eventIds).size).toBe(eventIds.length);
     });
+  });
+});
+
+describe("Codex native model-request accounting and links", () => {
+  const thread = "01a0e100-0000-7000-8000-000000000001";
+  const meta: CodexTranscriptPayload = {
+    type: "session_meta",
+    payload: { id: thread, session_id: thread, cwd: "/repo" },
+  };
+  const turnStart = (turnId: string): CodexTranscriptPayload => ({
+    type: "event_msg",
+    payload: { type: "task_started", turn_id: turnId },
+  });
+  const turnContext = (turnId: string): CodexTranscriptPayload => ({
+    type: "turn_context",
+    payload: { turn_id: turnId, model: "gpt-6-luna", model_provider: "openai" },
+  });
+  const turnEnd = (turnId: string): CodexTranscriptPayload => ({
+    type: "event_msg",
+    payload: { type: "task_complete", turn_id: turnId },
+  });
+  const userPrompt = (text: string): CodexTranscriptPayload => ({
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  });
+  const usageRecord = (
+    turnId: string,
+    responseId: string | undefined,
+    usage?: CodexTranscriptPayload,
+    extra: CodexTranscriptPayload = {},
+  ): CodexTranscriptPayload => ({
+    type: "token_usage_record",
+    payload: {
+      thread_id: thread,
+      turn_id: turnId,
+      ...(responseId === undefined ? {} : { response_id: responseId }),
+      ...(usage === undefined ? {} : { usage }),
+      ...extra,
+    },
+  });
+  const requestsOf = (events: NormalizedSessionEvent[]) =>
+    events.filter(
+      (event) =>
+        event.type === "session_lifecycle" && event.providerUsage?.usageScope === "request",
+    );
+  const terminalOf = (events: NormalizedSessionEvent[]) =>
+    events.filter(
+      (event) =>
+        event.type === "session_lifecycle" &&
+        (event.lifecycleType === "end" || event.lifecycleType === "crash"),
+    );
+  const requestBase = {
+    provider: "openai",
+    model: "gpt-6-luna",
+    accountingVersion: "codex-cli-native-rollout-v1",
+    usageScope: "request",
+  };
+
+  it("reports one complete request per response id with uncached input and cache writes", () => {
+    const counts = {
+      input_tokens: 1000,
+      cached_input_tokens: 600,
+      cache_write_input_tokens: 100,
+      output_tokens: 50,
+      reasoning_output_tokens: 20,
+      total_tokens: 1050,
+    };
+    // Codex reports the same cumulative thread total on the usage record and the token count.
+    const threadUsage = { input_tokens: 5000, output_tokens: 400, total_tokens: 5400 };
+    const events = decodeCodexTranscript(
+      [
+        meta,
+        turnStart("turn-a"),
+        turnContext("turn-a"),
+        userPrompt("first prompt"),
+        usageRecord("turn-a", "resp_a", counts, {
+          turn_token_usage: counts,
+          thread_token_usage: threadUsage,
+        }),
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: counts, total_token_usage: threadUsage },
+          },
+        },
+        turnEnd("turn-a"),
+      ],
+      { sessionId: "sess_request_complete" },
+    );
+    for (const event of events) {
+      expect(NormalizedSessionEventSchema.safeParse(event).success).toBe(true);
+    }
+    const requests = requestsOf(events);
+    expect(requests).toHaveLength(1);
+    const usage = requests[0]?.providerUsage;
+    // OpenAI input includes cache reads and writes; output includes reasoning.
+    expect(usage).toEqual({
+      ...requestBase,
+      availability: "complete",
+      requestId: "resp_a",
+      inputTokens: 300,
+      cachedInputTokens: 600,
+      cacheWriteTokens: 100,
+      outputTokens: 50,
+      reasoningTokens: 20,
+      totalTokens: 1050,
+    });
+    expect(usage && providerUsageNormalizedTotal(usage)).toBe(1050);
+    expect(requests[0]?.metadata).toMatchObject({
+      modelRequestId: "resp_a",
+      taskId: "turn-a",
+      codexNative: { threadId: thread, turnId: "turn-a" },
+    });
+    // The request is the only usage: neither the token count nor the turn end repeats it.
+    expect(events.filter((event) => event.providerUsage)).toHaveLength(1);
+    const [end] = terminalOf(events);
+    expect(end?.providerUsage).toBeUndefined();
+    expect(end?.metadata?.codexNative).toMatchObject({
+      threadTokenUsage: { input_tokens: 5000, total_tokens: 5400 },
+    });
+  });
+
+  describe("partial and missing request counts", () => {
+    const requestUsageOf = (usage: CodexTranscriptPayload | undefined) => {
+      const events = decodeCodexTranscript(
+        [meta, turnStart("turn-p"), turnContext("turn-p"), usageRecord("turn-p", "resp_p", usage)],
+        { sessionId: "sess_request_partial" },
+      );
+      for (const event of events) {
+        expect(NormalizedSessionEventSchema.safeParse(event).success).toBe(true);
+      }
+      const requests = requestsOf(events);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.metadata).toMatchObject({ modelRequestId: "resp_p", taskId: "turn-p" });
+      return requests[0]?.providerUsage;
+    };
+
+    it("omits uncached input rather than clamping when cache counts exceed input", () => {
+      expect(
+        requestUsageOf({
+          input_tokens: 100,
+          cached_input_tokens: 90,
+          cache_write_input_tokens: 20,
+          output_tokens: 5,
+          reasoning_output_tokens: 0,
+          total_tokens: 105,
+        }),
+      ).toEqual({
+        ...requestBase,
+        availability: "partial",
+        requestId: "resp_p",
+        cachedInputTokens: 90,
+        cacheWriteTokens: 20,
+        outputTokens: 5,
+        reasoningTokens: 0,
+        totalTokens: 105,
+      });
+    });
+
+    it("treats a missing cache-write count as unknown, not zero", () => {
+      expect(
+        requestUsageOf({
+          input_tokens: 100,
+          cached_input_tokens: 40,
+          output_tokens: 10,
+          total_tokens: 110,
+        }),
+      ).toEqual({
+        ...requestBase,
+        availability: "partial",
+        requestId: "resp_p",
+        cachedInputTokens: 40,
+        outputTokens: 10,
+        totalTokens: 110,
+      });
+    });
+
+    it("keeps an inconsistent source total as reported", () => {
+      expect(
+        requestUsageOf({
+          input_tokens: 100,
+          cached_input_tokens: 40,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          total_tokens: 999,
+        }),
+      ).toEqual({
+        ...requestBase,
+        availability: "partial",
+        requestId: "resp_p",
+        inputTokens: 60,
+        cachedInputTokens: 40,
+        cacheWriteTokens: 0,
+        outputTokens: 10,
+        totalTokens: 999,
+      });
+    });
+
+    it("keeps reasoning that exceeds output partial", () => {
+      expect(
+        requestUsageOf({
+          input_tokens: 100,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 0,
+          output_tokens: 10,
+          reasoning_output_tokens: 20,
+          total_tokens: 110,
+        }),
+      ).toMatchObject({ availability: "partial", outputTokens: 10, reasoningTokens: 20 });
+    });
+
+    it("derives the total from the categories when the source omits it", () => {
+      expect(
+        requestUsageOf({
+          input_tokens: 100,
+          cached_input_tokens: 30,
+          cache_write_input_tokens: 10,
+          output_tokens: 5,
+        }),
+      ).toMatchObject({ availability: "complete", inputTokens: 60, totalTokens: 105 });
+    });
+
+    it("links a response without usage but invents no counts", () => {
+      expect(requestUsageOf(undefined)).toEqual({
+        ...requestBase,
+        availability: "unavailable",
+        requestId: "resp_p",
+      });
+    });
+  });
+
+  it("re-emits a response only when its snapshot changes and keeps equal counts distinct", () => {
+    const counts = {
+      input_tokens: 200,
+      cached_input_tokens: 100,
+      cache_write_input_tokens: 0,
+      output_tokens: 20,
+      total_tokens: 220,
+    };
+    const revised = { ...counts, output_tokens: 30, total_tokens: 230 };
+    const events = decodeCodexTranscript(
+      [
+        meta,
+        turnStart("turn-s"),
+        turnContext("turn-s"),
+        usageRecord("turn-s", "resp_1", counts),
+        usageRecord("turn-s", "resp_1", counts),
+        usageRecord("turn-s", "resp_2", counts),
+        usageRecord("turn-s", "resp_1", revised),
+        turnEnd("turn-s"),
+      ],
+      { sessionId: "sess_request_snapshots" },
+    );
+    const usages = requestsOf(events).flatMap((event) =>
+      event.providerUsage ? [event.providerUsage] : [],
+    );
+    expect(usages.map((usage) => usage.requestId)).toEqual(["resp_1", "resp_2", "resp_1"]);
+    const [first, second, replacement] = usages;
+    if (!first || !second || !replacement) throw new Error("Expected three request snapshots");
+    expect(providerUsageRequestKey("s", first)).toBe(providerUsageRequestKey("s", replacement));
+    expect(providerUsageRequestKey("s", first)).not.toBe(providerUsageRequestKey("s", second));
+    expect(second).toMatchObject({ availability: "complete", inputTokens: 100, totalTokens: 220 });
+    expect(replacement).toMatchObject({ availability: "complete", outputTokens: 30 });
+    expect(selectProviderUsageSnapshot(first, replacement)).toBe(replacement);
+    expect(terminalOf(events)[0]?.providerUsage).toBeUndefined();
+  });
+
+  it("sums only id-less usage records on the terminal event of a mixed turn", () => {
+    const identified = {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 10,
+      total_tokens: 110,
+    };
+    const events = decodeCodexTranscript(
+      [
+        meta,
+        turnStart("turn-m"),
+        turnContext("turn-m"),
+        usageRecord("turn-m", "resp_m", identified, { turn_token_usage: identified }),
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: identified, total_token_usage: identified },
+          },
+        },
+        usageRecord(
+          "turn-m",
+          undefined,
+          { input_tokens: 50, output_tokens: 5, total_tokens: 55 },
+          { turn_token_usage: { input_tokens: 150, output_tokens: 15, total_tokens: 165 } },
+        ),
+        turnEnd("turn-m"),
+      ],
+      { sessionId: "sess_request_mixed" },
+    );
+    expect(requestsOf(events).map((event) => event.providerUsage?.requestId)).toEqual(["resp_m"]);
+    const [end] = terminalOf(events);
+    expect(end?.providerUsage).toMatchObject({
+      accountingVersion: "codex-cli-native-rollout-v1",
+      inputTokens: 50,
+      outputTokens: 5,
+      totalTokens: 55,
+    });
+    expect(end?.providerUsage?.usageScope).toBeUndefined();
+  });
+
+  it("links a turn's events to its turn id and never guesses one after a restart", () => {
+    const complete = {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 10,
+      total_tokens: 110,
+    };
+    const call = (callId: string, cmd: string): CodexTranscriptPayload => ({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: callId,
+        arguments: JSON.stringify({ cmd, workdir: "/repo" }),
+      },
+    });
+    const events = decodeCodexTranscript(
+      [
+        meta,
+        turnStart("turn-1"),
+        turnContext("turn-1"),
+        userPrompt("first"),
+        call("c-1", "true"),
+        call("c-2", "pwd"),
+        usageRecord("turn-1", "resp_t1", complete),
+        turnEnd("turn-1"),
+        turnStart("turn-2"),
+        userPrompt("second"),
+        turnEnd("turn-2"),
+      ],
+      { sessionId: "sess_request_task" },
+    );
+    const prompt = (text: string) =>
+      events.find(
+        (event) => event.type === "message" && event.role === "user" && event.content === text,
+      );
+    expect(prompt("first")?.metadata?.taskId).toBe("turn-1");
+    expect(prompt("second")?.metadata?.taskId).toBe("turn-2");
+    const calls = events.filter((event) => event.type === "tool_call");
+    expect(calls.map((event) => event.metadata?.taskId)).toEqual(["turn-1", "turn-1"]);
+    // Codex writes the response id after the response's items, so its parallel calls stay unlinked.
+    expect(calls.every((event) => event.metadata?.modelRequestId === undefined)).toBe(true);
+    expect(requestsOf(events)[0]?.metadata).toMatchObject({
+      modelRequestId: "resp_t1",
+      taskId: "turn-1",
+    });
+    expect(terminalOf(events).map((event) => event.metadata?.taskId)).toEqual(["turn-1", "turn-2"]);
+    const linked = events.filter((event) => event.metadata?.modelRequestId !== undefined);
+    expect(linked).toEqual(requestsOf(events));
+
+    const restarted = decodeCodexTranscript(
+      [userPrompt("mid-turn"), call("c-3", "ls"), usageRecord("turn-9", "resp_t9", complete)],
+      { sessionId: "sess_request_task" },
+    );
+    expect(
+      restarted
+        .filter((event) => event.type !== "session_lifecycle")
+        .every((event) => event.metadata?.taskId === undefined),
+    ).toBe(true);
+    expect(requestsOf(restarted)[0]?.metadata).toMatchObject({ taskId: "turn-9" });
+  });
+
+  it("reads Resin invocation receipts only from Resin gateway MCP results", () => {
+    const one = `inv_${"a".repeat(32)}`;
+    const two = `inv_${"b".repeat(32)}`;
+    const receipt = (invocationId: string, benchmarkId?: string) => ({
+      type: "text",
+      text: JSON.stringify(
+        benchmarkId === undefined
+          ? { resinInvocationId: invocationId }
+          : { resinInvocationId: invocationId, benchmarkId },
+      ),
+    });
+    const mcpItem = (
+      id: string,
+      server: string,
+      tool: string,
+      result: CodexTranscriptPayload,
+    ): CodexTranscriptPayload => ({
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        thread_id: thread,
+        turn_id: "turn-r",
+        item: { type: "McpToolCall", id, server, tool, arguments: {}, status: "completed", result },
+      },
+    });
+    const events = decodeCodexTranscript(
+      [
+        meta,
+        turnStart("turn-r"),
+        mcpItem("mcp-resin", "resin", "invoke_tool", {
+          content: [{ type: "text", text: "done" }, receipt(one)],
+          _meta: { "resin/invocation": { version: 1, invocationId: one } },
+        }),
+        mcpItem("mcp-other", "fixture", "word_count", {
+          content: [{ type: "text", text: "3" }, receipt(one)],
+        }),
+        {
+          type: "event_msg",
+          payload: {
+            type: "mcp_tool_call_end",
+            call_id: "mcp-batch",
+            invocation: { server: "resin", tool: "invoke_tool", arguments: {} },
+            result: {
+              Ok: {
+                content: [
+                  { type: "text", text: "ran twice" },
+                  receipt(one, "bench-1"),
+                  receipt(two, "bench-1"),
+                ],
+              },
+            },
+          },
+        },
+        {
+          type: "response_item",
+          payload: { type: "custom_tool_call", name: "exec", call_id: "cell-1", input: "text(1)" },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "cell-1",
+            output: [
+              { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+              { type: "input_text", text: JSON.stringify({ resinInvocationId: two }) },
+            ],
+          },
+        },
+        turnEnd("turn-r"),
+      ],
+      { sessionId: "sess_request_receipts" },
+    );
+    for (const event of events) {
+      expect(NormalizedSessionEventSchema.safeParse(event).success).toBe(true);
+    }
+    const result = (callId: string) =>
+      events.find((event) => event.type === "tool_result" && event.callId === callId);
+    expect(result("mcp-resin")?.metadata).toMatchObject({
+      resinInvocationId: one,
+      taskId: "turn-r",
+    });
+    expect(result("mcp-batch")?.metadata).toMatchObject({
+      resinInvocationIds: [one, two],
+      benchmarkId: "bench-1",
+    });
+    const withReceipts = events
+      .filter(
+        (event) =>
+          event.metadata?.resinInvocationId !== undefined ||
+          event.metadata?.resinInvocationIds !== undefined,
+      )
+      .map((event) => (event.type === "tool_result" ? event.callId : event.type));
+    expect(withReceipts).toEqual(["mcp-resin", "mcp-batch"]);
   });
 });
