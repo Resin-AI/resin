@@ -21,12 +21,56 @@ export interface SuggestToolInput {
   readonly required: boolean;
 }
 
+/** What one recorded step of a learned tool runs. */
+export interface SuggestStep {
+  /** Command phrases the step's program runs; empty for plumbing, edits and harness calls. */
+  readonly commands: readonly string[];
+  /** The boolean input that turns the step off, when it is optional. */
+  readonly optional?: string;
+  /** Present when the step changes files (an edit, a write, `rm`/`cp`/`mkdir`, an opaque script). */
+  readonly writes?: true;
+}
+
 export interface SuggestTool {
   /** The name the agent invokes it by. */
   readonly name: string;
   /** Command phrases its recorded programs run (`vitest`, `gh pr checks`), in run order. */
   readonly commands: readonly string[];
   readonly inputs: readonly SuggestToolInput[];
+  /** Its one-line purpose, as the agent is shown it in the catalog. */
+  readonly purpose?: string;
+  /** What each recorded step runs, when this machine knows its plan. */
+  readonly steps?: readonly SuggestStep[];
+}
+
+/** Longest purpose kept in the index. */
+export const SUGGEST_PURPOSE_MAX_CHARS = 200;
+/** Most steps kept per tool. */
+const MAX_STEPS = 100;
+
+function parseStep(value: unknown): SuggestStep | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const commands = "commands" in value ? value.commands : undefined;
+  const optional = "optional" in value ? value.optional : undefined;
+  const writes = "writes" in value ? value.writes : undefined;
+  if (!Array.isArray(commands)) return undefined;
+  return {
+    commands: commands.filter(
+      (command): command is string => typeof command === "string" && command.length > 0,
+    ),
+    ...(typeof optional === "string" && optional.length > 0 ? { optional } : {}),
+    ...(writes === true ? { writes: true as const } : {}),
+  };
+}
+
+/** A purpose as one bounded line. */
+export function oneLinePurpose(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  const line = text.replace(/\s+/gu, " ").trim();
+  if (line.length === 0) return undefined;
+  return line.length > SUGGEST_PURPOSE_MAX_CHARS
+    ? `${line.slice(0, SUGGEST_PURPOSE_MAX_CHARS - 1).trimEnd()}…`
+    : line;
 }
 
 export interface SuggestRepositoryEntry {
@@ -101,7 +145,20 @@ function parseTool(value: unknown): SuggestTool | undefined {
       parsedInputs.push({ name: inputName, required: required === true });
     }
   }
-  return { name, commands: parsedCommands, inputs: parsedInputs };
+  const purpose = "purpose" in value && typeof value.purpose === "string" ? value.purpose : "";
+  const shownPurpose = oneLinePurpose(purpose);
+  const steps = "steps" in value && Array.isArray(value.steps) ? value.steps : undefined;
+  const parsedSteps = steps?.slice(0, MAX_STEPS).flatMap((step) => {
+    const parsed = parseStep(step);
+    return parsed === undefined ? [] : [parsed];
+  });
+  return {
+    name,
+    commands: parsedCommands,
+    inputs: parsedInputs,
+    ...(shownPurpose === undefined ? {} : { purpose: shownPurpose }),
+    ...(parsedSteps === undefined ? {} : { steps: parsedSteps }),
+  };
 }
 
 /** Parses index text; anything malformed reads as an empty index. */

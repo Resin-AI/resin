@@ -93,9 +93,45 @@ describe("invoke_tool Meta-Tool", () => {
       parameters: {},
     });
     expect(resMissing.isError).toBe(true);
-    expect(resMissing.content[0].text).toContain("Parameter validation failed");
-    expect(resMissing.content[0].text).toContain("Missing required parameter 'count'");
-    expect(resMissing.content[0].text).toContain("Missing required parameter 'mode'");
+    // Each missing input with what it is, one complete call in both harness forms, and that the
+    // same call can simply be repeated with them.
+    const call = '{"name":"tool_validator","parameters":{"count":1,"mode":"fast"}}';
+    expect(resMissing.content[0].text).toBe(
+      [
+        "Missing required inputs for tool 'tool_validator'; nothing ran:",
+        "- count (integer): Item count",
+        "- mode (string): Execution mode",
+        "Repeat the call with them: replace each <placeholder> with your value. A complete call:",
+        `- OMP: write ${call} to xd://mcp__resin_invoke_tool`,
+        `- invoke_tool arguments: ${call}`,
+        "Optional inputs you may also pass: tag.",
+      ].join("\n"),
+    );
+    // The machine-readable failure stays: the reason, and the inputs the call left out.
+    expect(resMissing._meta).toMatchObject({
+      resinFailureReason: "validation_error",
+      resinMissingInputs: ["count", "mode"],
+    });
+
+    // A value the caller did pass stays in the call to repeat; a string gets a placeholder.
+    const partial = await handler(context, {
+      name: "validate_tool",
+      parameters: { count: 3 },
+    });
+    expect(partial.content[0].text).toContain(
+      "Missing required input for tool 'validate_tool'; nothing ran:\n- mode (string): Execution mode\nRepeat the call with it:",
+    );
+    expect(partial.content[0].text).toContain(
+      '- invoke_tool arguments: {"name":"validate_tool","parameters":{"count":3,"mode":"fast"}}',
+    );
+
+    // Any other problem is reported beside the missing inputs.
+    const wrong = await handler(context, {
+      toolId: "tool_validator",
+      parameters: { count: "three" },
+    });
+    expect(wrong.content[0].text).toContain("- mode (string): Execution mode");
+    expect(wrong.content[0].text).toMatch(/\nAlso: .*count/);
   });
 
   it("returns text output as text, one labeled section per step, not escaped JSON", async () => {

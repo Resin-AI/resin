@@ -1,14 +1,15 @@
 /**
- * Keeps the command-suggestion index current from inside `resin mcp`: each time the gateway lists
- * a connection's known catalog (initialize, tools/list, a catalog change), the learned tools it
- * offers there, with the commands their recorded programs run, replace that repository's entry.
- * The catalog is already scoped to the connection's repository by the router, so the index is too.
+ * Keeps the suggestion index current from inside `resin mcp`: each time the gateway lists a
+ * connection's known catalog (initialize, tools/list, a catalog change), the learned tools it
+ * offers there, with their one-line purpose, the commands their recorded programs run and what
+ * each recorded step runs, replace that repository's entry. The catalog is already scoped to the
+ * connection's repository by the router, so the index is too.
  */
 import { RESIN_LEARNED_TOOL_META } from "../protocol/types.js";
 import { callerRepository } from "../proxy/tool-location.js";
 import type { CatalogNoticeTool } from "../router.js";
 import type { WorkspaceContext } from "../workspace-resolver.js";
-import { type SuggestTool, writeRepositoryTools } from "./index-file.js";
+import { type SuggestTool, oneLinePurpose, writeRepositoryTools } from "./index-file.js";
 import { type RepositoryIdentityResolver, repositoryIdentity } from "./repository-identity.js";
 
 export type CatalogListedObserver = (
@@ -25,16 +26,17 @@ export interface CommandSuggestIndexWriterOptions {
 }
 
 /**
- * The index entries for a listed catalog: learned tools that run at least one command, except
- * those measured to cost more than running the command directly.
+ * The index entries for a listed catalog: learned tools, except those measured to cost more than
+ * running the command directly. A tool that runs no command is kept for prompt-time listings; the
+ * command matcher skips it.
  */
 export function suggestToolsFromCatalog(tools: readonly CatalogNoticeTool[]): SuggestTool[] {
   const result: SuggestTool[] = [];
   for (const tool of tools) {
     if (tool._meta?.[RESIN_LEARNED_TOOL_META] !== true || tool.recommended === false) continue;
     const commands = tool.localCommands ?? [];
-    if (commands.length === 0) continue;
     const required = new Set(tool.inputSchema.required ?? []);
+    const purpose = oneLinePurpose(tool.listing?.purpose);
     result.push({
       name: tool.name,
       commands: [...commands],
@@ -42,6 +44,16 @@ export function suggestToolsFromCatalog(tools: readonly CatalogNoticeTool[]): Su
         name,
         required: required.has(name),
       })),
+      ...(purpose === undefined ? {} : { purpose }),
+      ...(tool.localSteps === undefined
+        ? {}
+        : {
+            steps: tool.localSteps.map((step) => ({
+              commands: [...step.commands],
+              ...(step.optional === undefined ? {} : { optional: step.optional }),
+              ...(step.writes === true ? { writes: true as const } : {}),
+            })),
+          }),
     });
   }
   return result.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

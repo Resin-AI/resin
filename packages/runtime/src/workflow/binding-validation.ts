@@ -13,6 +13,7 @@
 
 import {
   type ProgramLanguage,
+  type ProgramToken,
   type ProgramTokenAddress,
   type ProgramTokenSpan,
   type ProgramTokenSpanValue,
@@ -34,6 +35,7 @@ import {
   demonstratedProgramTokenSpanValue,
   extractPrintedValue,
   isOptionLikeListItem,
+  omittableOptionProblem,
   parseExtractLocator,
   programTokenListAt,
   programTokenListShift,
@@ -744,6 +746,113 @@ async function demonstratedTokenValue(
   );
 }
 
+/** Where a plan binds an omittable option input: the first option hole of a recorded step. */
+interface OmittableOptionHole {
+  step: WorkflowStep;
+  argument: string;
+  hole: { token: number; option: number; span?: ProgramTokenSpan };
+}
+
+function omittableOptionHole(
+  plan: RecordedWorkflow,
+  name: string,
+): OmittableOptionHole | undefined {
+  for (const step of plan.steps) {
+    if (step.origin === "derivation") continue;
+    for (const argument of step.arguments) {
+      const source = argument.source;
+      if (source.kind !== "template" || source.template.type !== "program") continue;
+      if (step.callable.program?.argument !== argument.name) continue;
+      // A word list moves the tokens after it; such a program is not read here.
+      if (source.template.holes.some((hole) => hole.through !== undefined)) continue;
+      for (const hole of source.template.holes) {
+        if (
+          hole.option !== undefined &&
+          hole.embedded === undefined &&
+          hole.binding.type === "input" &&
+          hole.binding.name === name
+        ) {
+          return {
+            step,
+            argument: argument.name,
+            hole: {
+              token: hole.token,
+              option: hole.option,
+              ...(hole.span === undefined ? {} : { span: hole.span }),
+            },
+          };
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The value a demonstration ran an omittable option with: read at the hole only when the
+ * demonstrated program is still an omittable option site there with the recorded option word (and
+ * the recorded `--name=`/`key=` prefix); undefined otherwise, which leaves the input omitted.
+ */
+async function demonstratedOptionValue(
+  site: OmittableOptionHole,
+  supplied: string,
+  resolve: (reference: string) => Promise<WorkflowJsonValue>,
+): Promise<WorkflowJsonValue | undefined> {
+  const program = site.step.callable.program;
+  if (program === undefined || recordedProgramLanguage(program) !== "shell") return undefined;
+  const argument = site.step.arguments.find((entry) => entry.name === site.argument);
+  if (argument === undefined) return undefined;
+  let recorded: unknown;
+  try {
+    recorded = segmentOriginal(
+      site.step,
+      argument.name,
+      await recordedProgramText(argument.source, resolve),
+    );
+  } catch {
+    return undefined;
+  }
+  if (typeof recorded !== "string") return undefined;
+  let recordedTokens: ProgramToken[];
+  let suppliedTokens: ProgramToken[];
+  try {
+    recordedTokens = tokenizeProgram("shell", recorded);
+    suppliedTokens = tokenizeProgram("shell", supplied);
+  } catch {
+    return undefined;
+  }
+  const { hole } = site;
+  /** The option word, or for an attached option the token's text before the bound span. */
+  const optionWord = (tokens: readonly ProgramToken[]): string | undefined => {
+    const token = tokens[hole.option];
+    if (token === undefined) return undefined;
+    return hole.option === hole.token ? token.raw.slice(0, hole.span?.start ?? 0) : token.raw;
+  };
+  const word = optionWord(recordedTokens);
+  if (word === undefined || word !== optionWord(suppliedTokens)) return undefined;
+  const value = suppliedTokens[hole.token]?.value;
+  if (typeof value !== "string") return undefined;
+  // A span's prefix (`--subject=`, `key=`) is the recorded one; the value runs to the token's end.
+  const start = hole.span?.start ?? 0;
+  const recordedValue = recordedTokens[hole.token]?.value;
+  if (
+    hole.span !== undefined &&
+    (typeof recordedValue !== "string" ||
+      value.slice(0, start) !== recordedValue.slice(0, start) ||
+      value.length <= start)
+  ) {
+    return undefined;
+  }
+  const span = hole.span === undefined ? undefined : { start, end: value.length };
+  const problem = omittableOptionProblem(supplied, suppliedTokens, {
+    token: hole.token,
+    option: hole.option,
+    ...(span === undefined ? {} : { span }),
+  });
+  if (problem !== undefined) return undefined;
+  return value.slice(start);
+}
+
 /** The run of words a word list covers in a program argument: its list hole, else a proposal. */
 function wordListRun(
   step: WorkflowStep,
@@ -980,6 +1089,24 @@ export async function demonstrationEnvironment(params: {
     const source = argument.source;
     if (source.kind === "input" && !bindInput(source.name, [])) return undefined;
     if (source.kind === "template" && !bindTemplate(source.template, [])) return undefined;
+  }
+  // An omittable option input the plan already binds is read at its hole: the value the
+  // demonstration ran with that option, or nothing when it ran without the option, which leaves the
+  // input omitted so the replay checks the command without it.
+  for (const input of params.plan.inputs) {
+    if (input.omitOptionWhenAbsent !== true || Object.hasOwn(inputs, input.name)) continue;
+    const site = omittableOptionHole(params.plan, input.name);
+    if (site === undefined) continue;
+    const entry = demonstration.inputs.find(
+      (supplied) => supplied.stepId === site.step.id && supplied.argument === site.argument,
+    );
+    if (entry === undefined) continue;
+    const supplied = await suppliedFor(site.step, entry.argument, entry.reference);
+    if (typeof supplied !== "string") continue;
+    const value = await demonstratedOptionValue(site, supplied, resolveOnce);
+    if (value !== undefined && matchesDemonstratedType(value, input.type)) {
+      inputs[input.name] = value;
+    }
   }
   for (const candidate of params.candidates) {
     if (candidate.proposed.kind !== "input") continue;

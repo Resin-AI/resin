@@ -111,9 +111,19 @@ export const WINDOWS_PE_MACHINE = Object.freeze({ x64: 0x8664, arm64: 0xaa64 });
 /**
  * `bin/resin`. `resin suggest` runs once per shell command an agent is about to run (a harness
  * hook), so it goes straight to the lean suggestion module instead of loading the whole CLI.
+ * `resin mcp` first goes to the lean MCP supervisor, which keeps the harness's stdio and runs the
+ * gateway of the active release as a child (`RESIN_MCP_SUPERVISOR` set), switching releases
+ * mid-session; it declines (undefined) when it cannot supervise, and the CLI runs as before.
  */
 export const RESIN_CLI_LAUNCHER = `#!/usr/bin/env node
-if (process.argv[2] === "suggest") {
+let supervisedExitCode;
+if (process.argv[2] === "mcp" && process.env.RESIN_MCP_SUPERVISOR === undefined) {
+  const { runMcpSupervisor } = await import("../apps/gateway/dist/mcp-supervisor/index.js");
+  supervisedExitCode = await runMcpSupervisor({ entry: import.meta.url, args: process.argv.slice(3) });
+}
+if (supervisedExitCode !== undefined) {
+  process.exitCode = supervisedExitCode;
+} else if (process.argv[2] === "suggest") {
   const { runSuggestCli } = await import("../apps/gateway/dist/suggest/index.js");
   process.exitCode = await runSuggestCli(process.argv.slice(3));
 } else {

@@ -42,6 +42,7 @@ import {
   invocationStatusFor,
 } from "./invocation-failure.js";
 import { invocationReceipt, newInvocationId, withInvocationReceipt } from "./invocation-receipt.js";
+import { missingInputsResult, missingRequiredInputs } from "./missing-inputs.js";
 import { isToolOfferedHere, unavailableHereMessage } from "./repository-scope.js";
 import type { ToolInvocationRouter } from "./router-contract.js";
 import { isToolInScope } from "./search-tools.js";
@@ -599,6 +600,22 @@ export function createInvokeToolHandler(
     const paramSchema = resolvedTool.parameters ?? resolvedTool.manifest?.parameters;
     const validation = validateParameters(paramSchema, dispatchParams as JsonRpcParams);
     if (!validation.valid) {
+      const missing = missingRequiredInputs(paramSchema, dispatchParams);
+      if (missing.length > 0) {
+        // Missing inputs get a refusal the agent can act on: what each one is, and the same call
+        // with every required input filled in, ready to repeat.
+        const missingErrors = new Set(
+          missing.map((name) => `Missing required parameter '${name}'`),
+        );
+        const res = missingInputsResult(
+          displayIdentifier,
+          paramSchema,
+          targetParams as Record<string, unknown>,
+          missing,
+          validation.errors.filter((error) => !missingErrors.has(error)),
+        );
+        return recordInvocation("validation_error", res, validation.errors.join("; "));
+      }
       const res: CallToolResult = {
         isError: true,
         content: [

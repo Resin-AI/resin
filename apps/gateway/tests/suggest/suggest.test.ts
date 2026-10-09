@@ -131,11 +131,11 @@ describe("suggestForCommand", () => {
     );
     expect(claude?.tool).toBe("run_vitest_tests");
     expect(claude?.line).toBe(
-      'Resin: learned tool run_vitest_tests covers this command (`vitest`); instead of running it by hand, call mcp__resin__invoke_tool with {"name":"run_vitest_tests","parameters":{"test_file":"…","reporter":"…"}}, filling in your values (omitted inputs reuse recorded values). Ignore this if the tool does not fit your task.',
+      'Resin, next time: learned tool run_vitest_tests runs `vitest`; call mcp__resin__invoke_tool with {"name":"run_vitest_tests","parameters":{"test_file":"…"}}.',
     );
     const omp = suggestForCommand({ command: "vitest", cwd, harness: "omp" }, options);
     expect(omp?.line).toContain(
-      'write {"name":"run_vitest_tests","parameters":{"test_file":"…","reporter":"…"}} to xd://mcp__resin_invoke_tool',
+      'write {"name":"run_vitest_tests","parameters":{"test_file":"…"}} to xd://mcp__resin_invoke_tool',
     );
     expect(claude?.line).not.toContain("\n");
   });
@@ -259,7 +259,7 @@ describe("resin suggest --harness claude-code (hook I/O contract)", () => {
     expect(Object.keys(output)).toEqual(["hookSpecificOutput"]);
     expect(output.hookSpecificOutput.hookEventName).toBe("PreToolUse");
     expect(output.hookSpecificOutput.additionalContext).toMatch(
-      /^Resin: learned tool run_vitest_tests covers this command/,
+      /^Resin, next time: learned tool run_vitest_tests runs `vitest`/,
     );
     expect(output.hookSpecificOutput).not.toHaveProperty("permissionDecision");
     expect(output.hookSpecificOutput).not.toHaveProperty("updatedInput");
@@ -353,13 +353,14 @@ describe("index writer", () => {
     ...(localCommands === undefined ? {} : { localCommands }),
   });
 
-  it("indexes learned tools that run commands, by name", () => {
+  it("indexes learned tools by name, with or without commands", () => {
     expect(
       suggestToolsFromCatalog([
         learned("zeta", ["vitest"]),
         learned("no_program"),
         { name: "search_tools", inputSchema: { type: "object" } },
         learned("alpha", ["gh pr checks"]),
+        { ...learned("costly", ["make"]), recommended: false },
       ]),
     ).toEqual([
       {
@@ -367,8 +368,37 @@ describe("index writer", () => {
         commands: ["gh pr checks"],
         inputs: [{ name: "test_file", required: true }],
       },
+      { name: "no_program", commands: [], inputs: [{ name: "test_file", required: true }] },
       { name: "zeta", commands: ["vitest"], inputs: [{ name: "test_file", required: true }] },
     ]);
+  });
+
+  it("keeps each tool's one-line purpose and what each recorded step runs", () => {
+    const [entry] = suggestToolsFromCatalog([
+      {
+        ...learned("run_checks", ["cargo test", "cargo clippy"]),
+        listing: { purpose: "Run the crate's\n tests and lints.", signature: "{}" },
+        localSteps: [
+          { commands: ["cargo test"] },
+          { commands: ["cargo clippy"], optional: "run_clippy" },
+          { commands: [], writes: true },
+        ],
+      },
+    ]);
+    expect(entry).toEqual({
+      name: "run_checks",
+      commands: ["cargo test", "cargo clippy"],
+      inputs: [{ name: "test_file", required: true }],
+      purpose: "Run the crate's tests and lints.",
+      steps: [
+        { commands: ["cargo test"] },
+        { commands: ["cargo clippy"], optional: "run_clippy" },
+        { commands: [], writes: true },
+      ],
+    });
+    const dir = resolveCommandSuggestDir({ stateDir: tempDir("resin-suggest-steps-") });
+    writeRepositoryTools(dir, REPO_A, entry === undefined ? [] : [entry]);
+    expect(readRepositoryTools(dir, REPO_A)).toEqual([entry]);
   });
 
   it("writes each repository's listing under its identity, and nothing outside a repository", () => {

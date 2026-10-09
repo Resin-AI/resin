@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -136,6 +136,30 @@ describe("findHarnessSessionsNeedingRestart", () => {
     ]);
   });
 
+  it("does not ask to restart a session whose gateway runs under an MCP supervisor", () => {
+    const table = [
+      // Supervised: the supervisor (701) never registers a version; its child gateway (702) is
+      // still on the old release while the supervisor switches it.
+      proc(700, 1, ["claude"]),
+      proc(701, 700, ["node", RESIN_ENTRY, "mcp"]),
+      proc(702, 701, ["node", path.join(RESIN_HOME, "versions", "v1.1.9", "bin", "resin"), "mcp"]),
+      // Started before the supervisor shipped: an in-process gateway on the old release.
+      proc(710, 1, ["claude"]),
+      proc(711, 710, ["node", RESIN_ENTRY, "mcp"]),
+    ];
+
+    expect(
+      find(table, {
+        activeVersion: "1.2.0",
+        gatewayVersions: new Map([
+          [702, "1.1.9"],
+          [711, "1.1.9"],
+        ]),
+        switchableGatewayPids: new Set([701, 702]),
+      }),
+    ).toEqual([{ harnessId: "claude-code", pid: 710, reason: "outdated", version: "1.1.9" }]);
+  });
+
   it("skips sessions still starting and harnesses Resin is not registered with", () => {
     const table = [
       proc(600, 1, ["omp"], NOW - 5_000),
@@ -243,6 +267,51 @@ describe("status harness sessions", () => {
     }
   });
 
+  it("treats sessions with a live MCP supervisor as switchable", async () => {
+    const resinHome = await mkdtemp(path.join(os.tmpdir(), "resin-status-supervised-"));
+    try {
+      await mkdir(path.join(resinHome, "versions", "v1.2.0"), { recursive: true });
+      await symlink(path.join(resinHome, "versions", "v1.2.0"), path.join(resinHome, "current"));
+      const entry = path.join(resinHome, "bin", "resin");
+      await mkdir(path.join(resinHome, "run", "mcp-supervisors"), { recursive: true });
+      await writeFile(
+        path.join(resinHome, "run", "mcp-supervisors", "801.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          pid: 801,
+          protocol: 1,
+          version: "1.1.9",
+          activeVersion: "1.1.9",
+          childPids: [802],
+          startedAt: new Date(HOUR_AGO).toISOString(),
+        }),
+      );
+      const status = await readHarnessSessionsStatus({
+        resinHome,
+        harnesses: ["omp"],
+        nowMs: NOW,
+        isAlive: () => true,
+        procRoot: path.join(resinHome, "no-proc"),
+        readProcessTable: async () => [
+          proc(800, 1, ["omp"]),
+          proc(801, 800, ["node", entry, "mcp"]),
+          proc(802, 801, ["node", entry, "mcp"]),
+          proc(810, 1, ["omp"]),
+          proc(811, 810, ["node", entry, "mcp"]),
+        ],
+      });
+
+      expect(status.sessions).toEqual([
+        { harnessId: "omp", name: "Oh My Pi", pid: 810, reason: "outdated", version: null },
+      ]);
+      expect(formatHarnessSessionsNotice(status)).toBe(
+        "1 Oh My Pi session(s) run an older Resin that cannot switch releases by itself (unknown version; PID 810); restart them to load the current version.",
+      );
+    } finally {
+      await rm(resinHome, { recursive: true, force: true });
+    }
+  });
+
   it("reports the check as unavailable where the platform has no process table reader", async () => {
     const status = await readHarnessSessionsStatus({
       resinHome: RESIN_HOME,
@@ -277,7 +346,7 @@ describe("status harness sessions", () => {
         ],
       }),
     ).toBe(
-      "2 Claude Code session(s) run an older Resin (unknown version, v1.1.9; PIDs 7, 9); restart them to load the current version.",
+      "2 Claude Code session(s) run an older Resin that cannot switch releases by itself (unknown version, v1.1.9; PIDs 7, 9); restart them to load the current version.",
     );
   });
 });

@@ -44,6 +44,7 @@ import {
   isCredentialUnsafeGatewayVersion,
   listCredentialUnsafeGateways,
   listRunningGateways,
+  listRunningSupervisors,
   registerRunningGateway,
   resolveGatewayRegistryDir,
 } from "../src/updates/gateway-registry.js";
@@ -848,7 +849,7 @@ describe("MCP gateway version registry", () => {
         credentialUnsafe: [],
       }),
     ).toBe(
-      "2 MCP gateway process(es) still run an older Resin (v1.0.122); restart the harness to load the updated version.",
+      "2 MCP gateway process(es) still run an older Resin that cannot switch releases by itself (v1.0.122); restart the harness to load the updated version.",
     );
     expect(
       formatStaleMcpGateways({
@@ -858,7 +859,7 @@ describe("MCP gateway version registry", () => {
         credentialUnsafe: [{ pid: 77, version: null }],
       }),
     ).toBe(
-      "1 MCP gateway process(es) still run an older Resin (unknown version); restart the harness to load the updated version. 1 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 77 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
+      "1 MCP gateway process(es) still run an older Resin that cannot switch releases by itself (unknown version); restart the harness to load the updated version. 1 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 77 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
     );
   });
 
@@ -906,13 +907,14 @@ describe("MCP gateway version registry", () => {
         count: 2,
         versions: ["1.0.0"],
         unknownVersionCount: 1,
+        switchingCount: 0,
         credentialUnsafe: [
           { pid: 102, version: "1.0.0" },
           { pid: 201, version: null },
         ],
       });
       expect(formatStaleMcpGateways(stale)).toBe(
-        "2 MCP gateway process(es) still run an older Resin (v1.0.0, unknown version); restart the harness to load the updated version. 2 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 102 (v1.0.0), 201 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
+        "2 MCP gateway process(es) still run an older Resin that cannot switch releases by itself (v1.0.0, unknown version); restart the harness to load the updated version. 2 running MCP gateway process(es) use a Resin credential client older than v1.0.122: PID 102 (v1.0.0), 201 (unknown version). Sharing this device's sign-in with them can replay a rotated refresh token and get the sign-in revoked. Restart the harness sessions that own these PIDs (exit and reopen them). `resin login` will not pair while they run.",
       );
       // Without /proc (macOS, Windows) only registered gateways are reported.
       await expect(
@@ -924,6 +926,7 @@ describe("MCP gateway version registry", () => {
         count: 1,
         versions: ["1.0.0"],
         unknownVersionCount: 0,
+        switchingCount: 0,
         credentialUnsafe: [{ pid: 102, version: "1.0.0" }],
       });
       // Login detects them without an active install; hardened gateways are not listed.
@@ -938,6 +941,68 @@ describe("MCP gateway version registry", () => {
       await expect(
         readStaleMcpGateways(resinHome, { procRoot, isAlive: () => true }),
       ).resolves.toMatchObject({ count: 0, credentialUnsafe: [{ pid: 102 }, { pid: 201 }] });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not ask to restart gateways an MCP supervisor switches by itself", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "resin-gateway-supervised-"));
+    const resinHome = path.join(root, ".resin");
+    const procRoot = path.join(root, "proc");
+    try {
+      await fs.mkdir(path.join(resinHome, "versions", "v1.0.140"), { recursive: true });
+      await fs.symlink(
+        path.join(resinHome, "versions", "v1.0.140"),
+        path.join(resinHome, "current"),
+        "junction",
+      );
+      const supervisors = path.join(resinHome, "run", "mcp-supervisors");
+      await fs.mkdir(supervisors, { recursive: true });
+      const supervisor = (pid: number, childPids: number[]) =>
+        JSON.stringify({
+          schemaVersion: 1,
+          pid,
+          protocol: 1,
+          version: "1.0.130",
+          activeVersion: "1.0.130",
+          childPids,
+          startedAt: new Date().toISOString(),
+        });
+      // A live supervisor (101) running gateway 102, and the record of one that exited (999).
+      await fs.writeFile(path.join(supervisors, "101.json"), supervisor(101, [102]));
+      await fs.writeFile(path.join(supervisors, "999.json"), supervisor(999, [998]));
+      registerRunningGateway({ resinHome, version: "1.0.130", pid: 102 });
+      // An in-process gateway from before the supervisor: still needs a restart.
+      registerRunningGateway({ resinHome, version: "1.0.130", pid: 103 });
+      const entry = path.join(resinHome, "bin", "resin");
+      for (const pid of ["101", "102", "103"]) {
+        await fs.mkdir(path.join(procRoot, pid), { recursive: true });
+        await fs.writeFile(path.join(procRoot, pid, "cmdline"), `node\0${entry}\0mcp\0`);
+      }
+      const isAlive = (pid: number) => pid !== 999;
+
+      const stale = await readStaleMcpGateways(resinHome, { procRoot, isAlive });
+      expect(stale).toEqual({
+        count: 1,
+        versions: ["1.0.130"],
+        unknownVersionCount: 0,
+        switchingCount: 1,
+        credentialUnsafe: [],
+      });
+      expect(formatStaleMcpGateways(stale)).toBe(
+        "1 MCP gateway process(es) still run an older Resin that cannot switch releases by itself (v1.0.130); restart the harness to load the updated version. 1 MCP gateway process(es) on an older Resin are switching to the active version on their own; no restart is needed.",
+      );
+      // The exited supervisor's record is pruned; the live one is never an unregistered gateway.
+      await expect(
+        listRunningSupervisors({ resinHome, procRoot, isAlive }).then((live) =>
+          live.map((record) => record.pid),
+        ),
+      ).resolves.toEqual([101]);
+      await expect(fs.stat(path.join(supervisors, "999.json"))).rejects.toThrow();
+      await expect(listCredentialUnsafeGateways({ resinHome, procRoot, isAlive })).resolves.toEqual(
+        [],
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -1060,6 +1125,7 @@ describe("MCP gateway version registry", () => {
         count: 1,
         versions: ["1.0.0"],
         unknownVersionCount: 0,
+        switchingCount: 0,
         credentialUnsafe: [{ pid: process.pid, version: "1.0.0" }],
       });
     } finally {
@@ -1124,6 +1190,19 @@ describe("MCP gateway version registry", () => {
       expect(releaseNotice?.()).toMatch(
         /^Resin v999\.0\.0 was activated, but this Resin MCP server still runs v\d+\.\d+\.\d+.*\. Restart this session to use v999\.0\.0\.$/u,
       );
+
+      // A supervised gateway is switched by its supervisor, so it never asks for a restart.
+      let supervisedNotice: (() => string | undefined) | undefined = () => "unset";
+      await mcpCommand([], {
+        stderr: { write: () => true },
+        home,
+        env: { RESIN_MCP_SUPERVISOR: "1" },
+        shimFactory: (options) => {
+          supervisedNotice = options.releaseNotice;
+          return { start: async () => ({ mode: "failed" }), stop: async () => {} };
+        },
+      });
+      expect(supervisedNotice).toBeUndefined();
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

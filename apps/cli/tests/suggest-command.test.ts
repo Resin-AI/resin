@@ -81,6 +81,24 @@ describe("resin suggest", () => {
         stdout: "",
         stderr: "",
       });
+      const prompt = spawnSync(
+        process.execPath,
+        [launcher, "suggest", "--prompt", "--harness", "claude-code"],
+        {
+          input: JSON.stringify({
+            hook_event_name: "UserPromptSubmit",
+            prompt: "run the tests",
+            cwd: os.tmpdir(),
+          }),
+          env,
+          encoding: "utf8",
+        },
+      );
+      expect({ status: prompt.status, stdout: prompt.stdout, stderr: prompt.stderr }).toEqual({
+        status: 0,
+        stdout: "",
+        stderr: "",
+      });
     },
   );
 });

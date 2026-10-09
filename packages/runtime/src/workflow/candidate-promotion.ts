@@ -16,6 +16,7 @@ import {
   type WorkflowValueTemplate,
   bindProgramToken,
   hashCanonical,
+  omittableOptionSite,
   programTokenPath,
   recordedProgramLanguage,
 } from "@resin/contracts";
@@ -121,11 +122,21 @@ export function applyConfirmedWorkflowBinding(
       existing !== undefined &&
       (existing.type !== proposed.type ||
         (existing.recordedDefault === true) !== (proposed.recordedDefault === true) ||
+        (existing.omitOptionWhenAbsent === true) !== (proposed.omitOptionWhenAbsent === true) ||
         hashCanonical(existing.list ?? null) !== hashCanonical(proposed.list ?? null))
     )
       return undefined;
     // A recorded default keeps the recorded token when omitted, so only a token can carry one.
     if (proposed.recordedDefault === true && candidate.path[0] !== "tokens") return undefined;
+    if (
+      proposed.omitOptionWhenAbsent === true &&
+      (candidate.path[0] !== "tokens" ||
+        proposed.recordedDefault === true ||
+        proposed.list !== undefined ||
+        (proposed.type !== "string" && proposed.type !== "number"))
+    ) {
+      return undefined;
+    }
   }
   const isToken = candidate.path[0] === "tokens";
   if (
@@ -154,6 +165,23 @@ export function applyConfirmedWorkflowBinding(
     // A word list binds only a list input, and a list input binds only a word list.
     const list = proposed.kind === "input" ? proposed.list : undefined;
     if ((address.through === undefined) !== (list === undefined)) return undefined;
+    // An omittable option's value names its option word on the hole, read from the program text
+    // the plan carries; a site that is not an option value is never bound so.
+    let option: number | undefined;
+    if (proposed.kind === "input" && proposed.omitOptionWhenAbsent === true) {
+      const text =
+        source.type === "literal"
+          ? source.value
+          : source.type === "program" && source.source.type === "literal"
+            ? source.source.value
+            : undefined;
+      const site =
+        language === "shell" && typeof text === "string"
+          ? omittableOptionSite(text, address)
+          : undefined;
+      if (site === undefined) return undefined;
+      option = site.option;
+    }
     replaced = bindProgramToken(
       source,
       language,
@@ -163,6 +191,22 @@ export function applyConfirmedWorkflowBinding(
       address.span,
       address.through,
     );
+    if (replaced !== undefined && option !== undefined) {
+      if (replaced.type !== "program") return undefined;
+      const holes = replaced.holes.map((hole) =>
+        hole.token === address.token &&
+        hole.embedded === undefined &&
+        hole.through === undefined &&
+        hole.span?.start === address.span?.start &&
+        hole.span?.end === address.span?.end &&
+        hole.binding.type === "input" &&
+        leaf.type === "input" &&
+        hole.binding.name === leaf.name
+          ? { ...hole, option }
+          : hole,
+      );
+      replaced = { ...replaced, holes };
+    }
   } else if (proposed.kind === "input" && proposed.list !== undefined) {
     return undefined;
   } else {
@@ -187,6 +231,9 @@ export function applyConfirmedWorkflowBinding(
             name: proposed.name,
             type: proposed.type,
             ...(proposed.recordedDefault === true ? { recordedDefault: true as const } : {}),
+            ...(proposed.omitOptionWhenAbsent === true
+              ? { omitOptionWhenAbsent: true as const }
+              : {}),
             ...(proposed.list === undefined ? {} : { list: proposed.list }),
           },
         ]
@@ -230,7 +277,8 @@ export function applyComposedWorkflowBinding(
       input === undefined ||
       input.type !== "string" ||
       input.list !== undefined ||
-      input.recordedDefault === true
+      input.recordedDefault === true ||
+      input.omitOptionWhenAbsent === true
     ) {
       return undefined;
     }

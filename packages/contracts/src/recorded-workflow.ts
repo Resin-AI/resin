@@ -10,6 +10,7 @@
  * a workflow that uses it needs no compiler change.
  */
 
+import { optionalSegmentProblem } from "./check-segments.js";
 import { WORKFLOW_DERIVATION_RUNTIME } from "./derivation-steps.js";
 import {
   DISPLAY_FILTER_VERSIONS,
@@ -21,6 +22,7 @@ import {
   embeddedProgramProtectedTokens,
   embeddedPrograms,
   isOptionLikeListItem,
+  omittableOptionProblem,
   programTokenListFits,
   programTokenPath,
   programTokenSpanFits,
@@ -28,7 +30,6 @@ import {
   tokenizeProgram,
 } from "./program-tokens.js";
 import { type WorkflowStepLocation, workflowStepLocationProblem } from "./repository-location.js";
-import { isOptionalSetupSegment } from "./shell-and-chain.js";
 import {
   type ShellDialect,
   isShellDialect,
@@ -98,13 +99,19 @@ export type WorkflowValueTemplate =
        * `-c`/`-e` code string). With `span`, the hole binds only UTF-16 offsets [start, end) of the
        * addressed string token's decoded value, never all of it. With `through`, the hole is a word
        * list: a list input replaces the run of top-level shell words `token`..`through`, each item
-       * one shell word (at most one list per program, and no other hole inside its run).
+       * one shell word (at most one list per program, and no other hole inside its run). With
+       * `option`, the hole is an option's value and binds an `omitOptionWhenAbsent` input:
+       * `option` is the top-level token index of the option word, `token - 1` for `--subject {x}`,
+       * `-m {x}` and `-f key={x}`, or `token` itself for `--subject={x}` (see
+       * `omittableOptionProblem`). A caller who omits the input runs the program without tokens
+       * `option`..`token`.
        */
       holes: Array<{
         token: number;
         embedded?: number;
         span?: { start: number; end: number };
         through?: number;
+        option?: number;
         binding: WorkflowValueTemplate;
       }>;
       /** Whole original program source, kept in a local private resource. */
@@ -308,6 +315,14 @@ export type WorkflowBindingCandidate = {
          */
         recordedDefault?: true;
         /**
+         * Promote as an omittable option input (see `RecordedWorkflow.inputs[].
+         * omitOptionWhenAbsent`): the token or span this candidate addresses is an option's value,
+         * and applying it puts `option` (`omittableOptionSite`) on the new hole. Only a top-level
+         * program-token position of a POSIX shell program qualifies, never with a recorded default
+         * or a list.
+         */
+        omitOptionWhenAbsent?: true;
+        /**
          * A word list over the run `["tokens", first, "through", last]` addresses: promoted as an
          * `array` input with this {@link WorkflowListInput} shape.
          */
@@ -379,7 +394,10 @@ export type WorkflowStep = {
   /**
    * The step is a caller toggle: when the named boolean input resolves to `false`, the step is
    * skipped. The input defaults to `true`, so an omitted toggle keeps the recorded behavior. No
-   * other step may consume an optional step's result.
+   * other step may consume an optional step's result. A `segment` step may be optional only when it
+   * is its chain's `mkdir -p` setup, or a check (`isCheckSegment`) after which every named segment
+   * of its chain is a check or setup too (`optionalSegmentProblem`; device capability
+   * `optional-check-segments-v1`): skipping it then runs the rest of the chain unchanged.
    */
   optional?: { input: string };
   /**
@@ -483,6 +501,16 @@ export type RecordedWorkflow = {
      * it never becomes part of the plan. Such an input is bound only by program-token holes.
      */
     recordedDefault?: true;
+    /**
+     * The input is an option's value (`--subject {x}`, `--subject={x}`, `-m {x}`, `-f key={x}`), and
+     * the caller may omit it: the option word and its value then leave the command, so the program
+     * runs with the option's own default (`gh pr merge --squash` without `--subject`). It is never
+     * required and never reuses the recorded value. A `string` or `number` input without `default`,
+     * `recordedDefault` or `list`, bound only by program holes that carry `option`, in recorded
+     * (non-derivation) steps. Needs the device capability `omittable-option-v1`
+     * (`OMITTABLE_OPTION_CAPABILITY`).
+     */
+    omitOptionWhenAbsent?: true;
     /**
      * An `array` input that is a word list: bound only by list holes (`through`), each item one
      * shell word. See {@link workflowListInputProblem} for what a caller may pass.
@@ -1068,16 +1096,29 @@ function validateWorkflowOptionalSteps(workflow: Record<string, unknown>, errors
     } else if (input.type !== "boolean" || input.default !== true) {
       errors.push(`step ${stepId} toggle input ${name} must be a boolean defaulting to true`);
     }
-    // A segment step may be skipped only when it is the chain's one setup that nothing else needs.
+    // A segment step may be skipped only when it is the chain's `mkdir -p` setup, or a check that
+    // gates no later segment doing anything but check (`optionalSegmentProblem`).
     const callable = isPlainObject(step.callable) ? step.callable : undefined;
     const program = isPlainObject(callable?.program) ? callable.program : undefined;
-    if (
-      Object.hasOwn(step, "segment") &&
-      (typeof program?.source !== "string" || !isOptionalSetupSegment(program.source))
-    ) {
-      errors.push(
-        `step ${stepId} is a segment that only a mkdir -p setup segment may make optional`,
-      );
+    if (Object.hasOwn(step, "segment")) {
+      const index = isPlainObject(step.segment) ? step.segment.index : undefined;
+      const later = steps.flatMap((other) => {
+        if (other === step || other.callId !== step.callId || !isPlainObject(other.segment)) {
+          return [];
+        }
+        if (typeof index !== "number" || typeof other.segment.index !== "number") return [];
+        if (other.segment.index <= index) return [];
+        const otherCallable = isPlainObject(other.callable) ? other.callable : undefined;
+        const otherProgram = isPlainObject(otherCallable?.program)
+          ? otherCallable.program
+          : undefined;
+        return [typeof otherProgram?.source === "string" ? otherProgram.source : ""];
+      });
+      const problem =
+        typeof program?.source === "string"
+          ? optionalSegmentProblem(program.source, later)
+          : "is a segment without its program text, so it cannot be optional";
+      if (problem !== undefined) errors.push(`step ${stepId} ${problem}`);
     }
     const other = toggles.get(name);
     if (other !== undefined) {
@@ -1576,6 +1617,8 @@ export function validateRecordedWorkflow(value: unknown): {
   const inputNames = new Set<string>();
   const inputTypes = new Map<string, string>();
   const recordedDefaults = new Set<string>();
+  /** Omittable option inputs: read only as the binding of a hole that carries `option`. */
+  const omittableOptions = new Set<string>();
   /** Word-list inputs: read only as the binding of a list hole. */
   const listInputs = new Set<string>();
   for (const input of inputs ?? []) {
@@ -1629,6 +1672,23 @@ export function validateRecordedWorkflow(value: unknown): {
           errors.push(`input ${input.name} cannot have both a default and a recorded default`);
         } else {
           recordedDefaults.add(input.name);
+        }
+      }
+      if (Object.hasOwn(input, "omitOptionWhenAbsent")) {
+        if (input.omitOptionWhenAbsent !== true) {
+          errors.push(`input ${input.name} omitOptionWhenAbsent must be true when present`);
+        } else if (input.type !== "string" && input.type !== "number") {
+          errors.push(`input ${input.name} omitted with its option must be a string or number`);
+        } else if (
+          Object.hasOwn(input, "default") ||
+          Object.hasOwn(input, "recordedDefault") ||
+          Object.hasOwn(input, "list")
+        ) {
+          errors.push(
+            `input ${input.name} omitted with its option cannot also have a default, a recorded default or a list`,
+          );
+        } else {
+          omittableOptions.add(input.name);
         }
       }
     }
@@ -1788,6 +1848,10 @@ export function validateRecordedWorkflow(value: unknown): {
         errors.push(
           `step ${step.id} argument ${argument.name} reads recorded-default input ${String(source.name)} outside a program token`,
         );
+      } else if (source.kind === "input" && omittableOptions.has(String(source.name))) {
+        errors.push(
+          `step ${step.id} argument ${argument.name} reads omittable option input ${String(source.name)} outside an option value hole`,
+        );
       } else if (source.kind === "input" && listInputs.has(String(source.name))) {
         errors.push(
           `step ${step.id} argument ${argument.name} reads list input ${String(source.name)} outside a word-list hole`,
@@ -1820,11 +1884,14 @@ export function validateRecordedWorkflow(value: unknown): {
       }
       if (source.kind === "template") {
         const problems: string[] = [];
-        /** `token`: the binding of a program hole; `list`: of a word-list hole. */
+        /**
+         * `token`: the binding of a program hole; `list`: of a word-list hole; `option`: of a hole
+         * that carries `option` (an omittable option's value).
+         */
         const walk = (
           template: unknown,
           where: string,
-          holeBinding: "none" | "token" | "list" = "none",
+          holeBinding: "none" | "token" | "list" | "option" = "none",
         ): void => {
           if (!isPlainObject(template)) {
             problems.push(`${where} is not a template node`);
@@ -1840,6 +1907,12 @@ export function validateRecordedWorkflow(value: unknown): {
               } else if (recordedDefaults.has(template.name) && holeBinding === "none") {
                 problems.push(
                   `${where} reads recorded-default input ${template.name} outside a program token`,
+                );
+              } else if (omittableOptions.has(template.name) !== (holeBinding === "option")) {
+                problems.push(
+                  holeBinding === "option"
+                    ? `${where} option value hole must bind an omittable option input, not ${template.name}`
+                    : `${where} reads omittable option input ${template.name} outside an option value hole`,
                 );
               } else if (listInputs.has(template.name) !== (holeBinding === "list")) {
                 problems.push(
@@ -1936,7 +2009,8 @@ export function validateRecordedWorkflow(value: unknown): {
                 } else if (
                   inputTypes.get(name) !== "string" ||
                   listInputs.has(name) ||
-                  recordedDefaults.has(name)
+                  recordedDefaults.has(name) ||
+                  omittableOptions.has(name)
                 ) {
                   problems.push(`${at} must read a plain string input, not ${name}`);
                 }
@@ -1977,6 +2051,7 @@ export function validateRecordedWorkflow(value: unknown): {
                 return;
               }
               const spansByToken = new Map<string, Array<{ start: number; end: number } | null>>();
+              const optionRuns: Array<{ hole: number; from: number; through: number }> = [];
               const lists = template.holes.filter(
                 (hole): hole is Record<string, unknown> & { token: number; through: number } =>
                   isPlainObject(hole) &&
@@ -2015,6 +2090,70 @@ export function validateRecordedWorkflow(value: unknown): {
                     hole.span.start >= hole.span.end)
                 ) {
                   problems.push(`${where} hole ${index} must name a span of its token value`);
+                  continue;
+                }
+                const option = hole.option;
+                if (option !== undefined) {
+                  const binding = isPlainObject(hole.binding) ? hole.binding : undefined;
+                  if (
+                    typeof option !== "number" ||
+                    !Number.isInteger(option) ||
+                    option < 0 ||
+                    hole.through !== undefined ||
+                    hole.embedded !== undefined ||
+                    template.language !== "shell"
+                  ) {
+                    problems.push(
+                      `${where} hole ${index} option must name a top-level token of a shell program`,
+                    );
+                    continue;
+                  }
+                  if (step.origin === "derivation") {
+                    problems.push(`${where} hole ${index} cannot omit an option of a derivation`);
+                  }
+                  if (
+                    binding?.type !== "input" ||
+                    typeof binding.name !== "string" ||
+                    !omittableOptions.has(binding.name)
+                  ) {
+                    problems.push(
+                      `${where} hole ${index} option value hole must bind an omittable option input`,
+                    );
+                  }
+                  optionRuns.push({ hole: index, from: option, through: hole.token });
+                  if (
+                    isPlainObject(template.source) &&
+                    template.source.type === "literal" &&
+                    typeof template.source.value === "string"
+                  ) {
+                    const text = template.source.value;
+                    let problem: string | undefined;
+                    try {
+                      problem = omittableOptionProblem(text, tokenizeProgram("shell", text), {
+                        token: hole.token,
+                        option,
+                        ...(hole.span === undefined
+                          ? {}
+                          : { span: hole.span as { start: number; end: number } }),
+                      });
+                    } catch {
+                      problem = "the program does not tokenize";
+                    }
+                    if (problem !== undefined) {
+                      problems.push(
+                        `${where} hole ${index} is not an omittable option: ${problem}`,
+                      );
+                    }
+                  }
+                } else if (
+                  isPlainObject(hole.binding) &&
+                  hole.binding.type === "input" &&
+                  typeof hole.binding.name === "string" &&
+                  omittableOptions.has(hole.binding.name)
+                ) {
+                  problems.push(
+                    `${where} hole ${index} binds omittable option input ${hole.binding.name} without naming its option`,
+                  );
                   continue;
                 }
                 if (hole.through !== undefined) {
@@ -2098,8 +2237,33 @@ export function validateRecordedWorkflow(value: unknown): {
                   hole.embedded === undefined
                     ? `${where}<token ${hole.token}>`
                     : `${where}<token ${hole.token}.${hole.embedded}>`,
-                  "token",
+                  option === undefined ? "token" : "option",
                 );
+              }
+              // An omitted option takes its word and value out of the program: no other hole, word
+              // list or protected token may sit inside that run.
+              const protectedTokens = Array.isArray(template.protectedTokens)
+                ? template.protectedTokens
+                : [];
+              for (const run of optionRuns) {
+                const inside = (token: unknown): boolean =>
+                  typeof token === "number" && run.from <= token && token <= run.through;
+                const others = template.holes.some(
+                  (other, at) =>
+                    at !== run.hole &&
+                    isPlainObject(other) &&
+                    (inside(other.token) ||
+                      (typeof other.token === "number" &&
+                        typeof other.through === "number" &&
+                        other.token <= run.through &&
+                        run.from <= other.through)),
+                );
+                if (others) {
+                  problems.push(`${where} hole ${run.hole} option run holds another hole`);
+                }
+                if (protectedTokens.some(inside)) {
+                  problems.push(`${where} hole ${run.hole} option run holds a protected token`);
+                }
               }
               return;
             }
@@ -2295,6 +2459,22 @@ export function validateRecordedWorkflow(value: unknown): {
             errors.push(
               `candidate ${stepId}.${candidate.argument} may propose a recorded default only for a program token`,
             );
+          }
+          if (Object.hasOwn(proposed, "omitOptionWhenAbsent")) {
+            const address = path[0] === "tokens" ? programTokenPath(path) : undefined;
+            if (
+              proposed.omitOptionWhenAbsent !== true ||
+              address === undefined ||
+              address.embedded !== undefined ||
+              address.through !== undefined ||
+              Object.hasOwn(proposed, "recordedDefault") ||
+              Object.hasOwn(proposed, "list") ||
+              (proposed.type !== "string" && proposed.type !== "number")
+            ) {
+              errors.push(
+                `candidate ${stepId}.${candidate.argument} may propose an omittable option only as a string or number input at a top-level program token`,
+              );
+            }
           }
           if (
             proposed.type !== "string" &&

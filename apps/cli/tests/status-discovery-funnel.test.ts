@@ -41,6 +41,7 @@ describe("discovery funnel in `resin status --verbose`", () => {
     store.flush({ report: false });
     now = NOW;
     store.record("suggestion_shown");
+    store.record("prompt_suggestion_shown");
     store.record("tools_listed", 3);
     store.record("invocation_failed");
     store.flush({ report: false });
@@ -58,6 +59,7 @@ describe("discovery funnel in `resin status --verbose`", () => {
       tools_listed: 3,
       schema_reads: 1,
       suggestions_shown: 1,
+      prompt_suggestions_shown: 1,
       invocations_succeeded: 1,
       invocations_failed: 1,
       unavailable_here: 0,
@@ -68,7 +70,8 @@ describe("discovery funnel in `resin status --verbose`", () => {
     expect(verbose).toContain("[Learned Tool Discovery] (since 2026-09-30, UTC)");
     expect(verbose).toContain("Searches:       2 (1 with results)");
     expect(verbose).toContain("Calls:          1 succeeded, 1 failed");
-    expect(verbose).toContain("2026-10-06: 0 searches -> 0 schema reads -> 1 calls; 1 suggestions");
+    expect(verbose).toContain("2026-10-06: 0 searches -> 0 schema reads -> 1 calls; 2 suggestions");
+    expect(verbose).toContain("Suggestions:    1 after commands, 1 at prompts");
     expect(verbose).toContain("2026-10-05: 2 searches -> 1 schema reads -> 1 calls; 0 suggestions");
     expect(formatStatusForTerminal(summary)).not.toContain("Learned Tool Discovery");
   });
@@ -83,6 +86,7 @@ describe("discovery funnel in `resin status --verbose`", () => {
           tools_listed: 0,
           schema_reads: 0,
           suggestions_shown: 0,
+          prompt_suggestions_shown: 0,
           invocations_succeeded: 0,
           invocations_failed: 0,
           unavailable_here: 0,

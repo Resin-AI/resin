@@ -58,14 +58,18 @@ import {
   WorkerProcess,
   type WorkflowLocationAvailability,
   createInvocationGrant,
+  createInvocationOutputDirectory,
   encodeDeterministicTar,
   inspectArtifactImports,
   instantiateRecordedWorkflow,
+  pruneInvocationOutputs,
+  recordedWorkflowInputSchema,
   resolveDenoExecutable,
   timeRecordedCall,
   validateBundleEntryPath,
   verifyBundleSignature,
   workflowLocationAvailability,
+  workflowPinnedRepository,
 } from "@resin/runtime";
 import {
   isDatedValue,
@@ -73,6 +77,7 @@ import {
   missingDatedInputsMessage,
 } from "../meta/dated-defaults.js";
 import { failedToolResult } from "../meta/invocation-failure.js";
+import { missingInputsResult, missingRequiredInputs } from "../meta/missing-inputs.js";
 import { scrubPrivateValues, scrubbablePrivateValues } from "../meta/private-values.js";
 import { type ToolProfile, recordedWorkStepCount } from "../meta/tool-profile.js";
 import {
@@ -92,7 +97,22 @@ import {
   composedResultValue,
   presentStepSections,
 } from "../meta/invoke-tool.js";
-import { programCommands } from "../meta/learned-commands.js";
+import { programCommands, programWritesFiles } from "../meta/learned-commands.js";
+import type { SuggestStep } from "../suggest/index-file.js";
+
+/** Harness tools a recorded step may call that only read; any other call is taken to write. */
+const READ_ONLY_HARNESS_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "glob",
+  "find",
+  "ls",
+  "search",
+  "web_search",
+  "websearch",
+  "webfetch",
+  "fetch",
+]);
 
 /** A completed step's output as text: printed text as is, any other value as JSON. */
 function stepOutputText(value: RecordedStepOutcome & { status: "completed" }): string {
@@ -116,6 +136,8 @@ interface RecordedWorkflowSummary {
   privateValues: readonly string[];
   /** Each recorded-default input's one recorded value, when the plan itself carries it. */
   defaults: ReadonlyMap<string, string>;
+  /** What each recorded step runs (see `SuggestStep`), in plan order. */
+  steps: SuggestStep[];
 }
 
 /** Where one private value sits in a recorded text resolved on this machine. */
@@ -144,16 +166,45 @@ function joinStepNumbers(numbers: readonly number[]): string {
     : `${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
 }
 
+/** The most characters one completed step's output shows in a failure report. */
+const FAILED_REPORT_STEP_CHARS = 2_000;
+/** The most characters all completed steps' outputs show together in a failure report. */
+const FAILED_REPORT_OUTPUT_CHARS = 8_000;
+
 /**
- * What a failed recorded workflow did, by plan step: the step that failed and its error, each
- * completed step's output, the steps that never ran, and a warning that completed steps' effects
- * already happened. Only what the steps returned is shown, never their recorded programs. A
- * derivation computes inputs and has no effects, so it is counted but not shown.
+ * A completed step's output as a failure report shows it: whole when it fits `budget`, else its
+ * last part, with the whole output written to `file` (when one could be written) and named.
  */
-function failedWorkflowReport(
+async function boundedStepOutput(
+  text: string,
+  budget: number,
+  file: () => Promise<string | undefined>,
+): Promise<string> {
+  if (text.length <= budget) return text;
+  const kept = await file().catch(() => undefined);
+  const note = `…[output shortened to its last part${kept === undefined ? "" : `; all of it is in ${kept}`}]\n`;
+  const keep = Math.max(0, budget - note.length);
+  return `${note}${keep > 0 ? text.slice(text.length - keep) : ""}`;
+}
+
+/**
+ * What a failed recorded workflow did, by plan step: the step that failed and its error (which
+ * carries what it printed), then each step that completed before it, in plan order, with its
+ * output, the steps that never ran, and a warning that completed steps' effects already happened.
+ * Steps after a failure never run: a later step may depend on what the failed one did. Only what
+ * the steps returned is shown, never their recorded programs. A derivation computes inputs and has
+ * no effects, so it is counted but not shown.
+ *
+ * Each completed output is bounded (`FAILED_REPORT_STEP_CHARS`, and `FAILED_REPORT_OUTPUT_CHARS`
+ * shared by all of them): a longer one shows its last part, and its whole text is kept in a fresh
+ * capture directory under `outputRoot` (or a private temporary one), pruned like a display-filter
+ * step's. A display-filter step's own report is already bounded and is shown as it is.
+ */
+async function failedWorkflowReport(
   plan: RecordedWorkflow,
   execution: RecordedWorkflowExecution,
-): string | undefined {
+  outputRoot: string | undefined,
+): Promise<string | undefined> {
   const total = plan.steps.length;
   const numberOf = new Map(plan.steps.map((step, index) => [step.id, index + 1]));
   const derivations = new Set(
@@ -168,11 +219,31 @@ function failedWorkflowReport(
     outcome.status === "completed" && !derivations.has(outcome.stepId) ? [outcome] : [],
   );
   const lines = [`Step ${numberOf.get(failed.stepId)} of ${total} failed: ${failed.error}`];
-  for (const outcome of completed) {
+  if (completed.length > 0) {
     lines.push(
-      `--- step ${numberOf.get(outcome.stepId)}/${total} ---\n${outcome.display ?? stepOutputText(outcome)}`,
+      completed.length === 1
+        ? "Output of the step that completed before it:"
+        : "Outputs of the steps that completed before it:",
     );
   }
+  const budget = Math.min(
+    FAILED_REPORT_STEP_CHARS,
+    Math.floor(FAILED_REPORT_OUTPUT_CHARS / Math.max(1, completed.length)),
+  );
+  let directory: Promise<string> | undefined;
+  for (const outcome of completed) {
+    const number = numberOf.get(outcome.stepId);
+    const output =
+      outcome.display ??
+      (await boundedStepOutput(stepOutputText(outcome), budget, async () => {
+        directory ??= createInvocationOutputDirectory(outputRoot);
+        const kept = path.join(await directory, `step-${number}.txt`);
+        await fs.promises.writeFile(kept, stepOutputText(outcome), { mode: 0o600 });
+        return kept;
+      }));
+    lines.push(`--- step ${number}/${total} ---\n${output}`);
+  }
+  if (directory !== undefined) await pruneInvocationOutputs(await directory).catch(() => {});
   for (const outcome of failures.slice(1)) {
     lines.push(`Step ${numberOf.get(outcome.stepId)} of ${total} also failed: ${outcome.error}`);
   }
@@ -671,6 +742,11 @@ export class LocalArtifactExecutor {
   private readonly recordedWorkflowSummaries = new Map<string, RecordedWorkflowSummary>();
   /** Parsed recorded plans by artifact digest: an artifact's bytes never change under its digest. */
   private readonly recordedPlans = new Map<string, RecordedWorkflow>();
+  /**
+   * The repository each legacy plan pins (see `workflowPinnedRepository`) by artifact digest, null
+   * for none: caller-independent, so read once per plan and never again on a discovery path.
+   */
+  private readonly pinnedRepositories = new Map<string, string | null>();
 
   constructor(options: LocalArtifactExecutorOptions) {
     this.cache = options.cache;
@@ -740,6 +816,18 @@ export class LocalArtifactExecutor {
   }
 
   /**
+   * What each step of a cached recorded workflow runs: its command phrases (read like
+   * {@link recordedWorkflowCommands}), its toggle input when optional, and whether it changes
+   * files. Undefined for any other tool.
+   */
+  recordedWorkflowSteps(
+    artifactDigest: string,
+    context: WorkspaceContext,
+  ): SuggestStep[] | undefined {
+    return this.recordedWorkflowSummary(artifactDigest, context)?.steps;
+  }
+
+  /**
    * The recorded-default inputs of a cached recorded workflow whose recorded value is a date or a
    * time (see {@link isDatedValue}), each with that value as a description may show it (masked
    * where it is private). Such an input is required on this device: rerunning its recorded date
@@ -803,6 +891,34 @@ export class LocalArtifactExecutor {
   }
 
   /**
+   * The repository a cached legacy plan works in (see `workflowPinnedRepository`), read once per
+   * artifact. A private working directory the plan declares resolves here whichever workspace
+   * recorded it: only the repository id derived from it is kept, and only to narrow where the
+   * tool is offered, so no value reaches a caller or a run it does not own.
+   */
+  private recordedPinnedRepository(
+    artifactDigest: string,
+    plan: RecordedWorkflow,
+  ): string | undefined {
+    const cached = this.pinnedRepositories.get(artifactDigest);
+    if (cached !== undefined) return cached ?? undefined;
+    const declared = new Set(plan.privateReferences ?? []);
+    const store = this.getPrivateValueStore();
+    const repository = workflowPinnedRepository(plan, {
+      resolvePrivate: (reference) => {
+        if (!declared.has(reference)) return undefined;
+        try {
+          return resolvePrivateReference(store, reference);
+        } catch {
+          return undefined;
+        }
+      },
+    });
+    this.pinnedRepositories.set(artifactDigest, repository ?? null);
+    return repository;
+  }
+
+  /**
    * What this machine knows about a cached recorded workflow for discovery: how many recorded
    * steps it replays (see `recordedWorkStepCount`), the repositories its located steps run in, and
    * why it cannot run for this caller, if it cannot. Undefined for any other tool.
@@ -814,9 +930,15 @@ export class LocalArtifactExecutor {
     const plan = this.recordedPlan(artifactDigest);
     if (plan === undefined) return undefined;
     const availability = this.recordedWorkflowAvailability(artifactDigest, context);
+    const locatedRepositories = workflowLocationRepositories(plan);
+    const pinnedRepository =
+      locatedRepositories.length === 0
+        ? this.recordedPinnedRepository(artifactDigest, plan)
+        : undefined;
     return {
       steps: recordedWorkStepCount(plan),
-      locatedRepositories: workflowLocationRepositories(plan),
+      locatedRepositories,
+      ...(pinnedRepository === undefined ? {} : { pinnedRepository }),
       ...(availability === undefined || availability.available
         ? {}
         : { unavailableReason: availability.reason }),
@@ -1228,7 +1350,36 @@ export class LocalArtifactExecutor {
     // Each recorded-default input whose recorded value is a date: it is required, not defaulted.
     const dated = new Map<string, string>();
     const commands: string[] = [];
+    const stepInfo: SuggestStep[] = [];
     for (const [index, step] of plan.steps.entries()) {
+      // Per-step detail for command suggestions, read like `commands` (projected text only).
+      const stepCommands: string[] = [];
+      let writes = false;
+      const stepProgram = step.callable.program;
+      if (step.origin === "derivation") {
+        // Model-written code computing values; it runs in the sandbox and writes nothing.
+      } else if (stepProgram === undefined) {
+        writes = !READ_ONLY_HARNESS_TOOLS.has(step.callable.name.toLowerCase());
+      } else if (stepProgram.kind === "shell") {
+        const stepSource = step.arguments.find(
+          (argument) => argument.name === stepProgram.argument,
+        )?.source;
+        const projected = stepSource === undefined ? undefined : projectedText(stepSource);
+        if (projected !== undefined) {
+          stepCommands.push(...programCommands(projected, privateValues));
+          writes = programWritesFiles(projected);
+        } else {
+          writes = true;
+        }
+      } else {
+        // A patch edits a file; a script in another language is opaque.
+        writes = true;
+      }
+      stepInfo.push({
+        commands: stepCommands,
+        ...(step.optional === undefined ? {} : { optional: step.optional.input }),
+        ...(writes ? { writes: true as const } : {}),
+      });
       // A derivation is model-written code: describe what it computes, never the code itself.
       if (step.origin === "derivation") {
         const computed = new Set<string>();
@@ -1406,6 +1557,7 @@ export class LocalArtifactExecutor {
         dated: shownDated,
         defaults,
         privateValues: scrubValues,
+        steps: stepInfo,
       };
     }
     // An input bound in several places is dated if any of its recorded values is.
@@ -1431,6 +1583,7 @@ export class LocalArtifactExecutor {
       dated: shownDated,
       defaults,
       privateValues: scrubValues,
+      steps: stepInfo,
     };
     this.recordedWorkflowSummaries.set(key, summary);
     return summary;
@@ -2020,6 +2173,13 @@ export class LocalArtifactExecutor {
     }
   }
 
+  /** Where a recorded program step keeps each invocation's full output; none without a home. */
+  private invocationOutputRoot(): string | undefined {
+    return this.resinHome === undefined
+      ? undefined
+      : path.join(this.resinHome, "data", "invocation-output");
+  }
+
   /**
    * Executes a verified recorded-workflow artifact. The plan is the frozen
    * RecordedWorkflow the compiler produced; each step dispatches through `stepInvoker`
@@ -2052,6 +2212,19 @@ export class LocalArtifactExecutor {
       return failedToolResult(
         "runtime_unavailable",
         `Failed to read recorded workflow artifact: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // A plan input the call left out, which the manifest's schema did not catch: refused before
+    // anything runs, with what each input is and the complete call to repeat.
+    const planSchema = recordedWorkflowInputSchema(plan);
+    const missingInputs = missingRequiredInputs(planSchema, parameters);
+    if (missingInputs.length > 0) {
+      return missingInputsResult(
+        manifest.name ?? plan.workflowId,
+        planSchema,
+        parameters,
+        missingInputs,
       );
     }
 
@@ -2097,9 +2270,9 @@ export class LocalArtifactExecutor {
         workspace: context,
         ...(signal ? { signal } : {}),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-        ...(this.resinHome === undefined
+        ...(this.invocationOutputRoot() === undefined
           ? {}
-          : { invocationOutputRoot: path.join(this.resinHome, "data", "invocation-output") }),
+          : { invocationOutputRoot: this.invocationOutputRoot() }),
         routeToHost: async (request) => {
           if (!stepInvoker) {
             return {
@@ -2223,7 +2396,7 @@ export class LocalArtifactExecutor {
       );
       if (execution.status !== "completed") {
         const report =
-          failedWorkflowReport(plan, execution) ??
+          (await failedWorkflowReport(plan, execution, this.invocationOutputRoot())) ??
           execution.error ??
           "Recorded workflow execution failed";
         if (signal?.aborted) {

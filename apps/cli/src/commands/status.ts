@@ -101,8 +101,10 @@ import {
   type CredentialUnsafeGateway,
   formatCredentialUnsafeGateways,
   listRunningGateways,
+  listRunningSupervisors,
   listUnregisteredGatewayPids,
   selectCredentialUnsafeGateways,
+  switchableGatewayPids,
 } from "../updates/gateway-registry.js";
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
@@ -290,6 +292,12 @@ export interface DaemonStatusSummary {
       versions: string[];
       /** Live `resin mcp` processes that never registered a version (older releases). */
       unknownVersionCount: number;
+      /**
+       * Gateways on another release that run under an MCP supervisor, which switches their
+       * session to the active release by itself; they are not in `count`. Absent from reports
+       * written before the supervisor existed.
+       */
+      switchingCount?: number;
       /**
        * Live gateways whose credential client predates the refresh hardening (resin#294), by PID;
        * `version` is null for unregistered ones. They must restart before this device pairs.
@@ -1079,7 +1087,9 @@ export function formatDiscoveryFunnelLines(funnel: DiscoveryFunnelSummary | unde
   lines.push(`  Searches:       ${total.searches} (${total.searches_with_results} with results)`);
   lines.push(`  Tools listed:   ${total.tools_listed}`);
   lines.push(`  Schema reads:   ${total.schema_reads}`);
-  lines.push(`  Suggestions:    ${total.suggestions_shown}`);
+  lines.push(
+    `  Suggestions:    ${total.suggestions_shown} after commands, ${total.prompt_suggestions_shown} at prompts`,
+  );
   lines.push(
     `  Calls:          ${total.invocations_succeeded} succeeded, ${total.invocations_failed} failed`,
   );
@@ -1087,7 +1097,7 @@ export function formatDiscoveryFunnelLines(funnel: DiscoveryFunnelSummary | unde
   for (const { day, counts } of funnel.days) {
     const calls = counts.invocations_succeeded + counts.invocations_failed;
     lines.push(
-      `  ${day}: ${counts.searches} searches -> ${counts.schema_reads} schema reads -> ${calls} calls; ${counts.suggestions_shown} suggestions`,
+      `  ${day}: ${counts.searches} searches -> ${counts.schema_reads} schema reads -> ${calls} calls; ${counts.suggestions_shown + counts.prompt_suggestions_shown} suggestions`,
     );
   }
   return lines;
@@ -1823,23 +1833,40 @@ export async function readStaleMcpGateways(
   resinHome: string,
   options: { readonly procRoot?: string; readonly isAlive?: (pid: number) => boolean } = {},
 ): Promise<DaemonStatusSummary["update"]["staleMcpGateways"]> {
-  const none = { count: 0, versions: [], unknownVersionCount: 0, credentialUnsafe: [] };
+  const none = {
+    count: 0,
+    versions: [],
+    unknownVersionCount: 0,
+    switchingCount: 0,
+    credentialUnsafe: [],
+  };
   try {
     const registered = await listRunningGateways({
       resinHome,
       isAlive: options.isAlive,
       procRoot: options.procRoot,
     });
+    const supervisors = await listRunningSupervisors({
+      resinHome,
+      isAlive: options.isAlive,
+      procRoot: options.procRoot,
+    });
+    const switchable = switchableGatewayPids(supervisors);
     const unregisteredPids = await listUnregisteredGatewayPids({
       resinHome,
-      registeredPids: registered.map((gateway) => gateway.pid),
+      registeredPids: [
+        ...registered.map((gateway) => gateway.pid),
+        ...supervisors.map((supervisor) => supervisor.pid),
+      ],
       procRoot: options.procRoot,
     });
     const credentialUnsafe = selectCredentialUnsafeGateways(registered, unregisteredPids);
     const activeVersion = getActiveVersion(resinHome);
     if (!activeVersion) return { ...none, credentialUnsafe };
     const active = activeVersion.replace(/^v/u, "");
-    const stale = registered.filter((gateway) => gateway.version !== active);
+    const otherRelease = registered.filter((gateway) => gateway.version !== active);
+    const stale = otherRelease.filter((gateway) => !switchable.has(gateway.pid));
+    const switchingCount = otherRelease.length - stale.length;
     const versions = [...new Set(stale.map((gateway) => safeVersion(gateway.version)))]
       .filter((version): version is string => version !== null)
       .sort();
@@ -1848,6 +1875,7 @@ export async function readStaleMcpGateways(
       count: stale.length + unknownVersionCount,
       versions,
       unknownVersionCount,
+      switchingCount,
       credentialUnsafe,
     };
   } catch {
@@ -1864,7 +1892,12 @@ export function formatStaleMcpGateways(
     const versions = stale.versions.map((version) => `v${version}`);
     if (stale.unknownVersionCount > 0) versions.push("unknown version");
     notices.push(
-      `${stale.count} MCP gateway process(es) still run an older Resin (${versions.join(", ")}); restart the harness to load the updated version.`,
+      `${stale.count} MCP gateway process(es) still run an older Resin that cannot switch releases by itself (${versions.join(", ")}); restart the harness to load the updated version.`,
+    );
+  }
+  if ((stale.switchingCount ?? 0) > 0) {
+    notices.push(
+      `${stale.switchingCount} MCP gateway process(es) on an older Resin are switching to the active version on their own; no restart is needed.`,
     );
   }
   const credentialUnsafe = formatCredentialUnsafeGateways(stale.credentialUnsafe);
@@ -1910,9 +1943,15 @@ export async function readHarnessSessionsStatus(options: {
       isAlive: options.isAlive,
       procRoot: options.procRoot,
     });
+    const supervisors = await listRunningSupervisors({
+      resinHome: options.resinHome,
+      isAlive: options.isAlive,
+      procRoot: options.procRoot,
+    });
     const sessions = findHarnessSessionsNeedingRestart(table, {
       harnesses: options.harnesses,
       gatewayVersions: new Map(registered.map((gateway) => [gateway.pid, gateway.version])),
+      switchableGatewayPids: switchableGatewayPids(supervisors),
       activeVersion: getActiveVersion(options.resinHome),
       resinHome: options.resinHome,
       nowMs: options.nowMs,
@@ -1955,7 +1994,7 @@ export function formatHarnessSessionsNotice(
         ),
       ].sort();
       lines.push(
-        `${outdated.length} ${name} session(s) run an older Resin (${versions.join(", ")}; ${pids(outdated)}); restart them to load the current version.`,
+        `${outdated.length} ${name} session(s) run an older Resin that cannot switch releases by itself (${versions.join(", ")}; ${pids(outdated)}); restart them to load the current version.`,
       );
     }
   }

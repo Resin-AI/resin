@@ -65,7 +65,12 @@ Project-scope `.mcp.json` files are not touched.
 
 ### Command-time suggestions
 
-`init` also registers a `PreToolUse` hook for `Bash` in Claude's user settings, `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json`), that runs `resin suggest --harness claude-code`. Before Claude runs a shell command, the hook checks whether a learned tool offered in that repository already runs it (for example `npx vitest run …` when a tool runs `vitest`) and, if one does, adds one line of context naming the tool and how to call it through `mcp__resin__invoke_tool`. It never blocks or changes the command, prints nothing otherwise, suggests a tool at most twice per session, and skips read-only lookups such as `git status` or `gh pr view`. Before changing an existing settings file Resin writes a backup beside it (`settings.json.resin-backup.<time>.bak`); other settings and hooks are preserved, running `init` again changes nothing, and `resin uninstall` removes only Resin's hook. See [Configuration](configuration.md#command-time-suggestions) to turn suggestions off.
+`init` also registers two hooks in Claude's user settings, `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json`):
+
+- A `UserPromptSubmit` hook running `resin suggest --prompt --harness claude-code`. When you submit a prompt, before Claude starts work, it adds a compact block of the learned tools offered in that repository: each tool's ready `mcp__resin__invoke_tool` call and one-line purpose, the tools relevant to the prompt first (at most 8 tools and about 800 characters). The full block is shown once per session; later prompts list only the tools relevant to them, and nothing when none is. Relevance is scored on this machine from the prompt's words against each tool's name, purpose and commands; the prompt never leaves the machine and is never stored. Nothing is added in a repository without learned tools.
+- A `PreToolUse` hook for `Bash` running `resin suggest --harness claude-code`. When a learned tool is a close fit for a shell command (it runs the command's program and subcommand, and any other step it would run is a cheap read-only lookup or an optional step its call turns off), it adds a short "next time" line naming the tool and its call. Bundles that would add lint, coverage or other checks to a single test run, loops and stress tests (`for … in $(seq …)`, `while`, `&`), and read-only lookups such as `git status` or `gh pr view` never get a line. A tool is suggested at most twice per session.
+
+Neither hook ever blocks or changes the prompt or command, and both print nothing otherwise. Hooks are additive: other settings and hooks are preserved. Before changing an existing settings file Resin writes a backup beside it (`settings.json.resin-backup.<time>.bak`); running `init` again changes nothing, harness health re-adds a missing hook, and `resin uninstall` removes only Resin's hooks. See [Configuration](configuration.md#command-time-suggestions) to turn suggestions off.
 
 ### Manual Verification
 
@@ -202,7 +207,12 @@ Resin qualifies OMP against real sessions recorded with that release (`adapters/
 
 Resin keeps its learned-tool guidance in a managed block of `$OMP_HOME/agent/AGENTS.md` (`~/.omp/agent/AGENTS.md`), which OMP loads as a user context file in every project; a project's `.omp/APPEND_SYSTEM.md` would replace a global `APPEND_SYSTEM.md`, so Resin does not use that file. `resin uninstall` removes the block, the entry from the active config, and the entry from the legacy `~/.omp/config.json`.
 
-`resin init` also installs a Resin extension, `$OMP_HOME/agent/extensions/resin-command-suggest.ts` (`~/.omp/agent/extensions/…`). On each `bash` call it asks `resin suggest --harness omp` whether a learned tool in the command's repository already runs the command and, if one does, returns one line of `additionalContext` naming the tool and how to write its call to `xd://mcp__resin_invoke_tool`. It never blocks or rewrites the call and gives up silently after one second. Running `init` again leaves the file unchanged, a same-named file Resin did not write is never overwritten, and `resin uninstall` deletes it. New OMP sessions load it; running sessions do not.
+`resin init` also installs a Resin extension, `$OMP_HOME/agent/extensions/resin-command-suggest.ts` (`~/.omp/agent/extensions/…`), with two handlers:
+
+- `before_agent_start`: after you submit a prompt and before the agent loop, it asks `resin suggest --prompt --harness omp` for the block of the repository's learned tools described above for Claude Code (ready calls written to `xd://mcp__resin_invoke_tool`, relevant tools first, the full block once per session) and adds it to the session as a message shown in the TUI. The prompt goes only to that local process.
+- `tool_call` on `bash`: it asks `resin suggest --harness omp` whether a learned tool is a close fit for the command and, if one is, returns a short "next time" line as `additionalContext`, which OMP shows with the command's result.
+
+It never blocks or rewrites a prompt or call and gives up silently after one second. Running `init` again leaves the file unchanged, harness health rewrites an outdated one, a same-named file Resin did not write is never overwritten, and `resin uninstall` deletes it. New OMP sessions load it; running sessions keep the version they started with until restarted.
 
 ### Session Observation
 

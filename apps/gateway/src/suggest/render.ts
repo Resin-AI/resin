@@ -10,30 +10,44 @@ export function isSuggestHarness(value: string): value is SuggestHarness {
   return (SUGGEST_HARNESSES as readonly string[]).includes(value);
 }
 
-/** Inputs shown in the call example; the rest reuse recorded values when omitted. */
+/** Required inputs shown in a call example; optional ones run their recorded or default value. */
 const SHOWN_INPUTS = 3;
 const INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
 
-function exampleArguments(tool: SuggestTool): string {
-  const inputs = [...tool.inputs]
-    .filter((input) => INPUT_NAME.test(input.name))
-    .sort((a, b) => Number(b.required) - Number(a.required))
-    .slice(0, SHOWN_INPUTS);
-  const parameters = Object.fromEntries(inputs.map((input) => [input.name, "…"]));
-  return JSON.stringify({ name: tool.name, parameters });
+/**
+ * A ready `invoke_tool` argument for `tool`: its required inputs as `"…"` placeholders, and each
+ * input in `off` (an optional step's toggle) set to false so that step is skipped.
+ */
+export function callExample(tool: SuggestTool, off: readonly string[] = []): string {
+  const required = tool.inputs
+    .filter((input) => input.required && INPUT_NAME.test(input.name))
+    .slice(0, SHOWN_INPUTS)
+    .map((input): [string, string | boolean] => [input.name, "…"]);
+  const toggles = off
+    .filter((name) => INPUT_NAME.test(name))
+    .map((name): [string, string | boolean] => [name, false]);
+  return JSON.stringify({
+    name: tool.name,
+    parameters: Object.fromEntries([...required, ...toggles]),
+  });
+}
+
+/** How `harness` passes `call` to Resin's `invoke_tool`. */
+export function invokeHow(harness: SuggestHarness, call: string): string {
+  return harness === "omp"
+    ? `write ${call} to xd://mcp__resin_invoke_tool`
+    : `call mcp__resin__invoke_tool with ${call}`;
 }
 
 function quoted(phrases: readonly string[]): string {
   return phrases.map((phrase) => `\`${phrase}\``).join(", ");
 }
 
-/** The one line an agent is shown before running a command a learned tool covers. */
+/**
+ * The short reminder shown with a command's result when a learned tool is a close fit for it.
+ * Harnesses deliver it after the command ran, so it speaks to the next time.
+ */
 export function renderSuggestion(match: CommandMatch, harness: SuggestHarness): string {
-  const call = exampleArguments(match.tool);
-  const how =
-    harness === "omp"
-      ? `write ${call} to xd://mcp__resin_invoke_tool`
-      : `call mcp__resin__invoke_tool with ${call}`;
-  const also = match.alsoRuns.length === 0 ? "" : ` (it also runs ${quoted(match.alsoRuns)})`;
-  return `Resin: learned tool ${match.tool.name} covers this command (${quoted(match.covered)})${also}; instead of running it by hand, ${how}, filling in your values (omitted inputs reuse recorded values). Ignore this if the tool does not fit your task.`;
+  const call = callExample(match.tool, match.skip);
+  return `Resin, next time: learned tool ${match.tool.name} runs ${quoted(match.covered)}; ${invokeHow(harness, call)}.`;
 }

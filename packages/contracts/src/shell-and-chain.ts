@@ -511,6 +511,17 @@ export function shellAndChainSegmentText(
 }
 
 /**
+ * A segment's words as the current splitter reads them (see {@link segmentWords}): the first
+ * command's words with quotes removed, every pipeline command's words, and whether it redirects.
+ * Undefined when the segment is outside the grammar.
+ */
+export function segmentCommandWords(
+  text: string,
+): { words: string[]; redirects: boolean; pipeline: string[][] } | undefined {
+  return segmentWords(text);
+}
+
+/**
  * Whether a segment only creates directories — `mkdir -p` and plain path words — the one setup a
  * chain may run or omit without changing what its other segments do.
  */

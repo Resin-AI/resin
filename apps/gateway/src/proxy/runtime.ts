@@ -38,7 +38,7 @@ import {
 } from "@resin/runtime";
 import type { LocalToolDatedInputs, LocalToolRecordedDefaults } from "../meta/dated-defaults.js";
 import { composedResultValue } from "../meta/invoke-tool.js";
-import type { LocalToolCommands } from "../meta/learned-commands.js";
+import type { LocalToolCommands, LocalToolSteps } from "../meta/learned-commands.js";
 import type { LocalToolPrivateValues } from "../meta/private-values.js";
 import type { LocalToolDescriber } from "../meta/search-tools.js";
 import type { LocalToolProfile } from "../meta/tool-profile.js";
@@ -219,6 +219,14 @@ function recordedProgramCommands(executor: LocalArtifactExecutor): LocalToolComm
     tool.artifactDigest === undefined
       ? []
       : executor.recordedWorkflowCommands(tool.artifactDigest, context);
+}
+
+/** Local discovery detail for cached learned tools: what each recorded step runs. */
+function recordedProgramSteps(executor: LocalArtifactExecutor): LocalToolSteps {
+  return (tool, context) =>
+    tool.artifactDigest === undefined
+      ? undefined
+      : executor.recordedWorkflowSteps(tool.artifactDigest, context);
 }
 
 /** Local discovery detail for cached learned tools: what each one's plan replays, and where. */
@@ -476,6 +484,7 @@ export async function createProductionProxyRuntime(
     executor.setManagedToolAccess(managedToolAccess);
     options.registry?.setLocalToolDescriber(recordedProgramDescriber(executor));
     options.registry?.setLocalToolCommands(recordedProgramCommands(executor));
+    options.registry?.setLocalToolSteps(recordedProgramSteps(executor));
     options.registry?.setLocalToolProfile(recordedProfile(executor));
     options.registry?.setLocalToolDatedInputs(recordedDatedInputs(executor));
     options.registry?.setLocalToolPrivateValues(recordedPrivateValues(executor));
@@ -796,6 +805,7 @@ export async function createProductionProxyRuntime(
   localExecutor.setManagedToolAccess(managedToolAccess);
   options.registry?.setLocalToolDescriber(recordedProgramDescriber(localExecutor));
   options.registry?.setLocalToolCommands(recordedProgramCommands(localExecutor));
+  options.registry?.setLocalToolSteps(recordedProgramSteps(localExecutor));
   options.registry?.setLocalToolProfile(recordedProfile(localExecutor));
   options.registry?.setLocalToolDatedInputs(recordedDatedInputs(localExecutor));
   options.registry?.setLocalToolPrivateValues(recordedPrivateValues(localExecutor));

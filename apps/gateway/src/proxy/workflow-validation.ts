@@ -1122,12 +1122,19 @@ export function createRecordingCheckValidator(
     // One recording cannot show that a value varies, but it can offer the value as an optional
     // input that keeps exactly what the recording ran when omitted. Those offers are applied first,
     // in plan order as the cloud applies confirmed ones, and checking that plan verifies the tool as
-    // a caller gets it by default.
+    // a caller gets it by default. An option's value offered as omittable (`--subject {x}`) is
+    // applied the same way and checked with the recorded value bound at its hole: the check proves
+    // the plan reproduces the recording, and the option site rules prove omitting it removes only
+    // that option.
     let checked = withIteration(plan, undefined);
     const recordedDefaults: WorkflowBindingCandidate[] = [];
     if (baselineOnly) {
       for (const candidate of candidates) {
-        if (candidate.proposed.kind !== "input" || candidate.proposed.recordedDefault !== true) {
+        if (
+          candidate.proposed.kind !== "input" ||
+          (candidate.proposed.recordedDefault !== true &&
+            candidate.proposed.omitOptionWhenAbsent !== true)
+        ) {
           continue;
         }
         const next = applyConfirmedWorkflowBinding(checked, candidate);

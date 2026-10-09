@@ -24,6 +24,7 @@ import {
   workflowSinkStepIds,
 } from "@resin/contracts";
 import type {
+  ProgramOptionRun,
   ProgramToken,
   ProgramTokenListValue,
   ProgramTokenSpanValue,
@@ -527,15 +528,24 @@ async function buildTemplate(
       const embedded = new Map<number, Map<number, string | number | boolean | null>>();
       const spans: ProgramTokenSpanValue[] = [];
       const lists: ProgramTokenListValue[] = [];
+      const omissions: ProgramOptionRun[] = [];
       for (const hole of template.holes) {
         // An omitted recorded-default input leaves the token exactly as the recording ran it. A
         // derivation's tokens were never recorded; its omitted recorded-default inputs were
-        // supplied from the recording before it ran.
+        // supplied from the recording before it ran. An omitted option input takes its option
+        // word and value out of the command.
         if (
           hole.binding.type === "input" &&
           !Object.hasOwn(options.inputs, hole.binding.name) &&
           step.origin !== "derivation"
         ) {
+          if (hole.option !== undefined) {
+            omissions.push({
+              option: hole.option,
+              token: hole.token,
+              ...(hole.span === undefined ? {} : { span: hole.span }),
+            });
+          }
           continue;
         }
         const bound = await resolveLeaf(hole.binding);
@@ -638,15 +648,26 @@ async function buildTemplate(
           }
         }
       }
-      return applyProgramTokenValues(
-        text,
-        shellTokens,
-        values,
-        template.language,
-        embedded,
-        spans,
-        lists,
-      );
+      try {
+        return applyProgramTokenValues(
+          text,
+          shellTokens,
+          values,
+          template.language,
+          embedded,
+          spans,
+          lists,
+          omissions,
+        );
+      } catch (error) {
+        if (omissions.length === 0) throw error;
+        // The recorded text must still hold the option a plan says an omitted input removes.
+        throw new WorkflowBindingError(
+          error instanceof Error ? error.message : String(error),
+          step.id,
+          argumentName,
+        );
+      }
     }
     default: {
       const exhaustive: never = template;
@@ -774,7 +795,7 @@ export async function executeRecordedWorkflow(
       const problem = listProblem(input.default);
       if (problem !== undefined) throw new TypeError(`${problem} (its default)`);
       inputs[input.name] = copyWorkflowJsonValue(input.default);
-    } else if (input.recordedDefault !== true) {
+    } else if (input.recordedDefault !== true && input.omitOptionWhenAbsent !== true) {
       throw new TypeError(`missing required workflow input '${input.name}'`);
     }
   }
@@ -989,9 +1010,13 @@ function workflowCancellation(signal: AbortSignal): string {
     : "the invocation was cancelled";
 }
 
+/** What an omittable option input's description says about omitting it. */
+export const OMITTED_OPTION_NOTE =
+  "Optional: omit it to leave its option out of the command, so the command's own default applies.";
+
 /**
- * The input schema of a recorded workflow. An input with a default, or one that defaults to the
- * recorded token, is optional; every other input is required.
+ * The input schema of a recorded workflow. An input with a default, one that defaults to the
+ * recorded token, or one omitted with its option, is optional; every other input is required.
  */
 export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<string, unknown> {
   const JSON_SCHEMA_TYPES: Record<string, string> = {
@@ -1003,8 +1028,15 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
   };
   const properties: Record<string, unknown> = {};
   for (const input of workflow.inputs) {
-    const recordedDefault = input.recordedDefault ? "Omit to use the recorded value." : undefined;
-    const described = input.description ?? recordedDefault;
+    const recordedDefault = input.recordedDefault
+      ? "Omit to use the recorded value."
+      : input.omitOptionWhenAbsent
+        ? OMITTED_OPTION_NOTE
+        : undefined;
+    const described =
+      input.omitOptionWhenAbsent && input.description !== undefined
+        ? `${input.description} ${OMITTED_OPTION_NOTE}`
+        : (input.description ?? recordedDefault);
     const list = input.list;
     const description =
       list === undefined
@@ -1036,7 +1068,12 @@ export function recordedWorkflowInputSchema(workflow: RecordedWorkflow): Record<
     type: "object",
     properties,
     required: workflow.inputs
-      .filter((input) => !Object.hasOwn(input, "default") && input.recordedDefault !== true)
+      .filter(
+        (input) =>
+          !Object.hasOwn(input, "default") &&
+          input.recordedDefault !== true &&
+          input.omitOptionWhenAbsent !== true,
+      )
       .map((input) => input.name),
     additionalProperties: false,
   };

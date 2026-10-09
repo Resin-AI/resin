@@ -148,6 +148,12 @@ export interface FindHarnessSessionsOptions {
   readonly harnesses: readonly HarnessId[];
   /** Live registered gateway versions by PID (see `listRunningGateways`). */
   readonly gatewayVersions: ReadonlyMap<number, string>;
+  /**
+   * Gateways that switch to the active release by themselves: MCP supervisors and the gateways
+   * they run (see `switchableGatewayPids`). A session with one never needs a restart for a newer
+   * release.
+   */
+  readonly switchableGatewayPids?: ReadonlySet<number>;
   /** The active install's version; null for source builds, which skips the version check. */
   readonly activeVersion: string | null;
   /**
@@ -236,6 +242,7 @@ export function findHarnessSessionsNeedingRestart(
       continue;
     }
     if (active === null) continue;
+    if (gateways.some((gateway) => options.switchableGatewayPids?.has(gateway.pid))) continue;
     const versions = gateways.map(gatewayVersion).filter((version) => version !== "unjudged");
     // A session is current when any of its gateways runs the active version.
     if (versions.length === 0 || versions.includes(active)) continue;
