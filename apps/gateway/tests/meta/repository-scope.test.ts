@@ -1,13 +1,17 @@
+import { PassThrough } from "node:stream";
 import {
   CapabilityManifestSchema,
   ToolLimitConfigSchema,
   type ToolManifest,
   ToolParameterSchema,
   ToolRuntimeRequirementSchema,
+  listingTextTokens,
+  listingToolTokens,
 } from "@resin/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { DIRECT_LISTING_MAX_TOOLS, LocalMcpGateway } from "../../src/gateway.js";
+import { LocalMcpGateway } from "../../src/gateway.js";
+import { LISTING_CAP } from "../../src/listing-surface.js";
 import { createGetToolSchemaHandler } from "../../src/meta/get-tool-schema.js";
 import { createInvokeToolHandler } from "../../src/meta/invoke-tool.js";
 import {
@@ -22,9 +26,10 @@ import {
 } from "../../src/meta/search-tools.js";
 import type { ToolProfile } from "../../src/meta/tool-profile.js";
 import { recordedWorkStepCount } from "../../src/meta/tool-profile.js";
+import { McpFrameDecoder, encodeMcpMessage } from "../../src/protocol/framing.js";
 import {
   type CallToolResult,
-  type McpTool,
+  type JsonRpcMessage,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
   RESIN_LEARNED_TOOL_LISTING_META,
@@ -33,7 +38,12 @@ import {
 } from "../../src/protocol/types.js";
 import { ToolRegistry } from "../../src/registry/registry.js";
 import { computeManifestDigest } from "../../src/registry/validator.js";
-import { type GatewayRouter, createRegistryGatewayRouter } from "../../src/router.js";
+import {
+  type CatalogNoticeTool,
+  type GatewayRouter,
+  createRegistryGatewayRouter,
+} from "../../src/router.js";
+import { createToolSearchSurface } from "../../src/shim/tool-search-surface.js";
 import { suggestToolsFromCatalog } from "../../src/suggest/index-writer.js";
 import type { WorkspaceContext } from "../../src/workspace-resolver.js";
 
@@ -404,61 +414,215 @@ describe("ranking by recorded work", () => {
   });
 });
 
-describe("direct listing of a small per-repository catalog", () => {
-  const learnedTool = (index: number): McpTool => ({
+const ResultMetaSchema = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) });
+
+/**
+ * Initializes a search-listing connection to `router` and lists its tools, both through the stdio
+ * shim's surface: the gateway's `_meta` and what the harness was served.
+ */
+async function serveSearchListing(router: GatewayRouter, cwd = "/repos/alpha") {
+  const gateway = new LocalMcpGateway({ router, enableRefreshCoordinator: false });
+  const connection = gateway.createConnection({ cwd });
+  const output = new PassThrough();
+  const surface = createToolSearchSurface(output, {});
+  const received: JsonRpcMessage[] = [];
+  const decoder = new McpFrameDecoder();
+  output.on("data", (chunk: Buffer) => received.push(...decoder.push(chunk)));
+  surface.output.pipe(output);
+  const forwarded: JsonRpcMessage[] = [];
+  const inputDecoder = new McpFrameDecoder();
+  surface.input.on("data", (chunk: Buffer) => forwarded.push(...inputDecoder.push(chunk)));
+  const exchange = async (message: JsonRpcMessage) => {
+    surface.input.write(encodeMcpMessage(message));
+    const sent = forwarded.at(-1);
+    if (sent === undefined) throw new Error("The shim forwarded nothing");
+    const response = await gateway.handleMessage(connection, sent);
+    if (response === null) throw new Error("The gateway did not answer");
+    surface.output.write(encodeMcpMessage(response));
+    return { gateway: response, served: received.at(-1) };
+  };
+  const initialized = await exchange({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "omp-coding-agent", version: "1" },
+    },
+  });
+  const listed = await exchange({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const served = z
+    .object({
+      result: z.object({
+        tools: z.array(
+          z.object({
+            name: z.string(),
+            description: z.string().optional(),
+            inputSchema: z.unknown(),
+          }),
+        ),
+      }),
+    })
+    .parse(listed.served).result.tools;
+  const instructions = z
+    .object({ result: z.object({ instructions: z.string() }) })
+    .parse(initialized.served).result.instructions;
+  return {
+    gateway,
+    connection,
+    initializeMeta: ResultMetaSchema.parse(initialized.gateway).result._meta,
+    listMeta: ResultMetaSchema.parse(listed.gateway).result._meta,
+    instructions,
+    tools: served,
+    tokens:
+      listingTextTokens(instructions) +
+      served.reduce((sum, tool) => sum + listingToolTokens(tool), 0),
+  };
+}
+
+describe("direct listing of a per-repository catalog", () => {
+  const META_TOOLS: CatalogNoticeTool[] = [
+    { name: "search_tools", description: "Searches.", inputSchema: { type: "object" } },
+    { name: "get_tool_schema", description: "Schema.", inputSchema: { type: "object" } },
+    { name: "invoke_tool", description: "Invokes.", inputSchema: { type: "object" } },
+    { name: "manage_tools", description: "Manages.", inputSchema: { type: "object" } },
+  ];
+  const learnedTool = (
+    index: number,
+    extra: Partial<CatalogNoticeTool> = {},
+  ): CatalogNoticeTool => ({
     name: `learned_${index}`,
     description: `Runs job ${index}.`,
     inputSchema: { type: "object", properties: {} },
     _meta: { [RESIN_LEARNED_TOOL_META]: true },
+    localCommands: [`job${index}`],
+    scopedHere: true,
+    ...extra,
+  });
+  const routerOf = (tools: CatalogNoticeTool[]): GatewayRouter => ({
+    listTools: async () => [...META_TOOLS, ...tools],
+    callTool: async () => ({ content: [] }),
   });
 
-  async function initializeAndList(count: number) {
-    const tools = Array.from({ length: count }, (_, index) => learnedTool(index));
-    const router: GatewayRouter = {
-      listTools: async () => tools,
-      callTool: async () => ({ content: [] }),
-    };
-    const gateway = new LocalMcpGateway({ router, enableRefreshCoordinator: false });
-    const connection = gateway.createConnection({ cwd: "/tmp" });
-    const initialized = await gateway.handleMessage(connection, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "omp-coding-agent", version: "1" },
-        _meta: { [RESIN_SEARCH_LISTING_META]: true },
-      },
-    });
-    const listedTools = await gateway.handleMessage(connection, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-    });
-    const meta = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) });
-    return {
-      initialize: meta.parse(initialized).result._meta,
-      list: meta.parse(listedTools).result._meta,
-    };
-  }
-
-  it(`reports each tool's name and purpose for at most ${DIRECT_LISTING_MAX_TOOLS} tools`, async () => {
-    const { initialize, list } = await initializeAndList(DIRECT_LISTING_MAX_TOOLS);
-    expect(initialize[RESIN_LEARNED_TOOL_COUNT_META]).toBe(DIRECT_LISTING_MAX_TOOLS);
-    expect(initialize[RESIN_LEARNED_TOOL_LISTING_META]).toHaveLength(DIRECT_LISTING_MAX_TOOLS);
-    expect(initialize[RESIN_LEARNED_TOOL_LISTING_META]).toContainEqual({
+  it("lists every relevant tool, and no search, when all fit the cap", async () => {
+    const tools = Array.from({ length: 3 }, (_, index) => learnedTool(index));
+    const served = await serveSearchListing(routerOf(tools));
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(3);
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_LISTING_META]).toContainEqual({
       name: "learned_0",
       description: "Runs job 0.",
     });
-    expect(list[RESIN_LEARNED_TOOL_LISTING_META]).toHaveLength(DIRECT_LISTING_MAX_TOOLS);
+    expect(served.listMeta[RESIN_LEARNED_TOOL_LISTING_META]).toHaveLength(3);
+    expect(served.tools.map((tool) => tool.name)).toEqual([
+      "invoke_tool",
+      "learned_0",
+      "learned_1",
+      "learned_2",
+    ]);
   });
 
-  it("reports no listing above the limit, so the shim stays search-only", async () => {
-    const { initialize, list } = await initializeAndList(DIRECT_LISTING_MAX_TOOLS + 1);
-    expect(initialize[RESIN_LEARNED_TOOL_COUNT_META]).toBe(DIRECT_LISTING_MAX_TOOLS + 1);
-    expect(initialize[RESIN_LEARNED_TOOL_LISTING_META]).toBeUndefined();
-    expect(list[RESIN_LEARNED_TOOL_LISTING_META]).toBeUndefined();
+  it(`lists at most ${LISTING_CAP.maxTools} tools, pinned and most recorded steps first, and the rest by search`, async () => {
+    const tools = Array.from({ length: 10 }, (_, index) =>
+      learnedTool(index, {
+        ...(index === 9 ? { pinned: true as const } : {}),
+        ...(index === 5 ? { steps: 4 } : {}),
+      }),
+    );
+    const served = await serveSearchListing(routerOf(tools));
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(10);
+    const order = ["learned_9", "learned_5", "learned_0", "learned_1", "learned_2", "learned_3"];
+    expect(
+      z
+        .array(z.object({ name: z.string() }))
+        .parse(served.initializeMeta[RESIN_LEARNED_TOOL_LISTING_META])
+        .map((tool) => tool.name),
+    ).toEqual([...order, "learned_4", "learned_6"]);
+    // The commands of the two left out, for search to find them.
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual(
+      expect.arrayContaining(["job7", "job8"]),
+    );
+    const names = served.tools.map((tool) => tool.name);
+    expect(names.filter((name) => name.startsWith("learned_"))).toHaveLength(LISTING_CAP.maxTools);
+    expect(names).toContain("search_tools");
+    expect(names).not.toContain("get_tool_schema");
+    expect(names).not.toContain("manage_tools");
+    expect(served.instructions).toContain("2 more learned tools");
+    expect(served.tools.find((tool) => tool.name === "search_tools")?.description).toContain(
+      "2 more learned tools",
+    );
+    expect(served.tokens).toBeLessThanOrEqual(LISTING_CAP.maxTokens);
+  });
+
+  it("lists fewer tools when their definitions are large, keeping the served surface within the cap", async () => {
+    const tools = Array.from({ length: 10 }, (_, index) =>
+      learnedTool(index, { description: `Runs job ${index}. ${"Detail. ".repeat(80)}` }),
+    );
+    const served = await serveSearchListing(routerOf(tools));
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(10);
+    const listed = served.tools.filter((tool) => tool.name.startsWith("learned_"));
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.length).toBeLessThan(LISTING_CAP.maxTools);
+    expect(served.tools.map((tool) => tool.name)).toContain("search_tools");
+    expect(served.tokens).toBeLessThanOrEqual(LISTING_CAP.maxTokens);
+  });
+});
+
+describe("a learned tool that declares no repository", () => {
+  const caller = callerIn("/repos/alpha");
+
+  it("is neither listed nor counted, but runs by name through invoke_tool and tools/call", async () => {
+    const registry = await registryWith([
+      { id: "tool_alpha", name: "alpha_tests", repositories: [ALPHA] },
+      { id: "tool_old", name: "old_report" },
+    ]);
+    const invoke = vi.fn(async (request: { name: string }) => ({
+      content: [{ type: "text" as const, text: `ran ${request.name}` }],
+    }));
+    const registryRouter = createRegistryGatewayRouter(registry, { invoke });
+    // The caller's repository, whatever workspace initialize resolves for the connection.
+    const router: GatewayRouter = {
+      listTools: () => registryRouter.listTools(caller),
+      listCatalogNoticeTools: () => registryRouter.listCatalogNoticeTools(caller),
+      callTool: (_context, name, args, options) =>
+        registryRouter.callTool(caller, name, args, options),
+    };
+    const served = await serveSearchListing(router);
+    expect(served.initializeMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
+    expect(served.listMeta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
+    expect(
+      z
+        .array(z.object({ name: z.string() }))
+        .parse(served.listMeta[RESIN_LEARNED_TOOL_LISTING_META])
+        .map((tool) => tool.name),
+    ).toEqual(["alpha_tests"]);
+    expect(served.tools.map((tool) => tool.name).sort()).toEqual(["alpha_tests", "invoke_tool"]);
+    expect(served.instructions).not.toContain("old_report");
+    // Still offered: search finds it.
+    expect(await listed(registry, "/repos/alpha")).toContain("old_report");
+
+    const viaInvoke = await served.gateway.handleMessage(served.connection, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "invoke_tool", arguments: { name: "old_report" } },
+    });
+    expect(viaInvoke).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("ran old_report") }] },
+    });
+    const direct = await served.gateway.handleMessage(served.connection, {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "old_report", arguments: {} },
+    });
+    expect(direct).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("ran old_report") }] },
+    });
+    expect(invoke.mock.calls.map(([request]) => request.name)).toEqual([
+      "old_report",
+      "old_report",
+    ]);
   });
 });
 
@@ -474,8 +638,8 @@ describe("a learned tool measured to cost more than doing the job directly", () 
 
   async function catalogWithDemotedStyleCheck() {
     const registry = await registryWith([
-      { id: "tool_style", name: "check_lua_style" },
-      { id: "tool_deploy", name: "deploy_place" },
+      { id: "tool_style", name: "check_lua_style", repositories: [ALPHA] },
+      { id: "tool_deploy", name: "deploy_place", repositories: [ALPHA] },
     ]);
     registry.setLocalToolCommands((tool) =>
       "toolId" in tool && tool.toolId === "tool_style" ? ["stylua"] : ["rojo"],
@@ -527,7 +691,8 @@ describe("a learned tool measured to cost more than doing the job directly", () 
     const meta = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) }).parse(initialized)
       .result._meta;
     expect(meta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(1);
-    expect(meta[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual(["rojo"]);
+    // Neither listed nor named among the commands left to search.
+    expect(meta[RESIN_LEARNED_TOOL_COMMANDS_META] ?? []).not.toContain("stylua");
     expect(meta[RESIN_LEARNED_TOOL_LISTING_META]).toEqual([
       { name: "deploy_place", signature: expect.any(String), description: expect.any(String) },
     ]);

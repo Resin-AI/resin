@@ -72,3 +72,13 @@ run with `invoke_tool` (`--full-catalog` restores the whole listing). Hiding the
 leave Pi with no Resin tools at all, so the bridge registers whatever the gateway lists, and the
 per-request cost is the four meta-tool definitions instead of one definition per learned tool.
 The guidance tells the model to search before running a multi-step job by hand.
+
+## Amendment: bounded relevant listing (2026-10-09)
+
+`resin mcp` now lists only what the caller's repository needs: `invoke_tool`, the learned tools
+scoped to that repository within a hard cap (at most 8 tools and about 1,500 estimated tokens for
+the whole listing, instructions included; `LISTING_CAP` in `apps/gateway/src/listing-surface.ts`),
+and `search_tools` only when some of them do not fit. Measured on a real catalog, the search-only
+listing above cost about 1,900 estimated tokens per request in every workspace, counting tools
+learned in other projects; with no learned tools for the repository the listing is now
+`invoke_tool` and one line. The bridge still registers whatever the gateway lists.

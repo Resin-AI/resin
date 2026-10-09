@@ -3,7 +3,7 @@ import path from "node:path";
 import { parseResinInvocationReceiptText } from "@resin/contracts";
 import { RESIN_TOOL_CALL_TIMEOUT_MS } from "@resin/harness-contracts";
 import { McpConnection, type McpConnectionOptions } from "./connection.js";
-import { summarizeLearnedCommands } from "./meta/learned-commands.js";
+import { DEFAULT_GATEWAY_INSTRUCTIONS, learnedToolListing } from "./listing-surface.js";
 import type { ToolInvocationRouter } from "./meta/router-contract.js";
 import {
   JSON_RPC_ERROR_CODES,
@@ -36,6 +36,7 @@ import {
   type ProgressNotificationParams,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_IDS_META,
   RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
 } from "./protocol/types.js";
@@ -193,167 +194,30 @@ export function defaultHarnessDetector(clientInfo: McpImplementationInfo): strin
 export const FIRST_TOOL_LIST_CATALOG_WAIT_MS = 5_000;
 
 /**
- * The most learned tools a caller's catalog may have and still be listed directly to a
- * search-listing client: each as a tool of its own, named with its call signature and one-line
- * purpose in the instructions. Ten one-line entries cost less context than the search round trip
- * they replace, and an agent that sees a tool's name at every turn calls it; above this, only
- * search scales.
- */
-export const DIRECT_LISTING_MAX_TOOLS = 10;
-
-/** A learned tool as a direct listing names it: its name, call signature and one-line purpose. */
-export interface ListedLearnedTool {
-  name: string;
-  /** The arguments to call it with: `{}` without inputs, else `{name: type, optional?: type}`. */
-  signature?: string;
-  description?: string;
-}
-
-/**
- * Result `_meta` describing a workspace's learned tools once its catalog is known: how many there
- * are, the commands their recorded programs run most widely, so search-listing instructions can
- * name them, and, for a catalog small enough to list directly, each tool's name and purpose.
- * Nothing while the catalog is unknown. A tool measured to cost more than doing the job directly
- * is left out of all three: a search returns it only when the query names it, and it still
- * answers by name.
+ * Result `_meta` describing a workspace's learned tools once its catalog is known (see
+ * {@link learnedToolListing}): how many belong to the caller's repository, the commands those left
+ * out of the listing run, so search-listing instructions can name them, and the tools listed
+ * directly. Nothing while the catalog is unknown. A tool measured to cost more than doing the job
+ * directly, or not scoped to the caller's repository, is in none of them: a search returns it only
+ * when the query names it, and it still answers by name.
  */
 function learnedToolsMeta(tools: readonly CatalogNoticeTool[] | undefined) {
   if (tools === undefined) return {};
-  const learned = tools.filter(
-    (tool) => tool._meta?.[RESIN_LEARNED_TOOL_META] === true && tool.recommended !== false,
-  );
-  const commands = summarizeLearnedCommands(learned.map((tool) => tool.localCommands ?? []));
-  const listing: ListedLearnedTool[] | undefined =
-    learned.length > 0 && learned.length <= DIRECT_LISTING_MAX_TOOLS
-      ? learned.map((tool): ListedLearnedTool => {
-          if (tool.listing !== undefined) {
-            const { purpose, signature } = tool.listing;
-            return { name: tool.name, signature, description: purpose };
-          }
-          return tool.description === undefined
-            ? { name: tool.name }
-            : { name: tool.name, description: tool.description };
-        })
-      : undefined;
+  const { count, commands, listing } = learnedToolListing(tools);
+  const ids: Record<string, string> = {};
+  for (const tool of tools) {
+    if (tool._meta?.[RESIN_LEARNED_TOOL_META] === true && tool.toolId !== undefined) {
+      ids[tool.name] = tool.toolId;
+    }
+  }
   return {
     _meta: {
-      [RESIN_LEARNED_TOOL_COUNT_META]: learned.length,
+      [RESIN_LEARNED_TOOL_COUNT_META]: count,
       ...(commands.length === 0 ? {} : { [RESIN_LEARNED_TOOL_COMMANDS_META]: commands }),
-      ...(listing === undefined ? {} : { [RESIN_LEARNED_TOOL_LISTING_META]: listing }),
+      ...(listing.length === 0 ? {} : { [RESIN_LEARNED_TOOL_LISTING_META]: listing }),
+      ...(Object.keys(ids).length === 0 ? {} : { [RESIN_LEARNED_TOOL_IDS_META]: ids }),
     },
   };
-}
-
-/**
- * How any Resin tool may be used, whichever discovery the connection offers: only for exactly the
- * user's task, verified by its actual effects, and never by changing tool state. Kept short because
- * code-mode harnesses repeat a server's instructions in every tool description they list.
- */
-const GATEWAY_USE_RULES =
-  "Use a tool only for exactly the user's task, honoring their tool choices; check its errors and effects, and never enable, pin, disable or roll back tools.";
-
-/**
- * How learned tools are used. Their listing names each one's inputs and purpose only. With the
- * discovery route after it, this first line stays within the 250 characters Codex keeps of a
- * deferred tool source's summary.
- */
-const LEARNED_TOOL_GUIDANCE =
-  "Learned tools rerun recorded work: call one directly when it is your next step; omitted inputs reuse recorded values.";
-
-/** Static initialization instructions returned to MCP clients during capability negotiation. */
-export const DEFAULT_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: search_tools(query=<command>) and invoke_tool a result directly, or manage_tools(action=list_versions,scope=workspace).\n${GATEWAY_USE_RULES}`;
-
-/** Initialization instructions for a connection whose tool search is disabled: discovery uses manage_tools. */
-export const DISABLED_SEARCH_GATEWAY_INSTRUCTIONS = `${LEARNED_TOOL_GUIDANCE} Else: manage_tools(action=list_versions,scope=workspace,compact=true,query=<keyword>); get_tool_schema(name): steps; invoke_tool.\n${GATEWAY_USE_RULES}`;
-
-/**
- * How a search-listing connection runs what search_tools found: each result, including those
- * under `similar`, already carries the tool's recorded steps and its inputSchema, so the next call
- * is invoke_tool, not get_tool_schema, and a tool found earlier in the session is invoked again
- * without another search.
- */
-const INVOKE_FROM_SEARCH =
-  "Each result is directly invocable: call invoke_tool(name, parameters) with its inputSchema, no get_tool_schema call (that is only for output schema or limits); omitted inputs reuse recorded values. Invoke a tool you already found again without searching; search again only if invoke_tool rejects it.";
-
-/**
- * What a learned tool's output holds. An agent passed over an exact match because its recorded
- * program ended in `| tail -3`, and ran the commands itself; the tool reports what that hid.
- */
-const USE_TOOL_OUTPUT =
-  "Its output gives each command's exit status when one fails and the diagnostics its recorded `tail`/`head`/`grep` filters hid, so use it instead of rerunning the commands.";
-
-/**
- * The first sentence of search_tools' description on a search-listing connection: how many
- * learned tools the workspace has, which commands they run, and whether to search at all. A search
- * pays only when the next command is one a learned tool runs, so with no command named there is
- * nothing to search for. Harnesses that ignore server instructions still show tool descriptions,
- * so this is the one channel every harness gets.
- */
-export function learnedToolCountSentence(
-  learnedToolCount: number,
-  commands: readonly string[] = [],
-  listedDirectly = false,
-): string {
-  if (learnedToolCount === 0) {
-    return "Resin has no learned tools for this workspace yet, so do not search: do the task directly (tools Resin learns from it reach later sessions).";
-  }
-  if (listedDirectly) {
-    return learnedToolCount === 1
-      ? "Resin's 1 learned tool for this workspace is listed as a tool of its own: call it directly when it is your next step, no search needed."
-      : `Resin's ${learnedToolCount} learned tools for this workspace are listed as tools of their own: call one directly when it is your next step, no search needed.`;
-  }
-  const tools = `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace`;
-  return commands.length === 0
-    ? `${tools}, none running a command Resin can name, so do not search: do the task directly.`
-    : `${tools}: search them only when the next command you are about to run is one of theirs (${commands.map((command) => `\`${command}\``).join(", ")}), and call invoke_tool directly with a tool an earlier search found.`;
-}
-
-/** The longest purpose a direct listing's instructions give one tool. */
-const DIRECT_LISTING_PURPOSE_CHARS = 140;
-
-/**
- * Initialization instructions for a search-listing connection whose catalog is small enough to
- * list directly (see {@link DIRECT_LISTING_MAX_TOOLS}): each learned tool by name, call signature
- * and one-line purpose. The same tools are listed as MCP tools of their own, so the agent calls one
- * by name with the arguments its signature shows, without a documentation read first.
- */
-export function directListingGatewayInstructions(tools: readonly ListedLearnedTool[]): string {
-  const lines = tools.map((tool) => {
-    const line = (tool.description ?? "").trim().split("\n")[0]?.trim() ?? "";
-    const purpose =
-      line.length > DIRECT_LISTING_PURPOSE_CHARS
-        ? `${line.slice(0, DIRECT_LISTING_PURPOSE_CHARS - 1).trimEnd()}…`
-        : line;
-    const call = tool.signature === undefined ? tool.name : `${tool.name}(${tool.signature})`;
-    return purpose === "" ? `- ${call}` : `- ${call}: ${purpose}`;
-  });
-  return `Resin has ${tools.length} learned tool${tools.length === 1 ? "" : "s"} for this workspace, each listed as a tool of its own; call one directly when it is your next step with the arguments shown, without reading its docs first (omitted \`?\` inputs reuse recorded values):\n${lines.join("\n")}\n${GATEWAY_USE_RULES}`;
-}
-
-/**
- * Initialization instructions for a connection that lists only the meta tools (`resin mcp`
- * without `--full-catalog`): learned tools are found with search_tools, not read from a list.
- * `learnedToolCount` is omitted while the workspace's catalog is unknown; search_tools'
- * description then names the commands once it is known. With none learned yet, or no command
- * named, the agent is told not to search: a search for a job no learned tool runs only adds a
- * request. `commands` names what the learned tools run, so an agent about to type one of them
- * knows a search will find a tool.
- */
-export function searchListingGatewayInstructions(
-  learnedToolCount?: number,
-  commands: readonly string[] = [],
-): string {
-  if (learnedToolCount === 0) {
-    return `${learnedToolCountSentence(0)}\n${GATEWAY_USE_RULES}`;
-  }
-  if (learnedToolCount === undefined) {
-    return `Resin may have learned tools for this workspace, not listed; search_tools' description names the commands they run. Call search_tools(query=<the command line you are about to run>) only when your next command is one of those. ${INVOKE_FROM_SEARCH} ${USE_TOOL_OUTPUT}\n${GATEWAY_USE_RULES}`;
-  }
-  const available = `Resin has ${learnedToolCount} learned tool${learnedToolCount === 1 ? "" : "s"} for this workspace, not listed`;
-  if (commands.length === 0) {
-    return `${available}, none running a command Resin can name, so do not search: do the task directly.\n${GATEWAY_USE_RULES}`;
-  }
-  return `${available}; they run ${commands.map((command) => `\`${command}\``).join(", ")}. Call search_tools(query=<the command line you are about to run>) only when your next command is one of those; otherwise do not search. ${INVOKE_FROM_SEARCH} ${USE_TOOL_OUTPUT}\n${GATEWAY_USE_RULES}`;
 }
 
 /**

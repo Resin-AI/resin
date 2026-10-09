@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   type NormalizedSessionEvent,
   NormalizedSessionEventSchema,
+  RESIN_LISTING_FOOTPRINT_METADATA_KEY,
   isHarnessIntrospectionProgram,
   isResinDiscoveryToolCall,
   readCodexCommandMetadata,
@@ -31,6 +32,8 @@ import type { TailerRecordHandler } from "../tailing/tailer.js";
 import type { CloudUploadStatusRecorder } from "./cloud-upload-status.js";
 import { ComputationEvidenceRecorder } from "./computation/recorder.js";
 import { extractRawCommandStringFromEvent } from "./deterministic-command-sequence.js";
+import { FirstPromptMarkers } from "./first-prompt-markers.js";
+import { ListingFootprintJoin } from "./listing-footprint-join.js";
 import { MetadataEventProjector } from "./metadata-event-projector.js";
 import { RepositoryLocationAnnotator } from "./repository-location.js";
 import { ToolLinkEvidenceRecorder } from "./tool-links/recorder.js";
@@ -333,6 +336,17 @@ export interface TrajectoryCaptureCoordinatorOptions {
    * the device. Must be cheap and synchronous; it runs on every batch.
    */
   resolveSessionWorkingDirectory?: (session: HarnessSession) => string | undefined;
+  /**
+   * Directory of the local listing-footprint records the `resin mcp` processes write (only read).
+   * When set, a session's first user prompt carries the footprint of the Resin surface it was
+   * served, when exactly one surface can be tied to it.
+   */
+  listingFootprintRecordsDir?: string;
+  /**
+   * Local file recording each session's first-prompt position (see `FirstPromptMarkers`). Without
+   * it no footprint is attached, since the first prompt could not be told apart across restarts.
+   */
+  listingFootprintFirstPromptsPath?: string;
 }
 
 interface GenericSessionTail {
@@ -418,6 +432,8 @@ export class TrajectoryCaptureCoordinator {
   });
   /** Device-independent repository id and repository-relative directory of each located call. */
   private readonly repositoryLocationAnnotator = new RepositoryLocationAnnotator();
+  private readonly listingFootprintJoin?: ListingFootprintJoin;
+  private readonly firstPromptMarkers?: FirstPromptMarkers;
   private readonly resolveSessionWorkingDirectory?: TrajectoryCaptureCoordinatorOptions["resolveSessionWorkingDirectory"];
   private readonly genericCoalescingBuffers = new Map<string, GenericCoalescingBuffer>();
   private readonly sessionBackoffs = new Map<string, ExponentialBackoff>();
@@ -496,6 +512,16 @@ export class TrajectoryCaptureCoordinator {
       this.onPipelineResults = pipelineOrOptions.onPipelineResults;
       this.resolveHarnessVersion = pipelineOrOptions.resolveHarnessVersion;
       this.resolveSessionWorkingDirectory = pipelineOrOptions.resolveSessionWorkingDirectory;
+      if (pipelineOrOptions.listingFootprintRecordsDir !== undefined) {
+        this.listingFootprintJoin = new ListingFootprintJoin({
+          directory: pipelineOrOptions.listingFootprintRecordsDir,
+        });
+      }
+      if (pipelineOrOptions.listingFootprintFirstPromptsPath !== undefined) {
+        this.firstPromptMarkers = new FirstPromptMarkers({
+          filePath: pipelineOrOptions.listingFootprintFirstPromptsPath,
+        });
+      }
       this.onSessionEvents = pipelineOrOptions.onSessionEvents;
       this.computationEvidenceRecorder =
         pipelineOrOptions.computationEvidenceRecorder ?? new ComputationEvidenceRecorder();
@@ -801,6 +827,37 @@ export class TrajectoryCaptureCoordinator {
     }
   }
 
+  /**
+   * Attaches the session's served listing footprint to its first user prompt, and only there. The
+   * first prompt is the one whose causal position the persisted first-prompt marker records (see
+   * `FirstPromptMarkers`), so a re-read of it after a restart or an unacknowledged batch carries
+   * the footprint again and a later prompt never does. Any footprint already under the key (e.g.
+   * from a transcript) is dropped.
+   */
+  private annotateListingFootprint(
+    session: HarnessSession,
+    source: NormalizedSessionEvent,
+    target: NormalizedSessionEvent,
+    sessionDirectory: string | undefined,
+  ): void {
+    if (target.metadata !== undefined) delete target.metadata[RESIN_LISTING_FOOTPRINT_METADATA_KEY];
+    if (source.type !== "message" || source.role !== "user") return;
+    if (this.listingFootprintJoin === undefined || this.firstPromptMarkers === undefined) return;
+    const isFirst = this.firstPromptMarkers.isFirstPrompt(session.sessionId, {
+      causalSequence: source.causalRef.causalSequence,
+      stepIndex: source.causalRef.stepIndex ?? 0,
+    });
+    if (!isFirst) return;
+    const footprint = this.listingFootprintJoin.footprintFor({
+      harnessId: session.harnessId,
+      sessionDirectory,
+      at: source.timestamp,
+    });
+    if (footprint === undefined) return;
+    target.metadata ??= {};
+    target.metadata[RESIN_LISTING_FOOTPRINT_METADATA_KEY] = footprint;
+  }
+
   private observePipelineResults(
     session: HarnessSession,
     results: readonly PipelineProcessResult[],
@@ -981,6 +1038,7 @@ export class TrajectoryCaptureCoordinator {
                       );
                 this.workingDirectoryIdentifier.annotate(event, observed, sessionDirectory);
                 this.repositoryLocationAnnotator.annotate(event, observed, sessionDirectory);
+                this.annotateListingFootprint(session, event, observed, sessionDirectory);
                 emitter.ingest(observed);
                 ingestedEvents.push(this.metadataEventProjector.project(observed));
               } catch (err) {
@@ -1201,6 +1259,7 @@ export class TrajectoryCaptureCoordinator {
                       );
                 this.workingDirectoryIdentifier.annotate(ev, observed, sessionDirectory);
                 this.repositoryLocationAnnotator.annotate(ev, observed, sessionDirectory);
+                this.annotateListingFootprint(session, ev, observed, sessionDirectory);
                 validEvents.push(observed);
               }
             }

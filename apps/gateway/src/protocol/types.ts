@@ -226,28 +226,35 @@ export const RESIN_SEARCH_LISTING_META = "resin/searchListing";
 export const RESIN_BENCHMARK_ID_META = "resin/benchmarkId";
 
 /**
- * Result `_meta` key on `initialize` and `tools/list`: how many learned tools the connection's
- * workspace has. Set only once the workspace's catalog is known, so an unloaded catalog never
- * reads as zero; the stdio shim states it to the model on a search-listing connection.
+ * Result `_meta` key on `initialize` and `tools/list`: how many learned tools of the caller's
+ * repository the connection's workspace has (see `learnedToolListing`). Set only once the
+ * workspace's catalog is known, so an unloaded catalog never reads as zero; the stdio shim states
+ * it to the model on a search-listing connection.
  */
 export const RESIN_LEARNED_TOOL_COUNT_META = "resin/learnedToolCount";
 
 /**
- * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META}: the commands the workspace's
- * learned tools run most widely (`vitest`, `gh pr checks`), resolved from recorded programs on this
- * machine. The stdio shim names them to the model so it can tell a command it is about to type is
- * covered; absent when no learned tool runs a recognised command.
+ * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META}: the commands the counted learned
+ * tools left out of the listing run, most widely first (`vitest`, `gh pr checks`), resolved from
+ * recorded programs on this machine. The stdio shim names them to the model so it can tell a
+ * command it is about to type is covered; absent when none runs a recognised command.
  */
 export const RESIN_LEARNED_TOOL_COMMANDS_META = "resin/learnedToolCommands";
 
 /**
- * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META} on `initialize`, set only when the
- * caller's catalog is small enough to list directly (see `DIRECT_LISTING_MAX_TOOLS`): each learned
- * tool's name, call signature (`{}` or `{name: type, optional?: type}`) and one-line purpose. A
- * search-listing shim then lists the learned tools as tools of their own and names them in its
- * instructions instead of only search.
+ * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META}: the learned tools a
+ * search-listing connection lists directly, within the listing cap (see `LISTING_CAP`), in listing
+ * order: each one's name, call signature (`{}` or `{name: type, optional?: type}`) and one-line
+ * purpose. The shim lists them as tools of their own and names them in its instructions.
  */
 export const RESIN_LEARNED_TOOL_LISTING_META = "resin/learnedToolListing";
+
+/**
+ * Result `_meta` key beside {@link RESIN_LEARNED_TOOL_COUNT_META}: each learned tool's cloud tool
+ * id by its listed name, so the stdio shim can name the learned tools it served in the listing
+ * footprint it records. Never shown to the model.
+ */
+export const RESIN_LEARNED_TOOL_IDS_META = "resin/learnedToolIds";
 
 /**
  * Tool-result `_meta` key a recorded workflow sets when it returns several steps' outputs: which

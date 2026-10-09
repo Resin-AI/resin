@@ -5,7 +5,8 @@
  * location (an MCP query, a `gh` call taking `--repo` as an input) is offered everywhere, unless
  * it is an older tool whose plan pins its directories (an absolute leading `cd`, a recorded
  * `cwd`/`workdir`) inside one repository: that tool is offered only there. Any tool this machine
- * knows cannot run here is not offered.
+ * knows cannot run here is not offered. Only a tool scoped to the caller's repository is listed
+ * (see {@link isToolScopedHere}); the others are found by search or called by name.
  *
  * The scope comes from three places, merged: the catalog's `manifest.metadata.repositories` (the
  * repositories the tool's source recordings ran in), the repositories the cached plan's
@@ -75,18 +76,17 @@ function isLearnedTool(tool: Pick<RegistryTool, "isSystem" | "scope">): boolean 
 }
 
 /**
- * Whether discovery offers `tool` to this caller: search, listing, catalog instructions and
- * get_tool_schema all ask this. A tool that cannot run here (its local plan says so) is never
- * offered; a tool scoped to repositories is offered only in one of them; any other tool is.
+ * Where a learned tool stands for this caller: `unavailable` when its local plan says it cannot run
+ * here, `elsewhere` when it is scoped to repositories the caller is not in, `here` when it is scoped
+ * to the caller's repository, and `unscoped` when nothing scopes it to a repository.
  */
-export function isToolOfferedHere(
+function repositoryStanding(
   registry: Pick<ToolRegistry, "learnedToolProfile">,
-  tool: Pick<RegistryTool, "artifactDigest" | "manifest" | "isSystem" | "scope">,
+  tool: Pick<RegistryTool, "artifactDigest" | "manifest">,
   context: WorkspaceContext,
-): boolean {
-  if (!isLearnedTool(tool)) return true;
+): "unavailable" | "elsewhere" | "here" | "unscoped" {
   const profile = registry.learnedToolProfile(tool, context);
-  if (profile?.unavailableReason !== undefined) return false;
+  if (profile?.unavailableReason !== undefined) return "unavailable";
   const declared = toolRepositories(tool) ?? [];
   const located = repositoryIds(profile?.locatedRepositories ?? []);
   // A legacy tool, declaring no repository and locating no step, is scoped by the directories its
@@ -96,9 +96,38 @@ export function isToolOfferedHere(
       ? repositoryIds(profile?.pinnedRepository === undefined ? [] : [profile.pinnedRepository])
       : [];
   const scope = new Set([...declared, ...located, ...pinned]);
-  if (scope.size === 0) return true;
+  if (scope.size === 0) return "unscoped";
   const caller = callerRepositoryId(context);
-  return caller !== undefined && scope.has(caller);
+  return caller !== undefined && scope.has(caller) ? "here" : "elsewhere";
+}
+
+/**
+ * Whether discovery offers `tool` to this caller: search, catalog instructions, get_tool_schema
+ * and calls by name all ask this. A tool that cannot run here (its local plan says so) is never
+ * offered; a tool scoped to repositories is offered only in one of them; any other tool is.
+ */
+export function isToolOfferedHere(
+  registry: Pick<ToolRegistry, "learnedToolProfile">,
+  tool: Pick<RegistryTool, "artifactDigest" | "manifest" | "isSystem" | "scope">,
+  context: WorkspaceContext,
+): boolean {
+  if (!isLearnedTool(tool)) return true;
+  const standing = repositoryStanding(registry, tool, context);
+  return standing === "here" || standing === "unscoped";
+}
+
+/**
+ * Whether a learned tool belongs to the caller's workspace: scoped to the repository the caller
+ * works in and runnable there. Only these are listed and counted automatically; a tool declaring no
+ * repository is offered (searchable and invocable by name) but never listed, because nothing ties
+ * it to the work at hand and every listed tool costs context on every request.
+ */
+export function isToolScopedHere(
+  registry: Pick<ToolRegistry, "learnedToolProfile">,
+  tool: Pick<RegistryTool, "artifactDigest" | "manifest" | "isSystem" | "scope">,
+  context: WorkspaceContext,
+): boolean {
+  return isLearnedTool(tool) && repositoryStanding(registry, tool, context) === "here";
 }
 
 /** What a caller is told when it names a tool that exists but is not offered where it works. */

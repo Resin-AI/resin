@@ -22,6 +22,7 @@ import {
   RESIN_COMMAND_SEQUENCE_METADATA_KEY,
   RESIN_COMMAND_TEXT_METADATA_KEY,
   RESIN_COMPUTATION_EVIDENCE_KEY,
+  RESIN_LISTING_FOOTPRINT_METADATA_KEY,
   RESIN_REPOSITORY_METADATA_KEY,
   RESIN_TOOL_LINK_EVIDENCE_KEY,
   RESIN_WORKING_DIRECTORY_METADATA_KEY,
@@ -34,6 +35,7 @@ import {
   parseAssistantStopReason,
   readCodexCommandMetadata,
   readComputationEvidence,
+  readListingFootprint,
   readRepositoryLocationMetadata,
   readRequestLinkMetadata,
   readToolLinkEvidence,
@@ -872,6 +874,17 @@ export function projectEventToMetadataOnly(
     );
     if (stopReason !== undefined) {
       metadata[RESIN_ASSISTANT_STOP_REASON_METADATA_KEY] = stopReason;
+    }
+  }
+  // The session's served Resin surface, on its first user prompt: counts and cloud tool ids only,
+  // re-read through the strict schema; the local record's directory, process and text never ride.
+  if (event.type === "message" && event.role === "user") {
+    const footprint = readListingFootprint(event.metadata);
+    if (footprint !== undefined) {
+      metadata[RESIN_LISTING_FOOTPRINT_METADATA_KEY] = {
+        ...footprint,
+        toolIds: [...footprint.toolIds],
+      };
     }
   }
 

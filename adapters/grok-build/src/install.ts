@@ -16,18 +16,13 @@ export const GROK_GUIDANCE_MARKERS = Object.freeze({
 
 /**
  * Grok keeps MCP tools out of the model's tool list and exposes them through its `search_tool`
- * and `use_tool` meta-tools, so the model only finds Resin's tools when told to look. `resin mcp`
- * lists only Resin's meta tools; learned tools are found with Resin's own search_tools.
+ * and `use_tool` meta-tools, so the model only finds Resin's tools when told to look. No recorded
+ * Grok session shows Resin's server instructions reaching the model, so the block also carries
+ * when to call the tools and the use rules, which is why it is longer than Claude's or Cursor's.
  */
 export const GROK_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. Grok runs MCP tools through \`use_tool\`; Resin lists only \`resin__search_tools\`, \`resin__get_tool_schema\`, \`resin__invoke_tool\` and \`resin__manage_tools\`, and its learned tools are found with \`resin__search_tools\`. Grok's tool search shows the \`resin__search_tools\` description, and that description says how many learned tools this workspace has and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: call \`use_tool\` with \`tool_name: "resin__search_tools"\` and \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`resin__invoke_tool\` (via \`use_tool\`) with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`resin__get_tool_schema\` first. Omitted inputs reuse the recorded values.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
+Resin may have learned tools for this repository: \`resin__<name>\` tools beside \`resin__invoke_tool\`, found with \`search_tool\` and run with \`use_tool\`. Call one directly when it is your next step; omitted inputs reuse recorded values. If \`resin__search_tools\` is listed, search only when your next command is one its description names, then invoke a result directly. Otherwise do the task directly. Use a tool only for exactly the user's task; check its errors and effects; never enable, pin, disable or roll back tools.`;
 
 export const grokBuildInstallHarness: HarnessInstallDefinition = {
   id: GROK_HARNESS_ID,

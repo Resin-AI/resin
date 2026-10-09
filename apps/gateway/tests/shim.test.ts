@@ -89,7 +89,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
   });
 
   it.each([false, true])(
-    "standalone catalog lists only the meta tools (enableToolSearch=%s)",
+    "standalone catalog without learned tools lists only invoke_tool (enableToolSearch=%s)",
     async (enabled) => {
       const nonExistentSocket = path.join(
         os.tmpdir(),
@@ -163,12 +163,7 @@ describe("Stdio Shim & Bridge Lifecycle", () => {
 
         const tools = await listResultPromise;
         const toolNames = tools.map((t) => t.name).sort();
-        expect(toolNames).toEqual([
-          "get_tool_schema",
-          "invoke_tool",
-          "manage_tools",
-          "search_tools",
-        ]);
+        expect(toolNames).toEqual(["invoke_tool"]);
         expect(toolNames).not.toContain("echo");
         expect(toolNames).not.toContain("workspace_info");
         expect(toolNames).not.toContain("fail_tool");

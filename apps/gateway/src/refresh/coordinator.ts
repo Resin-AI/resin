@@ -180,11 +180,10 @@ export class CatalogRefreshCoordinator {
   async syncConnectionInstructions(conn: McpConnection): Promise<void> {
     const adapter = this.adapters.get(conn.harnessId);
     if (!adapter?.syncCatalogInstructions || !this.gateway?.listLearnedTools) return;
-    // A search-listing client finds learned tools with search_tools, or, for a catalog of at most
-    // DIRECT_LISTING_MAX_TOOLS, sees them listed by the stdio shim as tools of their own with their
-    // purposes in its MCP instructions: its harness gets no per-tool catalog file either way, and an
-    // empty one removes a block an earlier full listing wrote. The listing itself is scoped to the
-    // connection's repository by the router.
+    // A search-listing client sees the learned tools of its repository that fit the listing cap
+    // (LISTING_CAP) listed by the stdio shim as tools of their own, with their purposes in its MCP
+    // instructions, and finds the rest with search_tools: its harness gets no per-tool catalog file
+    // either way, and an empty one removes a block an earlier full listing wrote.
     const learned = conn.searchListing
       ? []
       : await this.gateway.listLearnedTools(conn.workspaceContext);

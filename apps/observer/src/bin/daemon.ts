@@ -5,10 +5,12 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { LISTING_FOOTPRINT_RECORDS_DIRNAME } from "@resin/contracts";
 import { createLocalStateStore } from "@resin/db";
 import type { ActionableNotification } from "@resin/protocol";
 import { z } from "zod";
 import { CLOUD_UPLOAD_STATUS_FILE_NAME } from "../analytics/cloud-upload-status.js";
+import { LISTING_FOOTPRINT_FIRST_PROMPTS_FILE_NAME } from "../analytics/first-prompt-markers.js";
 import { INVOCATION_UPLOAD_IDENTITY_FILE_NAME } from "../analytics/invocation-telemetry-uploader.js";
 import {
   AUTH_PENDING_DIRECTORY_NAME,
@@ -1256,6 +1258,11 @@ async function runForeground(options: {
     privacyCheckpointPath: path.join(paths.stateDir, "telemetry-privacy-checkpoint.json"),
     uploadStatusPath: path.join(paths.stateDir, CLOUD_UPLOAD_STATUS_FILE_NAME),
     captureWatermarkPath: path.join(paths.stateDir, CAPTURE_WATERMARK_FILE_NAME),
+    listingFootprintRecordsDir: path.join(paths.stateDir, LISTING_FOOTPRINT_RECORDS_DIRNAME),
+    listingFootprintFirstPromptsPath: path.join(
+      paths.stateDir,
+      LISTING_FOOTPRINT_FIRST_PROMPTS_FILE_NAME,
+    ),
     captureUserSessionsOnly: config.captureUserSessionsOnly,
   });
   const opportunityTrackingConfig = config.opportunityTracking;

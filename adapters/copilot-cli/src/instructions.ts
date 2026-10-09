@@ -9,15 +9,11 @@ export const COPILOT_GUIDANCE_MARKERS: ManagedBlockMarkers = {
  * Guidance installed in Copilot's global instructions (`$COPILOT_HOME/copilot-instructions.md`).
  * Copilot exposes MCP tools to the model as `<server>-<tool>` functions (recorded on 1.0.88:
  * `fixture-echo_upper` for server `fixture`, tool `echo_upper`), so Resin's tools are `resin-*`.
- * `resin mcp` lists only Resin's meta tools; learned tools are found with search_tools.
+ * No recorded Copilot session shows Resin's server instructions reaching the model, so the block
+ * carries when to call the tools and the use rules itself, which is why it is longer than
+ * Claude's or Cursor's.
  */
 export const COPILOT_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. They are not in your tool list: Resin lists only \`resin-search_tools\`, \`resin-get_tool_schema\`, \`resin-invoke_tool\` and \`resin-manage_tools\`. The \`resin-search_tools\` description says how many learned tools this workspace has and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: call \`resin-search_tools\` with \`{"query": "<that command line>"}\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: call \`resin-invoke_tool\` with \`{"name": "<name>", "parameters": {...}}\`, parameters from its \`inputSchema\`, without calling \`resin-get_tool_schema\` first. When several apply, call them together in one turn. Omitted inputs reuse the recorded values.
-- A listed tool's description already gives its inputs (or \`{}\`): call it with those arguments directly, without looking up its schema first.
-- Invoke a tool you already found without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.
+Resin may have learned tools for this repository: \`resin-<name>\` tools beside \`resin-invoke_tool\`. Call one directly when it is your next step; omitted inputs reuse recorded values. If \`resin-search_tools\` is listed, search only when your next command is one its description names, then invoke a result directly. Otherwise do the task directly. Use a tool only for exactly the user's task; check its errors and effects; never enable, pin, disable or roll back tools.
 `;

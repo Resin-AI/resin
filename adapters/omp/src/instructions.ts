@@ -16,18 +16,14 @@ export const OMP_GUIDANCE_MARKERS: ManagedBlockMarkers = {
 };
 
 /**
- * Guidance placed in OMP's user context file. `resin mcp` lists only Resin's meta tools, so OMP's
- * prompt shows just those as `xd://` devices; learned tools are found by searching.
+ * Guidance placed in OMP's user context file. OMP shows Resin's server instructions (which say
+ * when to call each listed tool and carry the use rules) and mounts each MCP tool as an
+ * `xd://mcp__resin_<tool>` device, but tells the model to read a device's docs before first use;
+ * the server instructions already give each listed tool's arguments, so the block skips that read.
  */
 export const OMP_RESIN_GUIDANCE = `# Resin learned tools
 
-Resin may have learned tools from earlier work in this workspace. They are not listed in your prompt; the summary of \`xd://mcp__resin_search_tools\` says how many there are and names the commands they run.
-
-- Search only when the next command you are about to run is one of those commands: write \`{"query": "<that command line>"}\` to \`xd://mcp__resin_search_tools\`. If it lists no command, or says there are no learned tools, do not search: do the task directly.
-- A result is directly invocable: write \`{"name": "<name>", "parameters": {...}}\` to \`xd://mcp__resin_invoke_tool\` with parameters from its \`inputSchema\`, without reading \`xd://mcp__resin_get_tool_schema\` first. Omitted inputs reuse the recorded values.
-- A listed tool's summary already gives its inputs (or \`{}\`): write those arguments to its \`xd://\` path directly, without reading its docs first.
-- Invoke a tool you already found or that is listed without searching; search again only if invoke_tool rejects it.
-- Its output gives each command's exit status when one fails and the diagnostics its recorded \`tail\`/\`head\`/\`grep\` filters hid: use it instead of rerunning those commands. If it does not answer your question (it keeps a value fixed that your task needs changed, such as a period or filter), do the rest yourself.`;
+Resin may have learned tools for this repository, mounted as \`xd://mcp__resin_<name>\` beside \`xd://mcp__resin_invoke_tool\`. Resin's server instructions say when to use them: write a tool's arguments to its path directly, without reading its docs first.`;
 
 /**
  * OMP loads \`<agent dir>/AGENTS.md\` alongside project context files. \`APPEND_SYSTEM.md\` is not

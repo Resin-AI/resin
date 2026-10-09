@@ -109,7 +109,8 @@ describe("production gateway catalog response notices", () => {
         .parse(listed.result)
         .tools.map((entry) => entry.name)
         .sort();
-      expect(names).toEqual(["get_tool_schema", "invoke_tool", "manage_tools", "search_tools"]);
+      // No learned tool yet: only invoke_tool is listed; the other meta tools answer by name.
+      expect(names).toEqual(["invoke_tool"]);
 
       const added = registeredTool();
       await registry.registerTool(added);

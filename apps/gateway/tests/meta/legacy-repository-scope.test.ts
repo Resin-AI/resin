@@ -27,7 +27,8 @@ import {
 import { ArtifactCache, RESIN_HARNESS_TOOL_RUNTIME, encodeDeterministicTar } from "@resin/runtime";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { DIRECT_LISTING_MAX_TOOLS, LocalMcpGateway } from "../../src/gateway.js";
+import { LocalMcpGateway } from "../../src/gateway.js";
+import { LISTING_CAP } from "../../src/listing-surface.js";
 import { type SearchToolsResponse, createSearchToolsHandler } from "../../src/meta/search-tools.js";
 import {
   type CallToolResult,
@@ -310,10 +311,11 @@ describe("legacy learned tools scoped by their pinned directories", () => {
     expect(await offered(repoB, "ws")).toEqual([]);
   });
 
-  it("turns on direct listing where legacy scoping brings the catalog to the limit", async () => {
+  it("counts and lists legacy tools pinned to the caller's repository, never repo-agnostic ones", async () => {
     const alpha = repositoryIdentity(repoA)?.id;
     if (alpha === undefined) throw new Error("repo A has no identity");
-    // Six tools declared for repo A, three legacy ones pinned to repo A, one repo-agnostic: ten.
+    // Six tools declared for repo A, three legacy ones pinned to repo A: nine relevant here; one
+    // repo-agnostic tool, offered but never listed or counted.
     for (let index = 0; index < 6; index++) {
       await learn(
         `declared_${index}`,
@@ -372,17 +374,19 @@ describe("legacy learned tools scoped by their pinned directories", () => {
     });
     const meta = z.object({ result: z.object({ _meta: z.record(z.unknown()) }) }).parse(initialized)
       .result._meta;
-    expect(meta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(DIRECT_LISTING_MAX_TOOLS);
+    const relevant = [
+      ...Array.from({ length: 6 }, (_, index) => `declared_${index}`),
+      ...Array.from({ length: 3 }, (_, index) => `alpha_legacy_${index}`),
+    ];
+    expect(meta[RESIN_LEARNED_TOOL_COUNT_META]).toBe(relevant.length);
     const listing = z
       .array(z.object({ name: z.string() }))
-      .parse(meta[RESIN_LEARNED_TOOL_LISTING_META]);
-    expect(listing.map((tool) => tool.name).sort()).toEqual(
-      [
-        ...Array.from({ length: 6 }, (_, index) => `declared_${index}`),
-        ...Array.from({ length: 3 }, (_, index) => `alpha_legacy_${index}`),
-        "gh_pr_status",
-      ].sort(),
-    );
+      .parse(meta[RESIN_LEARNED_TOOL_LISTING_META])
+      .map((tool) => tool.name);
+    expect(listing.length).toBeGreaterThan(0);
+    expect(listing.length).toBeLessThanOrEqual(LISTING_CAP.maxTools);
+    expect(relevant).toEqual(expect.arrayContaining(listing));
+    expect(listing).not.toContain("gh_pr_status");
     // The suggest index is written from the same scoped catalog.
     const suggested = suggestToolsFromCatalog(await registryRouter.listCatalogNoticeTools(caller));
     expect(suggested.some((tool) => tool.name.startsWith("beta_legacy_"))).toBe(false);

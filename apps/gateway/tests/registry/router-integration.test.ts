@@ -1,7 +1,14 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ToolManifest } from "@resin/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { FOR_EACH_DESCRIPTION_SENTENCE } from "../../src/for-each.js";
 import { LocalMcpGateway } from "../../src/gateway.js";
+import { repositoryIdentity } from "../../src/meta/repository-identity.js";
 import { MCP_ERROR_CODES } from "../../src/protocol/errors.js";
 import {
   type CallToolResult,
@@ -12,6 +19,7 @@ import {
   type ListToolsResult,
   RESIN_LEARNED_TOOL_COMMANDS_META,
   RESIN_LEARNED_TOOL_COUNT_META,
+  RESIN_LEARNED_TOOL_LISTING_META,
   RESIN_LEARNED_TOOL_META,
   RESIN_SEARCH_LISTING_META,
 } from "../../src/protocol/types.js";
@@ -397,7 +405,25 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
   });
 
   describe("learned-tool count for a search-listing connection", () => {
-    const searchListingInitialize = (root: string) => ({
+    const checkouts: string[] = [];
+    afterAll(() => {
+      for (const dir of checkouts) fs.rmSync(dir, { recursive: true, force: true });
+    });
+    /** A committed git checkout and its repository id: the caller's repository for scoped tools. */
+    const gitCheckout = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resin-router-repo-"));
+      checkouts.push(dir);
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+          stdio: "ignore",
+        });
+      git("init", "-q");
+      git("commit", "-q", "--allow-empty", "-m", "root");
+      const id = repositoryIdentity(dir)?.id;
+      if (id === undefined) throw new Error("The test checkout has no repository id");
+      return { dir, id };
+    };
+    const searchListingInitialize = (rootUri: string) => ({
       jsonrpc: "2.0" as const,
       id: 1,
       method: "initialize",
@@ -405,7 +431,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         protocolVersion: "2024-11-05",
         capabilities: {},
         clientInfo: { name: "omp-coding-agent", version: "18.3.5" },
-        rootUri: `file:///test/${root}`,
+        rootUri,
         _meta: { [RESIN_SEARCH_LISTING_META]: true },
       },
     });
@@ -413,11 +439,12 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       result._meta?.[RESIN_LEARNED_TOOL_COUNT_META];
 
     it("reports the count once a fresh install's catalog sync answers, from initialize on", async () => {
+      const checkout = gitCheckout();
       const registry = new ToolRegistry();
       const router = createRegistryGatewayRouter(registry);
       const loaded = Promise.withResolvers<void>();
       let workspaceId = "";
-      // The cloud answers during the bounded wait: one learned tool.
+      // The cloud answers during the bounded wait: one learned tool of the caller's repository.
       const runtime = {
         async onWorkspaceReady(workspace: { workspaceId: string }) {
           workspaceId = workspace.workspaceId;
@@ -425,7 +452,11 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         whenCatalogLoaded: () => loaded.promise,
         async catalogSettled() {
           await registry.registerTool(
-            makeManifest({ id: "tool_deploy", name: "deploy_application" }),
+            makeManifest({
+              id: "tool_deploy",
+              name: "deploy_application",
+              metadata: { repositories: [checkout.id] },
+            }),
             undefined,
             { workspaceId },
           );
@@ -434,11 +465,11 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         async stop() {},
       } as unknown as ProductionProxyRuntime;
       const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
-      const conn = gateway.createConnection();
+      const conn = gateway.createConnection({ cwd: checkout.dir });
 
       const initialized = (await gateway.handleMessage(
         conn.connectionId,
-        searchListingInitialize("project-count-fresh"),
+        searchListingInitialize(pathToFileURL(checkout.dir).href),
       )) as JsonRpcSuccessResponse<InitializeResult>;
       expect(countOf(initialized.result)).toBe(1);
 
@@ -468,7 +499,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
 
       const initialized = (await gateway.handleMessage(
         conn.connectionId,
-        searchListingInitialize("project-count-empty"),
+        searchListingInitialize("file:///test/project-count-empty"),
       )) as JsonRpcSuccessResponse<InitializeResult>;
       expect(countOf(initialized.result)).toBe(0);
       // An already-loaded catalog adds no wait to initialize.
@@ -483,7 +514,8 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
       expect(countOf(listed.result)).toBe(0);
     });
 
-    it("reports the commands the learned tools run, never exposing them on listed tools", async () => {
+    it("lists the learned tools of the caller's repository, never exposing their commands on listed tools", async () => {
+      const checkout = gitCheckout();
       const registry = new ToolRegistry();
       // What the local executor resolves from each tool's recorded programs.
       registry.setLocalToolCommands((tool) =>
@@ -495,9 +527,15 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         async onWorkspaceReady(workspace: { workspaceId: string }) {
           workspaceId = workspace.workspaceId;
           for (const name of ["run_vitest_tests", "check_pull_request_checks"]) {
-            await registry.registerTool(makeManifest({ id: `tool_${name}`, name }), undefined, {
-              workspaceId,
-            });
+            await registry.registerTool(
+              makeManifest({
+                id: `tool_${name}`,
+                name,
+                metadata: { repositories: [checkout.id] },
+              }),
+              undefined,
+              { workspaceId },
+            );
           }
         },
         async whenCatalogLoaded() {},
@@ -505,17 +543,25 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         async stop() {},
       } as unknown as ProductionProxyRuntime;
       const gateway = new LocalMcpGateway({ router, registry, cloudRuntime: runtime });
-      const conn = gateway.createConnection();
+      const conn = gateway.createConnection({ cwd: checkout.dir });
 
       const initialized = (await gateway.handleMessage(
         conn.connectionId,
-        searchListingInitialize("project-commands"),
+        searchListingInitialize(pathToFileURL(checkout.dir).href),
       )) as JsonRpcSuccessResponse<InitializeResult>;
       expect(countOf(initialized.result)).toBe(2);
-      expect(initialized.result._meta?.[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual([
-        "vitest",
-        "gh pr checks",
+      const listedNames = (result: { _meta?: Record<string, unknown> }) =>
+        z
+          .array(z.object({ name: z.string() }))
+          .parse(result._meta?.[RESIN_LEARNED_TOOL_LISTING_META])
+          .map((tool) => tool.name)
+          .sort();
+      expect(listedNames(initialized.result)).toEqual([
+        "check_pull_request_checks",
+        "run_vitest_tests",
       ]);
+      // Both are listed: no command is left for search to name.
+      expect(initialized.result._meta?.[RESIN_LEARNED_TOOL_COMMANDS_META]).toBeUndefined();
 
       const listed = (await gateway.handleMessage(conn.connectionId, {
         jsonrpc: "2.0",
@@ -523,12 +569,10 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
         method: "tools/list",
         params: {},
       })) as JsonRpcSuccessResponse<ListToolsResult>;
-      expect(listed.result._meta?.[RESIN_LEARNED_TOOL_COMMANDS_META]).toEqual([
-        "vitest",
-        "gh pr checks",
-      ]);
+      expect(listedNames(listed.result)).toEqual(["check_pull_request_checks", "run_vitest_tests"]);
       // Local program detail stays out of what the harness receives for each tool.
       expect(JSON.stringify(listed.result.tools)).not.toContain("localCommands");
+      expect(JSON.stringify(listed.result.tools)).not.toContain("gh pr checks");
     });
 
     it("omits the count when the catalog could not be loaded, so nothing claims zero", async () => {
@@ -546,7 +590,7 @@ describe("RegistryGatewayRouter & LocalMcpGateway Integration", () => {
 
       const initialized = (await gateway.handleMessage(
         conn.connectionId,
-        searchListingInitialize("project-count-unknown"),
+        searchListingInitialize("file:///test/project-count-unknown"),
       )) as JsonRpcSuccessResponse<InitializeResult>;
       expect(initialized.result._meta?.[RESIN_LEARNED_TOOL_COUNT_META]).toBeUndefined();
 

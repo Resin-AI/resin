@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import type { HarnessDefinition } from "@resin/harness-contracts";
 import { getErrorReporter } from "@resin/observer/error-reporting/core";
 import { describe, expect, it, vi } from "vitest";
 import {
+  installedGuidanceBlock,
   mcpCommand,
   parseMcpArgs,
   printMcpHelp,
@@ -247,6 +249,40 @@ describe("the harness a resin mcp shim serves", () => {
     expect(servedHarnessDefinition(undefined, definitions)?.id).toBe("servers-only");
     expect(servedHarnessDefinition("invoker-only", definitions)?.id).toBe("invoker-only");
     expect(servedHarnessDefinition("missing", definitions)).toBeUndefined();
+  });
+
+  it("reads the installed guidance block with its markers, or none", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "resin-guidance-"));
+    try {
+      const markers = { start: "<!-- resin:start -->", end: "<!-- resin:end -->" };
+      const file = path.join(home, "AGENTS.md");
+      const definitions: HarnessDefinition[] = [
+        {
+          ...ompHarness,
+          id: "guided",
+          guidance: { resolvePath: (dir) => path.join(dir, "AGENTS.md"), markers, body: "x" },
+        },
+        { ...ompHarness, id: "unguided", guidance: undefined },
+      ];
+      const read = (id: string) => installedGuidanceBlock(id, home, {}, definitions);
+
+      // No context file yet.
+      expect(read("guided")).toBe("");
+      fs.writeFileSync(file, "# Project\nNo Resin block here.\n");
+      expect(read("guided")).toBe("");
+      const block = `${markers.start}\nUse Resin.\n${markers.end}`;
+      fs.writeFileSync(file, `# Project\n\n${block}\n\nMore notes.\n`);
+      expect(read("guided")).toBe(block);
+      // A harness without guidance, or one Resin does not know, carries none.
+      expect(read("unguided")).toBe("");
+      expect(read("missing")).toBe("");
+      // An unreadable context file leaves the block unknown.
+      fs.rmSync(file);
+      fs.mkdirSync(file);
+      expect(read("guided")).toBeUndefined();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
