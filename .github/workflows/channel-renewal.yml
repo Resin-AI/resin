@@ -65,7 +65,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Verify public signatures and six-hour renewal headroom
@@ -141,7 +141,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Assume approved channel renewal role
@@ -170,7 +170,7 @@ jobs:
             | tee "$RUNNER_TEMP/channel-renewal-receipt.json"
           cat "$RUNNER_TEMP/channel-renewal-receipt.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain exact-run renewal receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: channel-renewal-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/channel-renewal-receipt.json
@@ -302,7 +302,7 @@ jobs:
           sys.exit(0 if receipt["submissionStatus"] == "submitted" else 1)
       - name: Upload notification submission receipt
         if: ${{ always() && steps.submission.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: channel-notification-receipt-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/channel-notification-receipt.json
