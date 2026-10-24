@@ -86,7 +86,7 @@
     "@resin/harness-contracts": "workspace:*",
     "@resin/protocol": "workspace:*",
     "@resin/windows-security": "workspace:*",
-    "posthog-node": "^5.55.0",
+    "posthog-node": "^5.56.4",
     "typescript": "5.9.3",
     "zod": "^3.25.76"
   },
