@@ -101,6 +101,6 @@
     "@resin/runtime": "workspace:*",
     "@resin/windows-security": "workspace:*",
     "smol-toml": "^1.9.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   }
 }

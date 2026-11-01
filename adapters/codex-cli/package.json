@@ -43,6 +43,6 @@
     "@resin/contracts": "workspace:*",
     "@babel/parser": "7.29.9",
     "@resin/harness-contracts": "workspace:*",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   }
 }
