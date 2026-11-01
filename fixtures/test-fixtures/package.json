@@ -46,6 +46,6 @@
     "@resin/contracts": "workspace:*",
     "@resin/harness-contracts": "workspace:*",
     "@resin/protocol": "workspace:*",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   }
 }

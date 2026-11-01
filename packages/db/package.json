@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@resin/contracts": "workspace:*",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@resin/test-fixtures": "workspace:*"
