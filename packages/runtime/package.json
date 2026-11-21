@@ -56,14 +56,14 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@babel/parser": "7.29.9",
+    "@babel/parser": "7.29.14",
     "@resin/contracts": "workspace:*",
     "@resin/crypto": "workspace:*",
     "@resin/db": "workspace:*",
     "@resin/observer": "workspace:*",
     "@resin/protocol": "workspace:*",
     "@resin/windows-security": "workspace:*",
-    "pyodide": "314.0.7",
+    "pyodide": "314.0.8",
     "typescript": "^5.7.3",
     "zod": "^3.25.76"
   }
